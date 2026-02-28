@@ -3764,7 +3764,8 @@ namespace MultiTerminal
 
         private void ShowProjectManagerDialog()
         {
-            using (var dialog = new ProjectManagerDialog(_projectService, _currentTheme))
+            using var projectDb = new MultiTerminal.Services.ProjectDatabase();
+            using (var dialog = new ProjectManagerDialog(_projectService, projectDb, _currentTheme))
             {
                 dialog.ProjectOpened += (s, args) =>
                 {

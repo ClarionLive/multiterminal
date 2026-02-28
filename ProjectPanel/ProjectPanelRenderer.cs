@@ -242,6 +242,22 @@ namespace MultiTerminal.ProjectPanel
             sb.Append($"\"description\":\"{EscapeJson(project.Description ?? "")}\",");
             sb.Append($"\"changeLog\":\"{EscapeJson(project.ChangeLog ?? "")}\",");
 
+            // Project info fields
+            sb.Append($"\"projectType\":\"{EscapeJson(project.ProjectType ?? "")}\",");
+            sb.Append($"\"currentVersion\":\"{EscapeJson(project.CurrentVersion ?? "")}\",");
+            sb.Append($"\"icon\":\"{EscapeJson(project.Icon ?? "")}\",");
+            sb.Append($"\"iconColor\":\"{EscapeJson(project.IconColor ?? "")}\",");
+
+            // Build & deploy commands
+            sb.Append($"\"buildCommand\":\"{EscapeJson(project.BuildCommand ?? "")}\",");
+            sb.Append($"\"deployCommand\":\"{EscapeJson(project.DeployCommand ?? "")}\",");
+            sb.Append($"\"launchCommand\":\"{EscapeJson(project.LaunchCommand ?? "")}\",");
+
+            // Git info
+            sb.Append($"\"gitRepoUrl\":\"{EscapeJson(project.GitRepoUrl ?? "")}\",");
+            sb.Append($"\"gitDefaultBranch\":\"{EscapeJson(project.GitDefaultBranch ?? "")}\",");
+            sb.Append($"\"gitAutoCommit\":{(project.GitAutoCommit ? "true" : "false")},");
+
             if (stats != null)
             {
                 sb.Append("\"stats\":{");

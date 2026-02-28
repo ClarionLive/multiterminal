@@ -15,9 +15,10 @@ namespace MultiTerminal.Dialogs
     public partial class ProjectManagerDialog : Form
     {
         private readonly ProjectService _projectService;
+        private readonly ProjectDatabase _projectDatabase;
         private readonly TerminalTheme _theme;
-        private List<ProjectRegistryEntry> _allProjects;
-        private List<ProjectRegistryEntry> _filteredProjects;
+        private List<MultiTerminal.Models.Project> _allProjects;
+        private List<MultiTerminal.Models.Project> _filteredProjects;
 
         // Controls
         private TextBox searchTextBox;
@@ -30,31 +31,39 @@ namespace MultiTerminal.Dialogs
         private Button closeButton;
 
         /// <summary>
-        /// Gets the currently selected project registry entry.
+        /// Gets the currently selected rich project.
         /// </summary>
-        public ProjectRegistryEntry SelectedProjectEntry
+        public MultiTerminal.Models.Project SelectedProject
         {
             get
             {
                 if (projectsGridView.SelectedRows.Count > 0)
                 {
-                    return projectsGridView.SelectedRows[0].Tag as ProjectRegistryEntry;
+                    return projectsGridView.SelectedRows[0].Tag as MultiTerminal.Models.Project;
                 }
                 return null;
             }
         }
 
         /// <summary>
-        /// Gets the full Project object for the selected entry.
+        /// Gets the currently selected project registry entry (legacy compatibility).
+        /// Maps from the rich project record stored in the row tag.
         /// </summary>
-        public Project SelectedProject
+        public ProjectRegistryEntry SelectedProjectEntry
         {
             get
             {
-                var entry = SelectedProjectEntry;
-                if (entry != null)
+                var project = SelectedProject;
+                if (project != null)
                 {
-                    return _projectService.LoadProject(entry);
+                    return new ProjectRegistryEntry
+                    {
+                        Id = project.Id,
+                        Name = project.Name,
+                        Path = project.Path,
+                        IsPinned = project.IsPinned,
+                        LastOpenedAt = project.LastOpenedAt
+                    };
                 }
                 return null;
             }
@@ -69,10 +78,12 @@ namespace MultiTerminal.Dialogs
         /// Creates a new ProjectManagerDialog instance.
         /// </summary>
         /// <param name="projectService">The project service for CRUD operations.</param>
+        /// <param name="projectDatabase">The project database for rich project data.</param>
         /// <param name="theme">The terminal theme to apply.</param>
-        public ProjectManagerDialog(ProjectService projectService, TerminalTheme theme)
+        public ProjectManagerDialog(ProjectService projectService, ProjectDatabase projectDatabase, TerminalTheme theme)
         {
             _projectService = projectService ?? throw new ArgumentNullException(nameof(projectService));
+            _projectDatabase = projectDatabase ?? throw new ArgumentNullException(nameof(projectDatabase));
             _theme = theme ?? TerminalTheme.Dark;
 
             InitializeComponent();
@@ -81,11 +92,27 @@ namespace MultiTerminal.Dialogs
         }
 
         /// <summary>
-        /// Loads all projects from the service and populates the grid.
+        /// Loads all projects from the database and populates the grid.
+        /// Falls back to JSON registry if database returns no results.
         /// </summary>
         private void LoadProjects()
         {
-            _allProjects = _projectService.GetAllRegisteredProjects();
+            _allProjects = _projectDatabase.GetAllRichProjects();
+
+            // Fall back to JSON registry if SQLite has no records yet
+            if (_allProjects == null || _allProjects.Count == 0)
+            {
+                var registryEntries = _projectService.GetAllRegisteredProjects();
+                _allProjects = registryEntries.Select(e => new MultiTerminal.Models.Project
+                {
+                    Id = e.Id,
+                    Name = e.Name,
+                    Path = e.Path,
+                    IsPinned = e.IsPinned,
+                    LastOpenedAt = e.LastOpenedAt
+                }).ToList();
+            }
+
             ApplyFilter();
         }
 
@@ -123,24 +150,30 @@ namespace MultiTerminal.Dialogs
         {
             projectsGridView.Rows.Clear();
 
-            foreach (var entry in _filteredProjects)
+            foreach (var project in _filteredProjects)
             {
                 int rowIndex = projectsGridView.Rows.Add();
                 var row = projectsGridView.Rows[rowIndex];
-                row.Tag = entry;
+                row.Tag = project;
 
                 // Pin column (checkbox-like indicator)
-                row.Cells["PinColumn"].Value = entry.IsPinned ? "*" : "";
+                row.Cells["PinColumn"].Value = project.IsPinned ? "*" : "";
 
                 // Name column
-                row.Cells["NameColumn"].Value = entry.Name ?? "(Unnamed)";
+                row.Cells["NameColumn"].Value = project.Name ?? "(Unnamed)";
 
                 // Path column
-                row.Cells["PathColumn"].Value = TruncatePath(entry.Path, 40);
-                row.Cells["PathColumn"].ToolTipText = entry.Path;
+                row.Cells["PathColumn"].Value = TruncatePath(project.Path, 35);
+                row.Cells["PathColumn"].ToolTipText = project.Path;
+
+                // Type column
+                row.Cells["TypeColumn"].Value = project.ProjectType ?? "";
+
+                // Version column
+                row.Cells["VersionColumn"].Value = project.CurrentVersion ?? "";
 
                 // Last Opened column
-                row.Cells["LastOpenedColumn"].Value = FormatLastOpened(entry.LastOpenedAt);
+                row.Cells["LastOpenedColumn"].Value = FormatLastOpened(project.LastOpenedAt);
             }
 
             UpdateButtonStates();
@@ -201,24 +234,21 @@ namespace MultiTerminal.Dialogs
 
         private void NewProjectButton_Click(object sender, EventArgs e)
         {
-            using (var dialog = new EditProjectDialog(_theme))
+            using (var dialog = new EditProjectDialog(_projectDatabase))
             {
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
                     try
                     {
-                        // Create new project
-                        var project = _projectService.RegisterProject(
-                            dialog.ProjectPath,
-                            dialog.ProjectName,
-                            dialog.Description
-                        );
-
-                        // Update changelog if provided
-                        if (!string.IsNullOrWhiteSpace(dialog.ChangeLog))
+                        var resultProject = dialog.ResultProject;
+                        if (resultProject != null)
                         {
-                            project.ChangeLog = dialog.ChangeLog;
-                            _projectService.SaveProject(project);
+                            // Also register with JSON service for backward compatibility
+                            _projectService.RegisterProject(
+                                resultProject.Path,
+                                resultProject.Name,
+                                resultProject.Description
+                            );
                         }
 
                         LoadProjects();
@@ -243,31 +273,34 @@ namespace MultiTerminal.Dialogs
 
         private void EditButton_Click(object sender, EventArgs e)
         {
-            var entry = SelectedProjectEntry;
-            if (entry == null) return;
+            var project = SelectedProject;
+            if (project == null) return;
 
-            var project = _projectService.LoadProject(entry);
-            if (project == null)
-            {
-                MessageBox.Show(
-                    "Failed to load project details.",
-                    "Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
-                return;
-            }
-
-            using (var dialog = new EditProjectDialog(project, _theme))
+            using (var dialog = new EditProjectDialog(project.Id, _projectDatabase))
             {
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
                     try
                     {
-                        project.Name = dialog.ProjectName;
-                        project.Description = dialog.Description;
-                        project.ChangeLog = dialog.ChangeLog;
-                        _projectService.SaveProject(project);
+                        var resultProject = dialog.ResultProject;
+                        if (resultProject != null)
+                        {
+                            // Sync name/description back to JSON registry for backward compatibility
+                            var entry = _projectService.GetAllRegisteredProjects()
+                                .FirstOrDefault(e2 => e2.Id == resultProject.Id);
+                            if (entry != null)
+                            {
+                                var legacyProject = _projectService.LoadProject(entry);
+                                if (legacyProject != null)
+                                {
+                                    legacyProject.Name = resultProject.Name;
+                                    legacyProject.Description = resultProject.Description;
+                                    legacyProject.ChangeLog = resultProject.ChangeLog;
+                                    _projectService.SaveProject(legacyProject);
+                                }
+                            }
+                        }
+
                         LoadProjects();
                     }
                     catch (Exception ex)
@@ -285,11 +318,11 @@ namespace MultiTerminal.Dialogs
 
         private void RemoveButton_Click(object sender, EventArgs e)
         {
-            var entry = SelectedProjectEntry;
-            if (entry == null) return;
+            var project = SelectedProject;
+            if (project == null) return;
 
             var result = MessageBox.Show(
-                $"Remove '{entry.Name}' from the project list?\n\nThis will unregister the project but keep the .claude/project.json file intact.",
+                $"Remove '{project.Name}' from the project list?\n\nThis will unregister the project but keep the .claude/project.json file intact.",
                 "Remove Project",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question
@@ -297,18 +330,18 @@ namespace MultiTerminal.Dialogs
 
             if (result == DialogResult.Yes)
             {
-                _projectService.UnregisterProject(entry.Id, deleteLocalConfig: false);
+                _projectService.UnregisterProject(project.Id, deleteLocalConfig: false);
                 LoadProjects();
             }
         }
 
         private void DeleteConfigButton_Click(object sender, EventArgs e)
         {
-            var entry = SelectedProjectEntry;
-            if (entry == null) return;
+            var project = SelectedProject;
+            if (project == null) return;
 
             var result = MessageBox.Show(
-                $"Delete project '{entry.Name}' completely?\n\nThis will remove the project from the list AND delete the .claude/project.json configuration file.",
+                $"Delete project '{project.Name}' completely?\n\nThis will remove the project from the list AND delete the .claude/project.json configuration file.",
                 "Delete Project Config",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning
@@ -316,7 +349,7 @@ namespace MultiTerminal.Dialogs
 
             if (result == DialogResult.Yes)
             {
-                _projectService.UnregisterProject(entry.Id, deleteLocalConfig: true);
+                _projectService.UnregisterProject(project.Id, deleteLocalConfig: true);
                 LoadProjects();
             }
         }
@@ -340,10 +373,10 @@ namespace MultiTerminal.Dialogs
             if (e.RowIndex >= 0 && e.ColumnIndex == projectsGridView.Columns["PinColumn"].Index)
             {
                 // Toggle pin state
-                var entry = projectsGridView.Rows[e.RowIndex].Tag as ProjectRegistryEntry;
-                if (entry != null)
+                var project = projectsGridView.Rows[e.RowIndex].Tag as MultiTerminal.Models.Project;
+                if (project != null)
                 {
-                    _projectService.ToggleProjectPinned(entry.Id);
+                    _projectService.ToggleProjectPinned(project.Id);
                     LoadProjects();
                 }
             }
@@ -373,6 +406,18 @@ namespace MultiTerminal.Dialogs
                         .ThenBy(p => p.Path)
                         .ToList();
                     break;
+                case "TypeColumn":
+                    _filteredProjects = _filteredProjects
+                        .OrderByDescending(p => p.IsPinned)
+                        .ThenBy(p => p.ProjectType)
+                        .ToList();
+                    break;
+                case "VersionColumn":
+                    _filteredProjects = _filteredProjects
+                        .OrderByDescending(p => p.IsPinned)
+                        .ThenBy(p => p.CurrentVersion)
+                        .ToList();
+                    break;
                 case "LastOpenedColumn":
                     _filteredProjects = _filteredProjects
                         .OrderByDescending(p => p.IsPinned)
@@ -392,11 +437,24 @@ namespace MultiTerminal.Dialogs
 
         private void OpenSelectedProject()
         {
-            var entry = SelectedProjectEntry;
-            if (entry == null) return;
+            var project = SelectedProject;
+            if (project == null) return;
 
-            var project = _projectService.LoadProject(entry);
-            if (project == null)
+            // Load full project from service (for prompts / legacy data)
+            var entry = _projectService.GetAllRegisteredProjects()
+                .FirstOrDefault(e => e.Id == project.Id);
+
+            MultiTerminal.Models.Project fullProject;
+            if (entry != null)
+            {
+                fullProject = _projectService.LoadProject(entry);
+            }
+            else
+            {
+                fullProject = project;
+            }
+
+            if (fullProject == null)
             {
                 MessageBox.Show(
                     "Failed to load project. The project configuration may be missing or corrupted.",
@@ -407,8 +465,8 @@ namespace MultiTerminal.Dialogs
                 return;
             }
 
-            _projectService.MarkProjectOpened(entry.Id);
-            ProjectOpened?.Invoke(this, new ProjectEventArgs(project));
+            _projectService.MarkProjectOpened(project.Id);
+            ProjectOpened?.Invoke(this, new ProjectEventArgs(fullProject));
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -584,7 +642,7 @@ namespace MultiTerminal.Dialogs
             pinColumn.Name = "PinColumn";
             pinColumn.HeaderText = "Pin";
             pinColumn.Width = 35;
-            pinColumn.FillWeight = 10;
+            pinColumn.FillWeight = 5;
             pinColumn.MinimumWidth = 35;
             this.projectsGridView.Columns.Add(pinColumn);
 
@@ -597,13 +655,25 @@ namespace MultiTerminal.Dialogs
             var pathColumn = new DataGridViewTextBoxColumn();
             pathColumn.Name = "PathColumn";
             pathColumn.HeaderText = "Path";
-            pathColumn.FillWeight = 40;
+            pathColumn.FillWeight = 30;
             this.projectsGridView.Columns.Add(pathColumn);
+
+            var typeColumn = new DataGridViewTextBoxColumn();
+            typeColumn.Name = "TypeColumn";
+            typeColumn.HeaderText = "Type";
+            typeColumn.FillWeight = 12;
+            this.projectsGridView.Columns.Add(typeColumn);
+
+            var versionColumn = new DataGridViewTextBoxColumn();
+            versionColumn.Name = "VersionColumn";
+            versionColumn.HeaderText = "Version";
+            versionColumn.FillWeight = 10;
+            this.projectsGridView.Columns.Add(versionColumn);
 
             var lastOpenedColumn = new DataGridViewTextBoxColumn();
             lastOpenedColumn.Name = "LastOpenedColumn";
             lastOpenedColumn.HeaderText = "Last Opened";
-            lastOpenedColumn.FillWeight = 20;
+            lastOpenedColumn.FillWeight = 13;
             this.projectsGridView.Columns.Add(lastOpenedColumn);
 
             //

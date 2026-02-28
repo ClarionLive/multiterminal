@@ -236,7 +236,18 @@ namespace MultiTerminal.Docking
                 CreatedAt = project.CreatedAt,
                 LastOpenedAt = project.LastOpenedAt,
                 IsPinned = project.IsPinned,
-                Prompts = allPrompts
+                Prompts = allPrompts,
+                // Pass new fields through to renderer
+                ProjectType = project.ProjectType,
+                CurrentVersion = project.CurrentVersion,
+                Icon = project.Icon,
+                IconColor = project.IconColor,
+                BuildCommand = project.BuildCommand,
+                DeployCommand = project.DeployCommand,
+                LaunchCommand = project.LaunchCommand,
+                GitRepoUrl = project.GitRepoUrl,
+                GitDefaultBranch = project.GitDefaultBranch,
+                GitAutoCommit = project.GitAutoCommit
             };
 
             // Show project immediately without stats (to avoid UI freeze)

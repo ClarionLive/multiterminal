@@ -449,6 +449,107 @@
             color: var(--text-muted);
         }
 
+        /* Project Info / badge styles */
+        .info-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .info-label {
+            color: var(--text-secondary);
+            min-width: 60px;
+            flex-shrink: 0;
+        }
+
+        .info-value {
+            color: var(--text-primary);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 500;
+            background: var(--bg-tertiary);
+            color: var(--success-color);
+            border: 1px solid var(--border-color);
+        }
+
+        .badge.version {
+            color: var(--warning-color);
+        }
+
+        /* Command blocks */
+        .command-block {
+            margin-bottom: 8px;
+        }
+
+        .command-label {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            margin-bottom: 3px;
+        }
+
+        .command-code {
+            font-family: 'Cascadia Mono', Consolas, monospace;
+            font-size: 11px;
+            color: var(--success-color);
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            padding: 5px 8px;
+            word-break: break-all;
+        }
+
+        /* Git section */
+        .git-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .git-label {
+            color: var(--text-secondary);
+            min-width: 80px;
+            flex-shrink: 0;
+        }
+
+        .git-link {
+            color: var(--accent-color);
+            text-decoration: none;
+            word-break: break-all;
+        }
+
+        .git-link:hover {
+            text-decoration: underline;
+        }
+
+        .git-status {
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 500;
+        }
+
+        .git-status.enabled {
+            background: rgba(78, 201, 176, 0.15);
+            color: var(--success-color);
+            border: 1px solid rgba(78, 201, 176, 0.3);
+        }
+
+        .git-status.disabled {
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+        }
+
         /* Light theme */
         body.light {
             --bg-primary: #f3f3f3;
@@ -502,11 +603,19 @@
             ` : '';
 
             const promptsHtml = renderPrompts(project.prompts || []);
+            const projectInfoHtml = renderProjectInfo(project);
+            const buildDeployHtml = renderBuildDeploy(project);
+            const gitHtml = renderGit(project);
+
+            // Determine icon to display (use custom icon/color if set, else default)
+            const iconDisplay = project.icon
+                ? `<span class="icon" style="${project.iconColor ? 'color:' + escapeHtml(project.iconColor) : ''}">${escapeHtml(project.icon)}</span>`
+                : `<span class="icon">📁</span>`;
 
             container.innerHTML = `
                 <div class="project-header">
                     <div class="project-name">
-                        <span class="icon">📁</span>
+                        ${iconDisplay}
                         <span>${escapeHtml(project.name || 'Unnamed Project')}</span>
                     </div>
                     <div class="project-path" onclick="copyPath('${escapeJs(project.path)}')" title="Click to copy path">
@@ -515,6 +624,8 @@
                 </div>
 
                 ${statsHtml}
+
+                ${projectInfoHtml}
 
                 <div class="section">
                     <div class="section-header" onclick="toggleSection(this)">
@@ -527,6 +638,10 @@
                         </div>
                     </div>
                 </div>
+
+                ${buildDeployHtml}
+
+                ${gitHtml}
 
                 <div class="section">
                     <div class="section-header" onclick="toggleSection(this)">
@@ -565,6 +680,137 @@
                     </div>
                 </div>
             `;
+        }
+
+        // Render Project Info section (type badge, version, icon)
+        function renderProjectInfo(project) {
+            const hasType = project.projectType && project.projectType.length > 0;
+            const hasVersion = project.currentVersion && project.currentVersion.length > 0;
+            if (!hasType && !hasVersion) return '';
+
+            let html = `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle">▼</span>
+                        <span class="section-title">Project Info</span>
+                    </div>
+                    <div class="section-content">
+            `;
+
+            if (hasType) {
+                html += `
+                    <div class="info-row">
+                        <span class="info-label">Type</span>
+                        <span class="badge">${escapeHtml(project.projectType)}</span>
+                    </div>
+                `;
+            }
+
+            if (hasVersion) {
+                html += `
+                    <div class="info-row">
+                        <span class="info-label">Version</span>
+                        <span class="badge version">${escapeHtml(project.currentVersion)}</span>
+                    </div>
+                `;
+            }
+
+            html += `</div></div>`;
+            return html;
+        }
+
+        // Render Build & Deploy section (build, deploy, launch commands)
+        function renderBuildDeploy(project) {
+            const hasBuild = project.buildCommand && project.buildCommand.length > 0;
+            const hasDeploy = project.deployCommand && project.deployCommand.length > 0;
+            const hasLaunch = project.launchCommand && project.launchCommand.length > 0;
+            if (!hasBuild && !hasDeploy && !hasLaunch) return '';
+
+            let html = `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">▼</span>
+                        <span class="section-title">Build &amp; Deploy</span>
+                    </div>
+                    <div class="section-content collapsed">
+            `;
+
+            if (hasBuild) {
+                html += `
+                    <div class="command-block">
+                        <div class="command-label">Build</div>
+                        <div class="command-code">${escapeHtml(project.buildCommand)}</div>
+                    </div>
+                `;
+            }
+
+            if (hasDeploy) {
+                html += `
+                    <div class="command-block">
+                        <div class="command-label">Deploy</div>
+                        <div class="command-code">${escapeHtml(project.deployCommand)}</div>
+                    </div>
+                `;
+            }
+
+            if (hasLaunch) {
+                html += `
+                    <div class="command-block">
+                        <div class="command-label">Launch</div>
+                        <div class="command-code">${escapeHtml(project.launchCommand)}</div>
+                    </div>
+                `;
+            }
+
+            html += `</div></div>`;
+            return html;
+        }
+
+        // Render Git section (repo URL, default branch, auto-commit status)
+        function renderGit(project) {
+            const hasRepo = project.gitRepoUrl && project.gitRepoUrl.length > 0;
+            const hasBranch = project.gitDefaultBranch && project.gitDefaultBranch.length > 0;
+            if (!hasRepo && !hasBranch) return '';
+
+            const autoCommitStatus = project.gitAutoCommit
+                ? '<span class="git-status enabled">Auto-commit on</span>'
+                : '<span class="git-status disabled">Auto-commit off</span>';
+
+            let html = `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">▼</span>
+                        <span class="section-title">Git</span>
+                    </div>
+                    <div class="section-content collapsed">
+            `;
+
+            if (hasRepo) {
+                html += `
+                    <div class="git-row">
+                        <span class="git-label">Repository</span>
+                        <a class="git-link" href="${escapeHtml(project.gitRepoUrl)}" onclick="event.preventDefault(); copyPath('${escapeJs(project.gitRepoUrl)}')" title="Click to copy URL">${escapeHtml(project.gitRepoUrl)}</a>
+                    </div>
+                `;
+            }
+
+            if (hasBranch) {
+                html += `
+                    <div class="git-row">
+                        <span class="git-label">Branch</span>
+                        <span class="info-value">${escapeHtml(project.gitDefaultBranch)}</span>
+                    </div>
+                `;
+            }
+
+            html += `
+                    <div class="git-row">
+                        <span class="git-label">Commits</span>
+                        ${autoCommitStatus}
+                    </div>
+                </div></div>
+            `;
+            return html;
         }
 
         // Render prompts tree
