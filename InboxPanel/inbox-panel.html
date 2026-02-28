@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inbox</title>
+<style>
+    :root {
+        --bg-primary: #1e1e1e;
+        --bg-secondary: #252526;
+        --bg-tertiary: #2d2d30;
+        --bg-hover: #333337;
+        --text-primary: #d4d4d4;
+        --text-secondary: #9e9e9e;
+        --text-muted: #6e6e6e;
+        --border-color: #3e3e42;
+        --accent-blue: #0078d4;
+        --accent-blue-hover: #1a8ae8;
+        --accent-green: #4ec9b0;
+        --accent-orange: #ce9178;
+        --accent-red: #f14c4c;
+        --accent-yellow: #dcdcaa;
+        --unread-dot: #0078d4;
+        --badge-bg: #0078d4;
+        --badge-text: #ffffff;
+        --reply-bg: #1a1a2e;
+        --scrollbar-thumb: #424242;
+        --scrollbar-track: transparent;
+    }
+
+    .light-theme {
+        --bg-primary: #ffffff;
+        --bg-secondary: #f3f3f3;
+        --bg-tertiary: #e8e8e8;
+        --bg-hover: #e0e0e0;
+        --text-primary: #1e1e1e;
+        --text-secondary: #616161;
+        --text-muted: #999999;
+        --border-color: #d4d4d4;
+        --accent-blue: #0066b8;
+        --accent-blue-hover: #005a9e;
+        --unread-dot: #0066b8;
+        --badge-bg: #0066b8;
+        --badge-text: #ffffff;
+        --reply-bg: #e8f0fe;
+        --scrollbar-thumb: #c1c1c1;
+        --scrollbar-track: transparent;
+    }
+
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+
+    body {
+        font-family: system-ui, "Segoe UI", sans-serif;
+        background-color: var(--bg-primary);
+        color: var(--text-primary);
+        font-size: 13px;
+        line-height: 1.5;
+        overflow: hidden;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+        width: 8px;
+    }
+    ::-webkit-scrollbar-track {
+        background: var(--scrollbar-track);
+    }
+    ::-webkit-scrollbar-thumb {
+        background: var(--scrollbar-thumb);
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: var(--text-muted);
+    }
+
+    /* Header */
+    .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        background-color: var(--bg-secondary);
+        border-bottom: 1px solid var(--border-color);
+        flex-shrink: 0;
+    }
+
+    .header-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .header-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .unread-badge {
+        display: none;
+        background-color: var(--badge-bg);
+        color: var(--badge-text);
+        font-size: 11px;
+        font-weight: 600;
+        padding: 1px 7px;
+        border-radius: 10px;
+        min-width: 18px;
+        text-align: center;
+    }
+
+    .unread-badge.visible {
+        display: inline-block;
+    }
+
+    .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .header-btn {
+        background: none;
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        font-size: 11px;
+        padding: 3px 10px;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .header-btn:hover {
+        background-color: var(--bg-hover);
+        color: var(--text-primary);
+        border-color: var(--text-muted);
+    }
+
+    .header-btn.mark-all-read {
+        color: var(--accent-blue);
+        border-color: var(--accent-blue);
+    }
+
+    .header-btn.mark-all-read:hover {
+        background-color: var(--accent-blue);
+        color: var(--badge-text);
+    }
+
+    /* Message list */
+    .message-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 4px 0;
+    }
+
+    /* Individual message item */
+    .message-item {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border-color);
+        transition: background-color 0.15s ease;
+        cursor: default;
+    }
+
+    .message-item:hover {
+        background-color: var(--bg-hover);
+    }
+
+    .message-item.unread {
+        background-color: var(--bg-secondary);
+        border-left: 3px solid var(--unread-dot);
+        padding-left: 11px;
+    }
+
+    .message-item.unread .message-summary {
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    /* Message header row: type icon + label + time */
+    .message-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 4px;
+    }
+
+    .type-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+    }
+
+    .type-label {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        flex-shrink: 0;
+    }
+
+    .type-label.ready_for_testing {
+        color: var(--accent-green);
+        background-color: rgba(78, 201, 176, 0.12);
+    }
+
+    .type-label.escalation {
+        color: var(--accent-orange);
+        background-color: rgba(206, 145, 120, 0.12);
+    }
+
+    .type-label.task_complete {
+        color: var(--accent-blue);
+        background-color: rgba(0, 120, 212, 0.12);
+    }
+
+    .type-label.helper_request {
+        color: var(--accent-red);
+        background-color: rgba(241, 76, 76, 0.12);
+    }
+
+    .unread-indicator {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background-color: var(--unread-dot);
+        flex-shrink: 0;
+        display: none;
+    }
+
+    .message-item.unread .unread-indicator {
+        display: block;
+    }
+
+    .message-time {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-left: auto;
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    /* Message body */
+    .message-summary {
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+        line-height: 1.4;
+        word-wrap: break-word;
+    }
+
+    .message-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+
+    .message-created-by {
+        font-size: 11px;
+        color: var(--text-muted);
+    }
+
+    .message-task-link {
+        font-size: 11px;
+        color: var(--accent-blue);
+        cursor: pointer;
+        text-decoration: none;
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .message-task-link:hover {
+        text-decoration: underline;
+        color: var(--accent-blue-hover);
+    }
+
+    /* Reply display (for already-replied messages) */
+    .message-reply-display {
+        background-color: var(--reply-bg);
+        border-radius: 4px;
+        padding: 6px 10px;
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--text-secondary);
+        border-left: 2px solid var(--accent-blue);
+    }
+
+    .message-reply-display .reply-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        margin-bottom: 2px;
+    }
+
+    /* Quick actions */
+    .message-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 6px;
+    }
+
+    .action-btn {
+        background: none;
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .action-btn:hover {
+        background-color: var(--bg-hover);
+        color: var(--text-primary);
+        border-color: var(--text-muted);
+    }
+
+    .action-btn.reply-btn {
+        color: var(--accent-blue);
+        border-color: var(--accent-blue);
+    }
+
+    .action-btn.reply-btn:hover {
+        background-color: var(--accent-blue);
+        color: var(--badge-text);
+    }
+
+    /* Inline reply input */
+    .reply-input-container {
+        display: none;
+        margin-top: 8px;
+        gap: 6px;
+        align-items: stretch;
+    }
+
+    .reply-input-container.visible {
+        display: flex;
+    }
+
+    .reply-input {
+        flex: 1;
+        background-color: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 3px;
+        color: var(--text-primary);
+        font-family: system-ui, "Segoe UI", sans-serif;
+        font-size: 12px;
+        padding: 6px 8px;
+        resize: none;
+        outline: none;
+        min-height: 32px;
+    }
+
+    .reply-input:focus {
+        border-color: var(--accent-blue);
+    }
+
+    .reply-send-btn {
+        background-color: var(--accent-blue);
+        border: none;
+        color: var(--badge-text);
+        font-size: 11px;
+        font-weight: 600;
+        padding: 6px 12px;
+        border-radius: 3px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background-color 0.15s ease;
+    }
+
+    .reply-send-btn:hover {
+        background-color: var(--accent-blue-hover);
+    }
+
+    .reply-cancel-btn {
+        background: none;
+        border: 1px solid var(--border-color);
+        color: var(--text-muted);
+        font-size: 11px;
+        padding: 6px 8px;
+        border-radius: 3px;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+
+    .reply-cancel-btn:hover {
+        color: var(--text-primary);
+        border-color: var(--text-muted);
+    }
+
+    /* Empty state */
+    .empty-state {
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        padding: 40px 20px;
+        text-align: center;
+    }
+
+    .empty-state.visible {
+        display: flex;
+    }
+
+    .empty-state-icon {
+        font-size: 48px;
+        margin-bottom: 16px;
+        opacity: 0.4;
+    }
+
+    .empty-state-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+    }
+
+    .empty-state-subtitle {
+        font-size: 12px;
+        color: var(--text-muted);
+    }
+
+    /* Loading state */
+    .loading-state {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--text-muted);
+        font-size: 13px;
+    }
+</style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-left">
+            <span class="header-title">Inbox</span>
+            <span class="unread-badge" id="unreadBadge">0</span>
+        </div>
+        <div class="header-actions">
+            <button class="header-btn" id="filterToggle" onclick="toggleFilter()" title="Toggle filter">Show All</button>
+            <button class="header-btn" onclick="refreshInbox()" title="Refresh">Refresh</button>
+            <button class="header-btn mark-all-read" onclick="markAllRead()" title="Mark all as read">Mark All Read</button>
+        </div>
+    </div>
+
+    <!-- Message list -->
+    <div class="message-list" id="messageList">
+        <div class="loading-state" id="loadingState">Loading inbox...</div>
+    </div>
+
+    <!-- Empty state -->
+    <div class="empty-state" id="emptyState">
+        <div class="empty-state-icon">&#x1F4ED;</div>
+        <div class="empty-state-title">No inbox messages</div>
+        <div class="empty-state-subtitle">Notifications from task updates and team events will appear here.</div>
+    </div>
+
+<script>
+    // --- State ---
+    let messages = [];
+    let unreadCount = 0;
+    let currentReplyId = null;
+    let showUnreadOnly = true;
+
+    // --- Type metadata ---
+    const typeConfig = {
+        ready_for_testing: { icon: '\uD83E\uDDEA', label: 'Ready for Testing' },
+        escalation:        { icon: '\u26A0\uFE0F', label: 'Escalation' },
+        task_complete:     { icon: '\u2705',       label: 'Task Complete' },
+        helper_request:    { icon: '\uD83C\uDD98', label: 'Helper Request' }
+    };
+
+    // --- Relative time formatting ---
+    function relativeTime(dateStr) {
+        if (!dateStr) return '';
+        const now = new Date();
+        const then = new Date(dateStr);
+        const diffMs = now - then;
+        const diffSec = Math.floor(diffMs / 1000);
+        const diffMin = Math.floor(diffSec / 60);
+        const diffHr = Math.floor(diffMin / 60);
+        const diffDay = Math.floor(diffHr / 24);
+
+        if (diffSec < 60) return 'just now';
+        if (diffMin < 60) return diffMin === 1 ? '1 min ago' : diffMin + ' min ago';
+        if (diffHr < 24) return diffHr === 1 ? '1 hour ago' : diffHr + ' hours ago';
+        if (diffDay < 7) return diffDay === 1 ? '1 day ago' : diffDay + ' days ago';
+        return then.toLocaleDateString();
+    }
+
+    // --- Escape HTML ---
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // --- Render messages ---
+    function renderMessages() {
+        const list = document.getElementById('messageList');
+        const empty = document.getElementById('emptyState');
+        const loading = document.getElementById('loadingState');
+        const badge = document.getElementById('unreadBadge');
+
+        // Hide loading
+        loading.style.display = 'none';
+
+        // Update badge
+        if (unreadCount > 0) {
+            badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+            badge.classList.add('visible');
+        } else {
+            badge.classList.remove('visible');
+        }
+
+        // Filter messages based on view mode
+        const visibleMessages = showUnreadOnly
+            ? (messages || []).filter(m => !m.readAt)
+            : (messages || []);
+
+        // Show empty state or message list
+        if (visibleMessages.length === 0) {
+            list.style.display = 'none';
+            empty.classList.add('visible');
+            return;
+        }
+
+        empty.classList.remove('visible');
+        list.style.display = 'block';
+
+        // Build HTML for visible messages (newest first)
+        let html = '';
+        for (const msg of visibleMessages) {
+            const isUnread = !msg.readAt;
+            const config = typeConfig[msg.type] || { icon: '\uD83D\uDD14', label: msg.type || 'Notification' };
+            const unreadClass = isUnread ? ' unread' : '';
+
+            html += `<div class="message-item${unreadClass}" data-id="${escapeHtml(msg.id)}">`;
+
+            // Header row
+            html += `<div class="message-header">`;
+            html += `<span class="type-icon">${config.icon}</span>`;
+            html += `<span class="type-label ${escapeHtml(msg.type)}">${escapeHtml(config.label)}</span>`;
+            html += `<span class="unread-indicator"></span>`;
+            html += `<span class="message-time">${relativeTime(msg.createdAt)}</span>`;
+            html += `</div>`;
+
+            // Summary
+            html += `<div class="message-summary">${escapeHtml(msg.summary)}</div>`;
+
+            // Meta: created by + task link
+            html += `<div class="message-meta">`;
+            if (msg.createdBy) {
+                html += `<span class="message-created-by">from ${escapeHtml(msg.createdBy)}</span>`;
+            }
+            if (msg.taskId && msg.taskTitle) {
+                html += `<a class="message-task-link" onclick="navigateToTask('${escapeHtml(msg.taskId)}')" title="${escapeHtml(msg.taskTitle)}">${escapeHtml(msg.taskTitle)}</a>`;
+            }
+            html += `</div>`;
+
+            // Existing reply display
+            if (msg.replyText) {
+                html += `<div class="message-reply-display">`;
+                html += `<div class="reply-label">Your reply</div>`;
+                html += `<div>${escapeHtml(msg.replyText)}</div>`;
+                html += `</div>`;
+            }
+
+            // Actions
+            html += `<div class="message-actions">`;
+            if (isUnread) {
+                html += `<button class="action-btn" onclick="markRead('${escapeHtml(msg.id)}')">Mark Read</button>`;
+            }
+            if (!msg.replyText) {
+                html += `<button class="action-btn reply-btn" onclick="toggleReply('${escapeHtml(msg.id)}')">Reply</button>`;
+            }
+            html += `</div>`;
+
+            // Inline reply input
+            html += `<div class="reply-input-container" id="reply-${escapeHtml(msg.id)}">`;
+            html += `<input type="text" class="reply-input" id="reply-input-${escapeHtml(msg.id)}" placeholder="Type a reply..." onkeydown="handleReplyKey(event, '${escapeHtml(msg.id)}')" />`;
+            html += `<button class="reply-send-btn" onclick="sendReply('${escapeHtml(msg.id)}')">Send</button>`;
+            html += `<button class="reply-cancel-btn" onclick="cancelReply('${escapeHtml(msg.id)}')">Cancel</button>`;
+            html += `</div>`;
+
+            html += `</div>`;
+        }
+
+        list.innerHTML = html;
+    }
+
+    // --- Actions ---
+
+    function markRead(messageId) {
+        postMessage({ type: 'mark_read', messageId: messageId });
+        // Optimistic update: mark as read locally and re-render
+        const msg = messages.find(m => m.id === messageId);
+        if (msg) {
+            msg.readAt = new Date().toISOString();
+            unreadCount = messages.filter(m => !m.readAt).length;
+            renderMessages();
+        }
+    }
+
+    function markAllRead() {
+        postMessage({ type: 'mark_all_read' });
+        // Optimistic update: mark all as read locally
+        const now = new Date().toISOString();
+        messages.forEach(m => { if (!m.readAt) m.readAt = now; });
+        unreadCount = 0;
+        renderMessages();
+    }
+
+    function toggleFilter() {
+        showUnreadOnly = !showUnreadOnly;
+        const btn = document.getElementById('filterToggle');
+        if (btn) btn.textContent = showUnreadOnly ? 'Show All' : 'Unread Only';
+        renderMessages();
+    }
+
+    function navigateToTask(taskId) {
+        postMessage({ type: 'navigate_to_task', taskId: taskId });
+    }
+
+    function refreshInbox() {
+        postMessage({ type: 'refresh' });
+    }
+
+    function toggleReply(messageId) {
+        // Close any previously open reply
+        if (currentReplyId && currentReplyId !== messageId) {
+            const prevContainer = document.getElementById('reply-' + currentReplyId);
+            if (prevContainer) prevContainer.classList.remove('visible');
+        }
+
+        const container = document.getElementById('reply-' + messageId);
+        if (!container) return;
+
+        const isVisible = container.classList.contains('visible');
+        if (isVisible) {
+            container.classList.remove('visible');
+            currentReplyId = null;
+        } else {
+            container.classList.add('visible');
+            currentReplyId = messageId;
+            const input = document.getElementById('reply-input-' + messageId);
+            if (input) input.focus();
+        }
+    }
+
+    function cancelReply(messageId) {
+        const container = document.getElementById('reply-' + messageId);
+        if (container) container.classList.remove('visible');
+        const input = document.getElementById('reply-input-' + messageId);
+        if (input) input.value = '';
+        currentReplyId = null;
+    }
+
+    function sendReply(messageId) {
+        const input = document.getElementById('reply-input-' + messageId);
+        if (!input) return;
+        const text = input.value.trim();
+        if (!text) return;
+
+        postMessage({ type: 'reply', messageId: messageId, replyText: text });
+        input.value = '';
+        const container = document.getElementById('reply-' + messageId);
+        if (container) container.classList.remove('visible');
+        currentReplyId = null;
+
+        // Optimistic update: set reply and mark as read locally
+        const msg = messages.find(m => m.id === messageId);
+        if (msg) {
+            msg.replyText = text;
+            msg.repliedAt = new Date().toISOString();
+            if (!msg.readAt) msg.readAt = msg.repliedAt;
+            unreadCount = messages.filter(m => !m.readAt).length;
+            renderMessages();
+        }
+    }
+
+    function handleReplyKey(event, messageId) {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            sendReply(messageId);
+        } else if (event.key === 'Escape') {
+            cancelReply(messageId);
+        }
+    }
+
+    // --- Communication with C# ---
+
+    function postMessage(data) {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(data);
+        }
+    }
+
+    // Listen for messages from C#
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.addEventListener('message', function(event) {
+            const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+            handleMessage(data);
+        });
+    }
+
+    function handleMessage(data) {
+        if (!data || !data.type) return;
+
+        switch (data.type) {
+            case 'inbox_data':
+                messages = data.messages || [];
+                unreadCount = data.unreadCount || 0;
+                renderMessages();
+                break;
+
+            case 'theme':
+                if (data.isDark) {
+                    document.body.classList.remove('light-theme');
+                } else {
+                    document.body.classList.add('light-theme');
+                }
+                break;
+
+            case 'font_size':
+                if (data.size) {
+                    document.body.style.fontSize = data.size + 'px';
+                }
+                break;
+        }
+    }
+
+    // --- Initialization ---
+    // Notify C# that JS is ready
+    postMessage({ type: 'ready' });
+</script>
+</body>
+</html>

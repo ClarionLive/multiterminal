@@ -1,0 +1,2505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tasks</title>
+    <style>
+        :root {
+            --bg-color: #1e1e1e;
+            --text-color: #d4d4d4;
+            --bubble-bg: #2d2d2d;
+            --timestamp-color: #808080;
+            --border-color: #3c3c3c;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-size: 13px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 8px 12px;
+            background-color: #252526;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        /* Project selector */
+        .project-selector {
+            position: relative;
+        }
+
+        .project-selector-btn {
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-color);
+            padding: 4px 24px 4px 8px;
+            font-size: 11px;
+            cursor: pointer;
+            min-width: 120px;
+            text-align: left;
+            position: relative;
+            transition: background-color 0.2s;
+        }
+
+        .project-selector-btn:hover {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .project-selector-btn::after {
+            content: '';
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            border: 4px solid transparent;
+            border-top-color: var(--text-color);
+            opacity: 0.6;
+        }
+
+        .project-selector-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            margin-top: 4px;
+            background-color: #2d2d2d;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 180px;
+            max-height: 300px;
+            overflow-y: auto;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .project-selector-dropdown.open {
+            display: block;
+        }
+
+        .project-selector-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            transition: background-color 0.15s;
+        }
+
+        .project-selector-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .project-selector-item.selected {
+            background-color: rgba(74, 144, 217, 0.2);
+        }
+
+        .project-selector-item .project-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .project-selector-item .task-count {
+            background-color: rgba(255, 255, 255, 0.1);
+            padding: 2px 6px;
+            border-radius: 8px;
+            font-size: 10px;
+            color: var(--timestamp-color);
+            margin-left: 8px;
+        }
+
+        body.light .project-selector-btn {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+
+        body.light .project-selector-btn:hover {
+            background-color: rgba(0, 0, 0, 0.1);
+        }
+
+        body.light .project-selector-dropdown {
+            background-color: #ffffff;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        /* Kanban Board */
+        .kanban-container {
+            flex: 1;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding: 12px;
+            display: flex;
+            gap: 12px;
+        }
+
+        .kanban-column {
+            flex: 1;
+            min-width: 220px;
+            max-width: 320px;
+            background-color: #252526;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            max-height: 100%;
+        }
+
+        .column-header {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-weight: 600;
+            font-size: 12px;
+        }
+
+        .column-header .count {
+            background-color: rgba(255, 255, 255, 0.18);
+            color: rgba(255, 255, 255, 0.75);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: normal;
+        }
+
+        body.light .column-header .count {
+            background-color: rgba(0, 0, 0, 0.1);
+            color: rgba(0, 0, 0, 0.6);
+        }
+
+        .column-header.todo { color: #808080; }
+        .column-header.in-progress { color: #4A90D9; }
+        .column-header.done { color: #4CAF50; }
+        .column-header.suggestion { color: #F39C12; }
+
+        .column-header-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .visibility-toggle {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+
+        .visibility-toggle:hover {
+            opacity: 1;
+        }
+
+        .visibility-toggle svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }
+
+        .kanban-column.hidden {
+            display: none;
+        }
+
+        /* Search input */
+        .search-container {
+            position: relative;
+            margin-left: 16px;
+        }
+
+        .search-input {
+            width: 250px;
+            padding: 6px 32px 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-size: 12px;
+            outline: none;
+            transition: border-color 0.2s, background-color 0.2s;
+        }
+
+        .search-input::placeholder {
+            color: var(--timestamp-color);
+        }
+
+        .search-input:focus {
+            border-color: #4A90D9;
+            background-color: rgba(74, 144, 217, 0.05);
+        }
+
+        .search-clear {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--timestamp-color);
+            cursor: pointer;
+            padding: 4px;
+            font-size: 14px;
+            line-height: 1;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .search-container:hover .search-clear,
+        .search-input:focus + .search-clear,
+        .search-clear.visible {
+            opacity: 1;
+        }
+
+        .search-clear:hover {
+            color: var(--text-color);
+        }
+
+        /* Hidden columns indicator */
+        .hidden-columns-indicator {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            background-color: rgba(255, 255, 255, 0.1);
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .hidden-columns-indicator:hover {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .hidden-columns-indicator.visible {
+            display: flex;
+        }
+
+        .hidden-columns-indicator svg {
+            width: 12px;
+            height: 12px;
+            fill: currentColor;
+            opacity: 0.7;
+        }
+
+        .hidden-columns-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 4px;
+            background-color: #2d2d2d;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 140px;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .hidden-columns-dropdown.open {
+            display: block;
+        }
+
+        .hidden-column-item {
+            padding: 6px 12px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: background-color 0.15s;
+        }
+
+        .hidden-column-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        body.light .hidden-columns-dropdown {
+            background-color: #f5f5f5;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .column-tasks {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .task-card {
+            background-color: var(--bubble-bg);
+            border-radius: 6px;
+            padding: 10px;
+            border-left: 3px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .task-card:hover {
+            background-color: #363636;
+        }
+
+        .task-card.todo { border-left-color: #808080; }
+        .task-card.in-progress { border-left-color: #4A90D9; }
+        .task-card.done { border-left-color: #4CAF50; }
+        .task-card.suggestion { border-left-color: #F39C12; }
+
+        .task-title {
+            font-weight: 500;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .task-description {
+            font-size: 11px;
+            color: var(--timestamp-color);
+            margin-bottom: 8px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .task-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 10px;
+            color: var(--timestamp-color);
+        }
+
+        .task-assignee {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .task-assignee .badge {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: #4A90D9;
+        }
+
+        .task-priority-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 8px;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-left: 6px;
+        }
+
+        .task-priority-badge.urgent {
+            background-color: rgba(231, 76, 60, 0.2);
+            color: #E74C3C;
+        }
+
+        .task-priority-badge.normal {
+            background-color: rgba(74, 144, 217, 0.2);
+            color: #4A90D9;
+        }
+
+        .task-priority-badge.low {
+            background-color: rgba(128, 128, 128, 0.2);
+            color: #808080;
+        }
+
+        .task-helpers {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 6px;
+            margin-bottom: 4px;
+            flex-wrap: wrap;
+        }
+
+        .helpers-label {
+            font-size: 10px;
+            color: var(--timestamp-color);
+            font-weight: 500;
+        }
+
+        .helper-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 10px;
+            color: white;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .helper-badge:hover {
+            opacity: 0.8;
+        }
+
+        .helper-remove {
+            font-size: 14px;
+            font-weight: bold;
+            margin-left: 2px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .helper-badge:hover .helper-remove {
+            opacity: 1;
+        }
+
+        .task-stale-warning {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 6px;
+            margin-bottom: 4px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .task-stale-warning[data-stale-level="1"] {
+            background-color: rgba(74, 144, 217, 0.15);
+            border-left: 3px solid #4A90D9;
+        }
+
+        .task-stale-warning[data-stale-level="2"] {
+            background-color: rgba(243, 156, 18, 0.15);
+            border-left: 3px solid #F39C12;
+        }
+
+        .stale-icon {
+            font-size: 14px;
+        }
+
+        .stale-message {
+            flex: 1;
+            color: var(--text-color);
+        }
+
+        .stale-respond-btn {
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-color);
+            padding: 4px 12px;
+            font-size: 10px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .stale-respond-btn:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        /* Checklist styles */
+        .task-checklist {
+            margin-top: 8px;
+            margin-bottom: 8px;
+        }
+
+        .checklist-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            background-color: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            font-size: 11px;
+        }
+
+        .checklist-header:hover {
+            background-color: rgba(255, 255, 255, 0.08);
+        }
+
+        .checklist-icon {
+            font-size: 14px;
+        }
+
+        .checklist-progress {
+            font-weight: 500;
+            color: var(--text-color);
+        }
+
+        .checklist-progress-bar {
+            flex: 1;
+            height: 4px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .checklist-progress-fill {
+            height: 100%;
+            background-color: #4CAF50;
+            transition: width 0.3s ease;
+        }
+
+        .checklist-toggle {
+            font-size: 10px;
+            color: var(--timestamp-color);
+        }
+
+        .checklist-items {
+            padding: 8px 8px 4px 8px;
+        }
+
+        .checklist-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            font-size: 11px;
+        }
+
+        .checklist-item input[type="checkbox"] {
+            cursor: pointer;
+            width: 14px;
+            height: 14px;
+        }
+
+        .checklist-item label {
+            cursor: pointer;
+            flex: 1;
+            color: var(--text-color);
+        }
+
+        .checklist-item input[type="checkbox"]:checked + label {
+            text-decoration: line-through;
+            color: var(--timestamp-color);
+        }
+
+        /* Workflow status badges for checklist items */
+        .checklist-item-status {
+            font-size: 9px;
+            font-weight: 600;
+            padding: 1px 5px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            white-space: nowrap;
+        }
+        .checklist-item-status.pending { background: rgba(128,128,128,0.2); color: #999; }
+        .checklist-item-status.coding { background: rgba(74,144,217,0.2); color: #5ba8f5; }
+        .checklist-item-status.testing { background: rgba(243,156,18,0.2); color: #f5b041; }
+        .checklist-item-status.done { background: rgba(76,175,80,0.2); color: #66bb6a; }
+
+        .checklist-item-name {
+            flex: 1;
+            font-size: 11px;
+        }
+        .checklist-item-name.done {
+            text-decoration: line-through;
+            color: var(--timestamp-color);
+        }
+
+        .checklist-item-notes-count {
+            font-size: 9px;
+            color: var(--timestamp-color);
+            cursor: help;
+        }
+
+        .checklist-item-cycle {
+            font-size: 9px;
+            color: #f5b041;
+        }
+
+        /* Multi-segment progress bar */
+        .checklist-progress-bar-segments {
+            flex: 1;
+            height: 6px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            display: flex;
+        }
+        .progress-segment {
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+        .progress-segment.done { background-color: #4CAF50; }
+        .progress-segment.testing { background-color: #F39C12; }
+        .progress-segment.coding { background-color: #4A90D9; }
+
+        /* Workflow info sections on card */
+        .task-workflow-info {
+            margin-top: 6px;
+            font-size: 11px;
+        }
+        .workflow-section {
+            padding: 4px 8px;
+            margin-top: 4px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 4px;
+            border-left: 2px solid var(--border-color);
+        }
+        .workflow-section-header {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--timestamp-color);
+            margin-bottom: 2px;
+        }
+        .workflow-section-content {
+            font-size: 11px;
+            color: var(--text-color);
+            white-space: pre-wrap;
+            max-height: 60px;
+            overflow: hidden;
+            line-height: 1.4;
+        }
+        .workflow-section.continuation { border-left-color: #F39C12; }
+        .workflow-section.plan { border-left-color: #4A90D9; }
+        .workflow-section.substatus-active { border-left-color: #4CAF50; }
+        .workflow-section.substatus-paused { border-left-color: #F39C12; }
+        .substatus-badge {
+            display: inline-block;
+            font-size: 9px;
+            font-weight: 600;
+            padding: 1px 6px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            margin-left: 6px;
+        }
+        .substatus-badge.active { background: rgba(76,175,80,0.2); color: #66bb6a; }
+        .substatus-badge.paused { background: rgba(243,156,18,0.2); color: #f5b041; }
+
+        .task-actions {
+            display: flex;
+            gap: 4px;
+        }
+
+        .task-btn {
+            background-color: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: var(--text-color);
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 10px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .task-btn:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .task-btn.claim {
+            background-color: rgba(74, 144, 217, 0.2);
+            color: #4A90D9;
+        }
+
+        .task-btn.claim:hover {
+            background-color: rgba(74, 144, 217, 0.3);
+        }
+
+        .task-btn.complete {
+            background-color: rgba(76, 175, 80, 0.2);
+            color: #4CAF50;
+        }
+
+        .task-btn.complete:hover {
+            background-color: rgba(76, 175, 80, 0.3);
+        }
+
+        .column-empty {
+            text-align: center;
+            padding: 20px;
+            color: var(--timestamp-color);
+            font-size: 11px;
+        }
+
+        /* Light theme */
+        body.light {
+            --bg-color: #ffffff;
+            --text-color: #333333;
+            --bubble-bg: #f0f0f0;
+            --timestamp-color: #808080;
+            --border-color: #e0e0e0;
+        }
+
+        body.light .header {
+            background-color: #f5f5f5;
+        }
+
+        body.light .kanban-column {
+            background-color: #f5f5f5;
+        }
+
+        body.light .task-card:hover {
+            background-color: #e8e8e8;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* Task card hover icons */
+        .task-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .task-card-icons {
+            display: flex;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .task-card:hover .task-card-icons {
+            opacity: 1;
+        }
+
+        .task-icon-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+
+        .task-icon-btn:hover {
+            opacity: 1;
+        }
+
+        .task-icon-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: var(--text-color);
+        }
+
+        .task-icon-btn.delete:hover svg {
+            fill: #E74C3C;
+        }
+
+        .task-icon-btn.assign:hover svg {
+            fill: #4A90D9;
+        }
+
+        .task-icon-btn.native-helper svg {
+            fill: #F39C12;
+        }
+
+        .task-icon-btn.native-helper:hover svg {
+            fill: #FFC107;
+            filter: drop-shadow(0 0 2px #F39C12);
+        }
+
+        /* Active native helpers section */
+        .task-native-helpers {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 6px;
+            margin-bottom: 4px;
+            flex-wrap: wrap;
+        }
+
+        .native-helpers-label {
+            font-size: 10px;
+            color: var(--timestamp-color);
+            font-weight: 500;
+        }
+
+        .native-helper-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 10px;
+            background-color: rgba(243, 156, 18, 0.2);
+            border: 1px dashed #F39C12;
+            color: #F39C12;
+        }
+
+        .native-helper-badge .lifecycle-icon {
+            font-size: 12px;
+        }
+
+        .native-helper-badge.spawning {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .native-helper-badge.working {
+            background-color: rgba(74, 144, 217, 0.2);
+            border-color: #4A90D9;
+            color: #4A90D9;
+        }
+
+        .native-helper-badge.completed {
+            background-color: rgba(76, 175, 80, 0.2);
+            border-color: #4CAF50;
+            color: #4CAF50;
+        }
+
+        .native-helper-badge.dissolving {
+            opacity: 0.5;
+            animation: fadeOut 2s ease-out forwards;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        @keyframes fadeOut {
+            from { opacity: 0.5; }
+            to { opacity: 0; }
+        }
+
+        /* Assign dropdown */
+        .assign-dropdown {
+            display: none;
+            position: absolute;
+            background-color: #2d2d2d;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 160px;
+            z-index: 200;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .assign-dropdown.open {
+            display: block;
+        }
+
+        .assign-dropdown-header {
+            padding: 6px 12px;
+            font-size: 10px;
+            color: var(--timestamp-color);
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 4px;
+        }
+
+        .assign-dropdown-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background-color 0.15s;
+        }
+
+        .assign-dropdown-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .assign-dropdown-item .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .assign-dropdown-item .status-dot.idle { background-color: #4CAF50; }
+        .assign-dropdown-item .status-dot.working { background-color: #F39C12; }
+        .assign-dropdown-item .status-dot.blocked { background-color: #E74C3C; }
+        .assign-dropdown-item .status-dot.unknown { background-color: #808080; }
+
+        .assign-dropdown-group-label {
+            padding: 6px 12px 2px;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--timestamp-color);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .assign-dropdown-divider {
+            height: 1px;
+            background-color: var(--border-color);
+            margin: 4px 0;
+        }
+
+        .assign-dropdown-item.unassign {
+            color: var(--timestamp-color);
+            font-style: italic;
+        }
+
+        .assign-dropdown-empty {
+            padding: 12px;
+            text-align: center;
+            color: var(--timestamp-color);
+            font-size: 11px;
+        }
+
+        body.light .assign-dropdown {
+            background-color: #ffffff;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        /* Toast notification */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 6px;
+            font-size: 12px;
+            z-index: 300;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.3s, transform 0.3s;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Modal styles */
+        /* Inline Add Task Form */
+        .inline-add-form {
+            padding: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .inline-add-form input {
+            width: 100%;
+            background: var(--bubble-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 8px;
+            color: var(--text-color);
+            font-size: 12px;
+            font-family: inherit;
+        }
+
+        .inline-add-form input:focus {
+            outline: none;
+            border-color: #4A90D9;
+            border-bottom-color: #4A90D9;
+        }
+
+        .inline-add-form .hint {
+            font-size: 10px;
+            color: var(--timestamp-color);
+            margin-top: 4px;
+        }
+
+        /* Delete popover */
+        .delete-popover {
+            display: none;
+            position: absolute;
+            background-color: #2d2d2d;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 12px;
+            z-index: 150;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            min-width: 180px;
+        }
+
+        .delete-popover.open {
+            display: block;
+        }
+
+        .delete-popover-text {
+            font-size: 12px;
+            margin-bottom: 12px;
+        }
+
+        .delete-popover-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .delete-popover-btn {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .delete-popover-btn.cancel {
+            background-color: transparent;
+            color: var(--text-color);
+        }
+
+        .delete-popover-btn.confirm {
+            background-color: #E74C3C;
+            color: white;
+        }
+
+        /* Add task button in column header */
+        .add-task-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+            margin-left: auto;
+        }
+
+        .add-task-btn:hover {
+            opacity: 1;
+        }
+
+        .add-task-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }
+
+        /* Light theme adjustments */
+        body.light .delete-popover {
+            background-color: #ffffff;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        /* Drag and drop styles */
+        .task-card[draggable="true"] {
+            cursor: grab;
+        }
+
+        .task-card[draggable="true"]:active {
+            cursor: grabbing;
+        }
+
+        .task-card.dragging {
+            opacity: 0.5;
+            transform: scale(0.98);
+        }
+
+        .column-tasks.drag-over {
+            background-color: rgba(74, 144, 217, 0.1);
+            border: 2px dashed #4A90D9;
+            border-radius: 4px;
+        }
+
+        body.light .column-tasks.drag-over {
+            background-color: rgba(74, 144, 217, 0.15);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <h1>Tasks</h1>
+            <div class="project-selector">
+                <button class="project-selector-btn" id="projectSelectorBtn" onclick="toggleProjectDropdown(event)">
+                    <span id="selectedProjectName">All Projects</span>
+                </button>
+                <div class="project-selector-dropdown" id="projectDropdown"></div>
+            </div>
+            <div class="project-selector" id="terminalSelectorContainer">
+                <button class="project-selector-btn" id="terminalSelectorBtn" onclick="toggleTerminalDropdown(event)">
+                    <span id="selectedTerminalName">All Terminals</span>
+                </button>
+                <div class="project-selector-dropdown" id="terminalDropdown"></div>
+            </div>
+            <div class="search-container">
+                <input type="text" class="search-input" id="taskSearchInput" placeholder="Search tasks..." oninput="handleSearchInput()">
+                <button class="search-clear" id="searchClearBtn" onclick="clearSearch()" title="Clear search">&#x2715;</button>
+            </div>
+        </div>
+        <div class="hidden-columns-indicator" id="hiddenColumnsIndicator" onclick="toggleDropdown(event)">
+            <svg viewBox="0 0 24 24"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>
+            <span id="hiddenColumnsCount">0 hidden</span>
+            <div class="hidden-columns-dropdown" id="hiddenColumnsDropdown"></div>
+        </div>
+    </div>
+
+    <div class="kanban-container" id="kanbanContainer">
+        <div class="kanban-column" data-column="suggestion" id="columnSuggestion">
+            <div class="column-header suggestion">
+                <div class="column-header-left">
+                    <span>Suggestions</span>
+                    <span class="count" id="suggestionCount">0</span>
+                </div>
+                <button class="add-task-btn" onclick="showInlineAddForm('suggestion')" title="Add suggestion">
+                    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                </button>
+                <button class="visibility-toggle" onclick="toggleColumnVisibility('suggestion')" title="Hide column">
+                    <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                </button>
+            </div>
+            <div class="column-tasks" id="suggestionTasks">
+                <div class="column-empty">No suggestions</div>
+            </div>
+        </div>
+        <div class="kanban-column" data-column="todo" id="columnTodo">
+            <div class="column-header todo">
+                <div class="column-header-left">
+                    <span>To Do</span>
+                    <span class="count" id="todoCount">0</span>
+                </div>
+                <button class="add-task-btn" onclick="showInlineAddForm('todo')" title="Add task">
+                    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                </button>
+                <button class="visibility-toggle" onclick="toggleColumnVisibility('todo')" title="Hide column">
+                    <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                </button>
+            </div>
+            <div class="column-tasks" id="todoTasks">
+                <div class="column-empty">No tasks</div>
+            </div>
+        </div>
+        <div class="kanban-column" data-column="in_progress" id="columnInProgress">
+            <div class="column-header in-progress">
+                <div class="column-header-left">
+                    <span>In Progress</span>
+                    <span class="count" id="inProgressCount">0</span>
+                </div>
+                <button class="add-task-btn" onclick="showInlineAddForm('in_progress')" title="Add task">
+                    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                </button>
+                <button class="visibility-toggle" onclick="toggleColumnVisibility('in_progress')" title="Hide column">
+                    <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                </button>
+            </div>
+            <div class="column-tasks" id="inProgressTasks">
+                <div class="column-empty">No tasks</div>
+            </div>
+        </div>
+        <div class="kanban-column" data-column="done" id="columnDone">
+            <div class="column-header done">
+                <div class="column-header-left">
+                    <span>Done</span>
+                    <span class="count" id="doneCount">0</span>
+                </div>
+                <button class="add-task-btn" onclick="showInlineAddForm('done')" title="Add task">
+                    <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                </button>
+                <button class="visibility-toggle" onclick="toggleColumnVisibility('done')" title="Hide column">
+                    <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                </button>
+            </div>
+            <div class="column-tasks" id="doneTasks">
+                <div class="column-empty">No tasks</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete Confirmation Popover -->
+    <div class="delete-popover" id="deletePopover">
+        <div class="delete-popover-text">Delete this task?</div>
+        <div class="delete-popover-actions">
+            <button class="delete-popover-btn cancel" onclick="closeDeletePopover()">Cancel</button>
+            <button class="delete-popover-btn confirm" onclick="confirmDelete()">Delete</button>
+        </div>
+    </div>
+
+    <!-- Assign to Terminal Dropdown -->
+    <div class="assign-dropdown" id="assignDropdown">
+        <div class="assign-dropdown-header">Assign to Member</div>
+        <div id="assignDropdownItems"></div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // State
+        let tasks = [];
+        let terminals = [];
+        let members = [];
+        let projects = [];
+        let selectedProjectId = null;
+        let selectedTerminalName = null;
+        let searchQuery = '';
+
+        // Storage keys
+        const PROJECT_STORAGE_KEY = 'kanban-selected-project';
+        const TERMINAL_STORAGE_KEY = 'kanban-selected-terminal';
+        const VISIBILITY_STORAGE_KEY = 'kanban-column-visibility';
+        const columnNames = {
+            'suggestion': 'Suggestions',
+            'todo': 'To Do',
+            'in_progress': 'In Progress',
+            'done': 'Done'
+        };
+        let columnVisibility = loadColumnVisibility();
+
+        // DOM elements
+        const suggestionTasks = document.getElementById('suggestionTasks');
+        const todoTasks = document.getElementById('todoTasks');
+        const inProgressTasks = document.getElementById('inProgressTasks');
+        const doneTasks = document.getElementById('doneTasks');
+        const suggestionCount = document.getElementById('suggestionCount');
+        const todoCount = document.getElementById('todoCount');
+        const inProgressCount = document.getElementById('inProgressCount');
+        const doneCount = document.getElementById('doneCount');
+
+        // WebView2 message handling
+        function sendToHost(message) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(message);
+            }
+        }
+
+        // Handle messages from C#
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                const data = event.data;
+                if (typeof data === 'string') {
+                    handleStringMessage(data);
+                } else {
+                    handleObjectMessage(data);
+                }
+            });
+        }
+
+        function handleStringMessage(data) {
+            if (data.startsWith('theme:')) {
+                const theme = data.substring(6);
+                document.body.className = theme === 'light' ? 'light' : '';
+            } else if (data.startsWith('fontSize:')) {
+                const size = parseFloat(data.substring(9));
+                if (!isNaN(size)) {
+                    document.body.style.fontSize = size + 'px';
+                }
+            }
+        }
+
+        function handleObjectMessage(data) {
+            console.log('[TasksPanel JS] handleObjectMessage:', data.type, data.tasks ? `(${data.tasks.length} tasks)` : '');
+            switch (data.type) {
+                case 'task_update':
+                    console.log('[TasksPanel JS] task_update received:', data.tasks?.length, 'tasks');
+                    updateTasks(data.tasks);
+                    break;
+                case 'terminals':
+                    terminals = data.terminals;
+                    renderTerminalDropdown();
+                    updateSelectedTerminalDisplay();
+                    break;
+                case 'members':
+                    members = data.members || [];
+                    break;
+                case 'task_claimed':
+                    showToast(`${data.claimedBy} claimed: ${data.taskTitle}`);
+                    break;
+                case 'projects':
+                    updateProjects(data.projects);
+                    break;
+                case 'helper_session_updated':
+                    handleHelperSessionUpdate(data);
+                    break;
+                case 'helper_message_logged':
+                    handleHelperMessage(data);
+                    break;
+            }
+        }
+
+        function getTerminalColor(name) {
+            const terminal = terminals.find(t => t.name === name);
+            return terminal ? terminal.color : '#808080';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Task management
+        function updateTasks(newTasks) {
+            console.log('[TasksPanel JS] updateTasks called, count:', newTasks?.length);
+            tasks = newTasks;
+            renderAllTasks();
+            renderTerminalDropdown();
+            updateSelectedTerminalDisplay();
+            console.log('[TasksPanel JS] renderAllTasks completed');
+        }
+
+        function handleSearchInput() {
+            const input = document.getElementById('taskSearchInput');
+            searchQuery = input.value;
+
+            // Show/hide clear button
+            const clearBtn = document.getElementById('searchClearBtn');
+            if (searchQuery.trim()) {
+                clearBtn.classList.add('visible');
+            } else {
+                clearBtn.classList.remove('visible');
+            }
+
+            // Re-render with filter applied
+            renderAllTasks();
+        }
+
+        function clearSearch() {
+            const input = document.getElementById('taskSearchInput');
+            input.value = '';
+            searchQuery = '';
+
+            // Hide clear button
+            const clearBtn = document.getElementById('searchClearBtn');
+            clearBtn.classList.remove('visible');
+
+            // Re-render without filter
+            renderAllTasks();
+        }
+
+        function renderAllTasks() {
+            console.log('[TasksPanel JS] renderAllTasks: total tasks =', tasks?.length, 'searchQuery =', searchQuery);
+            // Apply search filter first
+            let filteredTasks = tasks;
+            if (searchQuery.trim()) {
+                const query = searchQuery.toLowerCase();
+                filteredTasks = tasks.filter(task => {
+                    const title = (task.title || '').toLowerCase();
+                    const description = (task.description || '').toLowerCase();
+                    const assignee = (task.assignee || '').toLowerCase();
+                    const createdBy = (task.createdBy || '').toLowerCase();
+                    return title.includes(query) ||
+                           description.includes(query) ||
+                           assignee.includes(query) ||
+                           createdBy.includes(query);
+                });
+            }
+
+            // Apply terminal filter
+            if (selectedTerminalName) {
+                filteredTasks = filteredTasks.filter(t => t.assignee === selectedTerminalName);
+            }
+
+            const suggestions = filteredTasks.filter(t => t.status === 'suggestion');
+            const todo = filteredTasks.filter(t => t.status === 'todo');
+            const inProgress = filteredTasks.filter(t => t.status === 'in_progress');
+            const done = filteredTasks.filter(t => t.status === 'done');
+
+            console.log('[TasksPanel JS] renderAllTasks columns:',
+                'suggestion=' + suggestions.length, 'todo=' + todo.length,
+                'in_progress=' + inProgress.length, 'done=' + done.length);
+
+            suggestionCount.textContent = suggestions.length;
+            todoCount.textContent = todo.length;
+            inProgressCount.textContent = inProgress.length;
+            doneCount.textContent = done.length;
+
+            renderTaskColumn(suggestionTasks, suggestions, 'suggestion');
+            renderTaskColumn(todoTasks, todo, 'todo');
+            renderTaskColumn(inProgressTasks, inProgress, 'in_progress');
+            renderTaskColumn(doneTasks, done, 'done');
+        }
+
+        function renderTaskColumn(container, columnTasks, status) {
+            if (columnTasks.length === 0) {
+                container.innerHTML = '<div class="column-empty">No tasks</div>';
+                return;
+            }
+
+            container.innerHTML = columnTasks.map(task => renderTaskCard(task, status)).join('');
+        }
+
+        function renderTaskCard(task, status) {
+            const assigneeColor = task.assignee ? getTerminalColor(task.assignee) : '#808080';
+            const statusClass = status === 'in_progress' ? 'in-progress' : status;
+            const priority = task.Priority || 'normal';
+
+            let actions = '';
+            if (status === 'suggestion') {
+                actions = `<button class="task-btn claim" onclick="promoteTask('${task.id}')">To Do</button>`;
+            } else if (status === 'todo') {
+                actions = `<button class="task-btn claim" onclick="claimTask('${task.id}')">Claim</button>`;
+            } else if (status === 'in_progress') {
+                actions = `<button class="task-btn complete" onclick="completeTask('${task.id}')">Done</button>`;
+            }
+
+            // Show priority badge only for non-normal priorities
+            const priorityBadge = priority !== 'normal'
+                ? `<span class="task-priority-badge ${priority}">${priority}</span>`
+                : '';
+
+            return `
+                <div class="task-card ${statusClass}" data-task-id="${task.id}" draggable="true" ondragstart="handleDragStart(event)" ondragend="handleDragEnd(event)">
+                    <div class="task-card-header">
+                        <div class="task-title">${escapeHtml(task.title)}${priorityBadge}</div>
+                        <div class="task-card-icons">
+                            <button class="task-icon-btn assign" onclick="openAssignDropdown(event, '${task.id}')" title="Assign to terminal">
+                                <svg viewBox="0 0 24 24"><path d="M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                            </button>
+                            <button class="task-icon-btn edit" onclick="openLifecycleBoard('${task.id}')" title="Open lifecycle board">
+                                <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+                            </button>
+                            <button class="task-icon-btn delete" onclick="openDeletePopover(event, '${task.id}')" title="Delete task">
+                                <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                            </button>
+                            <button class="task-icon-btn helper" onclick="addHelperToTask('${task.id}')" title="Add helper">
+                                <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+                            </button>
+                            <button class="task-icon-btn native-helper" onclick="spawnNativeHelper('${task.id}')" title="Spawn native helper (temporary)">
+                                <svg viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    ${task.description ? `<div class="task-description">${escapeHtml(task.description)}</div>` : ''}
+                    ${task.Helpers && task.Helpers.length > 0 ? `
+                        <div class="task-helpers">
+                            <span class="helpers-label">Helpers:</span>
+                            ${task.Helpers.map(helper => {
+                                const helperColor = getTerminalColor(helper);
+                                return `<span class="helper-badge" style="background-color: ${helperColor}" title="${escapeHtml(helper)}" onclick="event.stopPropagation(); removeHelperFromTask('${task.id}', '${escapeHtml(helper)}')">${escapeHtml(helper)}<span class="helper-remove">&times;</span></span>`;
+                            }).join('')}
+                        </div>
+                    ` : ''}
+                    ${task.NativeHelpers && task.NativeHelpers.length > 0 ? `
+                        <div class="task-native-helpers">
+                            <span class="native-helpers-label">&#x26A1; Native Helpers:</span>
+                            ${task.NativeHelpers.map(helper => {
+                                const lifecycleIcon = helper.status === 'spawning' ? '&#x1F504;' : helper.status === 'working' ? '&#x2699;' : helper.status === 'completed' ? '&#x2705;' : '&#x1F464;';
+                                return `<span class="native-helper-badge ${helper.status}" title="${escapeHtml(helper.prompt)}">${lifecycleIcon} ${escapeHtml(helper.name || 'Helper')}</span>`;
+                            }).join('')}
+                        </div>
+                    ` : ''}
+                    ${task.StaleLevel && task.StaleLevel > 0 ? `
+                        <div class="task-stale-warning" data-stale-level="${task.StaleLevel}">
+                            <span class="stale-icon">${task.StaleLevel === 2 ? '&#x26A0;' : '&#x1F4CB;'}</span>
+                            <span class="stale-message">${task.StaleLevel === 2 ? 'URGENT: Paused ' + (task.DaysPaused || '') + ' days - close or re-prioritize?' : 'Paused ' + (task.DaysPaused || '') + ' days - still relevant?'}</span>
+                            <button class="stale-respond-btn" onclick="event.stopPropagation(); respondToStale('${task.id}')">Respond</button>
+                        </div>
+                    ` : ''}
+                    ${renderChecklist(task)}
+                    ${renderWorkflowInfo(task)}
+                    <div class="task-meta">
+                        <div class="task-assignee">
+                            ${task.assignee ? `<span class="badge" style="background-color: ${assigneeColor}"></span><span>${escapeHtml(task.assignee)}</span>` : '<span>Unassigned</span>'}
+                            ${task.SubStatus ? `<span class="substatus-badge ${task.SubStatus}">${task.SubStatus}</span>` : ''}
+                        </div>
+                        <div class="task-actions">
+                            ${actions}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderChecklist(task) {
+            // Parse checklist from JSON
+            let checklist = [];
+            try {
+                checklist = task.ChecklistJson ? JSON.parse(task.ChecklistJson) : [];
+            } catch (e) {
+                checklist = [];
+            }
+
+            if (checklist.length === 0) {
+                return '';
+            }
+
+            // Detect if this is a workflow-enhanced checklist (has status field)
+            const hasWorkflowStatus = checklist.some(item => item.status);
+
+            if (hasWorkflowStatus) {
+                // Workflow-enhanced checklist with status colors
+                const counts = { done: 0, coding: 0, testing: 0, pending: 0 };
+                checklist.forEach(item => {
+                    const s = item.status || (item.done ? 'done' : 'pending');
+                    if (counts[s] !== undefined) counts[s]++;
+                });
+                const total = checklist.length;
+                const donePercent = total > 0 ? (counts.done / total) * 100 : 0;
+                const testingPercent = total > 0 ? (counts.testing / total) * 100 : 0;
+                const codingPercent = total > 0 ? (counts.coding / total) * 100 : 0;
+
+                // Build progress summary text
+                let progressParts = [];
+                if (counts.done > 0) progressParts.push(`${counts.done} done`);
+                if (counts.testing > 0) progressParts.push(`${counts.testing} testing`);
+                if (counts.coding > 0) progressParts.push(`${counts.coding} coding`);
+                if (counts.pending > 0) progressParts.push(`${counts.pending} pending`);
+                const progressText = `${counts.done}/${total} done`;
+
+                return `
+                    <div class="task-checklist">
+                        <div class="checklist-header" onclick="event.stopPropagation(); toggleChecklist('${task.id}')">
+                            <span class="checklist-icon">&#x2713;</span>
+                            <span class="checklist-progress">${progressText}</span>
+                            <div class="checklist-progress-bar-segments">
+                                ${donePercent > 0 ? `<div class="progress-segment done" style="width:${donePercent}%"></div>` : ''}
+                                ${testingPercent > 0 ? `<div class="progress-segment testing" style="width:${testingPercent}%"></div>` : ''}
+                                ${codingPercent > 0 ? `<div class="progress-segment coding" style="width:${codingPercent}%"></div>` : ''}
+                            </div>
+                            <span class="checklist-toggle">&#x25BC;</span>
+                        </div>
+                        <div class="checklist-items" id="checklist-${task.id}" style="display: none;">
+                            ${checklist.map((item, index) => {
+                                const status = item.status || (item.done ? 'done' : 'pending');
+                                const notesCount = item.notes ? item.notes.length : 0;
+                                const cycleCount = item.cycleCount || item.CycleCount || 0;
+                                const latestNote = notesCount > 0 ? item.notes[notesCount - 1] : null;
+                                const noteTooltip = latestNote ? `Last: ${escapeHtml(latestNote.by || '')} - ${escapeHtml((latestNote.text || '').substring(0, 80))}` : '';
+                                return `
+                                    <div class="checklist-item">
+                                        <span class="checklist-item-status ${status}">${status}</span>
+                                        <span class="checklist-item-name ${status === 'done' ? 'done' : ''}">${escapeHtml(item.item)}</span>
+                                        ${cycleCount > 0 ? `<span class="checklist-item-cycle" title="${cycleCount} coding/testing cycles">&#x1f504;${cycleCount}</span>` : ''}
+                                        ${notesCount > 0 ? `<span class="checklist-item-notes-count" title="${escapeHtml(noteTooltip)}">${notesCount} note${notesCount > 1 ? 's' : ''}</span>` : ''}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            } else {
+                // Legacy checklist with done/not-done checkboxes
+                const completed = checklist.filter(item => item.done).length;
+                const total = checklist.length;
+                const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+                return `
+                    <div class="task-checklist">
+                        <div class="checklist-header" onclick="event.stopPropagation(); toggleChecklist('${task.id}')">
+                            <span class="checklist-icon">&#x2713;</span>
+                            <span class="checklist-progress">${completed}/${total} completed</span>
+                            <div class="checklist-progress-bar">
+                                <div class="checklist-progress-fill" style="width: ${percentage}%"></div>
+                            </div>
+                            <span class="checklist-toggle">&#x25BC;</span>
+                        </div>
+                        <div class="checklist-items" id="checklist-${task.id}" style="display: none;">
+                            ${checklist.map((item, index) => `
+                                <div class="checklist-item">
+                                    <input type="checkbox"
+                                           id="check-${task.id}-${index}"
+                                           ${item.done ? 'checked' : ''}
+                                           onchange="toggleChecklistItem('${task.id}', ${index})"
+                                           onclick="event.stopPropagation()">
+                                    <label for="check-${task.id}-${index}" onclick="event.stopPropagation()">${escapeHtml(item.item)}</label>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        function renderWorkflowInfo(task) {
+            // Only show for in-progress tasks that have workflow data
+            if (task.status !== 'in_progress') return '';
+
+            let sections = '';
+
+            // Continuation notes - most important for handoff context
+            if (task.ContinuationNotes) {
+                const preview = task.ContinuationNotes.length > 150
+                    ? task.ContinuationNotes.substring(0, 150) + '...'
+                    : task.ContinuationNotes;
+                sections += `
+                    <div class="workflow-section continuation">
+                        <div class="workflow-section-header">Continue From</div>
+                        <div class="workflow-section-content">${escapeHtml(preview)}</div>
+                    </div>
+                `;
+            }
+
+            // Plan preview
+            if (task.Plan) {
+                const preview = task.Plan.length > 120
+                    ? task.Plan.substring(0, 120) + '...'
+                    : task.Plan;
+                sections += `
+                    <div class="workflow-section plan">
+                        <div class="workflow-section-header">Plan</div>
+                        <div class="workflow-section-content">${escapeHtml(preview)}</div>
+                    </div>
+                `;
+            }
+
+            if (!sections) return '';
+
+            return `<div class="task-workflow-info">${sections}</div>`;
+        }
+
+        function toggleChecklist(taskId) {
+            const checklistItems = document.getElementById(`checklist-${taskId}`);
+            const isVisible = checklistItems.style.display !== 'none';
+            checklistItems.style.display = isVisible ? 'none' : 'block';
+
+            // Toggle arrow direction
+            const header = checklistItems.previousElementSibling;
+            const toggle = header.querySelector('.checklist-toggle');
+            toggle.textContent = isVisible ? '\u25BC' : '\u25B2';
+        }
+
+        function toggleChecklistItem(taskId, itemIndex) {
+            // Find the task in our tasks array
+            const task = tasks.find(t => t.id === taskId);
+            if (!task) return;
+
+            // Parse checklist
+            let checklist = [];
+            try {
+                checklist = task.ChecklistJson ? JSON.parse(task.ChecklistJson) : [];
+            } catch (e) {
+                checklist = [];
+            }
+
+            if (itemIndex >= checklist.length) return;
+
+            // Toggle the item
+            checklist[itemIndex].done = !checklist[itemIndex].done;
+
+            // Update the task's ChecklistJson
+            task.ChecklistJson = JSON.stringify(checklist);
+
+            // Send update to backend
+            sendToHost({
+                type: 'update_checklist',
+                taskId: taskId,
+                checklistJson: task.ChecklistJson
+            });
+
+            // Re-render the tasks to update the UI
+            renderTasks();
+        }
+
+        function promoteTask(taskId) {
+            sendToHost({
+                type: 'update_task',
+                taskId: taskId,
+                status: 'todo'
+            });
+        }
+
+        function claimTask(taskId) {
+            sendToHost({
+                type: 'claim_task',
+                taskId: taskId
+            });
+        }
+
+        function completeTask(taskId) {
+            sendToHost({
+                type: 'complete_task',
+                taskId: taskId
+            });
+        }
+
+        // Helper management functions
+        function addHelperToTask(taskId) {
+            // Show terminal selector dropdown (or prompt for now)
+            const helperName = prompt('Enter helper terminal name:');
+            if (!helperName || !helperName.trim()) return;
+
+            sendToHost({
+                type: 'add_helper',
+                taskId: taskId,
+                helperName: helperName.trim()
+            });
+        }
+
+        function removeHelperFromTask(taskId, helperName) {
+            sendToHost({
+                type: 'remove_helper',
+                taskId: taskId,
+                helperName: helperName
+            });
+        }
+
+        function requestHelpFromHelper(taskId, helperName) {
+            const message = prompt(`Request help from ${helperName}. What do you need help with?`);
+            if (!message || !message.trim()) return;
+
+            sendToHost({
+                type: 'request_help',
+                taskId: taskId,
+                helperName: helperName,
+                message: message.trim()
+            });
+        }
+
+        // Stale task management
+        function respondToStale(taskId) {
+            const response = prompt('Respond to stale task:\n1. "still_relevant" - Keep paused\n2. "will_close" - Will close soon\n3. "reprioritize" - Move back to todo\n\nEnter your response:');
+            if (!response || !response.trim()) return;
+
+            const validResponses = ['still_relevant', 'will_close', 'reprioritize'];
+            const cleanResponse = response.trim().toLowerCase();
+
+            if (!validResponses.includes(cleanResponse)) {
+                alert('Invalid response. Please use: still_relevant, will_close, or reprioritize');
+                return;
+            }
+
+            sendToHost({
+                type: 'respond_to_stale',
+                taskId: taskId,
+                response: cleanResponse
+            });
+        }
+
+        // Native helper management
+        function spawnNativeHelper(taskId) {
+            const task = tasks.find(t => t.id === taskId);
+            if (!task) return;
+
+            const prompt = window.prompt(`&#x26A1; Spawn Native Helper\n\nTask: ${task.title}\n\nWhat should the helper do?\n(e.g., "Check all Services/*.cs for pattern X", "Validate build configuration")`);
+            if (!prompt || !prompt.trim()) return;
+
+            sendToHost({
+                type: 'spawn_native_helper',
+                taskId: taskId,
+                prompt: prompt.trim()
+            });
+
+            showToast('&#x26A1; Spawning native helper...');
+        }
+
+        function handleHelperSessionUpdate(data) {
+            // Update task with latest helper session info
+            const task = tasks.find(t => t.id === data.taskId);
+            if (!task) return;
+
+            // Initialize NativeHelpers array if not exists
+            if (!task.NativeHelpers) {
+                task.NativeHelpers = [];
+            }
+
+            // Find existing helper or add new one
+            let helper = task.NativeHelpers.find(h => h.id === data.helperId);
+            if (!helper) {
+                helper = {
+                    id: data.helperId,
+                    name: data.helperName || 'Helper',
+                    prompt: data.prompt || '',
+                    status: data.status || 'spawning'
+                };
+                task.NativeHelpers.push(helper);
+            } else {
+                // Update existing helper
+                helper.status = data.status || helper.status;
+                helper.name = data.helperName || helper.name;
+            }
+
+            // Remove helpers that are dissolved (after fade animation)
+            if (data.status === 'dissolved') {
+                setTimeout(() => {
+                    task.NativeHelpers = task.NativeHelpers.filter(h => h.id !== data.helperId);
+                    renderAllTasks();
+                }, 2000); // Wait for fade animation
+            }
+
+            // Re-render tasks to show updated helper status
+            renderAllTasks();
+
+            // Show toast for status changes
+            if (data.status === 'spawning') {
+                showToast(`Helper spawning for task: ${task.title}`);
+            } else if (data.status === 'working') {
+                showToast(`Helper working on: ${task.title}`);
+            } else if (data.status === 'completed') {
+                showToast(`Helper completed work on: ${task.title}`);
+            }
+        }
+
+        function handleHelperMessage(data) {
+            // Helper messages are shown in ChatPanel
+            // Just log to console for now (ChatPanel will handle display)
+            console.log('[Native Helper Message]', data);
+        }
+
+        // Inline Add Task form
+        function showInlineAddForm(status) {
+            // Hide any existing inline forms first
+            hideAllInlineAddForms();
+
+            // Map status to column tasks container
+            var columnMap = {
+                'suggestion': 'suggestionTasks',
+                'todo': 'todoTasks',
+                'in_progress': 'inProgressTasks',
+                'done': 'doneTasks'
+            };
+            var containerId = columnMap[status];
+            if (!containerId) return;
+
+            var container = document.getElementById(containerId);
+            if (!container) return;
+
+            // Create inline form element
+            var form = document.createElement('div');
+            form.className = 'inline-add-form';
+            form.innerHTML = '<input type="text" placeholder="Task title... (Enter to add, Esc to cancel)" data-status="' + status + '">' +
+                '<div class="hint">Enter = add, Esc = cancel</div>';
+
+            // Insert at top of column
+            container.insertBefore(form, container.firstChild);
+
+            var input = form.querySelector('input');
+            input.focus();
+
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    var title = input.value.trim();
+                    if (title) {
+                        sendToHost({
+                            type: 'create_task',
+                            title: title,
+                            description: '',
+                            status: status,
+                            priority: 'normal',
+                            projectId: selectedProjectId || '',
+                            checklistJson: '[]',
+                            implementationChecklistJson: '[]',
+                            createdBy: 'User',
+                            assignee: '',
+                            helpers: '[]'
+                        });
+                    }
+                    form.remove();
+                    e.preventDefault();
+                } else if (e.key === 'Escape') {
+                    form.remove();
+                    e.preventDefault();
+                }
+            });
+
+            input.addEventListener('blur', function() {
+                setTimeout(function() { if (form.parentNode) form.remove(); }, 150);
+            });
+        }
+
+        function hideAllInlineAddForms() {
+            document.querySelectorAll('.inline-add-form').forEach(function(f) { f.remove(); });
+        }
+
+        function openLifecycleBoard(taskId) {
+            sendToHost({ type: 'open_lifecycle_board', taskId: taskId });
+        }
+
+        // Old modal functions removed - edit is now handled by lifecycle board
+
+        // Delete popover state
+        let currentDeleteTaskId = null;
+
+        function openDeletePopover(event, taskId) {
+            event.stopPropagation();
+            currentDeleteTaskId = taskId;
+
+            const popover = document.getElementById('deletePopover');
+            const button = event.currentTarget;
+            const rect = button.getBoundingClientRect();
+
+            // Position popover near the delete button
+            popover.style.top = (rect.bottom + 4) + 'px';
+            popover.style.left = (rect.left - 100) + 'px';
+            popover.classList.add('open');
+        }
+
+        function closeDeletePopover() {
+            document.getElementById('deletePopover').classList.remove('open');
+            currentDeleteTaskId = null;
+        }
+
+        function confirmDelete() {
+            if (currentDeleteTaskId) {
+                sendToHost({
+                    type: 'delete_task',
+                    taskId: currentDeleteTaskId
+                });
+            }
+            closeDeletePopover();
+        }
+
+        // Close popover when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.delete-popover') && !e.target.closest('.task-icon-btn.delete')) {
+                closeDeletePopover();
+            }
+        });
+
+        // Handle keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeDeletePopover();
+                hideAllInlineAddForms();
+            }
+        });
+
+        // Column visibility functions
+        function loadColumnVisibility() {
+            try {
+                const stored = localStorage.getItem(VISIBILITY_STORAGE_KEY);
+                if (stored) {
+                    return JSON.parse(stored);
+                }
+            } catch (e) {
+                console.error('Failed to load column visibility:', e);
+            }
+            // Default: all columns visible
+            return { suggestion: true, todo: true, in_progress: true, done: true };
+        }
+
+        function saveColumnVisibility() {
+            try {
+                localStorage.setItem(VISIBILITY_STORAGE_KEY, JSON.stringify(columnVisibility));
+            } catch (e) {
+                console.error('Failed to save column visibility:', e);
+            }
+        }
+
+        function toggleColumnVisibility(columnKey) {
+            columnVisibility[columnKey] = !columnVisibility[columnKey];
+            saveColumnVisibility();
+            applyColumnVisibility();
+            updateHiddenColumnsIndicator();
+        }
+
+        function showColumn(columnKey) {
+            columnVisibility[columnKey] = true;
+            saveColumnVisibility();
+            applyColumnVisibility();
+            updateHiddenColumnsIndicator();
+            closeDropdown();
+        }
+
+        function applyColumnVisibility() {
+            Object.keys(columnVisibility).forEach(key => {
+                const columnId = 'column' + key.split('_').map((s, i) =>
+                    i === 0 ? s.charAt(0).toUpperCase() + s.slice(1) : s.charAt(0).toUpperCase() + s.slice(1)
+                ).join('');
+                const column = document.getElementById(columnId);
+                if (column) {
+                    if (columnVisibility[key]) {
+                        column.classList.remove('hidden');
+                    } else {
+                        column.classList.add('hidden');
+                    }
+                }
+            });
+        }
+
+        function updateHiddenColumnsIndicator() {
+            const hiddenColumns = Object.entries(columnVisibility)
+                .filter(([key, visible]) => !visible)
+                .map(([key]) => key);
+
+            const indicator = document.getElementById('hiddenColumnsIndicator');
+            const countSpan = document.getElementById('hiddenColumnsCount');
+            const dropdown = document.getElementById('hiddenColumnsDropdown');
+
+            if (hiddenColumns.length > 0) {
+                indicator.classList.add('visible');
+                countSpan.textContent = hiddenColumns.length === 1
+                    ? '1 column hidden'
+                    : `${hiddenColumns.length} columns hidden`;
+
+                // Build dropdown items
+                dropdown.innerHTML = hiddenColumns.map(key =>
+                    `<div class="hidden-column-item" onclick="showColumn('${key}')">${columnNames[key]}</div>`
+                ).join('');
+            } else {
+                indicator.classList.remove('visible');
+                closeDropdown();
+            }
+        }
+
+        function toggleDropdown(event) {
+            event.stopPropagation();
+            const dropdown = document.getElementById('hiddenColumnsDropdown');
+            dropdown.classList.toggle('open');
+        }
+
+        function closeDropdown() {
+            const dropdown = document.getElementById('hiddenColumnsDropdown');
+            dropdown.classList.remove('open');
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.hidden-columns-indicator')) {
+                closeDropdown();
+            }
+        });
+
+        // Apply visibility on load
+        applyColumnVisibility();
+        updateHiddenColumnsIndicator();
+
+        // Project selector functions
+        function loadSelectedProject() {
+            try {
+                const stored = localStorage.getItem(PROJECT_STORAGE_KEY);
+                if (stored) {
+                    selectedProjectId = stored === '' ? null : stored;
+                }
+            } catch (e) {
+                console.error('Failed to load selected project:', e);
+            }
+        }
+
+        function saveSelectedProject() {
+            try {
+                localStorage.setItem(PROJECT_STORAGE_KEY, selectedProjectId || '');
+            } catch (e) {
+                console.error('Failed to save selected project:', e);
+            }
+        }
+
+        function updateProjects(newProjects) {
+            projects = newProjects || [];
+
+            // Validate stored project selection - clear if project no longer exists
+            if (selectedProjectId) {
+                const projectExists = projects.some(p => p.id === selectedProjectId);
+                if (!projectExists) {
+                    selectedProjectId = null;
+                    saveSelectedProject();
+                    // Notify backend to clear filter and resend all tasks
+                    sendToHost({ type: 'select_project', projectId: '' });
+                }
+            }
+
+            renderProjectDropdown();
+            updateSelectedProjectDisplay();
+        }
+
+        function renderProjectDropdown() {
+            const dropdown = document.getElementById('projectDropdown');
+            if (!dropdown) return;
+
+            let html = `<div class="project-selector-item${!selectedProjectId ? ' selected' : ''}" onclick="selectProject('')">
+                <span class="project-name">All Projects</span>
+                <span class="task-count">${tasks.length}</span>
+            </div>`;
+
+            projects.forEach(p => {
+                const isSelected = selectedProjectId === p.id;
+                html += `<div class="project-selector-item${isSelected ? ' selected' : ''}" onclick="selectProject('${escapeHtml(p.id)}')">
+                    <span class="project-name">${escapeHtml(p.name)}</span>
+                    <span class="task-count">${p.taskCount}</span>
+                </div>`;
+            });
+
+            dropdown.innerHTML = html;
+        }
+
+        function updateSelectedProjectDisplay() {
+            const nameSpan = document.getElementById('selectedProjectName');
+            if (!nameSpan) return;
+
+            if (!selectedProjectId) {
+                nameSpan.textContent = 'All Projects';
+            } else {
+                const project = projects.find(p => p.id === selectedProjectId);
+                nameSpan.textContent = project ? project.name : 'All Projects';
+            }
+        }
+
+        function toggleProjectDropdown(event) {
+            event.stopPropagation();
+            closeTerminalDropdown();
+            const dropdown = document.getElementById('projectDropdown');
+            dropdown.classList.toggle('open');
+        }
+
+        function closeProjectDropdown() {
+            const dropdown = document.getElementById('projectDropdown');
+            if (dropdown) {
+                dropdown.classList.remove('open');
+            }
+        }
+
+        function selectProject(projectId) {
+            selectedProjectId = projectId || null;
+            saveSelectedProject();
+            updateSelectedProjectDisplay();
+            renderProjectDropdown();
+            closeProjectDropdown();
+
+            // Notify backend of project selection
+            sendToHost({
+                type: 'select_project',
+                projectId: selectedProjectId || ''
+            });
+        }
+
+        // Close dropdowns when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('#projectSelectorBtn') && !e.target.closest('#projectDropdown')) {
+                closeProjectDropdown();
+            }
+            if (!e.target.closest('#terminalSelectorContainer')) {
+                closeTerminalDropdown();
+            }
+        });
+
+        // Load selected project from storage on init
+        loadSelectedProject();
+        renderProjectDropdown();  // Render immediately so dropdown works before backend responds
+        updateSelectedProjectDisplay();
+
+        // Request projects from backend after ready
+        function requestProjects() {
+            sendToHost({ type: 'get_projects' });
+        }
+
+        // Terminal selector functions
+        function loadSelectedTerminal() {
+            try {
+                const stored = localStorage.getItem(TERMINAL_STORAGE_KEY);
+                if (stored) {
+                    selectedTerminalName = stored === '' ? null : stored;
+                }
+            } catch (e) {
+                console.error('Failed to load selected terminal:', e);
+            }
+        }
+
+        function saveSelectedTerminal() {
+            try {
+                localStorage.setItem(TERMINAL_STORAGE_KEY, selectedTerminalName || '');
+            } catch (e) {
+                console.error('Failed to save selected terminal:', e);
+            }
+        }
+
+        function getUniqueAssignees() {
+            const names = new Set();
+            tasks.forEach(t => {
+                if (t.assignee) names.add(t.assignee);
+            });
+            terminals.forEach(t => {
+                if (t.name) names.add(t.name);
+            });
+            return Array.from(names).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+        }
+
+        function renderTerminalDropdown() {
+            const dropdown = document.getElementById('terminalDropdown');
+            if (!dropdown) return;
+
+            const assignees = getUniqueAssignees();
+
+            let html = `<div class="project-selector-item${!selectedTerminalName ? ' selected' : ''}" onclick="selectTerminal('')">
+                <span class="project-name">All Terminals</span>
+                <span class="task-count">${tasks.length}</span>
+            </div>`;
+
+            assignees.forEach(name => {
+                const isSelected = selectedTerminalName === name;
+                const count = tasks.filter(t => t.assignee === name).length;
+                const color = getTerminalColor(name);
+                html += `<div class="project-selector-item${isSelected ? ' selected' : ''}" onclick="selectTerminal('${escapeHtml(name)}')">
+                    <span class="project-name">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background-color:${color};margin-right:6px;vertical-align:middle;"></span>${escapeHtml(name)}
+                    </span>
+                    <span class="task-count">${count}</span>
+                </div>`;
+            });
+
+            dropdown.innerHTML = html;
+        }
+
+        function updateSelectedTerminalDisplay() {
+            const nameSpan = document.getElementById('selectedTerminalName');
+            if (!nameSpan) return;
+            nameSpan.textContent = selectedTerminalName || 'All Terminals';
+        }
+
+        function toggleTerminalDropdown(event) {
+            event.stopPropagation();
+            closeProjectDropdown();
+            const dropdown = document.getElementById('terminalDropdown');
+            dropdown.classList.toggle('open');
+        }
+
+        function closeTerminalDropdown() {
+            const dropdown = document.getElementById('terminalDropdown');
+            if (dropdown) {
+                dropdown.classList.remove('open');
+            }
+        }
+
+        function selectTerminal(name) {
+            selectedTerminalName = name || null;
+            saveSelectedTerminal();
+            updateSelectedTerminalDisplay();
+            renderTerminalDropdown();
+            closeTerminalDropdown();
+            renderAllTasks();
+        }
+
+        // Load selected terminal from storage on init
+        loadSelectedTerminal();
+        renderTerminalDropdown();
+        updateSelectedTerminalDisplay();
+
+        // Drag and drop functionality
+        let draggedTaskId = null;
+
+        function handleDragStart(event) {
+            const card = event.target.closest('.task-card');
+            if (!card) return;
+
+            draggedTaskId = card.dataset.taskId;
+            card.classList.add('dragging');
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', draggedTaskId);
+        }
+
+        function handleDragEnd(event) {
+            const card = event.target.closest('.task-card');
+            if (card) {
+                card.classList.remove('dragging');
+            }
+            draggedTaskId = null;
+
+            // Remove drag-over from all columns
+            document.querySelectorAll('.column-tasks').forEach(col => {
+                col.classList.remove('drag-over');
+            });
+        }
+
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+        }
+
+        function handleDragEnter(event) {
+            const column = event.target.closest('.column-tasks');
+            if (column) {
+                column.classList.add('drag-over');
+            }
+        }
+
+        function handleDragLeave(event) {
+            const column = event.target.closest('.column-tasks');
+            if (column && !column.contains(event.relatedTarget)) {
+                column.classList.remove('drag-over');
+            }
+        }
+
+        function handleDrop(event) {
+            event.preventDefault();
+            const column = event.target.closest('.column-tasks');
+            if (!column || !draggedTaskId) return;
+
+            column.classList.remove('drag-over');
+
+            // Get the target status from the column's parent
+            const kanbanColumn = column.closest('.kanban-column');
+            const newStatus = kanbanColumn ? kanbanColumn.dataset.column : null;
+
+            if (!newStatus) return;
+
+            // Find the current task to check if status actually changed
+            const task = tasks.find(t => t.id === draggedTaskId);
+            if (task && task.status !== newStatus) {
+                sendToHost({
+                    type: 'update_task',
+                    taskId: draggedTaskId,
+                    status: newStatus
+                });
+            }
+        }
+
+        // Set up drag event listeners on column containers
+        document.querySelectorAll('.column-tasks').forEach(column => {
+            column.addEventListener('dragover', handleDragOver);
+            column.addEventListener('dragenter', handleDragEnter);
+            column.addEventListener('dragleave', handleDragLeave);
+            column.addEventListener('drop', handleDrop);
+        });
+
+        // Assign dropdown state
+        let currentAssignTaskId = null;
+
+        // Returns all unique member names grouped by online/offline status
+        function getAllMemberNames() {
+            const online = [];
+            const offline = [];
+            const seen = new Set();
+            members.forEach(m => {
+                if (!seen.has(m.name.toLowerCase())) {
+                    seen.add(m.name.toLowerCase());
+                    if (m.isOnline) online.push(m.name);
+                    else offline.push(m.name);
+                }
+            });
+            // Add any terminals not already in members
+            terminals.forEach(t => {
+                if (!seen.has(t.name.toLowerCase())) {
+                    seen.add(t.name.toLowerCase());
+                    online.push(t.name);
+                }
+            });
+            return { online, offline, all: online.concat(offline) };
+        }
+
+        function openAssignDropdown(event, taskId) {
+            event.stopPropagation();
+            currentAssignTaskId = taskId;
+
+            const dropdown = document.getElementById('assignDropdown');
+            const itemsContainer = document.getElementById('assignDropdownItems');
+            const button = event.currentTarget;
+            const rect = button.getBoundingClientRect();
+
+            const memberData = getAllMemberNames();
+
+            if (memberData.all.length === 0) {
+                itemsContainer.innerHTML = '<div class="assign-dropdown-empty">No team members available</div>';
+            } else {
+                let html = '';
+
+                // Unassign option
+                const task = tasks.find(t => t.id === taskId);
+                if (task && task.assignee) {
+                    html += `<div class="assign-dropdown-item unassign" onclick="assignToTerminal('')">
+                        <span>Unassign</span>
+                    </div>`;
+                    html += '<div class="assign-dropdown-divider"></div>';
+                }
+
+                // Online group
+                if (memberData.online.length > 0) {
+                    html += '<div class="assign-dropdown-group-label">Online</div>';
+                    html += memberData.online.map(name => `
+                        <div class="assign-dropdown-item" onclick="assignToTerminal('${escapeHtml(name)}')">
+                            <span class="status-dot idle"></span>
+                            <span>${escapeHtml(name)}</span>
+                        </div>
+                    `).join('');
+                }
+
+                // Offline group
+                if (memberData.offline.length > 0) {
+                    if (memberData.online.length > 0) {
+                        html += '<div class="assign-dropdown-divider"></div>';
+                    }
+                    html += '<div class="assign-dropdown-group-label">Offline</div>';
+                    html += memberData.offline.map(name => `
+                        <div class="assign-dropdown-item" onclick="assignToTerminal('${escapeHtml(name)}')">
+                            <span class="status-dot unknown"></span>
+                            <span>${escapeHtml(name)}</span>
+                        </div>
+                    `).join('');
+                }
+
+                itemsContainer.innerHTML = html;
+            }
+
+            // Position dropdown near the button
+            dropdown.style.top = (rect.bottom + 4) + 'px';
+            dropdown.style.left = Math.max(4, rect.left - 100) + 'px';
+            dropdown.classList.add('open');
+        }
+
+        function closeAssignDropdown() {
+            document.getElementById('assignDropdown').classList.remove('open');
+            currentAssignTaskId = null;
+        }
+
+        function assignToTerminal(terminalName) {
+            if (!currentAssignTaskId) return;
+
+            const task = tasks.find(t => t.id === currentAssignTaskId);
+            if (!task) {
+                closeAssignDropdown();
+                return;
+            }
+
+            // Send assignment request to C#
+            sendToHost({
+                type: 'assign_to_terminal',
+                taskId: currentAssignTaskId,
+                terminalName: terminalName,
+                taskTitle: task.title,
+                taskDescription: task.description || ''
+            });
+
+            closeAssignDropdown();
+            showToast(terminalName ? `Task assigned to ${terminalName}` : 'Task unassigned');
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        // Close assign dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.assign-dropdown') && !e.target.closest('.task-icon-btn.assign')) {
+                closeAssignDropdown();
+            }
+        });
+
+        // Signal ready and send initial project selection if saved
+        console.log('[TasksPanel JS] Sending ready signal to host, selectedProjectId =', selectedProjectId);
+        sendToHost({ type: 'ready' });
+
+        // If we have a saved project selection, notify backend
+        if (selectedProjectId) {
+            sendToHost({
+                type: 'select_project',
+                projectId: selectedProjectId
+            });
+        }
+    </script>
+</body>
+</html>

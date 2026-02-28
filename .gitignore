@@ -1,0 +1,48 @@
+# Build outputs
+bin/
+obj/
+*.pdb
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.csproj.user
+
+# NuGet
+packages/
+.nuget/
+
+# Node.js
+node_modules/
+
+# Sensitive files
+.mcp.json
+.env
+.env.local
+.env.*.local
+.claude/settings.local.json
+
+# Databases & sessions
+*.db
+*.sqlite
+*.sqlite3
+.claude/sessions.db
+.claude/sync-debug.log
+
+# Session history (large, regeneratable)
+mcp-session-history/
+
+# Logs & temp
+*.log
+debug-log-*.txt
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc artifacts
+nul
+cq-windows-amd64.exe

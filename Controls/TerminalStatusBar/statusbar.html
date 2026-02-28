@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal Status Bar</title>
+    <style>
+        /* ============================================
+           CSS Variables - Shared Design System
+           ============================================ */
+        :root {
+            /* Team member accent colors */
+            --color-alice: #6366f1;   /* indigo */
+            --color-bob: #22c55e;     /* green */
+            --color-charlie: #f59e0b; /* amber */
+            --color-diana: #ec4899;   /* pink */
+
+            /* Base theme (dark) */
+            --bg-panel: #1e1e2e;
+            --bg-card: #2a2a3e;
+            --text-primary: #e4e4e7;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --border-color: #3f3f50;
+
+            /* Spacing */
+            --spacing-xs: 4px;
+            --spacing-sm: 8px;
+
+            /* Typography */
+            --font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            --font-size-xs: 11px;
+            --font-size-sm: 12px;
+        }
+
+        /* Light theme overrides */
+        body.light {
+            --bg-panel: #f4f4f5;
+            --bg-card: #ffffff;
+            --text-primary: #18181b;
+            --text-secondary: #52525b;
+            --text-muted: #a1a1aa;
+            --border-color: #d4d4d8;
+        }
+
+        /* ============================================
+           Base Styles
+           ============================================ */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 50px;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-size: var(--font-size-sm);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            line-height: 1.4;
+        }
+
+        /* ============================================
+           Status Bar Layout
+           ============================================ */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 12px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            height: 50px;
+        }
+
+        .avatar-container {
+            position: relative;
+            flex-shrink: 0;
+        }
+
+        .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--member-color, var(--bg-panel));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 14px;
+            color: white;
+            text-transform: uppercase;
+        }
+
+        .avatar-image {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            object-fit: cover;
+        }
+
+        .status-indicator {
+            position: absolute;
+            bottom: -2px;
+            right: -2px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #22c55e; /* green for active */
+            border: 2px solid var(--bg-card);
+        }
+
+        .info-container {
+            flex: 1;
+            min-width: 0; /* Allow text truncation */
+        }
+
+        .terminal-name {
+            font-size: var(--font-size-sm);
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 2px;
+        }
+
+        .current-task {
+            font-size: var(--font-size-xs);
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .task-label {
+            color: var(--text-muted);
+        }
+
+        /* ============================================
+           Helper: Get member color by name
+           ============================================ */
+        .avatar[data-member="Alice"],
+        .avatar[data-member="alice"] {
+            background: var(--color-alice);
+        }
+
+        .avatar[data-member="Bob"],
+        .avatar[data-member="bob"] {
+            background: var(--color-bob);
+        }
+
+        .avatar[data-member="Charlie"],
+        .avatar[data-member="charlie"] {
+            background: var(--color-charlie);
+        }
+
+        .avatar[data-member="Diana"],
+        .avatar[data-member="diana"] {
+            background: var(--color-diana);
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar">
+        <div class="avatar-container">
+            <div class="avatar" id="avatar" data-member="">
+                <span id="avatar-initials">?</span>
+                <img id="avatar-image" class="avatar-image" style="display: none;" />
+            </div>
+            <div class="status-indicator" id="status-indicator"></div>
+        </div>
+        <div class="info-container">
+            <div class="terminal-name" id="terminal-name">Terminal</div>
+            <div class="current-task" id="current-task">
+                <span class="task-label">Ready to work</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // WebView2 communication
+        function postMessage(type, data) {
+            window.chrome.webview.postMessage({ type, ...data });
+        }
+
+        // Notify C# that JS is ready
+        postMessage('ready', {});
+
+        // Theme management
+        function applyTheme(isDark) {
+            document.body.classList.toggle('light', !isDark);
+        }
+
+        // Update status bar data
+        function updateStatus(data) {
+            console.log('[StatusBar JS] updateStatus called with data:', JSON.stringify(data, null, 2));
+            const { name, avatarUrl, activityDescription, taskTitle, taskId, status } = data;
+
+            console.log('[StatusBar JS] Parsed values:');
+            console.log('  - name:', name);
+            console.log('  - avatarUrl:', avatarUrl);
+            console.log('  - activityDescription:', activityDescription);
+            console.log('  - taskTitle:', taskTitle);
+            console.log('  - taskId:', taskId);
+            console.log('  - status:', status);
+
+            // Update name
+            const nameEl = document.getElementById('terminal-name');
+            console.log('[StatusBar JS] Setting terminal name to:', name || 'Terminal');
+            nameEl.textContent = name || 'Terminal';
+
+            // Update avatar
+            const avatarEl = document.getElementById('avatar');
+            const initialsEl = document.getElementById('avatar-initials');
+            const imageEl = document.getElementById('avatar-image');
+
+            avatarEl.setAttribute('data-member', name || '');
+
+            // Check for valid avatar URL (not empty, not "null" string)
+            if (avatarUrl && avatarUrl.trim() !== '' && avatarUrl !== 'null') {
+                // Show avatar image
+                imageEl.src = avatarUrl;
+                imageEl.style.display = 'block';
+                initialsEl.style.display = 'none';
+            } else {
+                // Show initials
+                const initials = (name || 'T').substring(0, 1).toUpperCase();
+                initialsEl.textContent = initials;
+                initialsEl.style.display = 'block';
+                imageEl.style.display = 'none';
+            }
+
+            // Update task/activity (priority: activityDescription > taskTitle > status-based text)
+            const taskEl = document.getElementById('current-task');
+            if (activityDescription && activityDescription.trim() !== '') {
+                // Show activity description
+                taskEl.innerHTML = escapeHtml(activityDescription);
+            } else if (taskTitle && taskTitle.trim() !== '') {
+                // Show task title
+                taskEl.innerHTML = `<span class="task-label">Task:</span> ${escapeHtml(taskTitle)}`;
+            } else if (status) {
+                // Show status-based text
+                const statusText = status === 'active' ? 'Working' :
+                                 status === 'idle' ? 'Ready to work' :
+                                 status === 'offline' ? 'Offline' : 'Ready to work';
+                taskEl.innerHTML = `<span class="task-label">${statusText}</span>`;
+            } else {
+                taskEl.innerHTML = `<span class="task-label">Ready to work</span>`;
+            }
+
+            // Update status indicator color
+            const indicatorEl = document.getElementById('status-indicator');
+            if (status === 'active') {
+                indicatorEl.style.background = '#22c55e'; // green
+            } else if (status === 'busy') {
+                indicatorEl.style.background = '#3b82f6'; // blue
+            } else if (status === 'idle') {
+                indicatorEl.style.background = '#eab308'; // yellow
+            } else {
+                indicatorEl.style.background = '#6b7280'; // gray
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Listen for messages from C# (must use chrome.webview for WebView2)
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                console.log('[StatusBar JS] Received message from C#:', event.data);
+                const data = event.data;
+                if (typeof data === 'string') {
+                    if (data.startsWith('theme:')) {
+                        const isDark = data.split(':')[1] === 'dark';
+                        console.log('[StatusBar JS] Applying theme:', isDark ? 'dark' : 'light');
+                        applyTheme(isDark);
+                    } else if (data.startsWith('update:')) {
+                        const json = data.substring(7);
+                        console.log('[StatusBar JS] Update JSON received:', json);
+                        const statusData = JSON.parse(json);
+                        console.log('[StatusBar JS] Parsed status data:', statusData);
+                        updateStatus(statusData);
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>

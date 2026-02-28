@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Panel</title>
+    <style>
+        :root {
+            --bg-primary: #1e1e1e;
+            --bg-secondary: #252526;
+            --bg-tertiary: #2d2d30;
+            --bg-hover: #3e3e42;
+            --border-color: #3e3e42;
+            --text-primary: #cccccc;
+            --text-secondary: #9d9d9d;
+            --text-muted: #6d6d6d;
+            --accent-color: #0078d4;
+            --accent-hover: #1084d8;
+            --success-color: #4ec9b0;
+            --warning-color: #dcdcaa;
+            --stat-bg: #333333;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 13px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+        }
+
+        .container {
+            height: 100%;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 12px;
+        }
+
+        .container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .container::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .container::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+
+        .container::-webkit-scrollbar-thumb:hover {
+            background: #666;
+        }
+
+        /* Header Section */
+        .project-header {
+            margin-bottom: 16px;
+        }
+
+        .project-name {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .project-name .icon {
+            font-size: 18px;
+        }
+
+        .project-path {
+            font-size: 11px;
+            color: var(--text-muted);
+            word-break: break-all;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .project-path:hover {
+            color: var(--accent-color);
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .stat-card {
+            background: var(--stat-bg);
+            border-radius: 6px;
+            padding: 10px 8px;
+            text-align: center;
+            transition: background 0.2s, transform 0.2s;
+        }
+
+        .stat-card:hover {
+            background: var(--bg-hover);
+            transform: translateY(-1px);
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--success-color);
+            line-height: 1.2;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 2px;
+        }
+
+        /* Section */
+        .section {
+            margin-bottom: 12px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            padding: 8px 0;
+            cursor: pointer;
+            user-select: none;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 8px;
+        }
+
+        .section-header:hover {
+            color: var(--accent-color);
+        }
+
+        .section-toggle {
+            font-size: 10px;
+            margin-right: 8px;
+            transition: transform 0.2s;
+            color: var(--text-secondary);
+        }
+
+        .section-toggle.collapsed {
+            transform: rotate(-90deg);
+        }
+
+        .section-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+        }
+
+        .section-content {
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .section-content.collapsed {
+            max-height: 0 !important;
+        }
+
+        /* Description & Changelog */
+        .text-content {
+            font-size: 12px;
+            color: var(--text-primary);
+            line-height: 1.5;
+            white-space: pre-wrap;
+            padding: 8px 10px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            border-left: 3px solid var(--accent-color);
+        }
+
+        .text-content.empty {
+            color: var(--text-muted);
+            font-style: italic;
+            border-left-color: var(--border-color);
+        }
+
+        /* Prompts Tree */
+        .prompts-tree {
+            list-style: none;
+        }
+
+        .prompt-category {
+            margin-bottom: 4px;
+        }
+
+        .category-header {
+            display: flex;
+            align-items: center;
+            padding: 6px 8px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background 0.15s;
+        }
+
+        .category-header:hover {
+            background: var(--bg-hover);
+        }
+
+        .category-toggle {
+            font-size: 10px;
+            margin-right: 6px;
+            color: var(--text-secondary);
+            transition: transform 0.2s;
+        }
+
+        .category-toggle.collapsed {
+            transform: rotate(-90deg);
+        }
+
+        .category-name {
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .category-count {
+            margin-left: auto;
+            font-size: 10px;
+            color: var(--text-muted);
+            background: var(--bg-tertiary);
+            padding: 2px 6px;
+            border-radius: 10px;
+        }
+
+        .prompt-list {
+            list-style: none;
+            margin-left: 20px;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .prompt-list.collapsed {
+            max-height: 0 !important;
+        }
+
+        .prompt-item {
+            padding: 5px 10px;
+            margin: 2px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background 0.15s;
+            color: var(--text-primary);
+        }
+
+        .prompt-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .prompt-item .icon {
+            color: var(--warning-color);
+            font-size: 12px;
+        }
+
+        .prompt-item.global .icon {
+            color: var(--success-color);
+        }
+
+        /* Welcome State */
+        .welcome-state {
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .welcome-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.6;
+        }
+
+        .welcome-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .welcome-subtitle {
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+
+        .tips-list {
+            text-align: left;
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            padding: 16px;
+        }
+
+        .tip-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 8px 0;
+            color: var(--text-primary);
+            line-height: 1.4;
+        }
+
+        .tip-item .icon {
+            color: var(--accent-color);
+            flex-shrink: 0;
+        }
+
+        /* Not Registered State */
+        .not-registered {
+            text-align: center;
+            padding: 30px 20px;
+        }
+
+        .not-registered .icon {
+            font-size: 40px;
+            margin-bottom: 12px;
+            opacity: 0.6;
+        }
+
+        .not-registered .title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: var(--warning-color);
+        }
+
+        .not-registered .path {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 16px;
+            word-break: break-all;
+        }
+
+        .command-box {
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            padding: 12px;
+            font-family: 'Cascadia Mono', Consolas, monospace;
+            font-size: 12px;
+            color: var(--success-color);
+            margin-top: 12px;
+        }
+
+        /* Sessions List */
+        .sessions-list { max-height: none; overflow-y: auto; }
+        .session-item { padding: 8px 10px; margin: 4px 0; border-radius: 4px; background: var(--bg-secondary); border-left: 3px solid transparent; transition: border-color 0.2s; }
+        .session-item:hover { background: var(--bg-hover); }
+        .session-item.expanded { border-left-color: var(--accent-color); }
+        .session-header { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; }
+        .session-header .expand-icon { font-size: 10px; color: var(--text-secondary); transition: transform 0.2s; margin-top: 3px; flex-shrink: 0; }
+        .session-item.expanded .expand-icon { transform: rotate(90deg); }
+        .session-title { font-weight: 500; margin-bottom: 4px; flex: 1; }
+        .session-meta { font-size: 10px; color: var(--text-secondary); display: flex; gap: 12px; margin-left: 16px; flex-wrap: wrap; }
+        .session-badge { margin-left: auto; font-size: 10px; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 10px; }
+
+        /* Session Messages */
+        .session-messages { max-height: 400px; overflow-y: auto; padding: 10px; background: var(--bg-tertiary); border-radius: 4px; margin-top: 8px; margin-left: 16px; }
+        .session-messages::-webkit-scrollbar { width: 6px; }
+        .session-messages::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+        .session-message { padding: 8px 10px; margin-bottom: 6px; border-radius: 4px; }
+        .session-message.user { background: rgba(59, 130, 246, 0.15); border-left: 2px solid #3b82f6; }
+        .session-message.assistant { background: rgba(75, 85, 99, 0.2); border-left: 2px solid #6b7280; }
+        .session-message-role { font-size: 9px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 4px; letter-spacing: 0.5px; }
+        .session-message-content { font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 150px; overflow-y: auto; color: var(--text-primary); }
+        .session-message-content::-webkit-scrollbar { width: 6px; }
+        .session-message-content::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+        .session-message-content::-webkit-scrollbar-track { background: transparent; }
+        .session-message-content.truncated::after { content: '...'; color: var(--text-muted); }
+        .session-loading { text-align: center; padding: 20px; color: var(--text-secondary); }
+
+        /* Search Results */
+        .search-results { margin-top: 8px; }
+        .search-result { padding: 10px 12px; margin-bottom: 8px; background: var(--bg-secondary); border-radius: 6px; border-left: 3px solid var(--accent-color); cursor: pointer; transition: background 0.15s; }
+        .search-result:hover { background: var(--bg-hover); }
+        .search-result-session { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .search-result-role { font-size: 9px; font-weight: 600; text-transform: uppercase; color: var(--text-muted); margin-bottom: 4px; letter-spacing: 0.5px; }
+        .search-result-snippet { font-size: 12px; line-height: 1.5; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
+        .search-result-snippet.collapsed { max-height: 60px; overflow: hidden; }
+        .search-result-snippet.expanded { max-height: none; }
+        .search-highlight { background: rgba(255, 213, 0, 0.4); color: inherit; padding: 1px 2px; border-radius: 2px; }
+        .search-result-time { font-size: 10px; color: var(--text-muted); margin-top: 6px; }
+        .search-result-count { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }
+
+        /* Sync Button */
+        .sync-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 14px;
+            padding: 2px 6px;
+            margin-left: 8px;
+            border-radius: 4px;
+            transition: color 0.2s, background 0.2s;
+            line-height: 1;
+        }
+
+        .sync-btn:hover {
+            color: var(--accent-color);
+            background: var(--bg-hover);
+        }
+
+        .sync-btn:active {
+            transform: scale(0.95);
+        }
+
+        .sync-btn.spinning {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .sessions-search {
+            width: 100%;
+            padding: 6px 10px;
+            margin-bottom: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-size: 12px;
+        }
+
+        .sessions-search:focus {
+            outline: none;
+            border-color: var(--accent-color);
+        }
+
+        .sessions-search::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Light theme */
+        body.light {
+            --bg-primary: #f3f3f3;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #e8e8e8;
+            --bg-hover: #e0e0e0;
+            --border-color: #d4d4d4;
+            --text-primary: #1e1e1e;
+            --text-secondary: #6e6e6e;
+            --text-muted: #999999;
+            --stat-bg: #e8e8e8;
+            --success-color: #0d7377;
+            --warning-color: #795e26;
+        }
+    </style>
+</head>
+<body>
+    <div class="container" id="container">
+        <!-- Content populated by JavaScript -->
+    </div>
+
+    <script>
+        let currentData = null;
+
+        // Send message to C# host
+        function sendToHost(message) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(message);
+            }
+        }
+
+        // Render project view
+        function renderProject(project) {
+            const container = document.getElementById('container');
+
+            const statsHtml = project.stats ? `
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value">${project.stats.fileCount || 0}</div>
+                        <div class="stat-label">Files</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${formatNumber(project.stats.linesOfCode || 0)}</div>
+                        <div class="stat-label">Lines</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${project.stats.daysOld || 0}</div>
+                        <div class="stat-label">Days</div>
+                    </div>
+                </div>
+            ` : '';
+
+            const promptsHtml = renderPrompts(project.prompts || []);
+
+            container.innerHTML = `
+                <div class="project-header">
+                    <div class="project-name">
+                        <span class="icon">📁</span>
+                        <span>${escapeHtml(project.name || 'Unnamed Project')}</span>
+                    </div>
+                    <div class="project-path" onclick="copyPath('${escapeJs(project.path)}')" title="Click to copy path">
+                        ${escapeHtml(project.path || '')}
+                    </div>
+                </div>
+
+                ${statsHtml}
+
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle">▼</span>
+                        <span class="section-title">Description</span>
+                    </div>
+                    <div class="section-content">
+                        <div class="text-content ${project.description ? '' : 'empty'}">
+                            ${escapeHtml(project.description || 'No description')}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle">▼</span>
+                        <span class="section-title">Change Log</span>
+                    </div>
+                    <div class="section-content">
+                        <div class="text-content ${project.changeLog ? '' : 'empty'}">
+                            ${escapeHtml(project.changeLog || 'No changelog')}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle">▼</span>
+                        <span class="section-title">Prompts</span>
+                    </div>
+                    <div class="section-content">
+                        ${promptsHtml}
+                    </div>
+                </div>
+
+                <div class="section" id="sessions-section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">▼</span>
+                        <span class="section-title">Claude Sessions</span>
+                        <span class="session-badge" id="sessions-count">0</span>
+                        <button class="sync-btn" id="sync-sessions-btn" onclick="event.stopPropagation(); syncSessions();" title="Sync sessions from Claude">&#x21bb;</button>
+                    </div>
+                    <div class="section-content collapsed">
+                        <input type="text" class="sessions-search" placeholder="Search sessions..." oninput="searchSessions(this.value)">
+                        <div class="sessions-list" id="sessions-list">
+                            <div class="text-content empty">Loading sessions...</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render prompts tree
+        function renderPrompts(prompts) {
+            if (!prompts || prompts.length === 0) {
+                return '<div class="text-content empty">No prompts</div>';
+            }
+
+            // Group by category
+            const grouped = {};
+            prompts.forEach(p => {
+                const cat = p.category || 'Uncategorized';
+                if (!grouped[cat]) grouped[cat] = [];
+                grouped[cat].push(p);
+            });
+
+            let html = '<ul class="prompts-tree">';
+            for (const [category, items] of Object.entries(grouped).sort()) {
+                html += `
+                    <li class="prompt-category">
+                        <div class="category-header" onclick="toggleCategory(this)">
+                            <span class="category-toggle">▼</span>
+                            <span class="category-name">${escapeHtml(category)}</span>
+                            <span class="category-count">${items.length}</span>
+                        </div>
+                        <ul class="prompt-list">
+                            ${items.map(p => `
+                                <li class="prompt-item ${p.isGlobal ? 'global' : ''}"
+                                    onclick="pastePrompt('${escapeJs(p.id)}')"
+                                    title="${escapeHtml(p.text || '')}">
+                                    <span class="icon">${p.isGlobal ? '🌐' : '📝'}</span>
+                                    <span>${escapeHtml(p.description || 'Untitled')}</span>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </li>
+                `;
+            }
+            html += '</ul>';
+            return html;
+        }
+
+        // Render welcome state
+        function renderWelcome() {
+            const container = document.getElementById('container');
+            container.innerHTML = `
+                <div class="welcome-state">
+                    <div class="welcome-icon">🚀</div>
+                    <div class="welcome-title">Welcome to MultiTerminal</div>
+                    <div class="welcome-subtitle">Select a project to get started</div>
+                    <div class="tips-list">
+                        <div class="tip-item">
+                            <span class="icon">📂</span>
+                            <span>Click <strong>Projects</strong> above to select a registered project</span>
+                        </div>
+                        <div class="tip-item">
+                            <span class="icon">⚙️</span>
+                            <span>Click <strong>Manage</strong> to view and organize all projects</span>
+                        </div>
+                        <div class="tip-item">
+                            <span class="icon">✨</span>
+                            <span>Run Claude Code and use <code>/multiterminal-addproject</code> to register the current folder</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render not registered state (Claude detected)
+        function renderNotRegistered(path) {
+            const container = document.getElementById('container');
+            container.innerHTML = `
+                <div class="not-registered">
+                    <div class="icon">📋</div>
+                    <div class="title">Project Not Registered</div>
+                    <div class="path">${escapeHtml(path || '')}</div>
+                    <div style="color: var(--text-secondary); line-height: 1.5;">
+                        Claude Code is running in this folder.<br>
+                        Register it to enable project features.
+                    </div>
+                    <div class="command-box">/multiterminal-addproject</div>
+                </div>
+            `;
+        }
+
+        // Toggle section collapse
+        function toggleSection(header) {
+            const toggle = header.querySelector('.section-toggle');
+            const content = header.nextElementSibling;
+            toggle.classList.toggle('collapsed');
+            content.classList.toggle('collapsed');
+        }
+
+        // Toggle category collapse
+        function toggleCategory(header) {
+            const toggle = header.querySelector('.category-toggle');
+            const list = header.nextElementSibling;
+            toggle.classList.toggle('collapsed');
+            list.classList.toggle('collapsed');
+        }
+
+        // Paste prompt to terminal
+        function pastePrompt(promptId) {
+            sendToHost({ type: 'pastePrompt', promptId: promptId });
+        }
+
+        // Copy path to clipboard
+        function copyPath(path) {
+            sendToHost({ type: 'copyPath', path: path });
+        }
+
+        // Set theme
+        function setTheme(theme) {
+            document.body.className = theme === 'light' ? 'light' : '';
+        }
+
+        // Format large numbers
+        function formatNumber(num) {
+            if (num >= 1000) {
+                return (num / 1000).toFixed(1) + 'k';
+            }
+            return num.toString();
+        }
+
+        // Escape HTML
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;')
+                      .replace(/</g, '&lt;')
+                      .replace(/>/g, '&gt;')
+                      .replace(/"/g, '&quot;');
+        }
+
+        // Escape for JS strings
+        function escapeJs(str) {
+            if (!str) return '';
+            return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        }
+
+        // Format relative date for sessions
+        function formatRelativeDate(dateStr) {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+            if (diffDays === 0) {
+                return 'Today';
+            } else if (diffDays === 1) {
+                return 'Yesterday';
+            } else if (diffDays < 7) {
+                return diffDays + ' days ago';
+            } else if (diffDays < 30) {
+                const weeks = Math.floor(diffDays / 7);
+                return weeks + (weeks === 1 ? ' week ago' : ' weeks ago');
+            } else {
+                const months = Math.floor(diffDays / 30);
+                return months + (months === 1 ? ' month ago' : ' months ago');
+            }
+        }
+
+        // Format date with both absolute and relative
+        function formatDateTime(dateStr) {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            const absolute = date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+                            ', ' + date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            const relative = formatRelativeDate(dateStr);
+            return `${absolute} (${relative})`;
+        }
+
+        // Format session time range (created to modified)
+        function formatSessionTimeRange(created, modified) {
+            if (!created) return '';
+            const startDate = new Date(created);
+            const endDate = modified ? new Date(modified) : null;
+
+            const startDateStr = startDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
+            const startTimeStr = startDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+            let result = `${startDateStr}, ${startTimeStr}`;
+
+            if (endDate && endDate > startDate) {
+                const endDateStr = endDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                const endTimeStr = endDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+                // Same day? Just show end time
+                if (startDateStr === endDateStr) {
+                    result += ` → ${endTimeStr}`;
+                } else {
+                    result += ` → ${endDateStr}, ${endTimeStr}`;
+                }
+            }
+
+            // Add relative date
+            const relative = formatRelativeDate(created);
+            result += ` (${relative})`;
+
+            return result;
+        }
+
+        // Track expanded session
+        let expandedSessionId = null;
+
+        // Render sessions list
+        function renderSessions(sessions) {
+            const listEl = document.getElementById('sessions-list');
+            const countEl = document.getElementById('sessions-count');
+
+            if (!listEl) return;
+
+            if (countEl) {
+                countEl.textContent = sessions ? sessions.length : 0;
+            }
+
+            if (!sessions || sessions.length === 0) {
+                listEl.innerHTML = '<div class="text-content empty">No sessions found</div>';
+                return;
+            }
+
+            let html = '';
+            sessions.forEach(session => {
+                const title = session.summary || session.firstPrompt || 'Untitled Session';
+                const dateStr = formatSessionTimeRange(session.created, session.modified);
+                const messageCount = session.messageCount || 0;
+                const branch = session.gitBranch || '';
+
+                html += `
+                    <div class="session-item" data-session-id="${escapeHtml(session.sessionId)}">
+                        <div class="session-header" onclick="toggleSession('${escapeJs(session.sessionId)}')">
+                            <span class="expand-icon">▶</span>
+                            <div class="session-title">${escapeHtml(title)}</div>
+                        </div>
+                        <div class="session-meta">
+                            <span>${dateStr}</span>
+                            <span>${messageCount} messages</span>
+                            ${branch ? '<span>' + escapeHtml(branch) + '</span>' : ''}
+                        </div>
+                        <div class="session-messages" style="display: none;"></div>
+                    </div>
+                `;
+            });
+
+            listEl.innerHTML = html;
+            expandedSessionId = null;
+        }
+
+        // Toggle session expansion
+        function toggleSession(sessionId) {
+            const item = document.querySelector(`[data-session-id="${sessionId}"]`);
+            if (!item) return;
+
+            if (expandedSessionId === sessionId) {
+                // Collapse current
+                item.classList.remove('expanded');
+                item.querySelector('.session-messages').style.display = 'none';
+                expandedSessionId = null;
+            } else {
+                // Collapse previous if exists
+                if (expandedSessionId) {
+                    const prev = document.querySelector(`[data-session-id="${expandedSessionId}"]`);
+                    if (prev) {
+                        prev.classList.remove('expanded');
+                        prev.querySelector('.session-messages').style.display = 'none';
+                    }
+                }
+                // Expand new
+                item.classList.add('expanded');
+                expandedSessionId = sessionId;
+                loadSessionMessages(sessionId);
+            }
+        }
+
+        // Load session messages from host
+        function loadSessionMessages(sessionId) {
+            const item = document.querySelector(`[data-session-id="${sessionId}"]`);
+            if (!item) return;
+
+            const container = item.querySelector('.session-messages');
+            container.innerHTML = '<div class="session-loading">Loading messages...</div>';
+            container.style.display = 'block';
+
+            sendToHost({ type: 'getSessionMessages', sessionId: sessionId });
+        }
+
+        // Render session messages
+        function renderSessionMessages(sessionId, messages) {
+            const item = document.querySelector(`[data-session-id="${sessionId}"]`);
+            if (!item) return;
+
+            const container = item.querySelector('.session-messages');
+
+            if (!messages || messages.length === 0) {
+                container.innerHTML = '<div class="text-content empty">No messages found</div>';
+                return;
+            }
+
+            let html = '';
+            messages.forEach(msg => {
+                const role = msg.role || 'unknown';
+                const content = msg.content || '';
+
+                // Skip empty messages (check for any visible content)
+                if (!content.replace(/[\s\u200B-\u200D\uFEFF]/g, '')) return;
+
+                const truncated = content.length > 500;
+                const displayContent = truncated ? content.substring(0, 500) : content;
+
+                html += `
+                    <div class="session-message ${escapeHtml(role)}">
+                        <div class="session-message-role">${escapeHtml(role)}</div>
+                        <div class="session-message-content${truncated ? ' truncated' : ''}">${escapeHtml(displayContent)}</div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+        }
+
+        // Render search results with highlighted matches
+        function renderSearchResults(data) {
+            const container = document.getElementById('sessions-list');
+            if (!container) return;
+
+            const results = data.results || [];
+            const query = data.query || '';
+
+            if (results.length === 0) {
+                container.innerHTML = '<div class="text-content empty">No messages found matching "' + escapeHtml(query) + '"</div>';
+                return;
+            }
+
+            let html = '<div class="search-results">';
+            html += '<div class="search-result-count">Found ' + results.length + ' message' + (results.length !== 1 ? 's' : '') + ' matching "' + escapeHtml(query) + '"</div>';
+
+            results.forEach((result, index) => {
+                const sessionTitle = result.sessionSummary || 'Untitled Session';
+                const role = result.role || 'unknown';
+                const snippet = result.snippet || '';
+                const timestamp = result.timestamp ? formatDate(result.timestamp) : '';
+
+                // Highlight the search term in the snippet
+                const highlightedSnippet = highlightText(snippet, query);
+
+                html += `
+                    <div class="search-result" data-session-id="${escapeHtml(result.sessionId)}" data-index="${index}" onclick="toggleSearchResult(this)">
+                        <div class="search-result-session">${escapeHtml(sessionTitle)}</div>
+                        <div class="search-result-role">${escapeHtml(role)}</div>
+                        <div class="search-result-snippet collapsed">${highlightedSnippet}</div>
+                        <div class="search-result-time">${escapeHtml(timestamp)}</div>
+                    </div>
+                `;
+            });
+
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        // Highlight search term in text
+        function highlightText(text, query) {
+            if (!query || !text) return escapeHtml(text);
+
+            const escaped = escapeHtml(text);
+            const escapedQuery = escapeHtml(query);
+
+            // Case-insensitive replace with highlight
+            const regex = new RegExp('(' + escapedQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+            return escaped.replace(regex, '<mark class="search-highlight">$1</mark>');
+        }
+
+        // Toggle search result expansion
+        function toggleSearchResult(element) {
+            const snippet = element.querySelector('.search-result-snippet');
+            if (snippet) {
+                snippet.classList.toggle('collapsed');
+                snippet.classList.toggle('expanded');
+            }
+        }
+
+        // Open a session in dialog (keep for double-click or button)
+        function openSession(sessionId) {
+            sendToHost({ type: 'openSession', sessionId: sessionId });
+        }
+
+        // Search sessions
+        function searchSessions(query) {
+            sendToHost({ type: 'searchSessions', query: query });
+        }
+
+        // Sync sessions from Claude
+        function syncSessions() {
+            const btn = document.getElementById('sync-sessions-btn');
+            if (btn) {
+                btn.classList.add('spinning');
+                // Remove spinning class after 2 seconds (host will update sessions which re-renders)
+                setTimeout(() => btn.classList.remove('spinning'), 2000);
+            }
+            sendToHost({ type: 'syncSessions' });
+        }
+
+        // Handle messages from C#
+        function handleHostMessage(message) {
+            if (typeof message === 'string') {
+                const colonIndex = message.indexOf(':');
+                if (colonIndex > 0) {
+                    const command = message.substring(0, colonIndex);
+                    const data = message.substring(colonIndex + 1);
+
+                    switch (command) {
+                        case 'project':
+                            currentData = JSON.parse(data);
+                            renderProject(currentData);
+                            break;
+                        case 'welcome':
+                            renderWelcome();
+                            break;
+                        case 'notRegistered':
+                            renderNotRegistered(data);
+                            break;
+                        case 'theme':
+                            setTheme(data);
+                            break;
+                        case 'sessions':
+                            const sessions = JSON.parse(data);
+                            renderSessions(sessions);
+                            break;
+                        case 'syncResult':
+                            const count = parseInt(data) || 0;
+                            const btn = document.getElementById('sync-sessions-btn');
+                            if (btn) btn.classList.remove('spinning');
+                            console.log('Synced ' + count + ' sessions');
+                            break;
+                        case 'sessionMessages':
+                            const msgData = JSON.parse(data);
+                            renderSessionMessages(msgData.sessionId, msgData.messages);
+                            break;
+                        case 'searchResults':
+                            const searchData = JSON.parse(data);
+                            renderSearchResults(searchData);
+                            break;
+                        case 'fontSize':
+                            const size = parseFloat(data);
+                            if (!isNaN(size)) {
+                                document.body.style.fontSize = size + 'px';
+                            }
+                            break;
+                    }
+                }
+            }
+        }
+
+        // Listen for messages from C#
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                handleHostMessage(event.data);
+            });
+        }
+
+        // Initialize with welcome state
+        document.addEventListener('DOMContentLoaded', () => {
+            renderWelcome();
+            sendToHost({ type: 'ready' });
+        });
+    </script>
+</body>
+</html>

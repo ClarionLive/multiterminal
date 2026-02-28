@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #terminal-container {
+            width: 100%;
+            height: 100%;
+        }
+        /* Hide scrollbar in xterm viewport for cleaner look - scrolling still works */
+        .xterm-viewport::-webkit-scrollbar {
+            width: 10px;
+        }
+        .xterm-viewport::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .xterm-viewport::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 5px;
+        }
+        .xterm-viewport::-webkit-scrollbar-thumb:hover {
+            background: #666;
+        }
+    </style>
+</head>
+<body>
+    <div id="terminal-container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.12.0/lib/addon-web-links.min.js"></script>
+
+    <script>
+        // Theme definitions matching TerminalTheme.cs
+        const themes = {
+            dark: {
+                background: '#0C0C0C',
+                foreground: '#CCCCCC',
+                cursor: '#FFFFFF',
+                cursorAccent: '#000000',
+                selectionBackground: '#264F78',
+                selectionForeground: '#FFFFFF',
+                black: '#0C0C0C',
+                red: '#C50F1F',
+                green: '#13A10E',
+                yellow: '#C19C00',
+                blue: '#0037DA',
+                magenta: '#881798',
+                cyan: '#3A96DD',
+                white: '#CCCCCC',
+                brightBlack: '#767676',
+                brightRed: '#E74856',
+                brightGreen: '#16C60C',
+                brightYellow: '#F9F1A5',
+                brightBlue: '#3B78FF',
+                brightMagenta: '#B4009E',
+                brightCyan: '#61D6D6',
+                brightWhite: '#F2F2F2'
+            },
+            light: {
+                background: '#FFFFFF',
+                foreground: '#1E1E1E',
+                cursor: '#000000',
+                cursorAccent: '#FFFFFF',
+                selectionBackground: '#ADD6FF',
+                selectionForeground: '#000000',
+                black: '#1E1E1E',
+                red: '#C50F1F',
+                green: '#13A10E',
+                yellow: '#C19C00',
+                blue: '#0037DA',
+                magenta: '#881798',
+                cyan: '#3A96DD',
+                white: '#CCCCCC',
+                brightBlack: '#767676',
+                brightRed: '#E74856',
+                brightGreen: '#16C60C',
+                brightYellow: '#F9F1A5',
+                brightBlue: '#3B78FF',
+                brightMagenta: '#B4009E',
+                brightCyan: '#61D6D6',
+                brightWhite: '#F2F2F2'
+            }
+        };
+
+        let term = null;
+        let fitAddon = null;
+        let currentFontSize = 10;
+        let isInitialized = false;
+
+        // Initialize terminal
+        function initTerminal(themeName = 'dark') {
+            const container = document.getElementById('terminal-container');
+
+            term = new Terminal({
+                cursorBlink: false,
+                cursorStyle: 'block',
+                fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
+                fontSize: currentFontSize,
+                theme: themes[themeName] || themes.dark,
+                allowProposedApi: true,
+                scrollback: 10000,
+                convertEol: false,
+                letterSpacing: -1,
+                lineHeight: 1
+            });
+
+            // Load addons
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+
+            const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+            term.loadAddon(webLinksAddon);
+
+            // Open terminal in container
+            term.open(container);
+
+            // Initial fit
+            fitAddon.fit();
+
+            // Custom key handler for Windows-style shortcuts
+            term.attachCustomKeyEventHandler((event) => {
+                // CTRL+C: Copy if text selected, otherwise let it pass as interrupt
+                if (event.ctrlKey && event.key === 'c' && event.type === 'keydown') {
+                    const selection = term.getSelection();
+                    if (selection && selection.length > 0) {
+                        navigator.clipboard.writeText(selection);
+                        return false; // Prevent default (don't send to terminal)
+                    }
+                    // No selection - let CTRL+C pass through as interrupt
+                    return true;
+                }
+
+                // CTRL+V: Request paste from C# (avoids clipboard permission prompts)
+                if (event.ctrlKey && event.key === 'v' && event.type === 'keydown') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    sendToHost({ type: 'paste' });
+                    return false; // Prevent xterm.js from processing
+                }
+
+                // CTRL+Enter: Send LF (newline) instead of CR (carriage return)
+                if (event.ctrlKey && event.key === 'Enter' && event.type === 'keydown') {
+                    sendToHost({ type: 'input', data: btoa('\n') });
+                    return false; // Prevent default Enter behavior
+                }
+
+                // Let all other keys pass through normally
+                return true;
+            });
+
+            // Handle user input - send to C#
+            // Use TextEncoder to properly encode multi-byte (UTF-8) characters before Base64
+            term.onData((data) => {
+                const encoder = new TextEncoder();
+                const bytes = encoder.encode(data);
+                const binary = String.fromCharCode(...bytes);
+                sendToHost({ type: 'input', data: btoa(binary) });
+            });
+
+            // Handle resize - notify C#
+            term.onResize((size) => {
+                sendToHost({ type: 'resize', cols: size.cols, rows: size.rows });
+            });
+
+            // Handle title changes
+            term.onTitleChange((title) => {
+                sendToHost({ type: 'title', title: title });
+            });
+
+            // Handle window resize with debounce to reduce flashing
+            let resizeTimeout = null;
+            window.addEventListener('resize', () => {
+                if (resizeTimeout) {
+                    clearTimeout(resizeTimeout);
+                }
+                resizeTimeout = setTimeout(() => {
+                    if (fitAddon) {
+                        fitAddon.fit();
+                    }
+                    resizeTimeout = null;
+                }, 50);
+            });
+
+            // Handle Ctrl+mousewheel for font size
+            container.addEventListener('wheel', (e) => {
+                if (e.ctrlKey) {
+                    e.preventDefault();
+                    const delta = e.deltaY > 0 ? -1 : 1;
+                    const newSize = Math.max(6, Math.min(32, currentFontSize + delta));
+                    if (newSize !== currentFontSize) {
+                        setFontSize(newSize);
+                        // Notify C# of font size change so it can be saved
+                        sendToHost({ type: 'fontSizeChanged', fontSize: newSize });
+                    }
+                }
+            }, { passive: false });
+
+            // Handle right-click for context menu
+            container.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                const selectedText = (term && term.hasSelection()) ? term.getSelection() : '';
+                sendToHost({
+                    type: 'contextmenu',
+                    x: e.clientX,
+                    y: e.clientY,
+                    selectedText: selectedText
+                });
+            });
+
+            // Notify C# when terminal is clicked (for dropdown close)
+            container.addEventListener('mousedown', () => {
+                sendToHost({ type: 'terminalclick' });
+            });
+
+            isInitialized = true;
+
+            // Notify C# that terminal is ready
+            sendToHost({ type: 'ready', cols: term.cols, rows: term.rows });
+        }
+
+        // Send message to C# host
+        function sendToHost(message) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(message);
+            }
+        }
+
+        // Handle messages from C#
+        function handleHostMessage(message) {
+            if (!term) return;
+
+            if (typeof message === 'string') {
+                // Simple string protocol: "command:data"
+                const colonIndex = message.indexOf(':');
+                if (colonIndex > 0) {
+                    const command = message.substring(0, colonIndex);
+                    const data = message.substring(colonIndex + 1);
+
+                    switch (command) {
+                        case 'data':
+                            // Base64 encoded terminal data - decode as UTF-8
+                            // Note: Must mask with 0xFF to handle multi-byte UTF-8 chars (emojis)
+                            const binaryString = atob(data);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) {
+                                bytes[i] = binaryString.charCodeAt(i) & 0xFF;
+                            }
+                            const text = new TextDecoder('utf-8').decode(bytes);
+                            term.write(text);
+                            break;
+
+                        case 'theme':
+                            setTheme(data);
+                            break;
+
+                        case 'fontSize':
+                            setFontSize(parseFloat(data));
+                            break;
+
+                        case 'clear':
+                            term.clear();
+                            break;
+
+                        case 'reset':
+                            term.reset();
+                            break;
+
+                        case 'focus':
+                            term.focus();
+                            break;
+
+                        case 'scrollToBottom':
+                            term.scrollToBottom();
+                            break;
+
+                        case 'typeInput':
+                            // Character-by-character injection — mimics real keyboard typing.
+                            // Used by NudgeTerminal to inject [cm] trigger into Claude Code.
+                            // Format: "typeInput:delayMs:base64data"
+                            // Each character is sent individually through the xterm input path
+                            // with a configurable delay between keystrokes.
+                            {
+                                let charDelay = 15;
+                                let charData = data;
+                                const delayMatch = data.match(/^(\d+):(.+)$/);
+                                if (delayMatch) {
+                                    charDelay = parseInt(delayMatch[1], 10);
+                                    charData = delayMatch[2];
+                                }
+                                const decoded = atob(charData);
+                                let charIndex = 0;
+                                const typeNextChar = () => {
+                                    if (charIndex < decoded.length) {
+                                        sendToHost({ type: 'input', data: btoa(decoded[charIndex]) });
+                                        charIndex++;
+                                        setTimeout(typeNextChar, charDelay);
+                                    }
+                                };
+                                typeNextChar();
+                            }
+                            break;
+
+                        case 'sendEnter':
+                            // Simulate Enter key by sending CR through the input path
+                            // This goes through the same channel as physical keypresses
+
+                            // Capture cursor position BEFORE sending Enter
+                            const cursorYBefore = term.buffer.active.cursorY;
+                            const cursorXBefore = term.buffer.active.cursorX;
+
+                            sendToHost({ type: 'input', data: btoa('\r') });
+
+                            // Poll for cursor movement to verify Enter was processed
+                            // If cursor moves to a new line, the prompt was submitted
+                            const startTime = Date.now();
+                            const maxWaitMs = 500; // Wait up to 500ms for cursor movement
+
+                            const checkCursorMoved = () => {
+                                const cursorYAfter = term.buffer.active.cursorY;
+                                const cursorXAfter = term.buffer.active.cursorX;
+                                const elapsed = Date.now() - startTime;
+
+                                // Success: Cursor moved to a new line OR went back to column 0
+                                // (indicates prompt was submitted and new prompt started)
+                                if (cursorYAfter !== cursorYBefore || cursorXAfter < cursorXBefore) {
+                                    sendToHost({ type: 'enterAck' });
+                                    return;
+                                }
+
+                                // Timeout: Enter wasn't processed
+                                if (elapsed >= maxWaitMs) {
+                                    console.warn(`[Terminal] Enter key timeout after ${elapsed}ms - cursor didn't move (Y: ${cursorYBefore} -> ${cursorYAfter}, X: ${cursorXBefore} -> ${cursorXAfter})`);
+                                    sendToHost({ type: 'enterAck' }); // Still ack to prevent hang
+                                    return;
+                                }
+
+                                // Keep polling every 10ms
+                                setTimeout(checkCursorMoved, 10);
+                            };
+
+                            // Start polling after brief delay to let terminal process
+                            setTimeout(checkCursorMoved, 20);
+                            break;
+                    }
+                }
+            }
+        }
+
+        // Set theme
+        function setTheme(themeName) {
+            const theme = themes[themeName] || themes.dark;
+            if (term) {
+                term.options.theme = theme;
+                document.body.style.backgroundColor = theme.background;
+            }
+        }
+
+        // Set font size
+        function setFontSize(size) {
+            size = Math.max(6, Math.min(32, size));
+            currentFontSize = size;
+            if (term) {
+                term.options.fontSize = size;
+                if (fitAddon) {
+                    fitAddon.fit();
+                }
+            }
+        }
+
+        // Get selected text from terminal (exposed to C# via window object)
+        function getSelectedText() {
+            return (term && term.hasSelection()) ? term.getSelection() : '';
+        }
+        window.terminalGetSelection = getSelectedText;
+
+        // Listen for messages from C#
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                handleHostMessage(event.data);
+            });
+        }
+
+        // Initialize on load
+        document.addEventListener('DOMContentLoaded', () => {
+            initTerminal('dark');
+        });
+
+        // Also handle case where DOM is already loaded
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+            setTimeout(() => {
+                if (!isInitialized) {
+                    initTerminal('dark');
+                }
+            }, 0);
+        }
+    </script>
+</body>
+</html>

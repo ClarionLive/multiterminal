@@ -1,0 +1,2208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Office View</title>
+<style>
+/* =============================================
+   Theme Variables
+   ============================================= */
+:root {
+    --bg-panel: #1a1b2e;
+    --floor-tile1: #2d2e4a;
+    --floor-tile2: #32335a;
+    --wall-color: #22233d;
+    --wall-top: #1a1b30;
+    --furniture-color: #3a3b5a;
+    --furniture-dark: #2a2b45;
+    --furniture-light: #4a4b6a;
+    --monitor-off: #1a1a2a;
+    --monitor-on: #0a4a1a;
+    --monitor-glow: rgba(34,197,94,0.3);
+    --text-primary: #e4e4e7;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
+    --border-color: #3f3f50;
+    --status-working: #22c55e;
+    --status-idle: #eab308;
+    --status-blocked: #ef4444;
+    --status-unknown: #71717a;
+    --sidebar-bg: #252640;
+    --sidebar-border: #3f3f50;
+    --wood-floor1: #5a4a35;
+    --wood-floor2: #6a5a42;
+    --bubble-bg: #ffffff;
+    --bubble-text: #1a1a1a;
+    --door-color: #6a5a42;
+    --whiteboard-surface: #e8e8f0;
+    --cooler-color: #6888aa;
+    --plant-color: #2a8a3a;
+    --couch-color: #5a4a6a;
+}
+
+body.light {
+    --bg-panel: #e8e8f0;
+    --floor-tile1: #c8c8d4;
+    --floor-tile2: #d0d0dc;
+    --wall-color: #b0b0c0;
+    --wall-top: #a0a0b0;
+    --furniture-color: #8a8a9a;
+    --furniture-dark: #7a7a8a;
+    --furniture-light: #9a9aaa;
+    --monitor-off: #a0a0a8;
+    --monitor-on: #c4ffc4;
+    --monitor-glow: rgba(34,197,94,0.2);
+    --text-primary: #18181b;
+    --text-secondary: #52525b;
+    --text-muted: #71717a;
+    --border-color: #c0c0cc;
+    --sidebar-bg: #f0f0f8;
+    --sidebar-border: #d0d0dc;
+    --wood-floor1: #c4b89a;
+    --wood-floor2: #d0c4a8;
+    --bubble-bg: #ffffff;
+    --bubble-text: #1a1a1a;
+    --door-color: #a08a6a;
+    --whiteboard-surface: #f8f8ff;
+    --cooler-color: #88a8c8;
+    --plant-color: #3aaa4a;
+    --couch-color: #9a8aaa;
+}
+
+/* =============================================
+   Reset & Base
+   ============================================= */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* =============================================
+   Header
+   ============================================= */
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--sidebar-bg);
+    flex-shrink: 0;
+    min-height: 32px;
+}
+.header-title {
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.agent-badge {
+    font-size: 11px;
+    padding: 1px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    color: var(--text-secondary);
+}
+
+/* =============================================
+   Main Layout
+   ============================================= */
+.main-container {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* =============================================
+   Sidebar
+   ============================================= */
+.sidebar {
+    width: 130px;
+    flex-shrink: 0;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--sidebar-border);
+    padding: 12px 10px;
+    overflow-y: auto;
+}
+.sidebar-section {
+    margin-bottom: 16px;
+}
+.sidebar-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.stat-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+.stat-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.stat-label { color: var(--text-secondary); flex: 1; }
+.stat-value { font-weight: 700; font-size: 14px; }
+.latest-task {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.3;
+    word-break: break-word;
+}
+
+/* =============================================
+   Office Scene
+   ============================================= */
+.office-scene {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background:
+        repeating-conic-gradient(var(--floor-tile1) 0% 25%, var(--floor-tile2) 0% 50%)
+        0 0 / 32px 32px;
+}
+
+/* Wall */
+.wall {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 48px;
+    background: var(--wall-color);
+    border-bottom: 3px solid var(--furniture-dark);
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 24px;
+}
+.wall-top {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 6px;
+    background: var(--wall-top);
+}
+.wall-decor {
+    width: 28px;
+    height: 20px;
+    border-radius: 2px;
+    border: 1px solid var(--furniture-light);
+    position: relative;
+    top: 4px;
+}
+.wall-sign {
+    background: var(--whiteboard-surface);
+    color: #333;
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    border: 2px solid var(--furniture-dark);
+    border-radius: 2px;
+    position: relative;
+    top: 4px;
+}
+.wall-shelf {
+    width: 36px;
+    height: 16px;
+    background: var(--furniture-color);
+    border: 1px solid var(--furniture-light);
+    border-radius: 1px;
+    position: relative;
+    top: 8px;
+}
+.wall-clock {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid var(--furniture-light);
+    background: var(--whiteboard-surface);
+    position: relative;
+    top: 4px;
+}
+
+/* Break area floor */
+.break-area {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 38%;
+    height: 45%;
+    background:
+        repeating-conic-gradient(var(--wood-floor1) 0% 25%, var(--wood-floor2) 0% 50%)
+        0 0 / 24px 24px;
+    border-top: 2px solid var(--furniture-dark);
+    border-left: 2px solid var(--furniture-dark);
+    z-index: 1;
+}
+
+/* =============================================
+   Furniture
+   ============================================= */
+.furniture {
+    position: absolute;
+    z-index: 3;
+    pointer-events: none;
+}
+
+/* Desk (top-down: rectangle with monitor on top edge) */
+.desk {
+    width: 56px;
+    height: 36px;
+    background: var(--furniture-color);
+    border: 1px solid var(--furniture-light);
+    border-radius: 2px;
+}
+.desk-monitor {
+    position: absolute;
+    top: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 24px;
+    height: 10px;
+    background: var(--monitor-off);
+    border: 1px solid var(--furniture-dark);
+    border-radius: 1px;
+}
+.desk-monitor.on {
+    background: var(--monitor-on);
+    box-shadow: 0 0 6px var(--monitor-glow);
+}
+.desk-chair {
+    position: absolute;
+    bottom: -8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 16px;
+    height: 12px;
+    background: var(--furniture-dark);
+    border-radius: 3px 3px 1px 1px;
+    border: 1px solid var(--furniture-light);
+}
+.desk-label {
+    position: absolute;
+    bottom: -18px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 7px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    opacity: 0.5;
+}
+
+/* Director desk (larger, prominent) */
+.director-desk {
+    width: 64px;
+    height: 40px;
+    background: var(--furniture-color);
+    border: 2px solid var(--furniture-light);
+    border-radius: 3px;
+}
+.director-desk .desk-monitor {
+    position: absolute;
+    top: 3px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 28px;
+    height: 12px;
+    background: var(--monitor-off);
+    border: 1px solid var(--furniture-dark);
+    border-radius: 1px;
+}
+.director-desk .desk-monitor.on {
+    background: var(--monitor-on);
+    box-shadow: 0 0 8px var(--monitor-glow);
+}
+.director-desk .desk-chair {
+    position: absolute;
+    bottom: -10px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 18px;
+    height: 14px;
+    background: var(--furniture-dark);
+    border-radius: 4px 4px 1px 1px;
+    border: 1px solid var(--furniture-light);
+}
+
+/* Meeting table */
+.meeting-table {
+    width: 64px;
+    height: 48px;
+    background: var(--furniture-color);
+    border: 2px solid var(--furniture-light);
+    border-radius: 10px;
+}
+
+/* Whiteboard */
+.whiteboard-furniture {
+    width: 60px;
+    height: 36px;
+    background: var(--whiteboard-surface);
+    border: 2px solid var(--furniture-dark);
+    border-radius: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.whiteboard-content {
+    width: 80%;
+    height: 60%;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.wb-line {
+    height: 2px;
+    background: var(--text-muted);
+    border-radius: 1px;
+    opacity: 0.3;
+}
+.wb-line:nth-child(2) { width: 70%; }
+.wb-line:nth-child(3) { width: 50%; }
+
+/* Water cooler */
+.water-cooler {
+    width: 16px;
+    height: 24px;
+    background: var(--cooler-color);
+    border: 1px solid var(--furniture-dark);
+    border-radius: 2px 2px 0 0;
+    position: relative;
+}
+.water-cooler::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 8px;
+    height: 6px;
+    background: #88ccff;
+    border-radius: 2px;
+    opacity: 0.7;
+}
+.cooler-stand {
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 6px;
+    background: var(--furniture-dark);
+    border-radius: 1px;
+}
+
+/* Plant */
+.plant {
+    width: 14px;
+    height: 18px;
+    position: relative;
+}
+.plant-pot {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 10px;
+    height: 7px;
+    background: #8a6a4a;
+    border-radius: 0 0 2px 2px;
+}
+.plant-leaves {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 14px;
+    height: 12px;
+    background: var(--plant-color);
+    border-radius: 50%;
+}
+
+/* Couch */
+.couch {
+    width: 68px;
+    height: 30px;
+    background: var(--couch-color);
+    border: 1px solid var(--furniture-dark);
+    border-radius: 5px;
+    position: relative;
+}
+.couch-arm-l, .couch-arm-r {
+    position: absolute;
+    top: 2px;
+    width: 8px;
+    height: 26px;
+    background: var(--couch-color);
+    border: 1px solid var(--furniture-dark);
+    border-radius: 4px;
+}
+.couch-arm-l { left: -7px; }
+.couch-arm-r { right: -7px; }
+
+/* Entrance door */
+.entrance-door {
+    width: 32px;
+    height: 10px;
+    background: var(--door-color);
+    border: 1px solid var(--furniture-dark);
+    border-radius: 0 0 2px 2px;
+    position: relative;
+}
+.door-handle {
+    position: absolute;
+    right: 6px;
+    top: 3px;
+    width: 4px;
+    height: 4px;
+    background: #ccaa44;
+    border-radius: 50%;
+}
+
+/* =============================================
+   Characters
+   ============================================= */
+.character {
+    position: absolute;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    will-change: transform;
+    /* no transition by default - set dynamically during movement */
+}
+.character:hover { z-index: 20; }
+
+.char-sprite {
+    width: 48px;
+    height: 56px;
+    image-rendering: pixelated;
+}
+.char-sprite svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.char-name {
+    display: none;
+}
+.desk-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-align: center;
+    white-space: nowrap;
+    position: absolute;
+    top: -14px;
+    left: 50%;
+    transform: translateX(-50%);
+    text-shadow: 0 0 4px var(--bg-panel), 0 0 4px var(--bg-panel), 0 0 6px var(--bg-panel);
+    pointer-events: none;
+}
+
+.char-dot {
+    position: absolute;
+    top: -4px;
+    right: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid rgba(0,0,0,0.3);
+    z-index: 11;
+    box-shadow: 0 0 4px currentColor;
+}
+
+.char-activity {
+    display: none;
+}
+
+/* =============================================
+   Speech Bubbles
+   ============================================= */
+.speech-bubble {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bubble-bg);
+    color: var(--bubble-text);
+    font-size: 9px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    min-width: 80px;
+    max-width: 120px;
+    word-break: break-word;
+    line-height: 1.3;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    z-index: 30;
+    animation: bubbleIn 0.3s ease-out;
+    margin-bottom: 4px;
+}
+.speech-bubble::after {
+    content: '';
+    position: absolute;
+    bottom: -5px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid var(--bubble-bg);
+}
+.speech-bubble.removing {
+    animation: bubbleOut 0.3s ease-in forwards;
+}
+
+/* =============================================
+   Empty State
+   ============================================= */
+.empty-state {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    z-index: 4;
+}
+.empty-state-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+    opacity: 0.5;
+}
+.empty-state.hidden { display: none; }
+
+/* =============================================
+   Animations
+   ============================================= */
+@keyframes bubbleIn {
+    from { opacity: 0; transform: translateX(-50%) scale(0.8) translateY(4px); }
+    to { opacity: 1; transform: translateX(-50%) scale(1) translateY(0); }
+}
+@keyframes bubbleOut {
+    from { opacity: 1; transform: translateX(-50%) scale(1) translateY(0); }
+    to { opacity: 0; transform: translateX(-50%) scale(0.8) translateY(4px); }
+}
+@keyframes typing {
+    0%, 100% { transform: translateY(0); }
+    25% { transform: translate(-1px, -1px); }
+    75% { transform: translate(1px, -1px); }
+}
+@keyframes idleBounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+}
+@keyframes confused {
+    0%, 100% { transform: rotate(0deg); }
+    20% { transform: rotate(-3deg); }
+    40% { transform: rotate(3deg); }
+    60% { transform: rotate(-2deg); }
+    80% { transform: rotate(2deg); }
+}
+@keyframes sleeping {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.55; }
+}
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes fadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+.anim-typing .char-sprite { animation: typing 0.6s infinite; }
+.anim-idle .char-sprite { animation: idleBounce 2.5s infinite; }
+.anim-confused .char-sprite { animation: confused 0.8s infinite; }
+.anim-sleeping .char-sprite { animation: sleeping 3s infinite; }
+.anim-fadein { animation: fadeIn 0.4s ease-out; }
+.anim-fadeout { animation: fadeOut 0.4s ease-in forwards; }
+
+</style>
+</head>
+<body class="dark">
+
+<div class="header">
+    <span class="header-title">Office View</span>
+    <span class="agent-badge" id="agent-count">0 agents</span>
+</div>
+
+<div class="main-container">
+    <div class="sidebar">
+        <div class="sidebar-section">
+            <div class="sidebar-title">ACTIVE WORK</div>
+            <div class="stat-row">
+                <div class="stat-dot" style="background:var(--status-idle)"></div>
+                <span class="stat-label">Todo</span>
+                <span class="stat-value" id="wb-todo">0</span>
+            </div>
+            <div class="stat-row">
+                <div class="stat-dot" style="background:var(--status-working)"></div>
+                <span class="stat-label">Doing</span>
+                <span class="stat-value" id="wb-doing">0</span>
+            </div>
+            <div class="stat-row">
+                <div class="stat-dot" style="background:var(--text-muted)"></div>
+                <span class="stat-label">Done</span>
+                <span class="stat-value" id="wb-done">0</span>
+            </div>
+        </div>
+        <div class="sidebar-section">
+            <div class="sidebar-title">LATEST</div>
+            <div class="latest-task" id="wb-recent">-</div>
+        </div>
+    </div>
+
+    <div class="office-scene" id="office-scene">
+        <!-- Wall -->
+        <div class="wall">
+            <div class="wall-top"></div>
+            <div class="wall-decor" style="background: linear-gradient(135deg, #c44, #c84, #4c4, #44c);"></div>
+            <div class="wall-decor" style="background: linear-gradient(45deg, #446, #668);"></div>
+            <div class="wall-shelf"></div>
+            <div class="wall-clock"></div>
+            <div style="flex:1"></div>
+            <div class="wall-shelf"></div>
+            <div class="wall-decor" style="background: linear-gradient(135deg, #484, #4a8);"></div>
+            <div class="wall-sign">MULTITERMINAL</div>
+        </div>
+
+        <!-- Break area floor overlay -->
+        <div class="break-area"></div>
+
+        <!-- Furniture will be placed by JS -->
+        <div id="furniture-layer"></div>
+
+        <!-- Characters rendered here -->
+        <div id="character-layer"></div>
+
+        <!-- Empty state -->
+        <div class="empty-state" id="empty-state">
+            <div class="empty-state-icon">&#127970;</div>
+            <div>Office is empty</div>
+            <div style="font-size:11px;margin-top:4px;color:var(--text-muted)">Agents will appear when they connect</div>
+        </div>
+    </div>
+</div>
+
+<script>
+/* =============================================
+   State
+   ============================================= */
+var state = {
+    characters: new Map(),
+    directorDesks: [],
+    agentDesks: [],
+    sceneW: 0,
+    sceneH: 0
+};
+
+var walkTimers = {};
+var moveTimeouts = {};
+var bubbleTimers = {};
+var breakroomTimers = {};
+var BREAKROOM_TIMEOUT_MS = 60000;
+var DEFAULT_COLORS = ['#6366f1','#22c55e','#ef4444','#f59e0b','#ec4899','#14b8a6','#8b5cf6','#f97316'];
+
+/* Agent departure flow state */
+var whiteboardReporter = null;   // charId currently reporting at whiteboard
+var whiteboardQueue = [];        // charIds waiting to report
+var departingAgents = {};        // charId -> { phase, timers[] }
+var WHITEBOARD_REPORT_MS = 15000; // 15 sec at whiteboard
+var BREAKROOM_REST_MS = 45000;    // 45 sec at breakroom
+
+/* =============================================
+   Office Layout (percentage-based)
+   ============================================= */
+/* Director desks at the top (spread out below the wall) */
+var DIRECTOR_DESKS = [
+    { xPct: 14, yPct: 16 },
+    { xPct: 32, yPct: 16 },
+    { xPct: 50, yPct: 16 },
+    { xPct: 68, yPct: 16 },
+];
+
+/* Agent workstations (shifted down to make room for directors) */
+var DESKS = [
+    { xPct: 12, yPct: 32 },
+    { xPct: 28, yPct: 32 },
+    { xPct: 12, yPct: 48 },
+    { xPct: 28, yPct: 48 },
+    { xPct: 12, yPct: 64 },
+    { xPct: 28, yPct: 64 },
+    { xPct: 12, yPct: 80 },
+    { xPct: 28, yPct: 80 },
+];
+
+var LOCATIONS = {
+    whiteboard:   { xPct: 82, yPct: 16 },
+    meetingTable: { xPct: 48, yPct: 44 },
+    waterCooler:  { xPct: 90, yPct: 59 },
+    breakroom:    { xPct: 80, yPct: 86 },
+    entrance:     { xPct: 44, yPct: 96 }
+};
+
+var MEETING_SLOTS = [
+    { dx: -24, dy: -18 },
+    { dx:  28, dy: -18 },
+    { dx: -24, dy:  22 },
+    { dx:  28, dy:  22 },
+];
+
+var COOLER_SLOTS = [
+    { dx: -18, dy: -8 },
+    { dx:  18, dy: -8 },
+    { dx: -18, dy:  14 },
+    { dx:  18, dy:  14 },
+];
+
+var WHITEBOARD_SLOTS = [
+    { dx: -16, dy: 20 },
+    { dx:  16, dy: 20 },
+    { dx:   0, dy: 28 },
+];
+
+var BREAKROOM_SLOTS = [
+    { dx: -24, dy: -10 },
+    { dx:   0, dy: -18 },
+    { dx:  24, dy: -10 },
+    { dx:   0, dy:  12 },
+];
+
+/* Positions where agents wait in line to use the whiteboard */
+var WHITEBOARD_QUEUE_SLOTS = [
+    { dx: -10, dy: 46 },
+    { dx: -30, dy: 52 },
+    { dx:  10, dy: 52 },
+];
+
+/* =============================================
+   Color Utilities
+   ============================================= */
+function darkenColor(hex, amount) {
+    hex = hex.replace('#','');
+    var r = Math.max(0, parseInt(hex.substring(0,2),16) - amount);
+    var g = Math.max(0, parseInt(hex.substring(2,4),16) - amount);
+    var b = Math.max(0, parseInt(hex.substring(4,6),16) - amount);
+    return '#' + ('0'+r.toString(16)).slice(-2) + ('0'+g.toString(16)).slice(-2) + ('0'+b.toString(16)).slice(-2);
+}
+
+function lightenColor(hex, amount) {
+    hex = hex.replace('#','');
+    var r = Math.min(255, parseInt(hex.substring(0,2),16) + amount);
+    var g = Math.min(255, parseInt(hex.substring(2,4),16) + amount);
+    var b = Math.min(255, parseInt(hex.substring(4,6),16) + amount);
+    return '#' + ('0'+r.toString(16)).slice(-2) + ('0'+g.toString(16)).slice(-2) + ('0'+b.toString(16)).slice(-2);
+}
+
+var SKIN = '#FFDCB5';
+var SKIN_SHADOW = '#E8C8A0';
+var EYE_COLOR = '#333';
+
+/* =============================================
+   Sprite Functions (Top-Down 3/4 View)
+   ============================================= */
+
+function wrapFacing(inner, facing, vw, vh) {
+    var w = vw || 16;
+    var h = vh || 20;
+    var flip = (facing === 'left') ? ' transform="translate('+w+',0) scale(-1,1)"' : '';
+    return '<svg viewBox="0 0 '+w+' '+h+'" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">' +
+           '<g' + flip + '>' + inner + '</g></svg>';
+}
+
+function R(x,y,w,h,fill) {
+    return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" fill="'+fill+'"/>';
+}
+
+function spriteSitting(color, facing) {
+    var pants = darkenColor(color, 40);
+    var s = '';
+    // Hair (top of head, most visible from above)
+    s += R(5,0,6,3,color);
+    s += R(4,1,8,2,color);
+    // Head/face
+    s += R(5,3,6,3,SKIN);
+    s += R(4,3,1,2,color); // hair side
+    s += R(11,3,1,2,color);
+    // Eyes
+    s += R(6,4,1,1,EYE_COLOR);
+    s += R(9,4,1,1,EYE_COLOR);
+    // Body (shirt)
+    s += R(5,6,6,4,color);
+    s += R(4,7,1,3,color);
+    s += R(11,7,1,3,color);
+    // Arms extended forward (typing)
+    s += R(3,8,2,2,SKIN);
+    s += R(11,8,2,2,SKIN);
+    // Hands
+    s += R(2,9,1,1,SKIN);
+    s += R(13,9,1,1,SKIN);
+    // Lap/legs (seated, compressed)
+    s += R(5,10,6,2,pants);
+    return wrapFacing(s, facing);
+}
+
+function spriteStandIdle(color, facing) {
+    var pants = darkenColor(color, 40);
+    var shoes = darkenColor(color, 80);
+    var s = '';
+    // Hair
+    s += R(5,0,6,3,color);
+    s += R(4,1,8,2,color);
+    // Head
+    s += R(5,3,6,3,SKIN);
+    s += R(4,3,1,2,color);
+    s += R(11,3,1,2,color);
+    // Eyes
+    s += R(6,4,1,1,EYE_COLOR);
+    s += R(9,4,1,1,EYE_COLOR);
+    // Body
+    s += R(5,6,6,5,color);
+    // Arms at sides
+    s += R(3,7,2,4,color);
+    s += R(11,7,2,4,color);
+    // Hands
+    s += R(3,11,2,1,SKIN);
+    s += R(11,11,2,1,SKIN);
+    // Pants
+    s += R(5,11,3,4,pants);
+    s += R(8,11,3,4,pants);
+    // Shoes
+    s += R(5,15,3,1,shoes);
+    s += R(8,15,3,1,shoes);
+    return wrapFacing(s, facing, 16, 17);
+}
+
+function spriteStandBoard(color, facing) {
+    var pants = darkenColor(color, 40);
+    var shoes = darkenColor(color, 80);
+    var s = '';
+    // Hair
+    s += R(5,0,6,3,color);
+    s += R(4,1,8,2,color);
+    // Head
+    s += R(5,3,6,3,SKIN);
+    s += R(4,3,1,2,color);
+    s += R(11,3,1,2,color);
+    // Eyes
+    s += R(6,4,1,1,EYE_COLOR);
+    s += R(9,4,1,1,EYE_COLOR);
+    // Body
+    s += R(5,6,6,5,color);
+    // Left arm at side
+    s += R(3,7,2,4,color);
+    s += R(3,11,2,1,SKIN);
+    // Right arm raised (pointing at board)
+    s += R(11,5,2,2,color);
+    s += R(12,3,2,2,color);
+    s += R(13,2,2,1,SKIN); // hand up
+    // Pants
+    s += R(5,11,3,4,pants);
+    s += R(8,11,3,4,pants);
+    // Shoes
+    s += R(5,15,3,1,shoes);
+    s += R(8,15,3,1,shoes);
+    return wrapFacing(s, facing, 16, 17);
+}
+
+function spriteStandTable(color, facing) {
+    var pants = darkenColor(color, 40);
+    var shoes = darkenColor(color, 80);
+    var s = '';
+    // Hair
+    s += R(5,0,6,3,color);
+    s += R(4,1,8,2,color);
+    // Head
+    s += R(5,3,6,3,SKIN);
+    s += R(4,3,1,2,color);
+    s += R(11,3,1,2,color);
+    // Eyes
+    s += R(6,4,1,1,EYE_COLOR);
+    s += R(9,4,1,1,EYE_COLOR);
+    // Mouth (talking)
+    s += R(7,5,2,1,'#cc8888');
+    // Body
+    s += R(5,6,6,5,color);
+    // Left arm at side
+    s += R(3,7,2,4,color);
+    s += R(3,11,2,1,SKIN);
+    // Right arm gesturing forward
+    s += R(11,7,2,2,color);
+    s += R(13,7,1,2,SKIN); // hand forward
+    // Pants
+    s += R(5,11,3,4,pants);
+    s += R(8,11,3,4,pants);
+    // Shoes
+    s += R(5,15,3,1,shoes);
+    s += R(8,15,3,1,shoes);
+    return wrapFacing(s, facing, 16, 17);
+}
+
+function spriteWalkFrame1(color, facing) {
+    var pants = darkenColor(color, 40);
+    var shoes = darkenColor(color, 80);
+    var s = '';
+    // Hair
+    s += R(5,0,6,3,color);
+    s += R(4,1,8,2,color);
+    // Head
+    s += R(5,3,6,3,SKIN);
+    s += R(4,3,1,2,color);
+    s += R(11,3,1,2,color);
+    // Eyes
+    s += R(6,4,1,1,EYE_COLOR);
+    s += R(9,4,1,1,EYE_COLOR);
+    // Body
+    s += R(5,6,6,5,color);
+    // Arms swinging (left forward, right back)
+    s += R(3,6,2,3,color);
+    s += R(2,8,2,1,SKIN);
+    s += R(11,8,2,3,color);
+    s += R(12,11,2,1,SKIN);
+    // Legs (left forward, right back)
+    s += R(5,11,3,3,pants);
+    s += R(4,14,3,1,shoes); // left foot forward
+    s += R(8,11,3,4,pants);
+    s += R(9,15,3,1,shoes); // right foot back
+    return wrapFacing(s, facing, 16, 17);
+}
+
+function spriteWalkFrame2(color, facing) {
+    var pants = darkenColor(color, 40);
+    var shoes = darkenColor(color, 80);
+    var s = '';
+    // Hair (slightly higher - bob)
+    s += R(5,0,6,3,color);
+    s += R(4,0,8,2,color);
+    // Head
+    s += R(5,2,6,3,SKIN);
+    s += R(4,2,1,2,color);
+    s += R(11,2,1,2,color);
+    // Eyes
+    s += R(6,3,1,1,EYE_COLOR);
+    s += R(9,3,1,1,EYE_COLOR);
+    // Body
+    s += R(5,5,6,5,color);
+    // Arms swinging (right forward, left back)
+    s += R(11,5,2,3,color);
+    s += R(12,7,2,1,SKIN);
+    s += R(3,7,2,3,color);
+    s += R(2,10,2,1,SKIN);
+    // Legs (right forward, left back)
+    s += R(8,10,3,3,pants);
+    s += R(9,13,3,1,shoes); // right foot forward
+    s += R(5,10,3,4,pants);
+    s += R(4,14,3,1,shoes); // left foot back
+    return wrapFacing(s, facing, 16, 17);
+}
+
+function spriteBlocked(color, facing) {
+    var pants = darkenColor(color, 40);
+    var shoes = darkenColor(color, 80);
+    var s = '';
+    // Question mark above head
+    s += R(7,0,3,1,'#ef4444');
+    s += R(9,1,1,2,'#ef4444');
+    s += R(7,2,2,1,'#ef4444');
+    s += R(8,4,1,1,'#ef4444');
+    // Hair (offset down for ? mark)
+    s += R(5,5,6,2,color);
+    s += R(4,5,8,2,color);
+    // Head
+    s += R(5,7,6,3,SKIN);
+    s += R(4,7,1,2,color);
+    s += R(11,7,1,2,color);
+    // Eyes (wider, surprised)
+    s += R(6,8,2,1,EYE_COLOR);
+    s += R(9,8,2,1,EYE_COLOR);
+    // Body
+    s += R(5,10,6,4,color);
+    // Arms raised in shrug
+    s += R(3,9,2,3,color);
+    s += R(2,9,1,1,SKIN);
+    s += R(11,9,2,3,color);
+    s += R(13,9,1,1,SKIN);
+    // Pants
+    s += R(5,14,3,3,pants);
+    s += R(8,14,3,3,pants);
+    // Shoes
+    s += R(5,17,3,1,shoes);
+    s += R(8,17,3,1,shoes);
+    return wrapFacing(s, facing, 16, 19);
+}
+
+function spriteSleeping(color) {
+    var pants = darkenColor(color, 40);
+    var s = '';
+    // Zzz floating
+    s += '<text x="11" y="3" fill="#71717a" font-size="4" font-weight="bold" opacity="0.6">z</text>';
+    s += '<text x="13" y="6" fill="#71717a" font-size="3" font-weight="bold" opacity="0.4">z</text>';
+    // Hair (head tilted forward)
+    s += R(5,3,6,3,color);
+    s += R(4,4,8,2,color);
+    // Head (tilted)
+    s += R(5,6,6,2,SKIN);
+    s += R(4,6,1,1,color);
+    s += R(11,6,1,1,color);
+    // Closed eyes (lines)
+    s += R(6,7,2,0.5,EYE_COLOR);
+    s += R(9,7,2,0.5,EYE_COLOR);
+    // Body (slumped)
+    s += R(5,8,6,4,color);
+    s += R(4,9,2,3,color);
+    s += R(10,9,2,3,color);
+    // Arms drooping
+    s += R(3,11,1,2,SKIN);
+    s += R(12,11,1,2,SKIN);
+    // Pants
+    s += R(5,12,6,3,pants);
+    return wrapFacing(s, 'right', 16, 16);
+}
+
+/* =============================================
+   Coordinate Helpers
+   ============================================= */
+function sceneSize() {
+    var el = document.getElementById('office-scene');
+    return { w: el.offsetWidth, h: el.offsetHeight };
+}
+
+function pctToPixel(xPct, yPct) {
+    var sz = sceneSize();
+    return { x: (xPct / 100) * sz.w, y: (yPct / 100) * sz.h };
+}
+
+function getDeskPixel(deskIdx, role) {
+    if (role === 'director') {
+        var d = DIRECTOR_DESKS[deskIdx];
+        if (!d) d = DIRECTOR_DESKS[0];
+        var p = pctToPixel(d.xPct, d.yPct);
+        return { x: p.x, y: p.y + 20 };
+    } else {
+        var d = DESKS[deskIdx];
+        if (!d) d = DESKS[0];
+        var p = pctToPixel(d.xPct, d.yPct);
+        return { x: p.x, y: p.y + 20 };
+    }
+}
+
+function getLocationSlot(locKey, charId, slots) {
+    // Find an open slot, or use least-used
+    var chars = Array.from(state.characters.values());
+    var occupied = {};
+    for (var i = 0; i < chars.length; i++) {
+        if (chars[i].id !== charId && chars[i].currentLocation === locKey) {
+            var slotIdx = chars[i].slotIndex || 0;
+            occupied[slotIdx] = true;
+        }
+    }
+    for (var j = 0; j < slots.length; j++) {
+        if (!occupied[j]) {
+            var base = pctToPixel(LOCATIONS[locKey].xPct, LOCATIONS[locKey].yPct);
+            var ch = state.characters.get(charId);
+            if (ch) ch.slotIndex = j;
+            return { x: base.x + slots[j].dx, y: base.y + slots[j].dy };
+        }
+    }
+    // All full, just stack
+    var base2 = pctToPixel(LOCATIONS[locKey].xPct, LOCATIONS[locKey].yPct);
+    return { x: base2.x, y: base2.y };
+}
+
+function getTargetLocation(charId, status, activity) {
+    var ch = state.characters.get(charId);
+    if (!ch) return pctToPixel(50, 50);
+
+    if (activity) {
+        var lower = activity.toLowerCase();
+
+        // Chat activities → meeting table (both roles)
+        if (lower.startsWith('chatting with') || lower.startsWith('broadcasting') || lower.includes('messaging')) {
+            return getLocationSlot('meetingTable', charId, MEETING_SLOTS);
+        }
+
+        // Planning/task activities → whiteboard (both roles)
+        if (lower.startsWith('created task') || lower.includes('helper') || lower.includes('dispatch') || lower.includes('planning')) {
+            return getLocationSlot('whiteboard', charId, WHITEBOARD_SLOTS);
+        }
+
+        // Agent-specific activity patterns
+        if (ch.role === 'agent') {
+            if (lower.includes('reporting') || lower.includes('results') || lower.includes('completed')) {
+                return getLocationSlot('whiteboard', charId, WHITEBOARD_SLOTS);
+            }
+            if (lower.includes('dismissed') || lower.includes('break') || lower.includes('finished')) {
+                return getLocationSlot('breakroom', charId, BREAKROOM_SLOTS);
+            }
+        }
+    }
+
+    if (ch.role === 'director') {
+        // Directors default to their director desk
+        switch (status) {
+            case 'working':
+                return getDeskPixel(ch.deskIndex, 'director');
+            case 'idle':
+                return getDeskPixel(ch.deskIndex, 'director');
+            case 'blocked':
+                return getDeskPixel(ch.deskIndex, 'director');
+            default:
+                return getDeskPixel(ch.deskIndex, 'director');
+        }
+    } else {
+        // Agents stay at their desk for all statuses.
+        // Breakroom is only triggered by explicit activity keywords (dismissed/break/finished) above.
+        return getDeskPixel(ch.deskIndex, 'agent');
+    }
+}
+
+function getLocationName(status, activity, role) {
+    if (activity) {
+        var lower = activity.toLowerCase();
+        if (lower.startsWith('chatting with') || lower.startsWith('broadcasting') || lower.includes('messaging'))
+            return 'meeting';
+        if (lower.startsWith('created task') || lower.includes('helper') || lower.includes('dispatch') || lower.includes('planning'))
+            return 'whiteboard';
+
+        // Agent-specific patterns
+        if (role === 'agent') {
+            if (lower.includes('reporting') || lower.includes('results') || lower.includes('completed'))
+                return 'whiteboard';
+            if (lower.includes('dismissed') || lower.includes('break') || lower.includes('finished'))
+                return 'breakroom';
+        }
+    }
+
+    if (role === 'director') {
+        // Directors always at their desk (never cooler/breakroom)
+        return 'desk';
+    }
+
+    // Agents stay at desk for all statuses.
+    // Breakroom is only triggered by explicit activity keywords (dismissed/break/finished) above.
+    return 'desk';
+}
+
+function getSpriteForState(ch) {
+    var loc = ch.currentLocation;
+    var status = ch.status || 'idle';
+    var facing = ch.facing || 'right';
+
+    if (loc === 'desk' && status === 'working') return spriteSitting(ch.color, facing);
+    if (loc === 'desk' && status === 'blocked') return spriteBlocked(ch.color, facing);
+    if (loc === 'desk' && status === 'unknown') return spriteSleeping(ch.color);
+    if (loc === 'desk' && status === 'idle') return spriteSitting(ch.color, facing);
+    if (loc === 'meeting') return spriteStandTable(ch.color, facing);
+    if (loc === 'whiteboard') return spriteStandBoard(ch.color, facing);
+    if (loc === 'breakroom') return spriteStandIdle(ch.color, facing);
+    if (loc === 'cooler') return spriteStandIdle(ch.color, facing);
+    return spriteStandIdle(ch.color, facing);
+}
+
+function getAnimClass(ch) {
+    var loc = ch.currentLocation;
+    var status = ch.status || 'idle';
+    if (loc === 'desk' && status === 'working') return 'anim-typing';
+    if (loc === 'desk' && status === 'blocked') return 'anim-confused';
+    if (loc === 'desk' && status === 'unknown') return 'anim-sleeping';
+    if (loc === 'desk' && status === 'idle') return 'anim-idle';
+    if (loc === 'desk' && ch.role === 'director') return 'anim-typing';
+    if (loc === 'breakroom') return 'anim-idle';
+    if (loc === 'cooler') return 'anim-idle';
+    if (loc === 'meeting') return 'anim-idle';
+    if (loc === 'whiteboard') return 'anim-idle';
+    return 'anim-idle';
+}
+
+function getStatusColor(status) {
+    switch (status) {
+        case 'working': return 'var(--status-working)';
+        case 'idle': return 'var(--status-idle)';
+        case 'blocked': return 'var(--status-blocked)';
+        case 'unknown': return 'var(--status-unknown)';
+        default: return 'var(--status-idle)';
+    }
+}
+
+/* =============================================
+   Assign Desk
+   ============================================= */
+function assignDesk(charId, role) {
+    if (role === 'director') {
+        for (var i = 0; i < DIRECTOR_DESKS.length; i++) {
+            if (!state.directorDesks[i]) {
+                state.directorDesks[i] = charId;
+                return i;
+            }
+        }
+        return 0;
+    } else {
+        for (var i = 0; i < DESKS.length; i++) {
+            if (!state.agentDesks[i]) {
+                state.agentDesks[i] = charId;
+                return i;
+            }
+        }
+        return 0;
+    }
+}
+
+function releaseDesk(charId, role) {
+    if (role === 'director') {
+        for (var i = 0; i < state.directorDesks.length; i++) {
+            if (state.directorDesks[i] === charId) {
+                state.directorDesks[i] = null;
+                return;
+            }
+        }
+    } else {
+        for (var i = 0; i < state.agentDesks.length; i++) {
+            if (state.agentDesks[i] === charId) {
+                state.agentDesks[i] = null;
+                return;
+            }
+        }
+    }
+}
+
+/* =============================================
+   Movement System
+   ============================================= */
+var MOVE_SPEED = 150; // pixels per second
+var MIN_MOVE_MS = 400;
+var MAX_MOVE_MS = 1800;
+var WALK_FRAME_MS = 180;
+
+function moveCharacter(charId, targetX, targetY, onDone) {
+    var ch = state.characters.get(charId);
+    if (!ch) return;
+
+    var el = document.getElementById('char-' + charId);
+    if (!el) return;
+
+    var dx = targetX - ch.x;
+    var dy = targetY - ch.y;
+    var dist = Math.sqrt(dx*dx + dy*dy);
+
+    if (dist < 3) {
+        // Already there
+        ch.x = targetX;
+        ch.y = targetY;
+        if (onDone) onDone();
+        return;
+    }
+
+    var durMs = Math.max(MIN_MOVE_MS, Math.min(MAX_MOVE_MS, (dist / MOVE_SPEED) * 1000));
+
+    // Facing
+    ch.facing = dx >= 0 ? 'right' : 'left';
+    ch.isMoving = true;
+
+    // Remove idle animation during walk
+    el.className = 'character';
+
+    // Start walk frame cycling
+    startWalkAnim(charId);
+
+    // CSS transition
+    el.style.transition = 'left ' + durMs + 'ms linear, top ' + durMs + 'ms linear';
+    el.style.left = targetX + 'px';
+    el.style.top = targetY + 'px';
+
+    // Clear previous timeout
+    if (moveTimeouts[charId]) clearTimeout(moveTimeouts[charId]);
+
+    moveTimeouts[charId] = setTimeout(function() {
+        ch.x = targetX;
+        ch.y = targetY;
+        ch.isMoving = false;
+        stopWalkAnim(charId);
+        el.style.transition = '';
+
+        // Set arrival pose
+        renderCharacterPose(charId);
+        if (onDone) onDone();
+    }, durMs);
+}
+
+function startWalkAnim(charId) {
+    stopWalkAnim(charId);
+    var frame = 0;
+    var ch = state.characters.get(charId);
+    if (!ch) return;
+
+    var spriteEl = document.querySelector('#char-' + charId + ' .char-sprite');
+    if (!spriteEl) return;
+
+    walkTimers[charId] = setInterval(function() {
+        if (!ch) return;
+        frame = (frame + 1) % 2;
+        spriteEl.innerHTML = frame === 0
+            ? spriteWalkFrame1(ch.color, ch.facing)
+            : spriteWalkFrame2(ch.color, ch.facing);
+    }, WALK_FRAME_MS);
+}
+
+function stopWalkAnim(charId) {
+    if (walkTimers[charId]) {
+        clearInterval(walkTimers[charId]);
+        delete walkTimers[charId];
+    }
+}
+
+function renderCharacterPose(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch) return;
+    var el = document.getElementById('char-' + charId);
+    if (!el) return;
+
+    var spriteEl = el.querySelector('.char-sprite');
+    if (spriteEl) {
+        spriteEl.innerHTML = getSpriteForState(ch);
+    }
+
+    // Set animation class
+    el.className = 'character ' + getAnimClass(ch);
+
+    // Update status dot
+    var dot = el.querySelector('.char-dot');
+    if (dot) dot.style.background = getStatusColor(ch.status);
+
+    // Update activity label
+    var actEl = el.querySelector('.char-activity');
+    if (actEl) actEl.textContent = truncate(ch.activity || '', 18);
+
+    // Update monitor glow for desk
+    var monitorOn = ch.currentLocation === 'desk' && (ch.status === 'working' || ch.role === 'director');
+    updateDeskMonitor(ch.deskIndex, monitorOn, ch.role);
+}
+
+function updateDeskMonitor(deskIdx, isOn, role) {
+    var prefix = (role === 'director') ? 'director-monitor-' : 'desk-monitor-';
+    var monEl = document.getElementById(prefix + deskIdx);
+    if (monEl) {
+        if (isOn) monEl.classList.add('on');
+        else monEl.classList.remove('on');
+    }
+}
+
+/* =============================================
+   Agent Departure Flow
+   whiteboard (report) → random activities → leave
+   ============================================= */
+
+/* Random gibberish for chat bubbles */
+var CHAT_GIBBERISH = [
+    '@#!?', '...!!', '?!@#', '#$%!', '!!??', '@!?!',
+    '~*!@', '???', '!!?!', '#@!', '$#@!', '!?!?',
+    '**!!', '@#$', '?!?!', '!@#!', '##??', '~!@#'
+];
+
+function randInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function pickRandom(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function startAgentDepartureFlow(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch || ch.role !== 'agent') return;
+
+    // If agent hasn't reached their desk yet, defer departure until they arrive
+    if (!ch.arrivedAtDesk) {
+        ch.pendingDeparture = true;
+        return;
+    }
+
+    // Stop any existing movement/timers
+    stopWalkAnim(charId);
+    if (moveTimeouts[charId]) clearTimeout(moveTimeouts[charId]);
+    if (breakroomTimers[charId]) { clearTimeout(breakroomTimers[charId]); delete breakroomTimers[charId]; }
+
+    // Turn off desk monitor
+    updateDeskMonitor(ch.deskIndex, false, ch.role);
+
+    departingAgents[charId] = { phase: 'queued', timers: [] };
+
+    if (!whiteboardReporter) {
+        moveToWhiteboardReport(charId);
+    } else {
+        // Queue up and wait near the whiteboard
+        whiteboardQueue.push(charId);
+        var wbPos = pctToPixel(LOCATIONS.whiteboard.xPct, LOCATIONS.whiteboard.yPct);
+        var qIdx = whiteboardQueue.indexOf(charId);
+        var slot = WHITEBOARD_QUEUE_SLOTS[qIdx % WHITEBOARD_QUEUE_SLOTS.length];
+        ch.currentLocation = 'whiteboard';
+        ch.activity = 'Waiting to report';
+        moveCharacter(charId, wbPos.x + slot.dx, wbPos.y + slot.dy, function() {
+            renderCharacterPose(charId);
+        });
+    }
+}
+
+function moveToWhiteboardReport(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch || !departingAgents[charId]) return;
+
+    whiteboardReporter = charId;
+    departingAgents[charId].phase = 'whiteboard';
+    ch.currentLocation = 'whiteboard';
+    ch.activity = 'Reporting results';
+    ch.status = 'working';
+
+    var target = getLocationSlot('whiteboard', charId, WHITEBOARD_SLOTS);
+    moveCharacter(charId, target.x, target.y, function() {
+        renderCharacterPose(charId);
+
+        // Stay at whiteboard, then start random activities
+        var timer = setTimeout(function() {
+            leaveWhiteboardReport(charId);
+            startRandomActivities(charId);
+        }, WHITEBOARD_REPORT_MS);
+        departingAgents[charId].timers.push(timer);
+    });
+}
+
+function leaveWhiteboardReport(charId) {
+    if (whiteboardReporter === charId) {
+        whiteboardReporter = null;
+        // Advance the next queued agent
+        while (whiteboardQueue.length > 0) {
+            var nextId = whiteboardQueue.shift();
+            if (state.characters.has(nextId) && departingAgents[nextId]) {
+                moveToWhiteboardReport(nextId);
+                return;
+            }
+        }
+    }
+}
+
+/* ── Random post-work activities ── */
+
+var RANDOM_ACTIVITIES = ['waterCooler', 'breakroom', 'chat', 'leave'];
+
+function startRandomActivities(charId) {
+    if (!departingAgents[charId]) return;
+
+    // Pick 1-3 random activities, always ending with 'leave'
+    var count = randInt(1, 3);
+    var activities = [];
+    var pool = ['waterCooler', 'breakroom', 'chat'];
+    for (var i = 0; i < count; i++) {
+        activities.push(pickRandom(pool));
+    }
+    activities.push('leave');
+
+    departingAgents[charId].activityQueue = activities;
+    departingAgents[charId].phase = 'random';
+    doNextRandomActivity(charId);
+}
+
+function doNextRandomActivity(charId) {
+    var dep = departingAgents[charId];
+    if (!dep || !dep.activityQueue || dep.activityQueue.length === 0) {
+        finalAgentLeave(charId);
+        return;
+    }
+
+    var ch = state.characters.get(charId);
+    if (!ch) return;
+
+    var activity = dep.activityQueue.shift();
+
+    if (activity === 'leave') {
+        finalAgentLeave(charId);
+    } else if (activity === 'waterCooler') {
+        doWaterCoolerActivity(charId);
+    } else if (activity === 'breakroom') {
+        doBreakroomActivity(charId);
+    } else if (activity === 'chat') {
+        doChatActivity(charId);
+    } else {
+        doNextRandomActivity(charId);
+    }
+}
+
+function doWaterCoolerActivity(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch || !departingAgents[charId]) return;
+
+    ch.currentLocation = 'waterCooler';
+    ch.activity = 'Getting water';
+    ch.status = 'idle';
+
+    var target = getLocationSlot('waterCooler', charId, COOLER_SLOTS);
+    moveCharacter(charId, target.x, target.y, function() {
+        renderCharacterPose(charId);
+
+        var duration = randInt(10, 20) * 1000;
+        var timer = setTimeout(function() {
+            doNextRandomActivity(charId);
+        }, duration);
+        departingAgents[charId].timers.push(timer);
+    });
+}
+
+function doBreakroomActivity(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch || !departingAgents[charId]) return;
+
+    ch.currentLocation = 'breakroom';
+    ch.activity = 'On break';
+    ch.status = 'idle';
+
+    var target = getLocationSlot('breakroom', charId, BREAKROOM_SLOTS);
+    moveCharacter(charId, target.x, target.y, function() {
+        renderCharacterPose(charId);
+
+        var duration = randInt(15, 30) * 1000;
+        var timer = setTimeout(function() {
+            doNextRandomActivity(charId);
+        }, duration);
+        departingAgents[charId].timers.push(timer);
+    });
+}
+
+function doChatActivity(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch || !departingAgents[charId]) return;
+
+    // Find another character who is idle or also departing (not currently moving)
+    var chatTarget = null;
+    state.characters.forEach(function(other) {
+        if (chatTarget) return;
+        if (other.id === charId) return;
+        if (other.isMoving) return;
+        // Prefer characters at desk, cooler, or breakroom (not at entrance or whiteboard reporting)
+        if (other.currentLocation === 'entrance') return;
+        if (whiteboardReporter === other.id) return;
+        chatTarget = other;
+    });
+
+    if (!chatTarget) {
+        // Nobody to chat with, skip to next activity
+        doNextRandomActivity(charId);
+        return;
+    }
+
+    // Walk to the side of the chat target (not on top!)
+    ch.currentLocation = 'meeting';
+    ch.activity = 'Chatting';
+    ch.status = 'idle';
+
+    var targetEl = document.getElementById('char-' + chatTarget.id);
+    // Stand 50px to the left or right so sprites don't overlap
+    var side = (ch.x < chatTarget.x) ? -1 : 1;
+    var targetX = chatTarget.x + (side * 100);
+    var targetY = chatTarget.y + randInt(-5, 5);
+
+    moveCharacter(charId, targetX, targetY, function() {
+        renderCharacterPose(charId);
+
+        // Make the chat target turn to face the visitor and respond
+        var prevFacing = chatTarget.facing;
+        chatTarget.facing = (chatTarget.x < ch.x) ? 'right' : 'left';
+        renderCharacterPose(chatTarget.id);
+
+        // Show gibberish speech bubbles on both characters
+        var rounds = randInt(2, 4);
+        var delay = 0;
+        for (var r = 0; r < rounds; r++) {
+            (function(round) {
+                var t1 = setTimeout(function() {
+                    if (!state.characters.has(charId)) return;
+                    showSpeechBubble({
+                        terminalId: charId,
+                        message: pickRandom(CHAT_GIBBERISH),
+                        duration: 2000
+                    });
+                }, delay);
+                departingAgents[charId].timers.push(t1);
+
+                var t2 = setTimeout(function() {
+                    if (!state.characters.has(chatTarget.id)) return;
+                    showSpeechBubble({
+                        terminalId: chatTarget.id,
+                        message: pickRandom(CHAT_GIBBERISH),
+                        duration: 2000
+                    });
+                }, delay + 1200);
+                departingAgents[charId].timers.push(t2);
+            })(r);
+            delay += 3000;
+        }
+
+        // After chat rounds finish, restore boss facing and move on
+        var timer = setTimeout(function() {
+            // Restore chat target's original facing
+            if (state.characters.has(chatTarget.id)) {
+                chatTarget.facing = prevFacing;
+                renderCharacterPose(chatTarget.id);
+            }
+            doNextRandomActivity(charId);
+        }, delay + 2000);
+        departingAgents[charId].timers.push(timer);
+    });
+}
+
+function finalAgentLeave(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch) return;
+
+    // Clean up departure state
+    delete departingAgents[charId];
+
+    // Walk to entrance and fade out
+    var entrancePos = pctToPixel(LOCATIONS.entrance.xPct, LOCATIONS.entrance.yPct);
+    ch.activity = 'Leaving';
+    moveCharacter(charId, entrancePos.x, entrancePos.y, function() {
+        var el = document.getElementById('char-' + charId);
+        if (el) {
+            el.classList.add('anim-fadeout');
+            setTimeout(function() {
+                if (el.parentNode) el.parentNode.removeChild(el);
+            }, 400);
+        }
+        releaseDesk(charId, ch.role);
+        updateDeskMonitor(ch.deskIndex, false, ch.role);
+        state.characters.delete(charId);
+        updateAgentCount();
+    });
+}
+
+function cancelDepartureFlow(charId) {
+    if (!departingAgents[charId]) return;
+
+    // Clear all departure timers
+    departingAgents[charId].timers.forEach(function(t) { clearTimeout(t); });
+
+    // Free whiteboard if this agent was reporting
+    if (whiteboardReporter === charId) {
+        leaveWhiteboardReport(charId);
+    }
+
+    // Remove from queue
+    var qIdx = whiteboardQueue.indexOf(charId);
+    if (qIdx >= 0) whiteboardQueue.splice(qIdx, 1);
+
+    // Clear breakroom timer if any
+    if (breakroomTimers[charId]) {
+        clearTimeout(breakroomTimers[charId]);
+        delete breakroomTimers[charId];
+    }
+
+    delete departingAgents[charId];
+}
+
+/* =============================================
+   Character CRUD
+   ============================================= */
+function addCharacter(data) {
+    if (!data || !data.terminalId) return;
+    if (state.characters.has(data.terminalId)) {
+        // Re-summoned agent: cancel departure flow and send back to desk
+        if (departingAgents[data.terminalId]) {
+            cancelDepartureFlow(data.terminalId);
+            var ch = state.characters.get(data.terminalId);
+            if (ch) {
+                ch.status = data.status || 'working';
+                ch.activity = data.activity || 'Re-summoned';
+                ch.currentLocation = 'desk';
+                var target = getDeskPixel(ch.deskIndex, ch.role);
+                moveCharacter(ch.id, target.x, target.y, function() {
+                    updateDeskMonitor(ch.deskIndex, true, ch.role);
+                    renderCharacterPose(ch.id);
+                });
+            }
+            return;
+        }
+        updateCharacterState(data);
+        return;
+    }
+
+    var role = data.role || 'director';
+    var deskIdx = assignDesk(data.terminalId, role);
+    var color = data.color || DEFAULT_COLORS[deskIdx % DEFAULT_COLORS.length];
+    var entrancePos = pctToPixel(LOCATIONS.entrance.xPct, LOCATIONS.entrance.yPct);
+
+    var ch = {
+        id: data.terminalId,
+        name: data.name || 'Agent',
+        color: color,
+        role: role,
+        status: data.status || 'idle',
+        activity: data.activity || 'Connected',
+        deskIndex: deskIdx,
+        x: entrancePos.x,
+        y: entrancePos.y,
+        targetX: 0,
+        targetY: 0,
+        facing: 'right',
+        isMoving: false,
+        currentLocation: 'entrance',
+        slotIndex: 0,
+        arrivedAtDesk: false,
+        pendingDeparture: false
+    };
+
+    state.characters.set(data.terminalId, ch);
+
+    // Create DOM element
+    var el = document.createElement('div');
+    el.id = 'char-' + data.terminalId;
+    el.className = 'character anim-fadein';
+    el.style.left = ch.x + 'px';
+    el.style.top = ch.y + 'px';
+    el.innerHTML =
+        '<div class="char-dot" style="background:' + getStatusColor(ch.status) + '"></div>' +
+        '<div class="char-sprite">' + spriteStandIdle(ch.color, 'right') + '</div>' +
+        '<div class="char-name">' + escapeHtml(truncate(ch.name, 10)) + '</div>' +
+        '<div class="char-activity">' + escapeHtml(truncate(ch.activity, 18)) + '</div>';
+
+    // Directors: show name on desk label; Agents: hover tooltip
+    if (role === 'director') {
+        var label = document.getElementById('director-desk-label-' + deskIdx);
+        if (label) label.textContent = ch.name;
+    } else {
+        el.title = data.spawnedBy ? (ch.name + ' (spawned by ' + data.spawnedBy + ')') : ch.name;
+    }
+
+    el.addEventListener('click', function() {
+        postToHost({ type: 'characterClicked', terminalId: data.terminalId });
+    });
+
+    document.getElementById('character-layer').appendChild(el);
+    updateAgentCount();
+
+    // Walk to target location after a brief delay
+    setTimeout(function() {
+        var loc = getLocationName(ch.status, ch.activity, ch.role);
+        ch.currentLocation = loc;
+        var target = getTargetLocation(ch.id, ch.status, ch.activity);
+        moveCharacter(ch.id, target.x, target.y, function() {
+            ch.arrivedAtDesk = true;
+            if (loc === 'desk') {
+                updateDeskMonitor(ch.deskIndex, true, ch.role);
+                renderCharacterPose(ch.id);
+            }
+            // If departure was requested while walking, start it now
+            if (ch.pendingDeparture) {
+                ch.pendingDeparture = false;
+                setTimeout(function() {
+                    startAgentDepartureFlow(ch.id);
+                }, 2000); // Sit at desk for 2s before departing
+            }
+        });
+    }, 100);
+}
+
+function removeCharacter(terminalId) {
+    if (!terminalId) return;
+    var ch = state.characters.get(terminalId);
+    if (!ch) return;
+
+    // Agents go through departure flow: whiteboard → breakroom → leave
+    if (ch.role === 'agent' && !departingAgents[terminalId]) {
+        if (bubbleTimers[terminalId]) clearTimeout(bubbleTimers[terminalId]);
+        startAgentDepartureFlow(terminalId);
+        return;
+    }
+
+    // Directors (or agents in finalAgentLeave) - immediate departure
+    stopWalkAnim(terminalId);
+    if (moveTimeouts[terminalId]) clearTimeout(moveTimeouts[terminalId]);
+    if (bubbleTimers[terminalId]) clearTimeout(bubbleTimers[terminalId]);
+    if (breakroomTimers[terminalId]) clearTimeout(breakroomTimers[terminalId]);
+
+    var entrancePos = pctToPixel(LOCATIONS.entrance.xPct, LOCATIONS.entrance.yPct);
+
+    // Walk to entrance then remove
+    moveCharacter(terminalId, entrancePos.x, entrancePos.y, function() {
+        var el = document.getElementById('char-' + terminalId);
+        if (el) {
+            el.classList.add('anim-fadeout');
+            setTimeout(function() {
+                if (el.parentNode) el.parentNode.removeChild(el);
+            }, 400);
+        }
+        // Clear desk label for directors
+        if (ch.role === 'director') {
+            var label = document.getElementById('director-desk-label-' + ch.deskIndex);
+            if (label) label.textContent = '';
+        }
+        releaseDesk(terminalId, ch.role);
+        updateDeskMonitor(ch.deskIndex, false, ch.role);
+        state.characters.delete(terminalId);
+        updateAgentCount();
+    });
+}
+
+function triggerAgentLeave(charId) {
+    var ch = state.characters.get(charId);
+    if (!ch || ch.role !== 'agent') return;
+    removeCharacter(charId);
+}
+
+function updateCharacterState(data) {
+    if (!data || !data.terminalId) return;
+    var ch = state.characters.get(data.terminalId);
+    if (!ch) return;
+
+    var oldLoc = ch.currentLocation;
+    if (data.status !== undefined) ch.status = data.status;
+    if (data.activity !== undefined) ch.activity = data.activity;
+
+    var newLoc = getLocationName(ch.status, ch.activity, ch.role);
+    ch.currentLocation = newLoc;
+
+    // Update activity text immediately
+    var el = document.getElementById('char-' + ch.id);
+    if (el) {
+        var actEl = el.querySelector('.char-activity');
+        if (actEl) actEl.textContent = truncate(ch.activity || '', 18);
+        var dot = el.querySelector('.char-dot');
+        if (dot) dot.style.background = getStatusColor(ch.status);
+    }
+
+    // Manage breakroom timer for agents
+    if (ch.role === 'agent') {
+        if (newLoc === 'breakroom' && oldLoc !== 'breakroom') {
+            // Entering breakroom - start timeout
+            if (breakroomTimers[ch.id]) clearTimeout(breakroomTimers[ch.id]);
+            breakroomTimers[ch.id] = setTimeout(function() {
+                triggerAgentLeave(ch.id);
+            }, BREAKROOM_TIMEOUT_MS);
+        } else if (newLoc !== 'breakroom' && oldLoc === 'breakroom') {
+            // Leaving breakroom - cancel timeout
+            if (breakroomTimers[ch.id]) {
+                clearTimeout(breakroomTimers[ch.id]);
+                delete breakroomTimers[ch.id];
+            }
+        }
+    }
+
+    // If location changed, walk there
+    if (newLoc !== oldLoc || ch.isMoving) {
+        // Turn off old desk monitor if leaving desk
+        if (oldLoc === 'desk') updateDeskMonitor(ch.deskIndex, false, ch.role);
+
+        var target = getTargetLocation(ch.id, ch.status, ch.activity);
+        moveCharacter(ch.id, target.x, target.y);
+    } else {
+        // Same location, just update pose
+        renderCharacterPose(ch.id);
+    }
+}
+
+/* =============================================
+   Speech Bubbles
+   ============================================= */
+function showSpeechBubble(data) {
+    if (!data || !data.terminalId) return;
+    var ch = state.characters.get(data.terminalId);
+    if (!ch) return;
+
+    var el = document.getElementById('char-' + data.terminalId);
+    if (!el) return;
+
+    // Remove existing bubble
+    var existing = el.querySelector('.speech-bubble');
+    if (existing) existing.parentNode.removeChild(existing);
+    if (bubbleTimers[data.terminalId]) clearTimeout(bubbleTimers[data.terminalId]);
+
+    var bubble = document.createElement('div');
+    bubble.className = 'speech-bubble';
+    bubble.textContent = truncate(data.message || '', 60);
+    el.appendChild(bubble);
+
+    var duration = data.duration || 4000;
+    bubbleTimers[data.terminalId] = setTimeout(function() {
+        bubble.classList.add('removing');
+        setTimeout(function() {
+            if (bubble.parentNode) bubble.parentNode.removeChild(bubble);
+        }, 300);
+    }, duration);
+}
+
+/* =============================================
+   Whiteboard Sidebar
+   ============================================= */
+function updateWhiteboard(data) {
+    if (!data) return;
+    if (data.todo !== undefined) setText('wb-todo', data.todo);
+    if (data.inProgress !== undefined) setText('wb-doing', data.inProgress);
+    if (data.done !== undefined) setText('wb-done', data.done);
+    if (data.recentTask) setText('wb-recent', truncate(data.recentTask, 40));
+}
+
+/* =============================================
+   Utilities
+   ============================================= */
+function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+}
+
+function truncate(s, max) {
+    if (!s) return '';
+    return s.length > max ? s.substring(0, max) + '...' : s;
+}
+
+function escapeHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+function updateAgentCount() {
+    var count = state.characters.size;
+    setText('agent-count', count + ' agent' + (count !== 1 ? 's' : ''));
+    var empty = document.getElementById('empty-state');
+    if (empty) {
+        empty.classList.toggle('hidden', count > 0);
+    }
+}
+
+function postToHost(msg) {
+    try {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage(msg);
+        }
+    } catch(e) { console.error('postToHost error:', e); }
+}
+
+/* =============================================
+   Build Furniture
+   ============================================= */
+function buildFurniture() {
+    var layer = document.getElementById('furniture-layer');
+    if (!layer) return;
+
+    // Build director desks at the top (larger, with nameplates)
+    for (var i = 0; i < DIRECTOR_DESKS.length; i++) {
+        var pos = pctToPixel(DIRECTOR_DESKS[i].xPct, DIRECTOR_DESKS[i].yPct);
+        var desk = document.createElement('div');
+        desk.className = 'furniture';
+        desk.style.left = pos.x + 'px';
+        desk.style.top = pos.y + 'px';
+        desk.innerHTML =
+            '<div class="director-desk">' +
+                '<div class="desk-label" id="director-desk-label-' + i + '"></div>' +
+                '<div class="desk-monitor" id="director-monitor-' + i + '"></div>' +
+                '<div class="desk-chair"></div>' +
+            '</div>';
+        layer.appendChild(desk);
+        state.directorDesks[i] = null;
+    }
+
+    // Build agent workstation desks
+    for (var i = 0; i < DESKS.length; i++) {
+        var pos = pctToPixel(DESKS[i].xPct, DESKS[i].yPct);
+        var desk = document.createElement('div');
+        desk.className = 'furniture';
+        desk.style.left = pos.x + 'px';
+        desk.style.top = pos.y + 'px';
+        desk.innerHTML =
+            '<div class="desk">' +
+                '<div class="desk-monitor" id="desk-monitor-' + i + '"></div>' +
+                '<div class="desk-chair"></div>' +
+            '</div>';
+        layer.appendChild(desk);
+        state.agentDesks[i] = null;
+    }
+
+    // Meeting table
+    var mtPos = pctToPixel(LOCATIONS.meetingTable.xPct, LOCATIONS.meetingTable.yPct);
+    var mt = document.createElement('div');
+    mt.className = 'furniture';
+    mt.style.left = mtPos.x + 'px';
+    mt.style.top = mtPos.y + 'px';
+    mt.innerHTML = '<div class="meeting-table"></div>';
+    layer.appendChild(mt);
+
+    // Whiteboard
+    var wbPos = pctToPixel(LOCATIONS.whiteboard.xPct, LOCATIONS.whiteboard.yPct);
+    var wb = document.createElement('div');
+    wb.className = 'furniture';
+    wb.style.left = wbPos.x + 'px';
+    wb.style.top = wbPos.y + 'px';
+    wb.innerHTML =
+        '<div class="whiteboard-furniture">' +
+            '<div class="whiteboard-content">' +
+                '<div class="wb-line"></div>' +
+                '<div class="wb-line"></div>' +
+                '<div class="wb-line"></div>' +
+            '</div>' +
+        '</div>';
+    layer.appendChild(wb);
+
+    // Water cooler
+    var wcPos = pctToPixel(LOCATIONS.waterCooler.xPct, LOCATIONS.waterCooler.yPct);
+    var wc = document.createElement('div');
+    wc.className = 'furniture';
+    wc.style.left = wcPos.x + 'px';
+    wc.style.top = wcPos.y + 'px';
+    wc.innerHTML =
+        '<div class="water-cooler"><div class="cooler-stand"></div></div>';
+    layer.appendChild(wc);
+
+    // Plant in top-right corner of break room (against the wall)
+    var breakTopRight = pctToPixel(96, 58);
+    var plant = document.createElement('div');
+    plant.className = 'furniture';
+    plant.style.left = breakTopRight.x + 'px';
+    plant.style.top = breakTopRight.y + 'px';
+    plant.innerHTML = '<div class="plant"><div class="plant-leaves"></div><div class="plant-pot"></div></div>';
+    layer.appendChild(plant);
+
+    // Couch in break area
+    var couchPos = pctToPixel(LOCATIONS.breakroom.xPct, LOCATIONS.breakroom.yPct);
+    var couch = document.createElement('div');
+    couch.className = 'furniture';
+    couch.style.left = couchPos.x + 'px';
+    couch.style.top = couchPos.y + 'px';
+    couch.innerHTML =
+        '<div class="couch"><div class="couch-arm-l"></div><div class="couch-arm-r"></div></div>';
+    layer.appendChild(couch);
+
+    // Plant in bottom-right corner of break room (tucked in corner)
+    var breakBottomRight = pctToPixel(95, 92);
+    var plant2 = document.createElement('div');
+    plant2.className = 'furniture';
+    plant2.style.left = breakBottomRight.x + 'px';
+    plant2.style.top = breakBottomRight.y + 'px';
+    plant2.innerHTML = '<div class="plant"><div class="plant-leaves"></div><div class="plant-pot"></div></div>';
+    layer.appendChild(plant2);
+
+    // Entrance door at bottom
+    var doorPos = pctToPixel(LOCATIONS.entrance.xPct, LOCATIONS.entrance.yPct);
+    var door = document.createElement('div');
+    door.className = 'furniture';
+    door.style.left = (doorPos.x - 16) + 'px';
+    door.style.top = (doorPos.y - 5) + 'px';
+    door.innerHTML = '<div class="entrance-door"><div class="door-handle"></div></div>';
+    layer.appendChild(door);
+}
+
+/* =============================================
+   Resize Handler
+   ============================================= */
+var resizeTimer = null;
+function onResize() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+        // Rebuild furniture positions
+        var layer = document.getElementById('furniture-layer');
+        if (layer) layer.innerHTML = '';
+
+        // Preserve desk assignments before rebuild
+        var savedDirectorDesks = state.directorDesks.slice();
+        var savedAgentDesks = state.agentDesks.slice();
+        buildFurniture();
+        state.directorDesks = savedDirectorDesks;
+        state.agentDesks = savedAgentDesks;
+
+        // Reposition all characters
+        state.characters.forEach(function(ch) {
+            var target = getTargetLocation(ch.id, ch.status, ch.activity);
+            ch.x = target.x;
+            ch.y = target.y;
+            var el = document.getElementById('char-' + ch.id);
+            if (el) {
+                el.style.transition = '';
+                el.style.left = target.x + 'px';
+                el.style.top = target.y + 'px';
+            }
+            renderCharacterPose(ch.id);
+        });
+    }, 200);
+}
+
+/* =============================================
+   Message Handler
+   ============================================= */
+function handleMessage(msg) {
+    if (typeof msg !== 'string') return;
+    var idx = msg.indexOf(':');
+    if (idx === -1) return;
+    var cmd = msg.substring(0, idx);
+    var payload = msg.substring(idx + 1);
+
+    switch (cmd) {
+        case 'theme':
+            if (payload === 'light') {
+                document.body.classList.remove('dark');
+                document.body.classList.add('light');
+            } else {
+                document.body.classList.remove('light');
+                document.body.classList.add('dark');
+            }
+            break;
+        case 'addCharacter':
+            try { addCharacter(JSON.parse(payload)); } catch(e) { console.error('addCharacter error:', e, payload); }
+            break;
+        case 'removeCharacter':
+            removeCharacter(payload.trim());
+            break;
+        case 'updateState':
+            try { updateCharacterState(JSON.parse(payload)); } catch(e) { console.error('updateState error:', e, payload); }
+            break;
+        case 'speechBubble':
+            try { showSpeechBubble(JSON.parse(payload)); } catch(e) { console.error('speechBubble error:', e, payload); }
+            break;
+        case 'whiteboard':
+            try { updateWhiteboard(JSON.parse(payload)); } catch(e) { console.error('whiteboard error:', e, payload); }
+            break;
+        default:
+            break;
+    }
+}
+
+/* =============================================
+   Initialization
+   ============================================= */
+document.addEventListener('DOMContentLoaded', function() {
+    buildFurniture();
+    updateAgentCount();
+
+    window.addEventListener('resize', onResize);
+
+    try {
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', function(event) {
+                handleMessage(event.data);
+            });
+        }
+    } catch (e) {}
+
+    postToHost({ type: 'ready' });
+});
+</script>
+</body>
+</html>

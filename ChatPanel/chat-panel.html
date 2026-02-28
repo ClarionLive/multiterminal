@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Claude Chat</title>
+    <style>
+        :root {
+            --bg-color: #1e1e1e;
+            --text-color: #d4d4d4;
+            --bubble-bg: #2d2d2d;
+            --timestamp-color: #808080;
+            --border-color: #3c3c3c;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-size: 13px;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            padding: 8px 12px;
+            background-color: #252526;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .pause-btn {
+            background-color: #3c3c3c;
+            border: 1px solid #555;
+            color: #ffffff;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .pause-btn:hover {
+            background-color: #4a4a4a;
+        }
+
+        .pause-btn.paused {
+            background-color: #E74C3C;
+            border-color: #C0392B;
+        }
+
+        .pause-btn.paused:hover {
+            background-color: #C0392B;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--timestamp-color);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #808080;
+        }
+
+        .status-dot.connected {
+            background-color: #4CAF50;
+        }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 85%;
+        }
+
+        .message.outgoing {
+            align-self: flex-end;
+        }
+
+        .message.incoming {
+            align-self: flex-start;
+        }
+
+        .message-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 4px;
+            font-size: 11px;
+        }
+
+        .terminal-name {
+            font-weight: 600;
+        }
+
+        .terminal-badge {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .message-bubble {
+            padding: 10px 14px;
+            border-radius: 12px;
+            background-color: var(--bubble-bg);
+            position: relative;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .message.outgoing .message-bubble {
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.incoming .message-bubble {
+            border-bottom-left-radius: 4px;
+        }
+
+        .message-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 4px;
+            font-size: 10px;
+            color: var(--timestamp-color);
+        }
+
+        .message-actions {
+            display: flex;
+            gap: 8px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .message:hover .message-actions {
+            opacity: 1;
+        }
+
+        .action-btn {
+            background: none;
+            border: none;
+            color: var(--timestamp-color);
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .action-btn:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: var(--text-color);
+        }
+
+        .inject-btn {
+            color: #4A90D9;
+        }
+
+        .inject-btn:hover {
+            color: #6AA8E8;
+        }
+
+        .broadcast-badge {
+            font-size: 10px;
+            background-color: rgba(255, 255, 255, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 6px;
+        }
+
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--timestamp-color);
+            text-align: center;
+            padding: 20px;
+        }
+
+        .empty-state svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .terminals-list {
+            padding: 8px 12px;
+            background-color: #252526;
+            border-top: 1px solid var(--border-color);
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .terminal-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* Light theme */
+        body.light {
+            --bg-color: #ffffff;
+            --text-color: #333333;
+            --bubble-bg: #f0f0f0;
+            --timestamp-color: #808080;
+            --border-color: #e0e0e0;
+        }
+
+        body.light .header,
+        body.light .terminals-list {
+            background-color: #f5f5f5;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Multi-Claude Chat</h1>
+        <div class="header-controls">
+            <button class="pause-btn" id="pauseBtn" onclick="togglePause()">⏸ Pause</button>
+            <div class="status">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="chat-container" id="chatContainer">
+        <div class="empty-state" id="emptyState">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+            <p>No messages yet</p>
+            <p style="font-size: 11px; margin-top: 4px;">Messages between terminals will appear here</p>
+        </div>
+    </div>
+
+    <div class="terminals-list" id="terminalsList">
+        <span style="color: var(--timestamp-color);">Terminals:</span>
+        <span id="terminalsContent">None connected</span>
+    </div>
+
+    <script>
+        // State
+        let messages = [];
+        let terminals = [];
+        let isConnected = false;
+        let isPaused = false;
+
+        // DOM elements
+        const chatContainer = document.getElementById('chatContainer');
+        const emptyState = document.getElementById('emptyState');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const terminalsContent = document.getElementById('terminalsContent');
+        const pauseBtn = document.getElementById('pauseBtn');
+
+        // WebView2 message handling
+        function sendToHost(message) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(message);
+            }
+        }
+
+        // Handle messages from C#
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                const data = event.data;
+                if (typeof data === 'string') {
+                    handleStringMessage(data);
+                } else {
+                    handleObjectMessage(data);
+                }
+            });
+        }
+
+        function handleStringMessage(data) {
+            if (data.startsWith('theme:')) {
+                const theme = data.substring(6);
+                document.body.className = theme === 'light' ? 'light' : '';
+            } else if (data.startsWith('status:')) {
+                const status = data.substring(7);
+                updateStatus(status === 'connected');
+            } else if (data.startsWith('fontSize:')) {
+                const size = parseFloat(data.substring(9));
+                if (!isNaN(size)) {
+                    document.body.style.fontSize = size + 'px';
+                }
+            }
+        }
+
+        function handleObjectMessage(data) {
+            switch (data.type) {
+                case 'message':
+                    addMessage(data.message);
+                    break;
+                case 'messages':
+                    data.messages.forEach(m => addMessage(m));
+                    break;
+                case 'terminals':
+                    updateTerminals(data.terminals);
+                    break;
+                case 'clear':
+                    clearMessages();
+                    break;
+                case 'pauseState':
+                    updatePauseState(data.isPaused);
+                    break;
+                case 'helper_message_logged':
+                    // Add native helper message with special styling
+                    addMessage({
+                        id: data.messageId || Date.now().toString(),
+                        from: data.helperName || 'Native Helper',
+                        to: data.to || 'All',
+                        content: data.message || '',
+                        timestamp: data.timestamp || new Date().toLocaleTimeString(),
+                        isNativeHelper: true,
+                        helperStatus: data.helperStatus || 'working',
+                        isBroadcast: false
+                    });
+                    break;
+            }
+        }
+
+        function updateStatus(connected) {
+            isConnected = connected;
+            statusDot.className = 'status-dot' + (connected ? ' connected' : '');
+            statusText.textContent = connected ? 'Connected' : 'Disconnected';
+        }
+
+        function updateTerminals(terminalList) {
+            terminals = terminalList;
+            if (terminals.length === 0) {
+                terminalsContent.textContent = 'None connected';
+            } else {
+                terminalsContent.innerHTML = terminals.map(t =>
+                    `<span class="terminal-item">
+                        <span class="terminal-badge" style="background-color: ${t.color}"></span>
+                        ${t.name}
+                    </span>`
+                ).join('');
+            }
+        }
+
+        function addMessage(msg) {
+            messages.push(msg);
+            renderMessage(msg);
+            emptyState.style.display = 'none';
+            scrollToBottom();
+        }
+
+        function renderMessage(msg) {
+            const messageEl = document.createElement('div');
+            messageEl.className = 'message incoming';
+            messageEl.dataset.messageId = msg.id || '';
+            messageEl.dataset.threadId = msg.threadId || '';
+            messageEl.dataset.replyToId = msg.replyToId || '';
+
+            // Check if this is a native helper message
+            const isNativeHelper = msg.isNativeHelper || false;
+            const helperStatus = msg.helperStatus || 'working';
+
+            // Calculate indent level based on whether this is a reply
+            const indentLevel = msg.replyToId ? 1 : 0;
+            const indentStyle = indentLevel > 0 ? `margin-left: ${indentLevel * 20}px; border-left: 3px solid var(--border-color);` : '';
+
+            const terminalColor = isNativeHelper ? '#F39C12' : getTerminalColor(msg.from);
+
+            // Native helper styling (semi-transparent background)
+            const nativeHelperStyle = isNativeHelper ? 'opacity: 0.85; border: 1px dashed #F39C12;' : '';
+
+            // Thread indicator if this is a reply
+            const threadIndicator = msg.replyToId ? `<span class="thread-indicator" style="color: var(--timestamp-color)">↳ Reply</span>` : '';
+
+            // Native helper badge
+            const nativeHelperBadge = isNativeHelper ? '<span class="broadcast-badge" style="background-color: rgba(243, 156, 18, 0.2); border: 1px dashed #F39C12;">⚡ temporary</span>' : '';
+
+            // Lifecycle icon for native helpers
+            const lifecycleIcon = isNativeHelper ? (helperStatus === 'spawning' ? '🔄' : helperStatus === 'working' ? '⚙️' : helperStatus === 'completed' ? '✅' : '💨') : '';
+
+            messageEl.innerHTML = `
+                <div class="message-header">
+                    <span class="terminal-badge" style="background-color: ${terminalColor}; ${isNativeHelper ? 'border: 1px dashed #F39C12;' : ''}"></span>
+                    <span class="terminal-name" style="color: ${terminalColor}">${lifecycleIcon} ${escapeHtml(msg.from)}</span>
+                    ${nativeHelperBadge}
+                    ${msg.isBroadcast ? '<span class="broadcast-badge">broadcast</span>' : ''}
+                    <span style="color: var(--timestamp-color)">→ ${escapeHtml(msg.to)}</span>
+                    ${threadIndicator}
+                </div>
+                <div class="message-bubble" style="${indentStyle} ${nativeHelperStyle}">
+                    ${escapeHtml(msg.content)}
+                </div>
+                <div class="message-footer">
+                    <span>${msg.timestamp}</span>
+                    <div class="message-actions">
+                        <button class="action-btn reply-btn" data-message-id="${msg.id}" data-sender="${escapeHtml(msg.from)}">Reply</button>
+                        <button class="action-btn copy-btn" data-content="${escapeHtml(msg.content)}">Copy</button>
+                        <button class="action-btn inject-btn" data-terminal="${escapeHtml(msg.to)}" data-content="${escapeHtml(msg.content)}">Inject →</button>
+                    </div>
+                </div>
+            `;
+
+            chatContainer.appendChild(messageEl);
+        }
+
+        function getTerminalColor(name) {
+            const terminal = terminals.find(t => t.name === name);
+            return terminal ? terminal.color : '#808080';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function copyMessage(content) {
+            navigator.clipboard.writeText(content).then(() => {
+                // Could show a toast notification
+            });
+        }
+
+        function injectMessage(terminalName, content) {
+            sendToHost({
+                type: 'inject',
+                terminal: terminalName,
+                content: content
+            });
+        }
+
+        function replyToMessage(messageId, senderName) {
+            // Send reply request to host
+            sendToHost({
+                type: 'reply',
+                messageId: messageId,
+                senderName: senderName
+            });
+        }
+
+        // Event delegation for message action buttons
+        chatContainer.addEventListener('click', (e) => {
+            const target = e.target;
+
+            if (target.classList.contains('reply-btn')) {
+                const messageId = target.dataset.messageId;
+                const sender = target.dataset.sender;
+                if (messageId && sender) {
+                    replyToMessage(messageId, sender);
+                }
+            } else if (target.classList.contains('copy-btn')) {
+                const content = target.dataset.content;
+                if (content) {
+                    copyMessage(content);
+                }
+            } else if (target.classList.contains('inject-btn')) {
+                const terminal = target.dataset.terminal;
+                const content = target.dataset.content;
+                if (terminal && content) {
+                    injectMessage(terminal, content);
+                }
+            }
+        });
+
+        function clearMessages() {
+            messages = [];
+            chatContainer.innerHTML = '';
+            emptyState.style.display = 'flex';
+            chatContainer.appendChild(emptyState);
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function togglePause() {
+            sendToHost({ type: 'pause' });
+        }
+
+        function updatePauseState(paused) {
+            isPaused = paused;
+            if (paused) {
+                pauseBtn.textContent = '▶ Resume';
+                pauseBtn.classList.add('paused');
+            } else {
+                pauseBtn.textContent = '⏸ Pause';
+                pauseBtn.classList.remove('paused');
+            }
+        }
+
+        // Signal ready
+        sendToHost({ type: 'ready' });
+    </script>
+</body>
+</html>

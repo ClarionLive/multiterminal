@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "multiterminal": {
+      "command": "node",
+      "args": [
+        "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal\\multiterminal-mcp\\index.js"
+      ]
+    }
+  }
+}

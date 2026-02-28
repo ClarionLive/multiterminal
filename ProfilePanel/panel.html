@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mission Control - Team Profiles</title>
+    <style>
+        /* ============================================
+           CSS Variables - Shared Design System
+           ============================================ */
+        :root {
+            /* Team member accent colors */
+            --color-alice: #6366f1;   /* indigo */
+            --color-bob: #22c55e;     /* green */
+            --color-charlie: #f59e0b; /* amber */
+            --color-diana: #ec4899;   /* pink */
+
+            /* Base theme (dark) */
+            --bg-panel: #1e1e2e;
+            --bg-card: #2a2a3e;
+            --bg-card-hover: #353550;
+            --bg-input: #252535;
+            --text-primary: #e4e4e7;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --border-color: #3f3f50;
+            --border-accent: #4f4f60;
+
+            /* Status colors */
+            --status-success: #22c55e;
+            --status-warning: #f59e0b;
+            --status-error: #ef4444;
+
+            /* Spacing */
+            --spacing-xs: 4px;
+            --spacing-sm: 8px;
+            --spacing-md: 12px;
+            --spacing-lg: 16px;
+            --spacing-xl: 24px;
+
+            /* Typography */
+            --font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            --font-size-xs: 11px;
+            --font-size-sm: 12px;
+            --font-size-md: 13px;
+            --font-size-lg: 14px;
+            --font-size-xl: 16px;
+
+            /* Effects */
+            --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3);
+            --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.4);
+            --transition-fast: 150ms ease;
+            --transition-normal: 250ms ease;
+            --radius-sm: 4px;
+            --radius-md: 8px;
+            --radius-lg: 12px;
+        }
+
+        /* Light theme overrides */
+        body.light {
+            --bg-panel: #f4f4f5;
+            --bg-card: #ffffff;
+            --bg-card-hover: #fafafa;
+            --bg-input: #e4e4e7;
+            --text-primary: #18181b;
+            --text-secondary: #52525b;
+            --text-muted: #a1a1aa;
+            --border-color: #d4d4d8;
+            --border-accent: #a1a1aa;
+            --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.1);
+            --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        /* ============================================
+           Base Styles
+           ============================================ */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-size: var(--font-size-md);
+            background: var(--bg-panel);
+            color: var(--text-primary);
+            line-height: 1.5;
+            overflow: hidden;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-panel);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--border-accent);
+        }
+
+        /* ============================================
+           Panel Layout
+           ============================================ */
+        .panel {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: var(--spacing-sm);
+            gap: var(--spacing-sm);
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: var(--spacing-sm) var(--spacing-md);
+            background: var(--bg-card);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-color);
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            font-size: var(--font-size-lg);
+            font-weight: 600;
+        }
+
+        .panel-actions {
+            display: flex;
+            gap: var(--spacing-sm);
+        }
+
+        .btn {
+            padding: var(--spacing-sm) var(--spacing-md);
+            font-size: var(--font-size-sm);
+            font-weight: 500;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .btn:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-accent);
+        }
+
+        .btn-primary {
+            background: var(--color-alice);
+            border-color: var(--color-alice);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            opacity: 0.9;
+        }
+
+        /* ============================================
+           Profile Grid
+           ============================================ */
+        .profile-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: var(--spacing-md);
+            padding: var(--spacing-sm);
+            overflow-y: auto;
+        }
+
+        .profile-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-lg);
+            transition: all var(--transition-fast);
+            cursor: pointer;
+        }
+
+        .profile-card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-accent);
+            box-shadow: var(--shadow-hover);
+            transform: translateY(-2px);
+        }
+
+        .profile-header {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-md);
+            margin-bottom: var(--spacing-lg);
+        }
+
+        .profile-avatar {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: var(--member-color, var(--bg-input));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: 600;
+            color: white;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .profile-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .profile-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .profile-name {
+            font-size: var(--font-size-xl);
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 2px;
+        }
+
+        .profile-role {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+        }
+
+        .profile-bio {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            line-height: 1.6;
+            margin-bottom: var(--spacing-md);
+        }
+
+        .profile-section {
+            margin-bottom: var(--spacing-md);
+        }
+
+        .profile-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .section-label {
+            font-size: var(--font-size-xs);
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: var(--spacing-xs);
+        }
+
+        .tag-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--spacing-xs);
+        }
+
+        .tag {
+            padding: 4px 8px;
+            font-size: var(--font-size-xs);
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .tag.skill {
+            border-color: var(--color-alice);
+            color: var(--color-alice);
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        .tag.interest {
+            border-color: var(--color-diana);
+            color: var(--color-diana);
+            background: rgba(236, 72, 153, 0.1);
+        }
+
+        /* ============================================
+           Profile Edit Modal
+           ============================================ */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            width: 90%;
+            max-width: 600px;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: var(--spacing-lg);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .modal-title {
+            font-size: var(--font-size-xl);
+            font-weight: 600;
+        }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-radius: var(--radius-sm);
+            font-size: 20px;
+            transition: all var(--transition-fast);
+        }
+
+        .modal-close:hover {
+            background: var(--bg-input);
+            color: var(--text-primary);
+        }
+
+        .modal-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: var(--spacing-lg);
+        }
+
+        .form-group {
+            margin-bottom: var(--spacing-lg);
+        }
+
+        .form-label {
+            display: block;
+            font-size: var(--font-size-sm);
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: var(--spacing-xs);
+        }
+
+        .form-input,
+        .form-textarea {
+            width: 100%;
+            padding: var(--spacing-sm);
+            font-size: var(--font-size-sm);
+            font-family: var(--font-family);
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            transition: all var(--transition-fast);
+        }
+
+        .form-input:focus,
+        .form-textarea:focus {
+            outline: none;
+            border-color: var(--color-alice);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        .form-textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .form-help {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .avatar-upload {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-md);
+        }
+
+        .avatar-preview {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: var(--bg-input);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            font-weight: 600;
+            color: white;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .avatar-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .modal-footer {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: var(--spacing-sm);
+            padding: var(--spacing-lg);
+            border-top: 1px solid var(--border-color);
+        }
+
+        /* ============================================
+           Empty State
+           ============================================ */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: var(--spacing-xl);
+            color: var(--text-muted);
+            font-size: var(--font-size-md);
+            gap: var(--spacing-sm);
+            text-align: center;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            opacity: 0.5;
+        }
+
+        /* ============================================
+           Animations
+           ============================================ */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .profile-card {
+            animation: slideUp 300ms ease-out;
+        }
+
+        .modal-overlay.active {
+            animation: fadeIn 200ms ease-out;
+        }
+    </style>
+</head>
+<body>
+    <div class="panel" id="profilePanel">
+        <!-- Header -->
+        <header class="panel-header">
+            <div class="panel-title">
+                <span>👥</span>
+                <span>Team Profiles</span>
+            </div>
+            <div class="panel-actions">
+                <button class="btn btn-primary" id="createProfileBtn">
+                    ➕ Create Profile
+                </button>
+            </div>
+        </header>
+
+        <!-- Profile Grid -->
+        <div class="profile-grid" id="profileGrid">
+            <div class="empty-state">
+                <span class="empty-state-icon">👥</span>
+                <span>No team profiles yet</span>
+                <span style="font-size: var(--font-size-sm);">Click "Create Profile" to add your first team member!</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit/Create Profile Modal -->
+    <div class="modal-overlay" id="profileModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modalTitle">Create Profile</h2>
+                <button class="modal-close" id="modalClose">×</button>
+            </div>
+            <div class="modal-body">
+                <form id="profileForm">
+                    <input type="hidden" id="profileId" name="id">
+
+                    <div class="form-group">
+                        <label class="form-label" for="terminalName">Terminal Name *</label>
+                        <input type="text" class="form-input" id="terminalName" name="terminalName" required
+                               placeholder="e.g., Alice">
+                        <div class="form-help">Must match your terminal registration name</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="displayName">Display Name</label>
+                        <input type="text" class="form-input" id="displayName" name="displayName"
+                               placeholder="e.g., Alice Johnson">
+                        <div class="form-help">Optional friendly name</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="role">Role</label>
+                        <input type="text" class="form-input" id="role" name="role"
+                               placeholder="e.g., Senior Frontend Engineer">
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="avatarUrl">Avatar</label>
+                        <div class="avatar-upload">
+                            <div class="avatar-preview" id="avatarPreview">
+                                <span id="avatarInitial">A</span>
+                            </div>
+                            <div style="flex: 1;">
+                                <input type="url" class="form-input" id="avatarUrl" name="avatarUrl"
+                                       placeholder="https://example.com/avatar.jpg">
+                                <div class="form-help">Enter image URL or leave blank for default</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="bio">Bio</label>
+                        <textarea class="form-textarea" id="bio" name="bio"
+                                  placeholder="Tell us about yourself..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="skills">Skills</label>
+                        <input type="text" class="form-input" id="skills" name="skills"
+                               placeholder="e.g., HTML, CSS, JavaScript, React">
+                        <div class="form-help">Comma-separated list</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="interests">Interests</label>
+                        <input type="text" class="form-input" id="interests" name="interests"
+                               placeholder="e.g., UI Design, Performance Optimization, Accessibility">
+                        <div class="form-help">Comma-separated list</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="preferredModel">Preferred Model</label>
+                        <select class="form-input" id="preferredModel" name="preferredModel">
+                            <option value="sonnet">Sonnet (default)</option>
+                            <option value="opus">Opus</option>
+                            <option value="haiku">Haiku</option>
+                        </select>
+                        <div class="form-help">Claude model used when spawning this agent</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="agentInstructions">Agent Instructions</label>
+                        <textarea class="form-textarea" id="agentInstructions" name="agentInstructions"
+                                  placeholder="Custom instructions for this agent when spawned as a team member..."></textarea>
+                        <div class="form-help">Injected into the agent's system prompt on spawn</div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" id="deleteProfileBtn" style="margin-right: auto; background: var(--status-error); border-color: var(--status-error); color: white; display: none;">Delete Profile</button>
+                <button class="btn" id="cancelBtn">Cancel</button>
+                <button class="btn btn-primary" id="saveProfileBtn">Save Profile</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================
+        // State Management
+        // ============================================
+        const ProfileState = {
+            profiles: [],
+            currentProfile: null,
+            isEditing: false
+        };
+
+        // Member color mapping
+        const memberColors = {
+            alice: '#6366f1',
+            bob: '#22c55e',
+            charlie: '#f59e0b',
+            diana: '#ec4899'
+        };
+
+        // ============================================
+        // WebView2 Communication
+        // ============================================
+        function sendToHost(message) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(message);
+            } else {
+                console.log('Would send to host:', message);
+            }
+        }
+
+        function handleHostMessage(message) {
+            if (typeof message === 'string') {
+                const colonIndex = message.indexOf(':');
+                if (colonIndex === -1) return;
+
+                const command = message.substring(0, colonIndex);
+                const data = message.substring(colonIndex + 1);
+
+                console.log(`[C#→JS] ${command}:`, data);
+
+                switch (command) {
+                    case 'theme':
+                        document.body.classList.toggle('light', data === 'light');
+                        break;
+                    case 'profiles':
+                        ProfileState.profiles = JSON.parse(data);
+                        renderProfiles();
+                        break;
+                    case 'profileCreated':
+                    case 'profileUpdated':
+                        const profile = JSON.parse(data);
+                        updateProfileInState(profile);
+                        renderProfiles();
+                        closeModal();
+                        break;
+                    case 'profileDeleted':
+                        const deletedId = data;
+                        removeProfileFromState(deletedId);
+                        renderProfiles();
+                        break;
+                    default:
+                        console.warn('[Unknown command]', command);
+                }
+            }
+        }
+
+        // Setup WebView2 listener
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                handleHostMessage(event.data);
+            });
+            // Signal ready and request initial data
+            sendToHost({ type: 'ready' });
+            sendToHost({ type: 'getProfiles' });
+        }
+
+        // ============================================
+        // State Helpers
+        // ============================================
+        function updateProfileInState(profile) {
+            const index = ProfileState.profiles.findIndex(p => p.id === profile.id);
+            if (index >= 0) {
+                ProfileState.profiles[index] = profile;
+            } else {
+                ProfileState.profiles.push(profile);
+            }
+        }
+
+        function removeProfileFromState(id) {
+            ProfileState.profiles = ProfileState.profiles.filter(p => p.id !== id);
+        }
+
+        // ============================================
+        // Render Functions
+        // ============================================
+        function renderProfiles() {
+            const grid = document.getElementById('profileGrid');
+
+            if (ProfileState.profiles.length === 0) {
+                grid.innerHTML = `
+                    <div class="empty-state">
+                        <span class="empty-state-icon">👥</span>
+                        <span>No team profiles yet</span>
+                        <span style="font-size: var(--font-size-sm);">Click "Create Profile" to add your first team member!</span>
+                    </div>
+                `;
+                return;
+            }
+
+            grid.innerHTML = ProfileState.profiles.map(profile => {
+                const memberId = (profile.id || '').toLowerCase();
+                const memberColor = memberColors[memberId] || '#6b7280';
+                const displayName = profile.displayName || profile.id || 'Unknown';
+                const initial = displayName.charAt(0).toUpperCase();
+                const skills = profile.skills || [];
+                const interests = profile.interests || [];
+
+                return `
+                    <div class="profile-card" data-profile-id="${profile.id}" style="--member-color: ${memberColor};">
+                        <div class="profile-header">
+                            <div class="profile-avatar" style="background: ${memberColor};">
+                                ${profile.avatarUrl
+                                    ? `<img src="${escapeHtml(profile.avatarUrl)}" alt="${escapeHtml(displayName)}">`
+                                    : initial}
+                            </div>
+                            <div class="profile-info">
+                                <div class="profile-name">${escapeHtml(displayName)}</div>
+                                ${profile.role ? `<div class="profile-role">${escapeHtml(profile.role)}</div>` : ''}
+                            </div>
+                        </div>
+
+                        ${profile.bio ? `<div class="profile-bio">${escapeHtml(profile.bio)}</div>` : ''}
+
+                        ${skills.length > 0 ? `
+                            <div class="profile-section">
+                                <div class="section-label">Skills</div>
+                                <div class="tag-list">
+                                    ${skills.map(skill => `<span class="tag skill">${escapeHtml(skill)}</span>`).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        ${interests.length > 0 ? `
+                            <div class="profile-section">
+                                <div class="section-label">Interests</div>
+                                <div class="tag-list">
+                                    ${interests.map(interest => `<span class="tag interest">${escapeHtml(interest)}</span>`).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            // Attach click handlers
+            grid.querySelectorAll('.profile-card').forEach(card => {
+                card.addEventListener('click', () => {
+                    const profileId = card.dataset.profileId;
+                    const profile = ProfileState.profiles.find(p => p.id === profileId);
+                    if (profile) openEditModal(profile);
+                });
+            });
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ============================================
+        // Modal Functions
+        // ============================================
+        function openCreateModal() {
+            ProfileState.currentProfile = null;
+            ProfileState.isEditing = false;
+            document.getElementById('modalTitle').textContent = 'Create Profile';
+            document.getElementById('profileForm').reset();
+            document.getElementById('profileId').value = '';
+            updateAvatarPreview('', '');
+            document.getElementById('deleteProfileBtn').style.display = 'none'; // Hide delete button for new profiles
+            document.getElementById('profileModal').classList.add('active');
+        }
+
+        function openEditModal(profile) {
+            ProfileState.currentProfile = profile;
+            ProfileState.isEditing = true;
+            document.getElementById('modalTitle').textContent = 'Edit Profile';
+
+            // Populate form
+            document.getElementById('profileId').value = profile.id || '';
+            document.getElementById('terminalName').value = profile.id || '';
+            document.getElementById('displayName').value = profile.displayName || '';
+            document.getElementById('role').value = profile.role || '';
+            document.getElementById('avatarUrl').value = profile.avatarUrl || '';
+            document.getElementById('bio').value = profile.bio || '';
+            document.getElementById('skills').value = (profile.skills || []).join(', ');
+            document.getElementById('interests').value = (profile.interests || []).join(', ');
+            document.getElementById('preferredModel').value = profile.preferredModel || 'sonnet';
+            document.getElementById('agentInstructions').value = profile.agentInstructions || '';
+
+            updateAvatarPreview(profile.avatarUrl, profile.displayName || profile.id);
+            document.getElementById('deleteProfileBtn').style.display = 'block'; // Show delete button when editing
+            document.getElementById('profileModal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('profileModal').classList.remove('active');
+            ProfileState.currentProfile = null;
+            ProfileState.isEditing = false;
+        }
+
+        function updateAvatarPreview(url, name) {
+            const preview = document.getElementById('avatarPreview');
+            const initial = document.getElementById('avatarInitial');
+
+            if (url) {
+                preview.style.backgroundImage = `url(${url})`;
+                preview.style.backgroundSize = 'cover';
+                initial.style.display = 'none';
+            } else {
+                preview.style.backgroundImage = '';
+                initial.style.display = 'block';
+                initial.textContent = (name || 'A').charAt(0).toUpperCase();
+            }
+        }
+
+        // ============================================
+        // Form Handlers
+        // ============================================
+        function saveProfile() {
+            const form = document.getElementById('profileForm');
+            if (!form.checkValidity()) {
+                form.reportValidity();
+                return;
+            }
+
+            const id = document.getElementById('terminalName').value.trim();
+            const displayName = document.getElementById('displayName').value.trim();
+            const role = document.getElementById('role').value.trim();
+            const avatarUrl = document.getElementById('avatarUrl').value.trim();
+            const bio = document.getElementById('bio').value.trim();
+            const skillsText = document.getElementById('skills').value.trim();
+            const interestsText = document.getElementById('interests').value.trim();
+
+            const skills = skillsText ? skillsText.split(',').map(s => s.trim()).filter(s => s) : [];
+            const interests = interestsText ? interestsText.split(',').map(s => s.trim()).filter(s => s) : [];
+            const preferredModel = document.getElementById('preferredModel').value;
+            const agentInstructions = document.getElementById('agentInstructions').value.trim();
+
+            const profile = {
+                id: id,
+                displayName: displayName || null,
+                role: role || null,
+                avatarUrl: avatarUrl || null,
+                bio: bio || null,
+                skills: skills,
+                interests: interests,
+                preferredModel: preferredModel || 'sonnet',
+                agentInstructions: agentInstructions || null
+            };
+
+            if (ProfileState.isEditing) {
+                sendToHost({ type: 'updateProfile', profile: profile });
+            } else {
+                sendToHost({ type: 'createProfile', profile: profile });
+            }
+        }
+
+        function deleteProfile() {
+            if (!ProfileState.currentProfile) return;
+
+            const id = ProfileState.currentProfile.id;
+            const displayName = ProfileState.currentProfile.displayName || id;
+
+            // Send delete request to C# backend
+            // The C# side will show the confirmation dialog
+            sendToHost({ type: 'deleteProfile', id: id });
+            closeModal();
+        }
+
+        // ============================================
+        // Event Listeners
+        // ============================================
+        document.getElementById('createProfileBtn').addEventListener('click', openCreateModal);
+        document.getElementById('modalClose').addEventListener('click', closeModal);
+        document.getElementById('cancelBtn').addEventListener('click', closeModal);
+        document.getElementById('saveProfileBtn').addEventListener('click', saveProfile);
+        document.getElementById('deleteProfileBtn').addEventListener('click', deleteProfile);
+
+        // Avatar URL preview
+        document.getElementById('avatarUrl').addEventListener('input', (e) => {
+            const name = document.getElementById('displayName').value || document.getElementById('terminalName').value;
+            updateAvatarPreview(e.target.value, name);
+        });
+
+        // Name changes update avatar initial
+        document.getElementById('displayName').addEventListener('input', (e) => {
+            const url = document.getElementById('avatarUrl').value;
+            updateAvatarPreview(url, e.target.value || document.getElementById('terminalName').value);
+        });
+        document.getElementById('terminalName').addEventListener('input', (e) => {
+            const url = document.getElementById('avatarUrl').value;
+            const displayName = document.getElementById('displayName').value;
+            updateAvatarPreview(url, displayName || e.target.value);
+        });
+
+        // Close modal on overlay click
+        document.getElementById('profileModal').addEventListener('click', (e) => {
+            if (e.target.id === 'profileModal') {
+                closeModal();
+            }
+        });
+
+        // Escape key closes modal
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && ProfileState.currentProfile !== null) {
+                closeModal();
+            }
+        });
+
+        console.log('Profile Panel loaded and ready');
+    </script>
+</body>
+</html>

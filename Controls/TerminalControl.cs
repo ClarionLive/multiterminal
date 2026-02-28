@@ -1,0 +1,801 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using MultiTerminal.Terminal;
+using MultiTerminal.Services;
+
+namespace MultiTerminal.Controls
+{
+    /// <summary>
+    /// Event args for terminal title change events.
+    /// </summary>
+    public class TerminalTitleChangedEventArgs : EventArgs
+    {
+        public string Title { get; private set; }
+        public TerminalTitleChangedEventArgs(string title) { Title = title; }
+    }
+
+    /// <summary>
+    /// A complete terminal emulator control using Windows ConPTY and WebView2/xterm.js.
+    /// xterm.js handles all terminal emulation; ConPTY provides the shell backend.
+    /// </summary>
+    public class TerminalControl : UserControl
+    {
+        private ConPtyTerminal _terminal;
+        private WebViewTerminalRenderer _renderer;
+
+        private int _cols = 80;
+        private int _rows = 24;
+        private bool _isDisposed;
+        private bool _pendingStart;
+        private string _pendingWorkingDir;
+        private string _pendingDocId;
+        private string _pendingTerminalName;
+        private string _pendingAutoRunCommand;
+        private string _pendingSpawnerName;
+        private TerminalTheme _pendingTheme = TerminalTheme.Dark;
+        private string _terminalTitle = "PowerShell";
+        private DebugLogService _debugLogService;
+
+        /// <summary>
+        /// Sets the debug log service for this terminal control.
+        /// </summary>
+        public void SetDebugLogService(DebugLogService debugLogService)
+        {
+            _debugLogService = debugLogService;
+        }
+
+        /// <summary>
+        /// Logs a trace message to DebugLogService if available, otherwise to Debug.WriteLine.
+        /// </summary>
+        private void LogTrace(string message)
+        {
+            if (_debugLogService != null)
+            {
+                _debugLogService.Trace("TerminalControl", message);
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"[TerminalControl] {message}");
+            }
+        }
+
+        /// <summary>
+        /// Event fired when the terminal process exits.
+        /// </summary>
+        public event EventHandler ProcessExited;
+
+        /// <summary>
+        /// Event fired when the terminal title changes.
+        /// </summary>
+        public event EventHandler<TerminalTitleChangedEventArgs> TitleChanged;
+
+        /// <summary>
+        /// Event fired when font size changes.
+        /// </summary>
+        public event EventHandler<FontSizeChangedEventArgs> FontSizeChanged;
+
+        /// <summary>
+        /// Event fired when a context menu is requested (right-click).
+        /// </summary>
+        public event EventHandler<TerminalContextMenuEventArgs> ContextMenuRequested;
+
+        /// <summary>
+        /// Event fired when the terminal is clicked.
+        /// </summary>
+        public event EventHandler TerminalClicked;
+
+        /// <summary>
+        /// Event fired when the terminal is fully initialized and ready.
+        /// </summary>
+        public event EventHandler Ready;
+
+        /// <summary>
+        /// Event fired when the WebView2/xterm.js renderer is initialized (before shell starts).
+        /// </summary>
+        public event EventHandler RendererReady;
+
+        /// <summary>
+        /// Gets whether the terminal process is currently running.
+        /// </summary>
+        public bool IsRunning => _terminal != null && _terminal.IsRunning;
+
+        /// <summary>
+        /// Gets whether the WebView2/xterm.js renderer is initialized and ready for input.
+        /// </summary>
+        public bool IsRendererReady => _renderer?.IsInitialized ?? false;
+
+        /// <summary>
+        /// Gets the current terminal title.
+        /// </summary>
+        public string TerminalTitle => _terminalTitle;
+
+        public TerminalControl()
+        {
+            InitializeComponent();
+        }
+
+        private void InitializeComponent()
+        {
+            SuspendLayout();
+
+            // Create WebView2-based renderer
+            _renderer = new WebViewTerminalRenderer
+            {
+                Dock = DockStyle.Fill,
+                Name = "terminalRenderer"
+            };
+
+            // Subscribe to renderer events
+            _renderer.Initialized += OnRendererInitialized;
+            _renderer.TerminalResized += OnRendererResized;
+            _renderer.DataReceived += OnRendererDataReceived;
+            _renderer.TitleChanged += OnRendererTitleChanged;
+            _renderer.FontSizeChanged += OnRendererFontSizeChanged;
+            _renderer.EscapeKeyPressed += OnRendererEscapeKeyPressed;
+            _renderer.ShiftTabKeyPressed += OnRendererShiftTabKeyPressed;
+            _renderer.CtrlEnterKeyPressed += OnRendererCtrlEnterKeyPressed;
+            _renderer.AltVKeyPressed += OnRendererAltVKeyPressed;
+            _renderer.ContextMenuRequested += OnRendererContextMenuRequested;
+            _renderer.TerminalClicked += OnRendererTerminalClicked;
+
+            Controls.Add(_renderer);
+
+            BackColor = Color.FromArgb(30, 30, 30);
+            Name = "TerminalControl";
+            Size = new Size(640, 400);
+
+            ResumeLayout(false);
+        }
+
+        /// <summary>
+        /// Called when WebView2/xterm.js is fully initialized and ready.
+        /// </summary>
+        private void OnRendererInitialized(object sender, EventArgs e)
+        {
+            // Always fire RendererReady when WebView2 is initialized
+            RendererReady?.Invoke(this, EventArgs.Empty);
+
+            if (_pendingStart)
+            {
+                _pendingStart = false;
+                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName);
+            }
+        }
+
+        /// <summary>
+        /// Starts the terminal with the specified working directory.
+        /// </summary>
+        /// <param name="workingDirectory">Initial working directory</param>
+        /// <param name="docId">Document ID for MCP push notifications</param>
+        /// <param name="terminalName">Pre-registered terminal name for MCP (null if not pre-registered)</param>
+        /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
+        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        {
+            if (_terminal != null && _terminal.IsRunning)
+            {
+                Stop();
+            }
+
+            // If renderer is initialized, start immediately
+            if (_renderer.IsInitialized)
+            {
+                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName);
+            }
+            else
+            {
+                // Defer until WebView2 is initialized
+                _pendingStart = true;
+                _pendingWorkingDir = workingDirectory;
+                _pendingDocId = docId;
+                _pendingTerminalName = terminalName;
+                _pendingAutoRunCommand = autoRunCommand;
+                _pendingSpawnerName = spawnerName;
+            }
+        }
+
+        private void OnRendererFontSizeChanged(object sender, FontSizeChangedEventArgs e)
+        {
+            FontSizeChanged?.Invoke(this, e);
+        }
+
+        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        {
+            // Reset Claude Code detection so the event fires again for this new session
+            _claudeCodeDetectedThisSession = false;
+            _outputBuffer.Clear();
+
+            // Use size from renderer
+            _cols = Math.Max(80, _renderer.VisibleCols);
+            _rows = Math.Max(24, _renderer.VisibleRows);
+
+            // Apply theme
+            _renderer.SetTheme(_pendingTheme);
+
+            // Create and start terminal
+            _terminal = new ConPtyTerminal();
+            _terminal.DataReceived += OnTerminalDataReceived;
+            _terminal.ProcessExited += OnTerminalProcessExited;
+
+            try
+            {
+                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "Failed to start terminal: " + ex.Message + "\r\n\r\n" +
+                    "Make sure you're running Windows 10 version 1809 or later.",
+                    "Terminal Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+
+            _renderer.Focus();
+            Ready?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Stops the terminal process.
+        /// </summary>
+        public void Stop()
+        {
+            if (_terminal != null)
+            {
+                _terminal.DataReceived -= OnTerminalDataReceived;
+                _terminal.ProcessExited -= OnTerminalProcessExited;
+                _terminal.Dispose();
+                _terminal = null;
+            }
+        }
+
+        /// <summary>
+        /// Sends text to the terminal.
+        /// </summary>
+        public void Write(string text)
+        {
+            _terminal?.Write(text);
+        }
+
+        /// <summary>
+        /// Sends raw bytes to the terminal.
+        /// </summary>
+        public void Write(byte[] data)
+        {
+            _terminal?.Write(data);
+        }
+
+        /// <summary>
+        /// Maximum chunk size in bytes for message chunking.
+        /// Set to 500 bytes to prevent PowerShell's bracketed paste mode from triggering.
+        /// PowerShell enters paste mode at ~500-600 characters, causing messages to wait for user confirmation.
+        /// </summary>
+        private const int MaxChunkSize = 500;
+
+        /// <summary>
+        /// Injects text input into the terminal and submits it.
+        /// Uses xterm.js JavaScript injection for the Enter key to work with apps
+        /// like Claude Code that detect programmatic input differently.
+        /// Returns a Task that completes when the Enter key has been acknowledged by JS.
+        /// Large messages (>500 bytes) are automatically chunked with markers to prevent PowerShell paste mode.
+        /// </summary>
+        /// <param name="text">The text to inject.</param>
+        /// <returns>A Task that completes when injection is finished. Returns true if successful.</returns>
+        public async Task<bool> InjectInputAsync(string text)
+        {
+            LogTrace($"InjectInputAsync called, text length={text?.Length ?? 0}");
+
+            if (string.IsNullOrEmpty(text) || _terminal == null)
+            {
+                LogTrace("InjectInputAsync: early return (text empty or terminal null)");
+                return false;
+            }
+
+            // Check if chunking is needed
+            var textBytes = Encoding.UTF8.GetByteCount(text);
+            if (textBytes > MaxChunkSize)
+            {
+                LogTrace($"InjectInputAsync: using chunked mode ({textBytes} bytes)");
+                return await InjectChunkedInputAsync(text);
+            }
+
+            // Single message - inject directly
+            LogTrace("InjectInputAsync: using single mode");
+            return await InjectSingleInputAsync(text);
+        }
+
+        /// <summary>
+        /// Injects a single chunk of text (no chunking).
+        /// </summary>
+        private async Task<bool> InjectSingleInputAsync(string text)
+        {
+            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] InjectSingleInputAsync ENTRY: textLength={text?.Length ?? 0}");
+            LogTrace("InjectSingleInputAsync called");
+
+            if (string.IsNullOrEmpty(text) || _terminal == null)
+            {
+                LogTrace("InjectSingleInputAsync: early return (text empty or terminal null)");
+                return false;
+            }
+
+            // Write text WITHOUT newline (text appears in prompt field)
+            LogTrace("Writing text to ConPTY pipe (no newline)...");
+            _terminal.Write(text);
+            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] ConPTY write complete");
+            LogTrace("Text written, now triggering Enter via xterm.js...");
+
+            // Small delay to let text appear in prompt
+            try
+            {
+                await System.Threading.Tasks.Task.Delay(50);
+                LogTrace("Delay completed, checking terminal state...");
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"Task.Delay failed: {ex.Message}");
+                return false;
+            }
+
+            if (IsDisposed)
+            {
+                LogTrace("InjectSingleInputAsync: early return (disposed)");
+                return false;
+            }
+
+            if (_renderer == null)
+            {
+                LogTrace("InjectSingleInputAsync: early return (renderer is null)");
+                return false;
+            }
+
+            // Trigger Enter key through xterm.js to submit the input to Claude Code
+            try
+            {
+                LogTrace("Calling SendEnterViaXtermAsync...");
+                bool enterSuccess = await _renderer.SendEnterViaXtermAsync();
+                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] Enter key triggered, success={enterSuccess}");
+                LogTrace($"SendEnterViaXtermAsync completed with result: {enterSuccess}");
+
+                // Check if Enter key was successfully sent
+                if (!enterSuccess)
+                {
+                    LogTrace("InjectSingleInputAsync: Enter key failed (terminal not initialized)");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"SendEnterViaXtermAsync threw exception: {ex.Message}");
+                return false;
+            }
+
+            // Small delay to let Enter key be processed
+            await System.Threading.Tasks.Task.Delay(100);
+
+            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] InjectSingleInputAsync EXIT: success=true");
+            LogTrace("InjectSingleInputAsync completed successfully");
+            return true;
+        }
+
+        /// <summary>
+        /// Sends only the Enter key via xterm.js without writing any text.
+        /// Used to retry Enter submission when text was already written to the terminal.
+        /// </summary>
+        public async Task<bool> SendEnterAsync()
+        {
+            LogTrace("SendEnterAsync called");
+
+            if (IsDisposed || _renderer == null)
+            {
+                LogTrace("SendEnterAsync: early return (disposed or renderer null)");
+                return false;
+            }
+
+            try
+            {
+                bool enterSuccess = await _renderer.SendEnterViaXtermAsync();
+                LogTrace($"SendEnterAsync completed with result: {enterSuccess}");
+
+                if (enterSuccess)
+                {
+                    await System.Threading.Tasks.Task.Delay(100);
+                }
+
+                return enterSuccess;
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"SendEnterAsync threw exception: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Types text into the terminal character-by-character via xterm.js.
+        /// Mimics real keyboard typing to avoid paste detection.
+        /// </summary>
+        public void TypeInput(string text, string lineEnding = "cr", int charDelayMs = 15)
+        {
+            LogTrace($"TypeInput: charDelay={charDelayMs}ms, lineEnding={lineEnding}, text=\"{text}\"");
+            _renderer?.TypeInputViaXterm(text, lineEnding, charDelayMs);
+        }
+
+        /// <summary>
+        /// Injects large text by splitting into chunks with markers.
+        /// Each chunk is sent as a separate message with [n/total] prefix.
+        /// </summary>
+        private async Task<bool> InjectChunkedInputAsync(string text)
+        {
+            var chunks = SplitIntoChunks(text, MaxChunkSize);
+            var totalChunks = chunks.Count;
+
+            LogTrace($"Chunking message: {Encoding.UTF8.GetByteCount(text)} bytes into {totalChunks} chunks");
+
+            for (int i = 0; i < totalChunks; i++)
+            {
+                var chunkMarker = $"[{i + 1}/{totalChunks}] ";
+                var chunkText = chunkMarker + chunks[i];
+
+                var success = await InjectSingleInputAsync(chunkText);
+                if (!success)
+                {
+                    LogTrace($"Chunk {i + 1}/{totalChunks} failed to inject");
+                    return false;
+                }
+
+                // Delay between chunks to allow processing
+                if (i < totalChunks - 1)
+                {
+                    await System.Threading.Tasks.Task.Delay(100);
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Splits text into chunks at word boundaries where possible.
+        /// </summary>
+        /// <param name="text">Text to split.</param>
+        /// <param name="maxChunkBytes">Maximum bytes per chunk (excluding chunk marker).</param>
+        /// <returns>List of text chunks.</returns>
+        private static List<string> SplitIntoChunks(string text, int maxChunkBytes)
+        {
+            var chunks = new List<string>();
+
+            // Reserve space for chunk marker like "[99/99] " (9 bytes max)
+            var effectiveMaxBytes = maxChunkBytes - 10;
+
+            var remaining = text;
+            while (!string.IsNullOrEmpty(remaining))
+            {
+                var chunk = GetChunkAtWordBoundary(remaining, effectiveMaxBytes);
+                chunks.Add(chunk);
+                remaining = remaining.Substring(chunk.Length).TrimStart();
+            }
+
+            return chunks;
+        }
+
+        /// <summary>
+        /// Gets a chunk from the start of text, breaking at word boundary if possible.
+        /// </summary>
+        private static string GetChunkAtWordBoundary(string text, int maxBytes)
+        {
+            // If text fits, return it all
+            if (Encoding.UTF8.GetByteCount(text) <= maxBytes)
+            {
+                return text;
+            }
+
+            // Find the longest substring that fits
+            int low = 0;
+            int high = text.Length;
+            int bestFit = 0;
+
+            while (low <= high)
+            {
+                int mid = (low + high) / 2;
+                if (Encoding.UTF8.GetByteCount(text.Substring(0, mid)) <= maxBytes)
+                {
+                    bestFit = mid;
+                    low = mid + 1;
+                }
+                else
+                {
+                    high = mid - 1;
+                }
+            }
+
+            if (bestFit == 0) bestFit = 1; // At minimum take one character
+
+            // Try to break at word boundary (look back for space/newline)
+            var candidate = text.Substring(0, bestFit);
+            var lastSpace = candidate.LastIndexOfAny(new[] { ' ', '\n', '\r', '\t' });
+
+            // Only use word boundary if it's reasonably close (within 20% of max)
+            if (lastSpace > bestFit * 0.8)
+            {
+                return text.Substring(0, lastSpace);
+            }
+
+            return candidate;
+        }
+
+        /// <summary>
+        /// Injects text input into the terminal and submits it (fire-and-forget version).
+        /// For backward compatibility - prefer InjectInputAsync for new code.
+        /// </summary>
+        /// <param name="text">The text to inject.</param>
+        /// <returns>True for backward compatibility (actual result is discarded).</returns>
+        public bool InjectInput(string text)
+        {
+            _ = InjectInputAsync(text);
+            return true;
+        }
+
+        /// <summary>
+        /// Sends Ctrl+C to interrupt the current process.
+        /// </summary>
+        public void SendCtrlC()
+        {
+            _terminal?.SendCtrlC();
+        }
+
+        /// <summary>
+        /// Clears the terminal screen.
+        /// </summary>
+        public void Clear()
+        {
+            _renderer?.Clear();
+        }
+
+        /// <summary>
+        /// Called when xterm.js receives user input (keyboard data).
+        /// Forwards the input to the ConPTY terminal.
+        /// </summary>
+        private void OnRendererDataReceived(byte[] data)
+        {
+            if (_terminal != null && _terminal.IsRunning)
+            {
+                _terminal.Write(data);
+            }
+        }
+
+        /// <summary>
+        /// Event fired when Claude Code is detected running in this terminal.
+        /// </summary>
+        public event EventHandler ClaudeCodeDetected;
+
+        private bool _claudeCodeDetectedThisSession = false;
+        private StringBuilder _outputBuffer = new StringBuilder();
+
+        /// <summary>
+        /// Called when ConPTY terminal outputs data.
+        /// Forwards the data to xterm.js for display.
+        /// </summary>
+        private void OnTerminalDataReceived(byte[] data)
+        {
+            if (_isDisposed) return;
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => OnTerminalDataReceived(data)));
+                }
+                catch { }
+                return;
+            }
+
+            _renderer?.WriteToTerminal(data);
+
+            // Detect Claude Code startup (only once per session to avoid spam)
+            if (!_claudeCodeDetectedThisSession)
+            {
+                try
+                {
+                    string text = System.Text.Encoding.UTF8.GetString(data);
+                    _outputBuffer.Append(text);
+
+                    // Keep buffer from growing too large
+                    if (_outputBuffer.Length > 2000)
+                    {
+                        _outputBuffer.Remove(0, _outputBuffer.Length - 1000);
+                    }
+
+                    // Check for Claude Code patterns
+                    string buffer = _outputBuffer.ToString();
+                    if (buffer.Contains("Claude Code") ||
+                        buffer.Contains("claude-code") ||
+                        buffer.Contains("╭─") && buffer.Contains("Tips"))
+                    {
+                        _claudeCodeDetectedThisSession = true;
+                        _outputBuffer.Clear();
+                        ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private void OnTerminalProcessExited(object sender, EventArgs e)
+        {
+            if (_isDisposed) return;
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => OnTerminalProcessExited(sender, e)));
+                }
+                catch { }
+                return;
+            }
+
+            ProcessExited?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void OnRendererTitleChanged(object sender, TitleChangedEventArgs e)
+        {
+            if (_isDisposed) return;
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(new Action(() => OnRendererTitleChanged(sender, e)));
+                }
+                catch { }
+                return;
+            }
+
+            _terminalTitle = e.Title;
+            TitleChanged?.Invoke(this, new TerminalTitleChangedEventArgs(e.Title));
+        }
+
+        private void OnRendererResized(object sender, TerminalSizeEventArgs e)
+        {
+            if (e.Columns != _cols || e.Rows != _rows)
+            {
+                _cols = e.Columns;
+                _rows = e.Rows;
+                _terminal?.Resize(_cols, _rows);
+            }
+        }
+
+        /// <summary>
+        /// Handles ESC key from the renderer.
+        /// </summary>
+        private void OnRendererEscapeKeyPressed(object sender, EventArgs e)
+        {
+            // ESC is sent to terminal via DataReceived
+        }
+
+        /// <summary>
+        /// Handles Shift+Tab from the renderer.
+        /// </summary>
+        private void OnRendererShiftTabKeyPressed(object sender, EventArgs e)
+        {
+            // Shift+Tab is sent to terminal via DataReceived
+        }
+
+        /// <summary>
+        /// Handles Ctrl+Enter from the renderer.
+        /// </summary>
+        private void OnRendererCtrlEnterKeyPressed(object sender, EventArgs e)
+        {
+            // Send newline to terminal for Ctrl+Enter
+            if (_terminal != null && _terminal.IsRunning)
+            {
+                _terminal.Write(new byte[] { 0x0A }); // LF
+            }
+        }
+
+        /// <summary>
+        /// Handles Alt+V from the renderer.
+        /// Used for pasting images.
+        /// </summary>
+        private void OnRendererAltVKeyPressed(object sender, EventArgs e)
+        {
+            if (_terminal != null && _terminal.IsRunning)
+            {
+                // Alt+key in terminal is typically ESC followed by the key
+                _terminal.Write(Encoding.ASCII.GetBytes("\x1bv"));
+            }
+        }
+
+        /// <summary>
+        /// Handles context menu request from the renderer.
+        /// </summary>
+        private void OnRendererContextMenuRequested(object sender, TerminalContextMenuEventArgs e)
+        {
+            ContextMenuRequested?.Invoke(this, e);
+        }
+
+        /// <summary>
+        /// Handles terminal click from the renderer.
+        /// </summary>
+        private void OnRendererTerminalClicked(object sender, EventArgs e)
+        {
+            TerminalClicked?.Invoke(this, EventArgs.Empty);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _isDisposed = true;
+
+                // Unsubscribe from renderer events
+                if (_renderer != null)
+                {
+                    _renderer.Initialized -= OnRendererInitialized;
+                    _renderer.TerminalResized -= OnRendererResized;
+                    _renderer.DataReceived -= OnRendererDataReceived;
+                    _renderer.TitleChanged -= OnRendererTitleChanged;
+                    _renderer.FontSizeChanged -= OnRendererFontSizeChanged;
+                    _renderer.EscapeKeyPressed -= OnRendererEscapeKeyPressed;
+                    _renderer.ShiftTabKeyPressed -= OnRendererShiftTabKeyPressed;
+                    _renderer.CtrlEnterKeyPressed -= OnRendererCtrlEnterKeyPressed;
+                    _renderer.AltVKeyPressed -= OnRendererAltVKeyPressed;
+                    _renderer.ContextMenuRequested -= OnRendererContextMenuRequested;
+                    _renderer.TerminalClicked -= OnRendererTerminalClicked;
+                }
+
+                Stop();
+                _renderer?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        /// <summary>
+        /// Sets focus to the terminal renderer.
+        /// </summary>
+        public void FocusTerminal()
+        {
+            _renderer?.Focus();
+        }
+
+        /// <summary>
+        /// Sets the font size.
+        /// </summary>
+        public void SetFontSize(float size)
+        {
+            _renderer?.SetFontSize(size);
+        }
+
+        /// <summary>
+        /// Gets the current font size.
+        /// </summary>
+        public float GetFontSize()
+        {
+            return _renderer != null ? _renderer.FontSize : 10f;
+        }
+
+        /// <summary>
+        /// Sets the terminal color theme.
+        /// </summary>
+        public void SetTheme(TerminalTheme theme)
+        {
+            _pendingTheme = theme;
+
+            if (_renderer != null)
+            {
+                _renderer.SetTheme(theme);
+            }
+            BackColor = theme.Background;
+        }
+
+        /// <summary>
+        /// Gets the current theme.
+        /// </summary>
+        public TerminalTheme CurrentTheme
+        {
+            get { return _renderer?.Theme ?? TerminalTheme.Dark; }
+        }
+    }
+}

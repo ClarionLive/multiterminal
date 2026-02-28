@@ -1,0 +1,1919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mission Control - Activity Panel</title>
+    <style>
+        /* ============================================
+           CSS Variables - Shared Design System
+           ============================================ */
+        :root {
+            /* Team member accent colors */
+            --color-alice: #6366f1;   /* indigo */
+            --color-bob: #22c55e;     /* green */
+            --color-charlie: #f59e0b; /* amber */
+            --color-diana: #ec4899;   /* pink */
+
+            /* Status colors */
+            --status-active: #22c55e;
+            --status-idle: #eab308;
+            --status-offline: #6b7280;
+            --status-busy: #3b82f6;
+
+            /* Activity type colors */
+            --type-chat: #8b5cf6;     /* purple */
+            --type-edit: #06b6d4;     /* cyan */
+            --type-task: #22c55e;     /* green */
+            --type-learned: #f59e0b;  /* amber */
+            --type-decision: #ec4899; /* pink */
+            --type-credential: #ef4444; /* red */
+            --type-action: #f97316;   /* orange */
+            --type-build: #3b82f6;    /* blue */
+            --type-plan: #a855f7;     /* purple-ish */
+
+            /* Base theme (dark) */
+            --bg-panel: #1e1e2e;
+            --bg-card: #2a2a3e;
+            --bg-card-hover: #353550;
+            --bg-input: #252535;
+            --text-primary: #e4e4e7;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --border-color: #3f3f50;
+            --border-accent: #4f4f60;
+
+            /* Spacing */
+            --spacing-xs: 4px;
+            --spacing-sm: 8px;
+            --spacing-md: 12px;
+            --spacing-lg: 16px;
+            --spacing-xl: 24px;
+
+            /* Typography */
+            --font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            --font-size-xs: 11px;
+            --font-size-sm: 12px;
+            --font-size-md: 13px;
+            --font-size-lg: 14px;
+
+            /* Effects */
+            --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3);
+            --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.4);
+            --transition-fast: 150ms ease;
+            --transition-normal: 250ms ease;
+        }
+
+        /* Light theme overrides */
+        body.light {
+            --bg-panel: #f4f4f5;
+            --bg-card: #ffffff;
+            --bg-card-hover: #fafafa;
+            --bg-input: #e4e4e7;
+            --text-primary: #18181b;
+            --text-secondary: #52525b;
+            --text-muted: #a1a1aa;
+            --border-color: #d4d4d8;
+            --border-accent: #a1a1aa;
+            --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.1);
+            --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        /* ============================================
+           Base Styles
+           ============================================ */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-family);
+            font-size: var(--font-size-md);
+            background: var(--bg-panel);
+            color: var(--text-primary);
+            line-height: 1.4;
+            overflow: hidden;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-panel);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--border-accent);
+        }
+
+        /* ============================================
+           Panel Layout
+           ============================================ */
+        .panel {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: var(--spacing-sm);
+            gap: var(--spacing-sm);
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: var(--spacing-sm) var(--spacing-md);
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            font-size: var(--font-size-lg);
+            font-weight: 600;
+        }
+
+        /* Heartbeat pulse indicator */
+        .heartbeat {
+            width: 8px;
+            height: 8px;
+            background: var(--status-active);
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+
+        /* ============================================
+           Team Status Section (placeholder for Alice)
+           ============================================ */
+        .team-status {
+            display: flex;
+            gap: var(--spacing-sm);
+            padding: var(--spacing-md);
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            overflow-x: auto;
+        }
+
+        .team-member {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: var(--spacing-xs);
+            padding: var(--spacing-sm);
+            min-width: 80px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background var(--transition-fast);
+        }
+
+        .team-member:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .team-member.focused {
+            background: var(--bg-card-hover);
+            box-shadow: inset 0 0 0 2px var(--member-color, var(--border-accent));
+        }
+
+        .avatar {
+            position: relative;
+            width: 40px;
+            height: 40px;
+        }
+
+        .avatar-circle {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: var(--member-color, var(--bg-input));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: var(--font-size-lg);
+            color: white;
+            text-transform: uppercase;
+            overflow: hidden;
+        }
+
+        .status-ring {
+            position: absolute;
+            inset: -3px;
+            border-radius: 50%;
+            border: 2px solid var(--status-color, var(--status-offline));
+        }
+
+        .status-ring.active {
+            animation: status-pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes status-pulse {
+            0%, 100% { border-color: var(--status-active); opacity: 1; }
+            50% { border-color: var(--status-active); opacity: 0.4; }
+        }
+
+        .member-name {
+            font-size: var(--font-size-sm);
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .member-task {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            text-align: center;
+            max-width: 70px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* ============================================
+           Pinned Intel Section (Diana's section)
+           ============================================ */
+        .pinned-intel {
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: var(--spacing-sm) var(--spacing-md);
+            background: var(--bg-input);
+            border-bottom: 1px solid var(--border-color);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .section-header:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            font-size: var(--font-size-sm);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .section-icon {
+            font-size: 14px;
+        }
+
+        .section-badge {
+            background: var(--type-learned);
+            color: #000;
+            font-size: var(--font-size-xs);
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 10px;
+            min-width: 18px;
+            text-align: center;
+        }
+
+        .collapse-icon {
+            font-size: 12px;
+            color: var(--text-muted);
+            transition: transform var(--transition-fast);
+        }
+
+        .pinned-intel.collapsed .collapse-icon {
+            transform: rotate(-90deg);
+        }
+
+        .pinned-intel.collapsed .pinned-content {
+            display: none;
+        }
+
+        .pinned-content {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .pinned-tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .pinned-tab {
+            flex: 1;
+            padding: var(--spacing-sm);
+            font-size: var(--font-size-xs);
+            font-weight: 500;
+            text-align: center;
+            color: var(--text-muted);
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .pinned-tab:hover {
+            color: var(--text-primary);
+            background: var(--bg-card-hover);
+        }
+
+        .pinned-tab.active {
+            color: var(--text-primary);
+            background: var(--bg-card);
+            box-shadow: inset 0 -2px 0 var(--type-learned);
+        }
+
+        .pinned-list {
+            padding: var(--spacing-xs);
+        }
+
+        .pinned-item {
+            display: flex;
+            align-items: flex-start;
+            gap: var(--spacing-sm);
+            padding: var(--spacing-sm);
+            border-radius: 6px;
+            border: 1px solid transparent;
+            transition: all var(--transition-fast);
+        }
+
+        .pinned-item:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-color);
+        }
+
+        .pinned-item.session-only {
+            border-style: dashed;
+            opacity: 0.85;
+        }
+
+        .pin-category {
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .pin-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .pin-text {
+            font-size: var(--font-size-sm);
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+
+        .pin-meta {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            margin-top: 2px;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .pin-author {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .pin-author-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--member-color);
+        }
+
+        .pin-actions {
+            display: flex;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity var(--transition-fast);
+        }
+
+        .pinned-item:hover .pin-actions {
+            opacity: 1;
+        }
+
+        .pin-action {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-secondary);
+            transition: all var(--transition-fast);
+        }
+
+        .pin-action:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+            border-color: var(--border-accent);
+        }
+
+        .pin-action.unpin:hover {
+            color: var(--type-credential);
+        }
+
+        .empty-pins {
+            padding: var(--spacing-lg);
+            text-align: center;
+            color: var(--text-muted);
+            font-size: var(--font-size-sm);
+        }
+
+        /* ============================================
+           Activity Feed Section (placeholder for Alice)
+           ============================================ */
+        .activity-feed {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .feed-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .feed-filters {
+            display: flex;
+            gap: var(--spacing-xs);
+        }
+
+        .filter-chip {
+            padding: 4px 8px;
+            font-size: var(--font-size-xs);
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            transition: all var(--transition-fast);
+        }
+
+        .filter-chip:hover,
+        .filter-chip.active {
+            background: var(--bg-card-hover);
+            border-color: var(--border-accent);
+            color: var(--text-primary);
+        }
+
+        .filter-chip.active {
+            background: var(--filter-color, var(--bg-card-hover));
+            color: white;
+        }
+
+        .refresh-btn {
+            padding: 4px 8px;
+            font-size: 14px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            margin-left: 4px;
+        }
+
+        .refresh-btn:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--border-accent);
+            color: var(--text-primary);
+        }
+
+        .refresh-btn:active {
+            transform: rotate(180deg);
+        }
+
+        .last-updated {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            margin-left: 8px;
+            white-space: nowrap;
+        }
+
+        .feed-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: var(--spacing-xs);
+        }
+
+        .feed-item {
+            display: flex;
+            gap: var(--spacing-sm);
+            padding: var(--spacing-sm);
+            border-radius: 6px;
+            transition: all var(--transition-fast);
+        }
+
+        .feed-item:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .feed-item.dimmed {
+            opacity: 0.3;
+        }
+
+        .feed-type-indicator {
+            width: 4px;
+            border-radius: 2px;
+            background: var(--type-color, var(--border-color));
+            flex-shrink: 0;
+        }
+
+        .feed-avatar {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: var(--member-color, var(--bg-input));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: var(--font-size-xs);
+            font-weight: 600;
+            color: white;
+            flex-shrink: 0;
+            overflow: hidden;
+        }
+
+        .feed-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .feed-message {
+            font-size: var(--font-size-sm);
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+
+        .feed-meta {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            margin-top: 2px;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .feed-actions {
+            display: flex;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity var(--transition-fast);
+        }
+
+        .feed-item:hover .feed-actions {
+            opacity: 1;
+        }
+
+        /* ============================================
+           Metrics Bar (Diana's section)
+           ============================================ */
+        .metrics-bar {
+            display: flex;
+            gap: var(--spacing-md);
+            padding: var(--spacing-md);
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .metric-card {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: var(--spacing-xs);
+            padding: var(--spacing-sm);
+            background: var(--bg-input);
+            border-radius: 6px;
+        }
+
+        .metric-label {
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .metric-value.highlight {
+            color: var(--status-active);
+        }
+
+        /* Donut Chart */
+        .donut-chart {
+            position: relative;
+            width: 60px;
+            height: 60px;
+        }
+
+        .donut-svg {
+            width: 100%;
+            height: 100%;
+            transform: rotate(-90deg);
+        }
+
+        .donut-ring {
+            fill: none;
+            stroke: var(--bg-panel);
+            stroke-width: 8;
+        }
+
+        .donut-segment {
+            fill: none;
+            stroke-width: 8;
+            stroke-linecap: round;
+            transition: stroke-dashoffset var(--transition-normal);
+        }
+
+        .donut-center {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .donut-value {
+            font-size: var(--font-size-lg);
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .donut-label {
+            font-size: 8px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        /* Sparkline */
+        .sparkline-container {
+            width: 80px;
+            height: 30px;
+        }
+
+        .sparkline {
+            width: 100%;
+            height: 100%;
+        }
+
+        .sparkline-path {
+            fill: none;
+            stroke: var(--sparkline-color, var(--status-active));
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .sparkline-area {
+            fill: var(--sparkline-color, var(--status-active));
+            opacity: 0.1;
+        }
+
+        /* Team velocity section */
+        .velocity-card {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-md);
+        }
+
+        .velocity-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            height: 30px;
+        }
+
+        .velocity-bar {
+            width: 6px;
+            background: var(--status-active);
+            border-radius: 2px 2px 0 0;
+            transition: height var(--transition-normal);
+            opacity: 0.6;
+        }
+
+        .velocity-bar:last-child {
+            opacity: 1;
+        }
+
+        /* ============================================
+           Keyboard Shortcuts Hint
+           ============================================ */
+        .shortcuts-hint {
+            display: flex;
+            justify-content: center;
+            gap: var(--spacing-md);
+            padding: var(--spacing-xs);
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .shortcut {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .key {
+            padding: 2px 5px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 10px;
+        }
+
+        /* ============================================
+           Compact Mode (collapsed state)
+           ============================================ */
+        .panel.compact .team-status,
+        .panel.compact .pinned-intel,
+        .panel.compact .activity-feed {
+            display: none;
+        }
+
+        .panel.compact .metrics-bar {
+            padding: var(--spacing-sm);
+        }
+
+        .panel.compact .metric-card {
+            padding: var(--spacing-xs);
+        }
+
+        /* ============================================
+           Focus Mode Overlay
+           ============================================ */
+        .focus-mode .feed-item:not(.focused) {
+            opacity: 0.2;
+        }
+
+        .focus-mode .team-member:not(.focused) {
+            opacity: 0.3;
+        }
+
+        /* New item animation */
+        .feed-item.new {
+            animation: slideIn 300ms ease-out;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Empty state */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: var(--spacing-xl);
+            color: var(--text-muted);
+            font-size: var(--font-size-sm);
+            gap: var(--spacing-sm);
+        }
+
+        .empty-state-icon {
+            font-size: 24px;
+            opacity: 0.5;
+        }
+
+        /* Copy success feedback */
+        .pin-action.copied {
+            background: var(--status-active);
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="panel" id="missionControl">
+        <!-- Header with heartbeat -->
+        <header class="panel-header">
+            <div class="panel-title">
+                <span class="heartbeat"></span>
+                <span>Mission Control</span>
+            </div>
+            <div class="shortcuts-hint">
+                <span class="shortcut"><span class="key">1-4</span> Focus</span>
+                <span class="shortcut"><span class="key">Esc</span> Clear</span>
+            </div>
+        </header>
+
+        <!-- Team Status Cards -->
+        <section class="team-status" id="teamStatus">
+            <div class="empty-state">
+                <span class="empty-state-icon">&#128101;</span>
+                <span>Waiting for team data...</span>
+            </div>
+        </section>
+
+        <!-- Pinned Intel Section (Diana's section) -->
+        <section class="pinned-intel" id="pinnedIntel">
+            <div class="section-header" onclick="toggleSection('pinnedIntel')">
+                <div class="section-title">
+                    <span class="section-icon">&#128204;</span>
+                    <span>Pinned Intel</span>
+                    <span class="section-badge" id="pinCount">0</span>
+                </div>
+                <span class="collapse-icon">&#9660;</span>
+            </div>
+            <div class="pinned-content">
+                <div class="pinned-tabs">
+                    <button class="pinned-tab active" data-tab="team">Team Intel</button>
+                    <button class="pinned-tab" data-tab="personal">My Bookmarks</button>
+                </div>
+                <div class="pinned-list" id="pinnedList">
+                    <div class="empty-pins">No team intel pinned yet</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Activity Feed (Alice's section - placeholder) -->
+        <section class="activity-feed" id="activityFeed">
+            <div class="feed-header">
+                <div class="section-title">
+                    <span class="section-icon">&#128240;</span>
+                    <span>Activity Feed</span>
+                </div>
+                <div class="feed-filters">
+                    <button class="filter-chip active" data-filter="activity" style="--filter-color: var(--type-action);">Activity</button>
+                    <button class="filter-chip" data-filter="all" style="--filter-color: var(--text-secondary);">All</button>
+                    <button class="filter-chip" data-filter="task" style="--filter-color: var(--type-task);">Task</button>
+                    <button class="filter-chip" data-filter="plan" style="--filter-color: var(--type-plan);">Plan</button>
+                    <button class="filter-chip" data-filter="build" style="--filter-color: var(--type-build);">Build</button>
+                    <button class="refresh-btn" id="refreshBtn" title="Refresh activity feed">&#8635;</button>
+                    <span class="last-updated" id="lastUpdated">Updated just now</span>
+                </div>
+            </div>
+            <div class="feed-list" id="feedList">
+                <div class="empty-state">
+                    <span class="empty-state-icon">&#128236;</span>
+                    <span>No activity yet</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Metrics Bar (Diana's section) -->
+        <footer class="metrics-bar" id="metricsBar">
+            <!-- Task Status Donut -->
+            <div class="metric-card">
+                <span class="metric-label">Tasks</span>
+                <div class="donut-chart">
+                    <svg class="donut-svg" viewBox="0 0 36 36">
+                        <circle class="donut-ring" cx="18" cy="18" r="14"/>
+                        <!-- Completed segment (green) -->
+                        <circle class="donut-segment" cx="18" cy="18" r="14"
+                            stroke="var(--status-active)"
+                            stroke-dasharray="0 100"
+                            stroke-dashoffset="0"/>
+                        <!-- In Progress segment (blue) -->
+                        <circle class="donut-segment" cx="18" cy="18" r="14"
+                            stroke="var(--status-busy)"
+                            stroke-dasharray="0 100"
+                            stroke-dashoffset="0"/>
+                        <!-- Pending segment (gray) -->
+                        <circle class="donut-segment" cx="18" cy="18" r="14"
+                            stroke="var(--status-offline)"
+                            stroke-dasharray="0 100"
+                            stroke-dashoffset="0"/>
+                    </svg>
+                    <div class="donut-center">
+                        <span class="donut-value">0</span>
+                        <span class="donut-label">total</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Team Velocity -->
+            <div class="metric-card velocity-card">
+                <div>
+                    <span class="metric-label">Velocity</span>
+                    <div class="metric-value highlight">0</div>
+                </div>
+                <div class="velocity-chart">
+                    <div class="velocity-bar" style="height: 0%;"></div>
+                    <div class="velocity-bar" style="height: 0%;"></div>
+                    <div class="velocity-bar" style="height: 0%;"></div>
+                    <div class="velocity-bar" style="height: 0%;"></div>
+                    <div class="velocity-bar" style="height: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Messages Today -->
+            <div class="metric-card">
+                <span class="metric-label">Messages</span>
+                <div class="metric-value">0</div>
+            </div>
+
+            <!-- Activity Sparkline -->
+            <div class="metric-card">
+                <span class="metric-label">Activity</span>
+                <div class="sparkline-container">
+                    <svg class="sparkline" viewBox="0 0 80 30" preserveAspectRatio="none">
+                        <path class="sparkline-area" d="M0,30 L0,20 L10,18 L20,22 L30,15 L40,12 L50,16 L60,8 L70,10 L80,5 L80,30 Z"/>
+                        <path class="sparkline-path" d="M0,20 L10,18 L20,22 L30,15 L40,12 L50,16 L60,8 L70,10 L80,5"/>
+                    </svg>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        // ============================================
+        // State Management
+        // ============================================
+        const PanelState = {
+            team: [],
+            profiles: [], // Team member profiles with avatar URLs
+            activities: [],
+            pins: { team: [], personal: [] },
+            metrics: { tasks: {}, velocity: 0, messages: 0 },
+            // Default filter is 'activity' which excludes chat and learned
+            filters: { member: null, type: null, mode: 'activity' },
+            // Types to exclude in 'activity' mode
+            excludedTypes: ['chat', 'learned'],
+            focusedMember: null,
+            _subscribers: [],
+
+            subscribe(fn) {
+                this._subscribers.push(fn);
+                return () => {
+                    this._subscribers = this._subscribers.filter(s => s !== fn);
+                };
+            },
+
+            notify() {
+                this._subscribers.forEach(fn => fn(this));
+            },
+
+            setFocus(member) {
+                this.focusedMember = member;
+                this.notify();
+                updateFocusMode();
+            },
+
+            clearFocus() {
+                this.focusedMember = null;
+                this.notify();
+                updateFocusMode();
+            }
+        };
+
+        // ============================================
+        // UI Interactions
+        // ============================================
+        function toggleSection(sectionId) {
+            const section = document.getElementById(sectionId);
+            section.classList.toggle('collapsed');
+        }
+
+        function updateFocusMode() {
+            const panel = document.getElementById('missionControl');
+            const focused = PanelState.focusedMember;
+
+            if (focused) {
+                panel.classList.add('focus-mode');
+                // Update team members
+                document.querySelectorAll('.team-member').forEach(el => {
+                    el.classList.toggle('focused', el.dataset.member === focused);
+                });
+                // Update feed items (would be by member data attribute)
+            } else {
+                panel.classList.remove('focus-mode');
+                document.querySelectorAll('.team-member').forEach(el => {
+                    el.classList.remove('focused');
+                });
+            }
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.key >= '1' && e.key <= '4') {
+                const members = ['alice', 'bob', 'charlie', 'diana'];
+                const index = parseInt(e.key) - 1;
+                PanelState.setFocus(members[index]);
+            } else if (e.key === 'Escape') {
+                PanelState.clearFocus();
+            }
+        });
+
+        // Team member click for focus
+        document.querySelectorAll('.team-member').forEach(el => {
+            el.addEventListener('click', () => {
+                const member = el.dataset.member;
+                if (PanelState.focusedMember === member) {
+                    PanelState.clearFocus();
+                } else {
+                    PanelState.setFocus(member);
+                }
+            });
+        });
+
+        // Tab switching
+        document.querySelectorAll('.pinned-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.pinned-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                // Would switch content based on tab.dataset.tab
+            });
+        });
+
+        // Filter chips
+        document.querySelectorAll('.filter-chip').forEach(chip => {
+            chip.addEventListener('click', () => {
+                document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+                chip.classList.add('active');
+                // Would filter feed based on chip type
+            });
+        });
+
+        // ============================================
+        // Last Updated Timestamp
+        // ============================================
+        let lastUpdateTime = Date.now();
+
+        function updateLastUpdated() {
+            lastUpdateTime = Date.now();
+            refreshLastUpdatedDisplay();
+        }
+
+        function refreshLastUpdatedDisplay() {
+            const seconds = Math.floor((Date.now() - lastUpdateTime) / 1000);
+            const el = document.getElementById('lastUpdated');
+            if (!el) return;
+
+            if (seconds < 5) {
+                el.textContent = 'Updated just now';
+            } else if (seconds < 60) {
+                el.textContent = `Updated ${seconds}s ago`;
+            } else if (seconds < 3600) {
+                el.textContent = `Updated ${Math.floor(seconds / 60)}m ago`;
+            } else {
+                el.textContent = `Updated ${Math.floor(seconds / 3600)}h ago`;
+            }
+        }
+
+        // Update the display every 5 seconds
+        setInterval(refreshLastUpdatedDisplay, 5000);
+
+        // ============================================
+        // WebView2 Communication
+        // ============================================
+        function sendToHost(message) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage(message);
+            } else {
+                console.log('Would send to host:', message);
+            }
+        }
+
+        function handleHostMessage(message) {
+            if (typeof message === 'string') {
+                const colonIndex = message.indexOf(':');
+                if (colonIndex === -1) return;
+
+                const command = message.substring(0, colonIndex);
+                const data = message.substring(colonIndex + 1);
+
+                console.log(`[C#→JS] ${command}:`, data.substring(0, 100) + (data.length > 100 ? '...' : ''));
+
+                switch (command) {
+                    case 'theme':
+                        console.log('[Theme] Setting:', data);
+                        document.body.classList.toggle('light', data === 'light');
+                        break;
+                    case 'profiles':
+                        console.log('[Profiles] Received profiles:', JSON.parse(data).length);
+                        PanelState.profiles = JSON.parse(data);
+                        break;
+                    case 'team':
+                        console.log('[Team] Full refresh, count:', JSON.parse(data).length);
+                        PanelState.team = JSON.parse(data);
+                        renderTeam();
+                        updateLastUpdated();
+                        break;
+                    case 'activityUpdate':
+                        console.log('[Team] Single update:', JSON.parse(data).terminal);
+                        updateTeamMember(JSON.parse(data));
+                        updateLastUpdated();
+                        break;
+                    case 'activities':
+                        console.log('[Feed] Full refresh, count:', JSON.parse(data).length);
+                        PanelState.activities = JSON.parse(data);
+                        renderFeed();
+                        updateLastUpdated();
+                        break;
+                    case 'feedItem':
+                        console.log('[Feed] New item:', JSON.parse(data).type);
+                        addFeedItem(JSON.parse(data));
+                        updateLastUpdated();
+                        break;
+                    case 'pins':
+                        console.log('[Pins] Refresh');
+                        PanelState.pins = JSON.parse(data);
+                        renderPins();
+                        break;
+                    case 'metrics':
+                        console.log('[Metrics] Update');
+                        PanelState.metrics = JSON.parse(data);
+                        renderMetrics();
+                        break;
+                    case 'fontSize':
+                        const size = parseFloat(data);
+                        if (!isNaN(size)) {
+                            document.body.style.fontSize = size + 'px';
+                            console.log('[FontSize] Set to:', size + 'px');
+                        }
+                        break;
+                    default:
+                        console.warn('[Unknown command]', command);
+                }
+            }
+        }
+
+        // Update a single team member without full re-render
+        function updateTeamMember(activityData) {
+            const { terminal, status, activity, updatedAt } = activityData;
+            const memberEl = document.querySelector(`.team-member[data-member="${terminal.toLowerCase()}"]`);
+
+            if (!memberEl) {
+                console.warn('[Team] Member not found:', terminal);
+                PanelState.team.push(activityData);
+                renderTeam();
+                return;
+            }
+
+            // Update status ring - map database status to UI status
+            const statusRing = memberEl.querySelector('.status-ring');
+            if (statusRing) {
+                // Map database status values to UI status
+                const statusMap = { working: 'active', idle: 'idle', blocked: 'busy', unknown: 'offline' };
+                const uiStatus = statusMap[status] || 'offline';
+                const statusColors = {
+                    active: 'var(--status-active)',
+                    idle: 'var(--status-idle)',
+                    offline: 'var(--status-offline)',
+                    busy: 'var(--status-busy)'
+                };
+                statusRing.style.setProperty('--status-color', statusColors[uiStatus] || statusColors.offline);
+                statusRing.classList.toggle('active', uiStatus === 'active');
+            }
+
+            // Update current task
+            const taskEl = memberEl.querySelector('.member-task');
+            if (taskEl && activity) {
+                taskEl.textContent = activity.length > 20 ? activity.substring(0, 20) + '...' : activity;
+                taskEl.title = activity;
+            }
+
+            // Update state
+            const idx = PanelState.team.findIndex(t => t.terminal === terminal);
+            if (idx >= 0) PanelState.team[idx] = activityData;
+
+            console.log('[Team] Updated:', terminal, status);
+        }
+
+        // Add a new feed item with animation
+        function addFeedItem(item) {
+            // Skip if item already exists (duplicate detection)
+            if (PanelState.activities.some(a => a.id === item.id)) {
+                console.log('[Feed] Skipping duplicate:', item.id);
+                return;
+            }
+
+            PanelState.activities.unshift(item);
+
+            const { member: filterMember, type: filterType, mode: filterMode } = PanelState.filters;
+
+            // Check if item passes current filter
+            let passesFilter = true;
+
+            // Member filter
+            if (filterMember && item.terminal?.toLowerCase() !== filterMember) {
+                passesFilter = false;
+            }
+
+            // Type filter (specific type selected)
+            if (filterType && item.type !== filterType) {
+                passesFilter = false;
+            }
+
+            // Activity mode excludes chat and learned
+            if (filterMode === 'activity' && PanelState.excludedTypes.includes(item.type)) {
+                passesFilter = false;
+            }
+
+            if (!passesFilter) {
+                console.log('[Feed] Item filtered out:', item.type);
+                return;
+            }
+
+            const feedList = document.getElementById('feedList');
+            const itemEl = createFeedItemElement(item);
+            itemEl.classList.add('new');
+
+            const emptyState = feedList.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+
+            feedList.prepend(itemEl);
+            setTimeout(() => itemEl.classList.remove('new'), 300);
+
+            console.log('[Feed] Added:', item.type);
+        }
+
+        // Helper to create a feed item element
+        function createFeedItemElement(item) {
+            const memberColors = {
+                alice: 'var(--color-alice)', bob: 'var(--color-bob)',
+                charlie: 'var(--color-charlie)', diana: 'var(--color-diana)'
+            };
+            const typeColors = {
+                learned: 'var(--type-learned)', chat: 'var(--type-chat)',
+                task: 'var(--type-task)', decision: 'var(--type-decision)',
+                build: 'var(--type-build)', plan: 'var(--type-plan)'
+            };
+
+            const memberKey = (item.terminal || '').toLowerCase();
+            const initial = (item.terminal || '?')[0].toUpperCase();
+            const timeAgo = formatTimeAgo(new Date(item.timestamp));
+            const avatarUrl = getAvatarUrl(item.terminal);
+            const avatarContent = avatarUrl
+                ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(item.terminal)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">`
+                : initial;
+
+            const div = document.createElement('div');
+            div.className = 'feed-item';
+            div.dataset.activityId = item.id;
+            div.dataset.member = memberKey;
+            div.dataset.type = item.type;
+            div.style.setProperty('--member-color', memberColors[memberKey] || 'var(--bg-input)');
+            div.style.setProperty('--type-color', typeColors[item.type] || 'var(--border-color)');
+
+            div.innerHTML = `
+                <div class="feed-type-indicator"></div>
+                <div class="feed-avatar">${avatarContent}</div>
+                <div class="feed-content">
+                    <div class="feed-message">${escapeHtml(item.content || '')}</div>
+                    <div class="feed-meta">
+                        <span>${escapeHtml(item.terminal || 'Unknown')}</span>
+                        <span>•</span>
+                        <span>${timeAgo}</span>
+                    </div>
+                </div>
+                <div class="feed-actions">
+                    <button class="pin-action" title="Pin">📌</button>
+                    <button class="pin-action" title="Copy">📋</button>
+                </div>
+            `;
+            return div;
+        }
+
+        // Format timestamp as relative time
+        function formatTimeAgo(date) {
+            const seconds = Math.floor((new Date() - date) / 1000);
+            if (seconds < 60) return 'just now';
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `${minutes}m ago`;
+            const hours = Math.floor(minutes / 60);
+            if (hours < 24) return `${hours}h ago`;
+            return `${Math.floor(hours / 24)}d ago`;
+        }
+
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Setup WebView2 listener
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.addEventListener('message', (event) => {
+                handleHostMessage(event.data);
+            });
+            // Signal ready
+            sendToHost({ type: 'ready' });
+        }
+
+        // Refresh button handler
+        document.getElementById('refreshBtn').addEventListener('click', function() {
+            this.style.transform = 'rotate(360deg)';
+            setTimeout(() => this.style.transform = '', 300);
+            sendToHost({ type: 'refresh' });
+        });
+
+        // ============================================
+        // Pin Actions (Diana's section)
+        // ============================================
+
+        // Auto-detect category from text content
+        function detectCategory(text) {
+            const lower = text.toLowerCase();
+            if (/password|credential|secret|api.?key|token/.test(lower)) return 'credential';
+            if (/decided|agreed|going with|using|chosen/.test(lower)) return 'decision';
+            if (/todo|need to|must|should|action/.test(lower)) return 'action';
+            if (/https?:\/\/|\.com|\.io|\.dev/.test(lower)) return 'reference';
+            if (/\.(js|ts|cs|py|html|css|json)|\w+\.\w+:\d+/.test(lower)) return 'file';
+            if (/error|exception|stack|failed|bug/.test(lower)) return 'debug';
+            return 'general';
+        }
+
+        // Get category icon
+        function getCategoryIcon(category) {
+            const icons = {
+                credential: '🔐',
+                decision: '📋',
+                action: '⚠️',
+                reference: '🔗',
+                file: '📁',
+                debug: '🐛',
+                general: '📌'
+            };
+            return icons[category] || icons.general;
+        }
+
+        // Pin an activity to team intel
+        function pinToTeam(activityId, text, member) {
+            const category = detectCategory(text);
+            sendToHost({
+                type: 'pin',
+                action: 'add',
+                scope: 'team',
+                activityId: activityId,
+                text: text,
+                member: member,
+                category: category,
+                persistent: false // Session-only by default
+            });
+            console.log(`Pinned to team: ${text} [${category}]`);
+        }
+
+        // Pin an activity to personal bookmarks
+        function pinToPersonal(activityId, text) {
+            const category = detectCategory(text);
+            sendToHost({
+                type: 'pin',
+                action: 'add',
+                scope: 'personal',
+                activityId: activityId,
+                text: text,
+                category: category
+            });
+            console.log(`Bookmarked: ${text} [${category}]`);
+        }
+
+        // Remove a pin
+        function unpinItem(pinId, scope) {
+            sendToHost({
+                type: 'pin',
+                action: 'remove',
+                scope: scope,
+                pinId: pinId
+            });
+            console.log(`Unpinned: ${pinId} from ${scope}`);
+        }
+
+        // Promote session pin to persistent
+        function promotePin(pinId) {
+            sendToHost({
+                type: 'pin',
+                action: 'promote',
+                pinId: pinId
+            });
+            console.log(`Promoted pin to persistent: ${pinId}`);
+        }
+
+        // Copy text to clipboard with visual feedback
+        async function copyToClipboard(text, buttonEl) {
+            try {
+                await navigator.clipboard.writeText(text);
+
+                // Visual feedback
+                if (buttonEl) {
+                    buttonEl.classList.add('copied');
+                    const originalText = buttonEl.innerHTML;
+                    buttonEl.innerHTML = '✓';
+
+                    setTimeout(() => {
+                        buttonEl.classList.remove('copied');
+                        buttonEl.innerHTML = originalText;
+                    }, 1500);
+                }
+
+                console.log('Copied to clipboard:', text);
+            } catch (err) {
+                console.error('Failed to copy:', err);
+                // Fallback for older browsers
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }
+        }
+
+        // Wire up pin actions on feed items (event delegation)
+        document.getElementById('feedList').addEventListener('click', (e) => {
+            const button = e.target.closest('.pin-action');
+            if (!button) return;
+
+            const feedItem = button.closest('.feed-item');
+            const message = feedItem.querySelector('.feed-message')?.textContent || '';
+            const member = feedItem.querySelector('.feed-meta span')?.textContent || '';
+            const activityId = feedItem.dataset.activityId || Date.now().toString();
+
+            if (button.title === 'Pin') {
+                pinToTeam(activityId, message, member);
+            } else if (button.title === 'Bookmark') {
+                pinToPersonal(activityId, message);
+            } else if (button.title === 'Copy') {
+                copyToClipboard(message, button);
+            }
+        });
+
+        // Wire up pin actions on pinned items (event delegation)
+        document.getElementById('pinnedList').addEventListener('click', (e) => {
+            const button = e.target.closest('.pin-action');
+            if (!button) return;
+
+            const pinnedItem = button.closest('.pinned-item');
+            const text = pinnedItem.querySelector('.pin-text')?.textContent || '';
+            const pinId = pinnedItem.dataset.pinId || '';
+            const scope = pinnedItem.dataset.scope || 'team';
+
+            if (button.classList.contains('unpin')) {
+                unpinItem(pinId, scope);
+            } else if (button.classList.contains('copy')) {
+                copyToClipboard(text, button);
+            } else if (button.classList.contains('promote')) {
+                promotePin(pinId);
+            }
+        });
+
+        // ============================================
+        // Render Functions (Alice's implementation)
+        // ============================================
+
+        // Helper to get profile avatar URL by terminal name
+        function getAvatarUrl(terminalName) {
+            if (!terminalName || !PanelState.profiles) return null;
+            const profile = PanelState.profiles.find(p =>
+                (p.id || '').toLowerCase() === terminalName.toLowerCase()
+            );
+            return profile?.avatarUrl || null;
+        }
+
+        // Member color mapping
+        const memberColors = {
+            alice: 'var(--color-alice)',
+            bob: 'var(--color-bob)',
+            charlie: 'var(--color-charlie)',
+            diana: 'var(--color-diana)'
+        };
+
+        // Activity type color mapping
+        const typeColors = {
+            learned: 'var(--type-learned)',
+            task: 'var(--type-task)',
+            chat: 'var(--type-chat)',
+            decision: 'var(--type-decision)',
+            build: 'var(--type-build)',
+            plan: 'var(--type-plan)'
+        };
+
+        function renderTeam() {
+            const container = document.getElementById('teamStatus');
+            if (!PanelState.team || PanelState.team.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <span class="empty-state-icon">👥</span>
+                        <span>No team members connected</span>
+                    </div>
+                `;
+                return;
+            }
+
+            // Check if we need a full rebuild or can do incremental updates
+            const existingMembers = container.querySelectorAll('.team-member');
+            const existingMemberIds = new Set(Array.from(existingMembers).map(el => el.dataset.member));
+            const newMemberIds = new Set(PanelState.team.map(m => (m.terminal || '').toLowerCase()));
+
+            // If member count changed or different members, do full rebuild
+            const needsFullRebuild = existingMemberIds.size !== newMemberIds.size ||
+                                     [...existingMemberIds].some(id => !newMemberIds.has(id)) ||
+                                     existingMembers.length === 0;
+
+            if (needsFullRebuild) {
+                // Full rebuild - but use DocumentFragment to minimize reflows
+                const fragment = document.createDocumentFragment();
+
+                PanelState.team.forEach(member => {
+                    const el = createTeamMemberElement(member);
+                    fragment.appendChild(el);
+                });
+
+                container.innerHTML = '';
+                container.appendChild(fragment);
+                attachTeamMemberHandlers();
+                console.log('[Team] Full rebuild completed');
+            } else {
+                // Incremental update - just update changed properties
+                PanelState.team.forEach(member => {
+                    updateTeamMember(member);
+                });
+                console.log('[Team] Incremental update completed');
+            }
+        }
+
+        // Helper to create a team member element
+        function createTeamMemberElement(member) {
+            const terminalName = member.terminal || 'Unknown';
+            const memberId = terminalName.toLowerCase();
+            const statusMap = { 'working': 'active', 'idle': 'idle', 'blocked': 'busy', 'unknown': 'offline' };
+            const uiStatus = statusMap[member.status] || 'offline';
+            const statusClass = uiStatus === 'active' ? 'active' : '';
+            const focusedClass = PanelState.focusedMember === memberId ? 'focused' : '';
+            const statusColors = {
+                active: 'var(--status-active)', idle: 'var(--status-idle)',
+                busy: 'var(--status-busy)', offline: 'var(--status-offline)'
+            };
+            const statusColor = statusColors[uiStatus] || statusColors.offline;
+            const memberColor = memberColors[memberId] || 'var(--bg-input)';
+            const blockedIndicator = member.blockedBy ? ' ⛔' : '';
+
+            const div = document.createElement('div');
+            div.className = `team-member ${focusedClass}`.trim();
+            div.style.setProperty('--member-color', memberColor);
+            div.dataset.member = memberId;
+            div.setAttribute('role', 'button');
+            div.setAttribute('tabindex', '0');
+            div.setAttribute('aria-label', `Focus on ${terminalName}${member.blockedBy ? ' (blocked)' : ''}`);
+
+            const avatarUrl = getAvatarUrl(terminalName);
+            const avatarContent = avatarUrl
+                ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(terminalName)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">`
+                : terminalName.charAt(0).toUpperCase();
+
+            div.innerHTML = `
+                <div class="avatar">
+                    <div class="status-ring ${statusClass}" style="--status-color: ${statusColor};"></div>
+                    <div class="avatar-circle">${avatarContent}</div>
+                </div>
+                <span class="member-name">${escapeHtml(terminalName)}${blockedIndicator}</span>
+                <span class="member-task" title="${escapeHtml(member.activity || '')}">${escapeHtml(member.activity || 'Idle')}</span>
+            `;
+
+            return div;
+        }
+
+        function attachTeamMemberHandlers() {
+            document.querySelectorAll('.team-member').forEach(el => {
+                el.addEventListener('click', () => toggleMemberFocus(el.dataset.member));
+                el.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleMemberFocus(el.dataset.member);
+                    }
+                });
+            });
+        }
+
+        function toggleMemberFocus(member) {
+            if (PanelState.focusedMember === member) {
+                PanelState.clearFocus();
+            } else {
+                PanelState.setFocus(member);
+            }
+        }
+
+        function renderFeed() {
+            const container = document.getElementById('feedList');
+            const filters = PanelState.filters;
+
+            // Filter activities
+            // Bob's model: { id, terminal, type, content, timestamp, isPinned }
+            let items = PanelState.activities || [];
+
+            // Member filter
+            if (filters.member) {
+                items = items.filter(item => (item.terminal || '').toLowerCase() === filters.member);
+            }
+
+            // Type filter (specific type selected)
+            if (filters.type) {
+                items = items.filter(item => item.type === filters.type);
+            }
+
+            // Activity mode excludes chat and learned
+            if (filters.mode === 'activity') {
+                items = items.filter(item => !PanelState.excludedTypes.includes(item.type));
+            }
+
+            if (items.length === 0) {
+                const filterActive = filters.member || filters.type;
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <span class="empty-state-icon">${filterActive ? '🔍' : '📭'}</span>
+                        <span>${filterActive ? 'No matching activities' : 'No activity yet'}</span>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = items.map((item, index) => {
+                const terminalName = item.terminal || 'Unknown';
+                const memberId = terminalName.toLowerCase();
+                const memberColor = memberColors[memberId] || 'var(--bg-input)';
+                const typeColor = typeColors[item.type] || 'var(--border-color)';
+                const initial = terminalName.charAt(0).toUpperCase();
+                const dimmedClass = PanelState.focusedMember && memberId !== PanelState.focusedMember ? 'dimmed' : '';
+                const newClass = item.isNew ? 'new' : '';
+                const timeAgo = formatTimeAgo(item.timestamp);
+                const activityId = item.id || `activity-${index}`;
+                const pinnedClass = item.isPinned ? 'pinned' : '';
+                const avatarUrl = getAvatarUrl(terminalName);
+                const avatarContent = avatarUrl
+                    ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(terminalName)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">`
+                    : initial;
+
+                return `
+                    <div class="feed-item ${dimmedClass} ${newClass} ${pinnedClass}"
+                         data-member="${memberId}"
+                         data-type="${item.type || ''}"
+                         data-activity-id="${activityId}"
+                         role="article"
+                         style="--member-color: ${memberColor}; --type-color: ${typeColor};">
+                        <div class="feed-type-indicator"></div>
+                        <div class="feed-avatar">${avatarContent}</div>
+                        <div class="feed-content">
+                            <div class="feed-message">${escapeHtml(item.content || '')}</div>
+                            <div class="feed-meta">
+                                <span>${escapeHtml(terminalName)}</span>
+                                <span>•</span>
+                                <span>${timeAgo}</span>
+                                ${item.isPinned ? '<span>• 📌</span>' : ''}
+                            </div>
+                        </div>
+                        <div class="feed-actions">
+                            <button class="pin-action" title="Pin" aria-label="Pin to team">📌</button>
+                            <button class="pin-action" title="Bookmark" aria-label="Add bookmark">🔖</button>
+                            <button class="pin-action" title="Copy" aria-label="Copy text">📋</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderPins() {
+            const container = document.getElementById('pinnedList');
+            const activeTab = document.querySelector('.pinned-tab.active')?.dataset.tab || 'team';
+            const pins = activeTab === 'team' ? (PanelState.pins.team || []) : (PanelState.pins.personal || []);
+
+            // Update badge count
+            const totalCount = (PanelState.pins.team?.length || 0) + (PanelState.pins.personal?.length || 0);
+            document.getElementById('pinCount').textContent = totalCount;
+
+            if (pins.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-pins">
+                        ${activeTab === 'team' ? 'No team intel pinned yet' : 'No personal bookmarks'}
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = pins.map(pin => {
+                const memberId = (pin.member || '').toLowerCase();
+                const memberColor = memberColors[memberId] || 'var(--bg-input)';
+                const sessionClass = pin.sessionOnly ? 'session-only' : '';
+                const categoryIcon = getCategoryIcon(pin.category);
+                const timeAgo = formatTimeAgo(pin.pinnedAt);
+
+                return `
+                    <div class="pinned-item ${sessionClass}"
+                         style="--member-color: ${memberColor};"
+                         data-pin-id="${pin.id || ''}"
+                         data-scope="${activeTab}">
+                        <span class="pin-category">${categoryIcon}</span>
+                        <div class="pin-content">
+                            <div class="pin-text">${escapeHtml(pin.text || '')}</div>
+                            <div class="pin-meta">
+                                <span class="pin-author">
+                                    <span class="pin-author-dot"></span>
+                                    ${escapeHtml(pin.memberName || pin.member || 'Unknown')}
+                                </span>
+                                <span>•</span>
+                                <span>${pin.sessionOnly ? 'Session only' : timeAgo}</span>
+                            </div>
+                        </div>
+                        <div class="pin-actions">
+                            ${pin.sessionOnly ? `<button class="pin-action promote" title="Keep" aria-label="Make persistent">⭐</button>` : ''}
+                            <button class="pin-action copy" title="Copy" aria-label="Copy text">📋</button>
+                            <button class="pin-action unpin" title="Unpin" aria-label="Remove pin">📌</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderMetrics() {
+            const metrics = PanelState.metrics;
+            if (!metrics) return;
+
+            // Bob's model: { totalTasks, completedTasks, inProgressTasks, pendingTasks, messageCount, learnedCount }
+
+            // Update donut chart
+            const total = metrics.totalTasks || (metrics.completedTasks || 0) + (metrics.inProgressTasks || 0) + (metrics.pendingTasks || 0);
+            if (total > 0) {
+                const completedPct = ((metrics.completedTasks || 0) / total) * 100;
+                const inProgressPct = ((metrics.inProgressTasks || 0) / total) * 100;
+                const pendingPct = ((metrics.pendingTasks || 0) / total) * 100;
+
+                const segments = document.querySelectorAll('.donut-segment');
+                if (segments[0]) segments[0].setAttribute('stroke-dasharray', `${completedPct} 100`);
+                if (segments[1]) {
+                    segments[1].setAttribute('stroke-dasharray', `${inProgressPct} 100`);
+                    segments[1].setAttribute('stroke-dashoffset', `-${completedPct}`);
+                }
+                if (segments[2]) {
+                    segments[2].setAttribute('stroke-dasharray', `${pendingPct} 100`);
+                    segments[2].setAttribute('stroke-dashoffset', `-${completedPct + inProgressPct}`);
+                }
+
+                const donutValue = document.querySelector('.donut-value');
+                if (donutValue) donutValue.textContent = total;
+            }
+
+            // Update velocity (calculated: completed tasks this session)
+            const velocityEl = document.querySelector('.velocity-card .metric-value');
+            if (velocityEl && metrics.completedTasks !== undefined) {
+                const velocity = metrics.completedTasks;
+                velocityEl.textContent = velocity >= 0 ? `+${velocity}` : velocity;
+            }
+
+            // Update messages count
+            if (metrics.messageCount !== undefined) {
+                const metricCards = document.querySelectorAll('.metric-card');
+                const msgCard = metricCards[2];
+                if (msgCard) {
+                    const msgValue = msgCard.querySelector('.metric-value');
+                    if (msgValue) msgValue.textContent = metrics.messageCount;
+                }
+            }
+
+            // Update sparkline (if provided)
+            if (metrics.activityData && Array.isArray(metrics.activityData)) {
+                updateSparkline(metrics.activityData);
+            }
+
+            console.log('Metrics updated:', metrics);
+        }
+
+        function updateSparkline(data) {
+            if (!data || data.length < 2) return;
+
+            const width = 80;
+            const height = 30;
+            const maxVal = Math.max(...data, 1);
+
+            const points = data.map((val, i) => {
+                const x = (i / (data.length - 1)) * width;
+                const y = height - (val / maxVal) * (height - 5);
+                return `${x},${y}`;
+            });
+
+            const pathD = 'M' + points.join(' L');
+            const areaD = `M0,${height} L${points.join(' L')} L${width},${height} Z`;
+
+            const sparklinePath = document.querySelector('.sparkline-path');
+            const sparklineArea = document.querySelector('.sparkline-area');
+            if (sparklinePath) sparklinePath.setAttribute('d', pathD);
+            if (sparklineArea) sparklineArea.setAttribute('d', areaD);
+        }
+
+        // ============================================
+        // Helper Functions
+        // ============================================
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatTimeAgo(timestamp) {
+            if (!timestamp) return 'just now';
+            const now = Date.now();
+            const diff = now - new Date(timestamp).getTime();
+            const minutes = Math.floor(diff / 60000);
+            const hours = Math.floor(minutes / 60);
+
+            if (minutes < 1) return 'just now';
+            if (minutes < 60) return `${minutes}m ago`;
+            if (hours < 24) return `${hours}h ago`;
+            return `${Math.floor(hours / 24)}d ago`;
+        }
+
+        // ============================================
+        // Filter Logic
+        // ============================================
+        function setFilter(filterName) {
+            // Reset filters
+            PanelState.filters.type = null;
+            PanelState.filters.mode = null;
+
+            if (filterName === 'activity') {
+                // Activity mode: excludes chat and learned
+                PanelState.filters.mode = 'activity';
+            } else if (filterName === 'all') {
+                // All mode: show everything
+                PanelState.filters.mode = 'all';
+            } else {
+                // Specific type filter
+                PanelState.filters.type = filterName;
+            }
+
+            renderFeed();
+            updateFilterChips();
+        }
+
+        function updateFilterChips() {
+            document.querySelectorAll('.filter-chip').forEach(chip => {
+                const filterName = chip.dataset.filter;
+                let isActive = false;
+
+                if (filterName === 'activity') {
+                    isActive = PanelState.filters.mode === 'activity';
+                } else if (filterName === 'all') {
+                    isActive = PanelState.filters.mode === 'all';
+                } else {
+                    isActive = PanelState.filters.type === filterName;
+                }
+
+                chip.classList.toggle('active', isActive);
+                chip.setAttribute('aria-pressed', isActive);
+            });
+        }
+
+        // Re-wire filter chips with new logic
+        document.querySelectorAll('.filter-chip').forEach(chip => {
+            chip.setAttribute('role', 'button');
+            chip.setAttribute('aria-pressed', 'false');
+            chip.addEventListener('click', () => {
+                const filterName = chip.dataset.filter;
+                setFilter(filterName);
+            });
+        });
+
+        // Initial console message for standalone testing
+        console.log('Mission Control Activity Panel loaded');
+        console.log('Keyboard shortcuts: 1-4 to focus team members, Esc to clear');
+        console.log('Render functions ready: renderTeam(), renderFeed(), renderPins(), renderMetrics()');
+    </script>
+</body>
+</html>
