@@ -12,6 +12,7 @@ using MultiTerminal.Terminal;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.Services;
+using MultiTerminal.StartScreen;
 using WeifenLuo.WinFormsUI.Docking;
 
 namespace MultiTerminal.Docking
@@ -32,6 +33,10 @@ namespace MultiTerminal.Docking
         private DebugLogService _debugLogService;
         private static int _instanceCount = 0;
         private readonly string _docId = Guid.NewGuid().ToString("N").Substring(0, 8);
+
+        // Start screen — shown before a terminal shell is started
+        private StartScreenControl _startScreen;
+        private bool _isStartScreenVisible;
 
         /// <summary>
         /// Gets the unique document ID for this terminal.
@@ -98,6 +103,24 @@ namespace MultiTerminal.Docking
         /// Event fired when user requests to launch a new terminal with a specific identity.
         /// </summary>
         public event EventHandler<LaunchAsIdentityEventArgs> LaunchAsIdentityRequested;
+
+        /// <summary>
+        /// Forwarded from StartScreenControl: user clicked a project card to launch.
+        /// MainForm wires this to build the Claude Code command and call StartTerminal().
+        /// </summary>
+        public event EventHandler<StartScreenLaunchEventArgs> ProjectLaunched;
+
+        /// <summary>
+        /// Forwarded from StartScreenControl: user clicked "Open PowerShell" (no project).
+        /// MainForm calls StartTerminal() with no project context.
+        /// </summary>
+        public event EventHandler StartScreenOpenPowerShellRequested;
+
+        /// <summary>
+        /// Forwarded from StartScreenControl: user clicked "New Project".
+        /// MainForm opens the EditProjectDialog.
+        /// </summary>
+        public event EventHandler StartScreenNewProjectRequested;
 
         /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
@@ -378,6 +401,19 @@ namespace MultiTerminal.Docking
             Controls.Add(_terminalAgentSplitter);
             Controls.Add(_statusBar);
 
+            // Start screen: overlays the full client area, shown before terminal starts
+            _startScreen = new StartScreenControl
+            {
+                Dock = DockStyle.Fill,
+                Visible = true // Visible by default on new tabs
+            };
+            _startScreen.ProjectLaunched += (s, e) => ProjectLaunched?.Invoke(this, e);
+            _startScreen.OpenPowerShellRequested += (s, e) => StartScreenOpenPowerShellRequested?.Invoke(this, e);
+            _startScreen.NewProjectRequested += (s, e) => StartScreenNewProjectRequested?.Invoke(this, e);
+            Controls.Add(_startScreen);
+            _startScreen.BringToFront();
+            _isStartScreenVisible = true;
+
             // Configure dock behavior
             DockAreas = DockAreas.Document | DockAreas.Float;
             CloseButton = true;
@@ -445,6 +481,13 @@ namespace MultiTerminal.Docking
         private void InitializeTabContextMenu()
         {
             _tabContextMenu = new ContextMenuStrip();
+
+            // Home — show start screen
+            var homeItem = new ToolStripMenuItem("Home");
+            homeItem.Click += (s, args) => ShowStartScreen();
+            _tabContextMenu.Items.Add(homeItem);
+
+            _tabContextMenu.Items.Add(new ToolStripSeparator());
 
             // Close
             var closeItem = new ToolStripMenuItem("Close");
@@ -541,6 +584,9 @@ namespace MultiTerminal.Docking
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] projectId: '{projectId ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _docId: '{_docId}'");
 
+            // Hide start screen before launching the shell
+            HideStartScreen();
+
             _lastKnownDirectory = workingDirectory;
             ToolTipText = workingDirectory;
             _isTerminalStarted = true;
@@ -571,6 +617,7 @@ namespace MultiTerminal.Docking
             _statusBar?.SetTheme(theme.IsDark);
             _taskHud?.ApplyTheme(theme.IsDark);
             _embeddedAgentPanel?.ApplyTheme(theme.IsDark);
+            _startScreen?.ApplyTheme(theme.IsDark);
 
             // Theme the splitter handle
             if (_terminalAgentSplitter != null)
@@ -871,9 +918,8 @@ namespace MultiTerminal.Docking
                 return;
             }
 
-            // Mark as exited in title
-            Text = $"[Exited] {Text}";
-            TabText = Text;
+            // Return to start screen on process exit so the tab can be reused
+            ShowStartScreen();
 
             TerminalExited?.Invoke(this, EventArgs.Empty);
         }
@@ -954,6 +1000,53 @@ namespace MultiTerminal.Docking
             _currentContextMenu = menu;
             menu.Show(_terminal, e.Location);
         }
+
+        /// <summary>
+        /// Injects a ProjectDatabase so the start screen can list projects.
+        /// Call after construction, before the document is shown.
+        /// </summary>
+        public void SetProjectDatabase(ProjectDatabase projectDatabase)
+        {
+            _startScreen?.Initialize(projectDatabase);
+        }
+
+        /// <summary>
+        /// Show the start screen and hide the terminal area.
+        /// Called on new tab creation (before shell starts) and after shell exit.
+        /// </summary>
+        public void ShowStartScreen()
+        {
+            if (_startScreen == null) return;
+            _isStartScreenVisible = true;
+
+            // Show start screen over the entire content area
+            _startScreen.BringToFront();
+            _startScreen.Visible = true;
+            _startScreen.RefreshProjects();
+
+            // Update tab title
+            Text = "Home";
+            TabText = "Home";
+
+            // Give WebView2 keyboard focus so the start screen is immediately interactive
+            _startScreen.Focus();
+        }
+
+        /// <summary>
+        /// Hide the start screen and reveal the terminal area.
+        /// Called by StartTerminal() just before the shell launches.
+        /// </summary>
+        public void HideStartScreen()
+        {
+            if (_startScreen == null) return;
+            _isStartScreenVisible = false;
+            _startScreen.Visible = false;
+        }
+
+        /// <summary>
+        /// Whether the start screen is currently visible (shell not yet started / has exited).
+        /// </summary>
+        public bool IsStartScreenVisible => _isStartScreenVisible;
 
         /// <summary>
         /// Sets the debug log service for status bar logging.
@@ -1097,6 +1190,12 @@ namespace MultiTerminal.Docking
             {
                 _projectFileWatcher?.Dispose();
                 _projectFileWatcher = null;
+
+                if (_startScreen != null)
+                {
+                    _startScreen.Dispose();
+                    _startScreen = null;
+                }
 
                 // Unsubscribe from activity updates
                 if (_messageBroker?.ActivityService != null)

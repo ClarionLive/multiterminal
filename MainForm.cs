@@ -20,6 +20,7 @@ using MultiTerminal.InboxPanel;
 using MultiTerminal.TaskLifecycleBoard;
 using MultiTerminal.Terminal; // For FontSizeChangedEventArgs
 using MultiTerminal.AgentPanel;
+using MultiTerminal.StartScreen;
 using WeifenLuo.WinFormsUI.Docking;
 
 namespace MultiTerminal
@@ -76,6 +77,9 @@ namespace MultiTerminal
         private readonly Dictionary<string, (AgentPanelControl Control, Panel Slot, TerminalDocument Terminal)> _embeddedAgentMap = new();
         private TeamWatcherService _teamWatcher;
         private InboxMonitorService _inboxMonitor;
+
+        // Shared project database for start screen — created once, disposed with form
+        private Services.ProjectDatabase _sharedProjectDatabase;
 
         // Anti-reentrance: throttle nudges per terminal (5-second cooldown)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastNudgeTime = new();
@@ -150,6 +154,21 @@ namespace MultiTerminal
             ResumeLayout(false);
         }
 
+        /// <summary>
+        /// Handle global keyboard shortcuts that must work even when WebView2 has focus.
+        /// Ctrl+Shift+H: show start screen on the active terminal tab.
+        /// </summary>
+        protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.Shift | Keys.H))
+            {
+                var activeTerminal = _dockPanel.ActiveDocument as TerminalDocument;
+                activeTerminal?.ShowStartScreen();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
         private void InitializeDockPanel()
         {
             _dockPanel = new DockPanel
@@ -183,6 +202,9 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine("[MainForm] Creating SessionDatabase...");
             _sessionDatabase = new SessionDatabase(); // Uses centralized path in APPDATA
             System.Diagnostics.Trace.WriteLine("[MainForm] SessionDatabase created successfully");
+
+            // Shared project database for the start screen (one connection, shared across all terminals)
+            _sharedProjectDatabase = new Services.ProjectDatabase();
 
             // Initialize project panel (combines project info and prompts)
             _projectPanel = new ProjectPanelDocument();
@@ -1482,6 +1504,9 @@ namespace MultiTerminal
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
             doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
 
+            // Wire start screen events
+            WireStartScreenEvents(doc);
+
             string terminalName = null;
 
             // Show in dock panel based on new terminal mode setting
@@ -1501,6 +1526,13 @@ namespace MultiTerminal
             }
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Terminal shown in DockPanel");
 
+            // When called with no launch parameters, show the start screen instead of starting a shell.
+            // Any meaningful parameter (directory, identity, command, project) triggers immediate start.
+            bool hasLaunchParams = !string.IsNullOrEmpty(workingDirectory)
+                || !string.IsNullOrEmpty(identityName)
+                || !string.IsNullOrEmpty(autoRunCommand)
+                || !string.IsNullOrEmpty(projectId);
+
             // Register with MCP server AFTER adding to DockPanel so the
             // TerminalRegistered event handler can find this doc by DocId
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Registering terminal with MCP server...");
@@ -1512,24 +1544,34 @@ namespace MultiTerminal
                     terminalName = PreRegisterTerminalWithName(doc.DocId, identityName);
                     System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] PreRegisterTerminalWithName returned: '{terminalName}'");
                 }
-                else
+                else if (hasLaunchParams)
                 {
                     System.Diagnostics.Trace.WriteLine("[AddNewTerminal] No identity name, using 'Unassigned'");
                     terminalName = "Unassigned";
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
                 }
+                // else: start screen tab — no MCP registration yet; happens when user launches a project
             }
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Terminal registered as: '{terminalName ?? "null"}'");
 
-            // Start the terminal with specified or default directory and optional auto-run command
-            string dir = workingDirectory ?? _settings?.GetLastDirectory();
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Starting terminal...");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}')...");
-            doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId);
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
+            if (hasLaunchParams)
+            {
+                // Start the terminal with specified or default directory and optional auto-run command
+                string dir = workingDirectory ?? _settings?.GetLastDirectory();
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Starting terminal...");
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}')...");
+                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId);
+                System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
+            }
+            else
+            {
+                // No launch params: show start screen so user can pick a project
+                System.Diagnostics.Trace.WriteLine("[AddNewTerminal] No launch params — showing start screen");
+                doc.ShowStartScreen();
+            }
 
             // Apply specified or default font size
             float terminalFontSize = fontSize ?? _settings?.GetTerminalFontSize() ?? 10f;
@@ -1538,9 +1580,118 @@ namespace MultiTerminal
             // Focus the new terminal and track it as last active
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Focusing terminal...");
             doc.Activate();
-            doc.FocusTerminal();
+            if (!doc.IsStartScreenVisible)
+                doc.FocusTerminal();
             _lastActiveTerminal = doc;
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Completed");
+        }
+
+        /// <summary>
+        /// Wires the start screen events on a newly created TerminalDocument and injects the project database.
+        /// Call this at every TerminalDocument creation site.
+        /// </summary>
+        private void WireStartScreenEvents(TerminalDocument doc)
+        {
+            doc.SetProjectDatabase(_sharedProjectDatabase);
+            doc.ProjectLaunched += OnStartScreenProjectLaunched;
+            doc.StartScreenOpenPowerShellRequested += OnStartScreenOpenPowerShell;
+            doc.StartScreenNewProjectRequested += OnStartScreenNewProject;
+        }
+
+        /// <summary>
+        /// Handles a project selection from the start screen.
+        /// Loads the project, builds the Claude Code launch command, updates last_opened_at,
+        /// then calls StartTerminal() on the source document.
+        /// </summary>
+        private void OnStartScreenProjectLaunched(object sender, StartScreenLaunchEventArgs e)
+        {
+            if (sender is not TerminalDocument doc) return;
+
+            try
+            {
+                var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
+                if (project == null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[StartScreen] Project not found: {e.ProjectId}");
+                    return;
+                }
+
+                // Update last opened timestamp
+                project.LastOpenedAt = DateTime.Now;
+                _sharedProjectDatabase?.SaveRichProject(project);
+
+                // Build Claude Code launch command (resolves working directory, adds MT config flags)
+                var launchCmd = Services.LaunchCommandBuilder.BuildClaudeCommand(project);
+                string launchDir = launchCmd.WorkingDirectory;
+                string autoRunCommand = launchCmd.AutoRunCommand;
+
+                // Register terminal before starting (start screen tabs are unregistered)
+                string terminalName = null;
+                if (_mcpServer?.Broker != null)
+                {
+                    terminalName = "Unassigned";
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                }
+
+                System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
+                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id);
+
+                // Apply current font size
+                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
+                doc.SetFontSize(terminalFontSize);
+
+                doc.Activate();
+                doc.FocusTerminal();
+                _lastActiveTerminal = doc;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenProjectLaunched error: {ex.Message}");
+                MessageBox.Show($"Failed to launch project: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        /// <summary>
+        /// Handles "Open PowerShell" from the start screen: starts a plain terminal with no project context.
+        /// </summary>
+        private void OnStartScreenOpenPowerShell(object sender, EventArgs e)
+        {
+            if (sender is not TerminalDocument doc) return;
+
+            string terminalName = null;
+            if (_mcpServer?.Broker != null)
+            {
+                terminalName = "Unassigned";
+                _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+            }
+
+            string dir = _settings?.GetLastDirectory();
+            doc.StartTerminal(dir, terminalName);
+
+            float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
+            doc.SetFontSize(terminalFontSize);
+
+            doc.Activate();
+            doc.FocusTerminal();
+            _lastActiveTerminal = doc;
+        }
+
+        /// <summary>
+        /// Handles "New Project" from the start screen: opens the EditProjectDialog.
+        /// </summary>
+        private void OnStartScreenNewProject(object sender, EventArgs e)
+        {
+            using var projectDb = new Services.ProjectDatabase();
+            using var dialog = new Dialogs.EditProjectDialog(projectDb, _currentTheme);
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+            {
+                // Refresh all visible start screens so the new project card appears
+                foreach (var termDoc in _dockPanel.Documents.OfType<TerminalDocument>())
+                {
+                    if (termDoc.IsStartScreenVisible)
+                        termDoc.ShowStartScreen(); // calls RefreshProjects() internally
+                }
+            }
         }
 
         /// <summary>
@@ -1682,6 +1833,7 @@ namespace MultiTerminal
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
             doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
+            WireStartScreenEvents(doc);
 
             string terminalName = null;
 
@@ -1741,6 +1893,7 @@ namespace MultiTerminal
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
             doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
+            WireStartScreenEvents(doc);
 
             // Wait for renderer (WebView2/xterm.js) to be ready
             void rendererReadyHandler(object s, EventArgs e)
@@ -2102,6 +2255,7 @@ namespace MultiTerminal
                 // Wire up "Launch as..." context menu support
                 doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
                 doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
+                WireStartScreenEvents(doc);
 
                 doc.Show(_dockPanel, DockState.Document);
                 doc.StartTerminal(_settings?.GetLastDirectory());
@@ -2344,12 +2498,22 @@ namespace MultiTerminal
                     layoutRestored = true;
                     System.Diagnostics.Trace.WriteLine("[RestoreSession] Layout loaded successfully");
 
-                    // Start all restored terminals in parallel for faster loading
+                    // Start all restored terminals in parallel for faster loading.
+                    // Terminals that had no saved working directory (PendingWorkingDirectory == null)
+                    // are shown as start screens so the user can pick a project rather than
+                    // auto-starting in an arbitrary fallback directory.
                     var terminals = _gridManager.GetTerminalDocuments();
                     var startupTasks = terminals
                         .Where(doc => !doc.IsTerminalStarted)
                         .Select(async doc =>
                         {
+                            // Terminals with no saved directory restore to start screen
+                            if (string.IsNullOrEmpty(doc.PendingWorkingDirectory))
+                            {
+                                doc.ShowStartScreen();
+                                return;
+                            }
+
                             // Wait for WebView2 renderer to be ready before starting shell
                             await WaitForRendererReadyAsync(doc);
 
@@ -2361,18 +2525,20 @@ namespace MultiTerminal
                                 _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
                             }
 
-                            string dir = doc.PendingWorkingDirectory ?? _settings?.GetLastDirectory();
-                            await StartTerminalAndWaitAsync(doc, dir, terminalName);
+                            await StartTerminalAndWaitAsync(doc, doc.PendingWorkingDirectory, terminalName);
                         });
 
                     await Task.WhenAll(startupTasks);
 
-                    // Focus the first terminal
-                    if (terminals.Count > 0)
+                    // Focus the first terminal that is running; fall back to first start screen
+                    var firstStarted = terminals.FirstOrDefault(d => d.IsTerminalStarted);
+                    var firstDoc = firstStarted ?? terminals.FirstOrDefault();
+                    if (firstDoc != null)
                     {
-                        terminals[0].Activate();
-                        terminals[0].FocusTerminal();
-                        _lastActiveTerminal = terminals[0];
+                        firstDoc.Activate();
+                        if (firstDoc.IsTerminalStarted)
+                            firstDoc.FocusTerminal();
+                        _lastActiveTerminal = firstDoc;
                     }
                 }
                 catch (Exception ex)
@@ -2662,6 +2828,7 @@ namespace MultiTerminal
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
             doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
+            WireStartScreenEvents(doc);
 
             if (sessionInfo != null)
             {
@@ -3743,6 +3910,7 @@ namespace MultiTerminal
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
             doc.LaunchAsIdentityRequested += OnLaunchAsIdentityRequested;
+            WireStartScreenEvents(doc);
 
             // Show as tab
             doc.Show(_dockPanel, DockState.Document);
@@ -3965,6 +4133,7 @@ namespace MultiTerminal
                 _inboxMonitor?.Dispose();
                 _sessionIndexingService?.Dispose();
                 _sessionDatabase?.Dispose();
+                _sharedProjectDatabase?.Dispose();
                 _debugLogService?.Dispose();
                 _dockPanel?.Dispose();
                 _toolStrip?.Dispose();

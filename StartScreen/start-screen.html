@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MultiTerminal Start Screen</title>
+    <style>
+        /* ============================================================
+           CSS Variables — Dark theme defaults, light theme overrides
+           ============================================================ */
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #1f2937;
+            --bg-card-hover: #2a3441;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent: #4FC3F7;
+            --accent-hover: #29B6F6;
+            --border: #334155;
+            --badge-bg: #1e293b;
+            --pin-active: #fbbf24;
+            --pin-inactive: #475569;
+            --success: #22c55e;
+            --skeleton-base: #1f2937;
+            --skeleton-shimmer: #2d3748;
+            --input-bg: #1e293b;
+            --input-border: #334155;
+            --btn-secondary-bg: #1e293b;
+            --btn-secondary-hover: #263548;
+            --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+            --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+
+        body.light {
+            --bg-primary: #f8fafc;
+            --bg-secondary: #f1f5f9;
+            --bg-card: #ffffff;
+            --bg-card-hover: #f8fafc;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --accent: #0284c7;
+            --accent-hover: #0369a1;
+            --border: #e2e8f0;
+            --badge-bg: #f1f5f9;
+            --pin-active: #f59e0b;
+            --pin-inactive: #cbd5e1;
+            --success: #16a34a;
+            --skeleton-base: #e2e8f0;
+            --skeleton-shimmer: #f1f5f9;
+            --input-bg: #ffffff;
+            --input-border: #cbd5e1;
+            --btn-secondary-bg: #f1f5f9;
+            --btn-secondary-hover: #e2e8f0;
+            --shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+        }
+
+        /* ============================================================
+           Reset & Base
+           ============================================================ */
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font);
+            font-size: 13px;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        /* ============================================================
+           Header
+           ============================================================ */
+        .header {
+            padding: 16px 24px 12px;
+            background-color: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .wordmark {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .wordmark-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--accent);
+        }
+
+        .header-subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* ============================================================
+           Main content area
+           ============================================================ */
+        .main {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding: 20px 24px 16px;
+            gap: 16px;
+        }
+
+        /* Section label */
+        .section-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        /* ============================================================
+           View switching
+           ============================================================ */
+        .view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+        .view.active { display: flex; }
+
+        /* Fade-in animation for view switch */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .view.active {
+            animation: fadeIn 0.18s ease-out;
+        }
+
+        /* ============================================================
+           Project grid
+           ============================================================ */
+        .grid-section {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        .grid-section::-webkit-scrollbar { width: 6px; }
+        .grid-section::-webkit-scrollbar-track { background: transparent; }
+        .grid-section::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        .project-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            padding-bottom: 4px;
+        }
+
+        /* ============================================================
+           Project Card
+           ============================================================ */
+        .project-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            transition: background-color 0.15s, border-color 0.15s, transform 0.1s;
+            position: relative;
+            opacity: 0;
+            animation: cardFadeIn 0.25s ease-out forwards;
+        }
+
+        @keyframes cardFadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .project-card:hover {
+            background-color: var(--bg-card-hover);
+            border-color: var(--accent);
+        }
+
+        .project-card:active {
+            transform: scale(0.99);
+        }
+
+        /* Card top row: icon + info + pin */
+        .card-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 700;
+            flex-shrink: 0;
+            color: #fff;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+
+        .card-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .card-name {
+            font-weight: 600;
+            font-size: 13px;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 2px;
+        }
+
+        .card-description {
+            font-size: 11px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.4;
+        }
+
+        .card-pin {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px;
+            font-size: 16px;
+            line-height: 1;
+            flex-shrink: 0;
+            color: var(--pin-inactive);
+            transition: color 0.15s, transform 0.15s;
+            display: flex;
+            align-items: center;
+        }
+
+        .card-pin.pinned {
+            color: var(--pin-active);
+        }
+
+        .card-pin:hover {
+            transform: scale(1.2);
+        }
+
+        /* Card bottom row: badge + time + agents */
+        .card-bottom {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .type-badge {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 20px;
+            background-color: var(--badge-bg);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .card-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .last-opened {
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .agent-badge {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            color: var(--success);
+            font-weight: 600;
+        }
+
+        .agent-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--success);
+        }
+
+        /* ============================================================
+           Skeleton loading cards
+           ============================================================ */
+        @keyframes shimmer {
+            0%   { background-position: -400px 0; }
+            100% { background-position: 400px 0; }
+        }
+
+        .skeleton-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .skeleton-line {
+            border-radius: 4px;
+            background: linear-gradient(
+                90deg,
+                var(--skeleton-base) 25%,
+                var(--skeleton-shimmer) 50%,
+                var(--skeleton-base) 75%
+            );
+            background-size: 800px 100%;
+            animation: shimmer 1.4s infinite linear;
+        }
+
+        .skeleton-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            flex-shrink: 0;
+        }
+
+        .skeleton-row {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .skeleton-text {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        /* ============================================================
+           Action row
+           ============================================================ */
+        .action-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            flex-shrink: 0;
+            padding: 4px 0;
+        }
+
+        .action-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background-color: var(--btn-secondary-bg);
+            color: var(--text-secondary);
+            font-family: var(--font);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+        }
+
+        .action-btn:hover {
+            background-color: var(--btn-secondary-hover);
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+
+        .action-btn svg {
+            width: 14px;
+            height: 14px;
+            flex-shrink: 0;
+        }
+
+        /* ============================================================
+           Empty state
+           ============================================================ */
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            opacity: 0.3;
+        }
+
+        .empty-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .empty-subtitle {
+            font-size: 13px;
+            color: var(--text-secondary);
+            max-width: 340px;
+            line-height: 1.6;
+        }
+
+        .empty-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 8px;
+        }
+
+        .btn-primary {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 9px 18px;
+            border-radius: 8px;
+            border: none;
+            background-color: var(--accent);
+            color: #fff;
+            font-family: var(--font);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--accent-hover);
+        }
+
+        /* ============================================================
+           Browse All view
+           ============================================================ */
+        .browse-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-shrink: 0;
+            margin-bottom: 12px;
+        }
+
+        .back-btn {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background-color: var(--btn-secondary-bg);
+            color: var(--text-secondary);
+            font-family: var(--font);
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.15s, color 0.15s;
+            flex-shrink: 0;
+        }
+
+        .back-btn:hover {
+            background-color: var(--btn-secondary-hover);
+            color: var(--text-primary);
+        }
+
+        .search-input {
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--input-border);
+            background-color: var(--input-bg);
+            color: var(--text-primary);
+            font-family: var(--font);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .search-input:focus {
+            border-color: var(--accent);
+        }
+
+        .search-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* List view */
+        .project-list-wrap {
+            flex: 1;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+
+        .project-list-wrap::-webkit-scrollbar { width: 6px; }
+        .project-list-wrap::-webkit-scrollbar-track { background: transparent; }
+        .project-list-wrap::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        .list-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .list-table th {
+            text-align: left;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background-color: var(--bg-primary);
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+
+        .list-table th:hover { color: var(--text-secondary); }
+        .list-table th.sort-asc::after  { content: ' ↑'; }
+        .list-table th.sort-desc::after { content: ' ↓'; }
+
+        .list-row {
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            transition: background-color 0.12s;
+        }
+
+        .list-row:hover { background-color: var(--bg-card-hover); }
+
+        .list-row td {
+            padding: 9px 10px;
+            vertical-align: middle;
+            font-size: 12px;
+        }
+
+        .list-icon-cell {
+            width: 32px;
+        }
+
+        .list-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 7px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .list-name {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .list-path {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 240px;
+        }
+
+        .list-no-results {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+    </style>
+</head>
+<body>
+
+<!-- ================================================================
+     Header
+     ================================================================ -->
+<div class="header">
+    <div class="wordmark">
+        <div class="wordmark-dot"></div>
+        MultiTerminal
+    </div>
+    <div class="header-subtitle">Select a project to open</div>
+</div>
+
+<!-- ================================================================
+     Main content — views are mutually exclusive
+     ================================================================ -->
+<div class="main">
+
+    <!-- HOME VIEW: card grid + action row -->
+    <div id="view-home" class="view active">
+
+        <!-- Loading skeleton (shown before first "projects" message) -->
+        <div id="skeleton-grid" class="project-grid">
+            <div class="skeleton-card">
+                <div class="skeleton-row">
+                    <div class="skeleton-line skeleton-icon"></div>
+                    <div class="skeleton-text">
+                        <div class="skeleton-line" style="height:13px;width:70%;"></div>
+                        <div class="skeleton-line" style="height:11px;width:50%;"></div>
+                    </div>
+                </div>
+                <div class="skeleton-line" style="height:10px;width:40%;"></div>
+            </div>
+            <div class="skeleton-card">
+                <div class="skeleton-row">
+                    <div class="skeleton-line skeleton-icon"></div>
+                    <div class="skeleton-text">
+                        <div class="skeleton-line" style="height:13px;width:60%;"></div>
+                        <div class="skeleton-line" style="height:11px;width:45%;"></div>
+                    </div>
+                </div>
+                <div class="skeleton-line" style="height:10px;width:35%;"></div>
+            </div>
+            <div class="skeleton-card">
+                <div class="skeleton-row">
+                    <div class="skeleton-line skeleton-icon"></div>
+                    <div class="skeleton-text">
+                        <div class="skeleton-line" style="height:13px;width:55%;"></div>
+                        <div class="skeleton-line" style="height:11px;width:40%;"></div>
+                    </div>
+                </div>
+                <div class="skeleton-line" style="height:10px;width:30%;"></div>
+            </div>
+        </div>
+
+        <!-- Empty state (shown when projects array is empty) -->
+        <div id="empty-state" style="display:none;" class="empty-state">
+            <div class="empty-icon">🚀</div>
+            <div class="empty-title">Welcome to MultiTerminal</div>
+            <div class="empty-subtitle">
+                Get started by creating your first project or opening a PowerShell terminal
+            </div>
+            <div class="empty-actions">
+                <button class="btn-primary" onclick="postMsg({type:'new_project'})">
+                    <svg viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8 1a.5.5 0 0 1 .5.5v6h6a.5.5 0 0 1 0 1h-6v6a.5.5 0 0 1-1 0v-6h-6a.5.5 0 0 1 0-1h6v-6A.5.5 0 0 1 8 1z"/>
+                    </svg>
+                    Create Your First Project
+                </button>
+                <button class="action-btn" onclick="postMsg({type:'open_powershell'})">
+                    <svg viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
+                        <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
+                    </svg>
+                    Open PowerShell
+                </button>
+            </div>
+        </div>
+
+        <!-- Populated grid (hidden until data arrives) -->
+        <div class="section-label" id="recent-label" style="display:none;">Recent Projects</div>
+        <div id="project-grid" class="grid-section" style="display:none;">
+            <div class="project-grid" id="card-container"></div>
+        </div>
+
+        <!-- Action row -->
+        <div id="action-row" class="action-row" style="display:none;">
+            <button class="action-btn" onclick="showBrowseAll()">
+                <svg viewBox="0 0 16 16" fill="currentColor">
+                    <path fill-rule="evenodd" d="M2.5 12a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5z"/>
+                </svg>
+                Browse All Projects
+            </button>
+            <button class="action-btn" onclick="postMsg({type:'new_project'})">
+                <svg viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1a.5.5 0 0 1 .5.5v6h6a.5.5 0 0 1 0 1h-6v6a.5.5 0 0 1-1 0v-6h-6a.5.5 0 0 1 0-1h6v-6A.5.5 0 0 1 8 1z"/>
+                </svg>
+                New Project
+            </button>
+            <button class="action-btn" onclick="postMsg({type:'open_powershell'})">
+                <svg viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
+                    <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
+                </svg>
+                Open PowerShell
+            </button>
+        </div>
+    </div>
+
+    <!-- BROWSE ALL VIEW -->
+    <div id="view-browse" class="view">
+        <div class="browse-header">
+            <button class="back-btn" onclick="showHome()">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                    <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
+                </svg>
+                Back
+            </button>
+            <input
+                id="search-input"
+                class="search-input"
+                type="text"
+                placeholder="Search projects by name, description, or type..."
+                oninput="onSearchInput()"
+                autocomplete="off"
+                spellcheck="false"
+            />
+        </div>
+
+        <div class="project-list-wrap">
+            <table class="list-table" id="list-table">
+                <thead>
+                    <tr>
+                        <th class="list-icon-cell"></th>
+                        <th id="sort-name"    onclick="setSort('name')"     class="sort-asc">Name</th>
+                        <th id="sort-type"    onclick="setSort('type')">Type</th>
+                        <th id="sort-opened"  onclick="setSort('opened')">Last Opened</th>
+                    </tr>
+                </thead>
+                <tbody id="list-body"></tbody>
+            </table>
+            <div id="list-no-results" class="list-no-results" style="display:none;">No projects match your search.</div>
+        </div>
+    </div>
+
+</div><!-- /main -->
+
+<!-- ================================================================
+     JavaScript
+     ================================================================ -->
+<script>
+    /* ---------------------------------------------------------------
+       State
+       --------------------------------------------------------------- */
+    var allProjects = [];          // full project list received from C#
+    var currentSort = 'name';      // 'name' | 'type' | 'opened'
+    var currentSortDir = 'asc';    // 'asc' | 'desc'
+    var searchQuery = '';
+    var dataLoaded = false;
+
+    /* ---------------------------------------------------------------
+       Messaging helpers
+       --------------------------------------------------------------- */
+    function postMsg(obj) {
+        window.chrome.webview.postMessage(obj);
+    }
+
+    /* ---------------------------------------------------------------
+       Relative time helper
+       --------------------------------------------------------------- */
+    function relativeTime(isoString) {
+        if (!isoString) return 'never';
+        var date;
+        try { date = new Date(isoString); } catch(e) { return 'unknown'; }
+        if (isNaN(date.getTime())) return 'unknown';
+
+        var now = Date.now();
+        var diffMs = now - date.getTime();
+        var diffSec = Math.floor(diffMs / 1000);
+        var diffMin = Math.floor(diffSec / 60);
+        var diffHr  = Math.floor(diffMin / 60);
+        var diffDay = Math.floor(diffHr / 24);
+
+        if (diffSec < 30)  return 'just now';
+        if (diffMin < 1)   return diffSec + 's ago';
+        if (diffMin < 60)  return diffMin + 'm ago';
+        if (diffHr < 24)   return diffHr + 'h ago';
+        if (diffDay === 1) return 'yesterday';
+        if (diffDay < 7)   return diffDay + ' days ago';
+
+        // Older: show month + day
+        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        return months[date.getMonth()] + ' ' + date.getDate();
+    }
+
+    /* ---------------------------------------------------------------
+       Icon/color helpers
+       --------------------------------------------------------------- */
+    // Derive icon label from project: emoji if icon field is emoji, else first letter
+    function iconLabel(project) {
+        var icon = project.icon || '';
+        // Check if icon is an emoji (non-ASCII or multi-char)
+        if (icon && icon.trim().length > 0) {
+            // Simple check: if codepoint > 127, likely emoji
+            if (icon.codePointAt(0) > 127) return icon;
+            // Named icons we map to emoji
+            var iconMap = {
+                'terminal': '⚡',
+                'code': '{}',
+                'folder': '📁',
+                'web': '🌐',
+                'database': '🗄️',
+                'cloud': '☁️',
+                'star': '⭐',
+                'rocket': '🚀',
+                'gear': '⚙️',
+                'bug': '🐛'
+            };
+            if (iconMap[icon]) return iconMap[icon];
+        }
+        // Fall back to first letter of name
+        return (project.name || '?').charAt(0).toUpperCase();
+    }
+
+    // Choose a deterministic color if iconColor not set
+    var defaultColors = [
+        '#4FC3F7','#81C784','#FFB74D','#E57373',
+        '#9575CD','#4DB6AC','#F06292','#64B5F6'
+    ];
+    function iconColor(project) {
+        if (project.iconColor) return project.iconColor;
+        // Hash the project id for a stable color
+        var id = project.id || project.name || '';
+        var hash = 0;
+        for (var i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
+        return defaultColors[Math.abs(hash) % defaultColors.length];
+    }
+
+    /* ---------------------------------------------------------------
+       Sort helper
+       --------------------------------------------------------------- */
+    function sortedProjects(list) {
+        var pinned   = list.filter(function(p) { return p.isPinned; });
+        var unpinned = list.filter(function(p) { return !p.isPinned; });
+
+        function cmp(a, b) {
+            var va, vb;
+            if (currentSort === 'type') {
+                va = (a.projectType || '').toLowerCase();
+                vb = (b.projectType || '').toLowerCase();
+            } else if (currentSort === 'opened') {
+                va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
+                vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
+                // default opened = desc (newest first) when no explicit asc forced
+            } else {
+                va = (a.name || '').toLowerCase();
+                vb = (b.name || '').toLowerCase();
+            }
+            if (va < vb) return currentSortDir === 'asc' ? -1 : 1;
+            if (va > vb) return currentSortDir === 'asc' ? 1 : -1;
+            return 0;
+        }
+
+        pinned.sort(cmp);
+        unpinned.sort(function(a, b) {
+            // always sort unpinned by lastOpenedAt desc in home grid
+            var ta = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
+            var tb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
+            return tb - ta;
+        });
+
+        return pinned.concat(unpinned);
+    }
+
+    /* ---------------------------------------------------------------
+       Render home grid
+       --------------------------------------------------------------- */
+    function renderGrid() {
+        var container = document.getElementById('card-container');
+        container.innerHTML = '';
+
+        var sorted = sortedProjects(allProjects);
+
+        sorted.forEach(function(project, idx) {
+            var card = buildCard(project, idx);
+            container.appendChild(card);
+        });
+    }
+
+    function buildCard(project, idx) {
+        var card = document.createElement('div');
+        card.className = 'project-card';
+        card.style.animationDelay = (idx * 0.04) + 's';
+
+        var label  = iconLabel(project);
+        var color  = iconColor(project);
+        var pinned = project.isPinned;
+        var agents = project.activeAgentCount || 0;
+        var badgeText = project.projectType || 'project';
+        var lastOpened = relativeTime(project.lastOpenedAt);
+
+        card.innerHTML =
+            '<div class="card-top">' +
+                '<div class="card-icon" style="background-color:' + esc(color) + '">' + esc(label) + '</div>' +
+                '<div class="card-info">' +
+                    '<div class="card-name" title="' + esc(project.name) + '">' + esc(project.name) + '</div>' +
+                    '<div class="card-description" title="' + esc(project.description) + '">' + esc(project.description || '') + '</div>' +
+                '</div>' +
+                '<button class="card-pin' + (pinned ? ' pinned' : '') + '" ' +
+                    'data-id="' + esc(project.id) + '" ' +
+                    'title="' + (pinned ? 'Unpin' : 'Pin') + ' project" ' +
+                    'aria-label="' + (pinned ? 'Unpin' : 'Pin') + '">' +
+                    (pinned ? '★' : '☆') +
+                '</button>' +
+            '</div>' +
+            '<div class="card-bottom">' +
+                '<span class="type-badge">' + esc(badgeText) + '</span>' +
+                '<div class="card-meta">' +
+                    (agents > 0
+                        ? '<span class="agent-badge"><span class="agent-dot"></span>' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>'
+                        : '') +
+                    '<span class="last-opened">' + lastOpened + '</span>' +
+                '</div>' +
+            '</div>';
+
+        // Launch project on card click (not pin)
+        card.addEventListener('click', function() {
+            postMsg({ type: 'launch_project', projectId: project.id });
+        });
+
+        // Pin toggle
+        var pinBtn = card.querySelector('.card-pin');
+        pinBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            postMsg({ type: 'toggle_pin', projectId: project.id });
+            // Optimistic UI update
+            project.isPinned = !project.isPinned;
+            pinBtn.textContent = project.isPinned ? '★' : '☆';
+            pinBtn.classList.toggle('pinned', project.isPinned);
+            pinBtn.setAttribute('title', project.isPinned ? 'Unpin project' : 'Pin project');
+            // Re-render to reorder
+            renderGrid();
+        });
+
+        return card;
+    }
+
+    /* ---------------------------------------------------------------
+       Render Browse All list
+       --------------------------------------------------------------- */
+    function renderList() {
+        var body = document.getElementById('list-body');
+        var noResults = document.getElementById('list-no-results');
+        body.innerHTML = '';
+
+        var filtered = allProjects.filter(function(p) {
+            if (!searchQuery) return true;
+            var q = searchQuery.toLowerCase();
+            return (
+                (p.name        || '').toLowerCase().indexOf(q) >= 0 ||
+                (p.description || '').toLowerCase().indexOf(q) >= 0 ||
+                (p.projectType || '').toLowerCase().indexOf(q) >= 0
+            );
+        });
+
+        // Sort filtered list by current column
+        filtered.sort(function(a, b) {
+            var va, vb;
+            if (currentSort === 'type') {
+                va = (a.projectType || '').toLowerCase();
+                vb = (b.projectType || '').toLowerCase();
+            } else if (currentSort === 'opened') {
+                va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
+                vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
+            } else {
+                va = (a.name || '').toLowerCase();
+                vb = (b.name || '').toLowerCase();
+            }
+            if (va < vb) return currentSortDir === 'asc' ? -1 : 1;
+            if (va > vb) return currentSortDir === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        if (filtered.length === 0) {
+            noResults.style.display = '';
+            return;
+        }
+        noResults.style.display = 'none';
+
+        filtered.forEach(function(project) {
+            var tr = document.createElement('tr');
+            tr.className = 'list-row';
+            var label = iconLabel(project);
+            var color = iconColor(project);
+            tr.innerHTML =
+                '<td class="list-icon-cell">' +
+                    '<div class="list-icon" style="background-color:' + esc(color) + '">' + esc(label) + '</div>' +
+                '</td>' +
+                '<td>' +
+                    '<div class="list-name">' + esc(project.name) + '</div>' +
+                    '<div class="list-path">' + esc(project.sourcePath || '') + '</div>' +
+                '</td>' +
+                '<td><span class="type-badge">' + esc(project.projectType || 'project') + '</span></td>' +
+                '<td><span class="last-opened">' + relativeTime(project.lastOpenedAt) + '</span></td>';
+
+            tr.addEventListener('click', function() {
+                postMsg({ type: 'launch_project', projectId: project.id });
+            });
+
+            body.appendChild(tr);
+        });
+    }
+
+    /* ---------------------------------------------------------------
+       Sort column header management
+       --------------------------------------------------------------- */
+    function setSort(column) {
+        if (currentSort === column) {
+            currentSortDir = currentSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+            currentSort = column;
+            currentSortDir = 'asc';
+        }
+        updateSortHeaders();
+        renderList();
+    }
+
+    function updateSortHeaders() {
+        ['name','type','opened'].forEach(function(col) {
+            var th = document.getElementById('sort-' + col);
+            if (!th) return;
+            th.className = '';
+            if (currentSort === col) {
+                th.className = currentSortDir === 'asc' ? 'sort-asc' : 'sort-desc';
+            }
+        });
+    }
+
+    /* ---------------------------------------------------------------
+       Search input handler
+       --------------------------------------------------------------- */
+    function onSearchInput() {
+        searchQuery = document.getElementById('search-input').value;
+        renderList();
+    }
+
+    /* ---------------------------------------------------------------
+       View switching
+       --------------------------------------------------------------- */
+    function showHome() {
+        document.getElementById('view-browse').classList.remove('active');
+        document.getElementById('view-home').classList.add('active');
+    }
+
+    function showBrowseAll() {
+        postMsg({ type: 'browse_all' });
+        // Switch view; also request full list from C# (C# may send updated projects)
+        document.getElementById('search-input').value = '';
+        searchQuery = '';
+        currentSort = 'name';
+        currentSortDir = 'asc';
+        updateSortHeaders();
+        renderList();
+        document.getElementById('view-home').classList.remove('active');
+        document.getElementById('view-browse').classList.add('active');
+        document.getElementById('search-input').focus();
+    }
+
+    /* ---------------------------------------------------------------
+       Handle data from C# (projects array)
+       --------------------------------------------------------------- */
+    function onProjectsReceived(projects) {
+        allProjects = projects || [];
+        dataLoaded = true;
+
+        // Hide skeleton
+        document.getElementById('skeleton-grid').style.display = 'none';
+
+        if (allProjects.length === 0) {
+            // Show empty state
+            document.getElementById('empty-state').style.display = 'flex';
+            document.getElementById('project-grid').style.display = 'none';
+            document.getElementById('recent-label').style.display = 'none';
+            document.getElementById('action-row').style.display = 'none';
+        } else {
+            document.getElementById('empty-state').style.display = 'none';
+            document.getElementById('recent-label').style.display = '';
+            document.getElementById('project-grid').style.display = '';
+            document.getElementById('action-row').style.display = 'flex';
+            renderGrid();
+        }
+    }
+
+    /* ---------------------------------------------------------------
+       Theming
+       --------------------------------------------------------------- */
+    function setTheme(theme) {
+        if (theme === 'light') {
+            document.body.classList.add('light');
+        } else {
+            document.body.classList.remove('light');
+        }
+    }
+
+    function setFontSize(size) {
+        document.documentElement.style.fontSize = size + 'px';
+    }
+
+    /* ---------------------------------------------------------------
+       HTML escape helper — prevents XSS from project data
+       --------------------------------------------------------------- */
+    function esc(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g,  '&amp;')
+            .replace(/</g,  '&lt;')
+            .replace(/>/g,  '&gt;')
+            .replace(/"/g,  '&quot;')
+            .replace(/'/g,  '&#39;');
+    }
+
+    /* ---------------------------------------------------------------
+       WebView2 message listener (receives messages from C#)
+       --------------------------------------------------------------- */
+    window.chrome.webview.addEventListener('message', function(event) {
+        var data = event.data;
+
+        // String messages: "theme:dark", "theme:light", "fontSize:N"
+        if (typeof data === 'string') {
+            if (data.startsWith('theme:')) {
+                setTheme(data.substring(6));
+            } else if (data.startsWith('fontSize:')) {
+                setFontSize(parseInt(data.substring(9), 10));
+            }
+            return;
+        }
+
+        // JSON messages
+        if (data && typeof data === 'object') {
+            if (data.type === 'projects') {
+                onProjectsReceived(data.projects);
+            }
+            return;
+        }
+    });
+
+    /* ---------------------------------------------------------------
+       Signal readiness to C# — triggers project data request
+       --------------------------------------------------------------- */
+    window.chrome.webview.postMessage({ type: 'ready' });
+
+</script>
+</body>
+</html>
