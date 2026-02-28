@@ -530,13 +530,15 @@ namespace MultiTerminal.Docking
         /// <param name="workingDirectory">Initial working directory</param>
         /// <param name="terminalName">Pre-registered terminal name for MCP (null if not pre-registered)</param>
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
         {
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] terminalName: '{terminalName ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] autoRunCommand: '{autoRunCommand ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] spawnerName: '{spawnerName ?? "null"}'");
+            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] projectId: '{projectId ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _docId: '{_docId}'");
 
             _lastKnownDirectory = workingDirectory;
@@ -551,7 +553,7 @@ namespace MultiTerminal.Docking
             }
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId);
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _terminal.Start returned");
 
             // Update status bar after terminal starts

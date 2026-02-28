@@ -79,7 +79,8 @@ namespace MultiTerminal.Terminal
         /// <param name="terminalName">Pre-registered terminal name (sets MULTITERMINAL_NAME env var)</param>
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="spawnerName">Name of the terminal that spawned this one (sets MULTITERMINAL_SPAWNER env var)</param>
-        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
+        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
         {
             if (_isRunning)
                 throw new InvalidOperationException("Terminal is already running");
@@ -110,7 +111,7 @@ namespace MultiTerminal.Terminal
                 CreatePseudoConsole(cols, rows);
 
                 // Start the shell process
-                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName);
+                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId);
 
                 // Set running flag BEFORE starting timer/reader (prevents race condition)
                 _isRunning = true;
@@ -252,7 +253,7 @@ namespace MultiTerminal.Terminal
                     ". Make sure you're running Windows 10 version 1809 or later.");
         }
 
-        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
         {
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] shellPath: '{shellPath}'");
@@ -299,9 +300,14 @@ namespace MultiTerminal.Terminal
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Building environment setup...");
             // Force UTF-8 encoding in the child PowerShell process for correct international character handling
             string envSetup = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::InputEncoding = [System.Text.Encoding]::UTF8; ";
+
+            // Escape single quotes in all values before interpolating into the PowerShell -Command string.
+            // In PowerShell single-quoted strings, a literal single quote is represented as ''.
+            // Without escaping, a value like abc'; Start-Process calc; $x=' would break out of the string.
             if (!string.IsNullOrEmpty(docId))
             {
-                envSetup += $"$env:MULTITERMINAL_DOC_ID = '{docId}'; ";
+                string safeDocId = docId.Replace("'", "''");
+                envSetup += $"$env:MULTITERMINAL_DOC_ID = '{safeDocId}'; ";
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_DOC_ID = '{docId}'");
             }
             else
@@ -311,7 +317,8 @@ namespace MultiTerminal.Terminal
 
             if (!string.IsNullOrEmpty(terminalName))
             {
-                envSetup += $"$env:MULTITERMINAL_NAME = '{terminalName}'; ";
+                string safeTerminalName = terminalName.Replace("'", "''");
+                envSetup += $"$env:MULTITERMINAL_NAME = '{safeTerminalName}'; ";
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_NAME = '{terminalName}'");
             }
             else
@@ -321,8 +328,16 @@ namespace MultiTerminal.Terminal
 
             if (!string.IsNullOrEmpty(spawnerName))
             {
-                envSetup += $"$env:MULTITERMINAL_SPAWNER = '{spawnerName}'; ";
+                string safeSpawnerName = spawnerName.Replace("'", "''");
+                envSetup += $"$env:MULTITERMINAL_SPAWNER = '{safeSpawnerName}'; ";
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_SPAWNER = '{spawnerName}'");
+            }
+
+            if (!string.IsNullOrEmpty(projectId))
+            {
+                string safeProjectId = projectId.Replace("'", "''");
+                envSetup += $"$env:MULTITERMINAL_PROJECT_ID = '{safeProjectId}'; ";
+                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_PROJECT_ID = '{projectId}'");
             }
 
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
@@ -332,7 +347,9 @@ namespace MultiTerminal.Terminal
             string autoRun = "";
             if (!string.IsNullOrEmpty(autoRunCommand))
             {
-                autoRun = $"; cd '{workingDirectory}'; {autoRunCommand}";
+                // Escape single quotes in workingDirectory to prevent PowerShell injection via path names
+                string safeWorkDir = (workingDirectory ?? "").Replace("'", "''");
+                autoRun = $"; cd '{safeWorkDir}'; {autoRunCommand}";
             }
             else
             {

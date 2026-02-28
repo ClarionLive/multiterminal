@@ -1453,7 +1453,7 @@ namespace MultiTerminal
             "Quinn", "Ruby", "Sam", "Tara", "Uma", "Vera", "Wade", "Xena", "Yuri", "Zara"
         };
 
-        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null)
+        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
         {
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -1461,6 +1461,7 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] forceTabMode: {forceTabMode}");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] identityName: '{identityName ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] autoRunCommand: '{autoRunCommand ?? "null"}'");
+            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] projectId: '{projectId ?? "null"}'");
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Creating TerminalDocument...");
             var doc = new TerminalDocument();
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] TerminalDocument created");
@@ -1526,8 +1527,8 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}')...");
-            doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName);
+            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}')...");
+            doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId);
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
 
             // Apply specified or default font size
@@ -3541,19 +3542,34 @@ namespace MultiTerminal
             switch (result.Action)
             {
                 case ProjectTerminalAction.ReplaceCurrentTerminal:
-                    // Change directory in active terminal
+                    // Change directory in active terminal (use source_path as canonical path)
                     if (_lastActiveTerminal != null)
                     {
-                        _lastActiveTerminal.Terminal.Write($"cd \"{e.Project.Path}\"\r");
+                        string rawPath = !string.IsNullOrEmpty(e.Project.SourcePath) ? e.Project.SourcePath : e.Project.Path;
+                        // Validate path is a rooted local directory (not a UNC path) that exists
+                        string projectPath = (!string.IsNullOrEmpty(rawPath) && Path.IsPathRooted(rawPath) && !rawPath.StartsWith("\\\\") && Directory.Exists(rawPath))
+                            ? rawPath
+                            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                        _lastActiveTerminal.Terminal.Write($"cd \"{projectPath}\"\r");
+                        // Inject project ID into environment for context hook
+                        if (!string.IsNullOrEmpty(e.Project.Id))
+                            _lastActiveTerminal.Terminal.Write($"$env:MULTITERMINAL_PROJECT_ID = '{e.Project.Id}'\r");
                         targetTerminal = _lastActiveTerminal;
                     }
                     break;
 
                 case ProjectTerminalAction.CreateNewTerminal:
-                    // Create new terminal at project path (respects Tab/Grid setting)
-                    AddNewTerminal(e.Project.Path);
+                {
+                    // Create new terminal at project source_path with project ID for context injection
+                    string rawSourcePath = !string.IsNullOrEmpty(e.Project.SourcePath) ? e.Project.SourcePath : e.Project.Path;
+                    // Validate path is a rooted local directory (not a UNC path) that exists
+                    string sourcePath = (!string.IsNullOrEmpty(rawSourcePath) && Path.IsPathRooted(rawSourcePath) && !rawSourcePath.StartsWith("\\\\") && Directory.Exists(rawSourcePath))
+                        ? rawSourcePath
+                        : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    AddNewTerminal(sourcePath, projectId: e.Project.Id);
                     targetTerminal = _lastActiveTerminal; // AddNewTerminal sets this
                     break;
+                }
 
                 case ProjectTerminalAction.Cancel:
                     // Do nothing with terminal
@@ -3815,8 +3831,8 @@ namespace MultiTerminal
 
         private void OnViewSessionRequested(object sender, string sessionId)
         {
-            // Get current project path from current project or last active terminal
-            string projectPath = _currentProject?.Path
+            // Get current project path from current project or last active terminal (prefer SourcePath)
+            string projectPath = (!string.IsNullOrEmpty(_currentProject?.SourcePath) ? _currentProject.SourcePath : _currentProject?.Path)
                 ?? _lastActiveTerminal?.GetWorkingDirectory()
                 ?? _settings?.GetLastDirectory();
 

@@ -45,6 +45,7 @@ When working on ANY kanban ticket:
 │  REST API (port 5050) - MultiTerminalRestServer.cs  │
 │  ├── TasksController      /api/tasks                │
 │  ├── MessagingController  /api/messaging            │
+│  ├── ProjectContextController /api/projects/{id}/context │
 │  └── ToolsController      /api (self-documenting)   │
 ├─────────────────────────────────────────────────────┤
 │  MessageBroker.cs (4.2K LOC) - CENTRAL HUB          │
@@ -76,12 +77,12 @@ When working on ANY kanban ticket:
 
 | Folder | Purpose | Key Files |
 |--------|---------|-----------|
-| `Services/` | Business logic & SQLite persistence | TaskDatabase, SessionDatabase, ProjectService, TerminalSpawner, SettingsService |
+| `Services/` | Business logic & SQLite persistence | TaskDatabase, SessionDatabase, ProjectService, ProjectDatabase, ProjectContextService, ProjectJsonMigrationService, TerminalSpawner, SettingsService |
 | `MCPServer/Services/` | MCP server services | **MessageBroker**, PoolCoordinator, ActivityService, StaleTaskService, SpawnService |
 | `MCPServer/Tools/` | MCP tool implementations | MessagingTools, TaskTools, PlanTools, HelperTools, ProfileTools, InboxTools |
 | `MCPServer/Models/` | Data models (14 files) | KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary |
-| `Models/` | App-level models (6 files) | TerminalSessionInfo, SpawnedTeammate, ProjectRegistryEntry |
-| `API/Controllers/` | REST endpoints | TasksController, MessagingController, ToolsController |
+| `Models/` | App-level models (8+ files) | TerminalSessionInfo, SpawnedTeammate, ProjectRegistryEntry, Project, ProjectAgent, ProjectMcpServer, ProjectSpecialistAgent, ProjectPath, ProjectPromptEntry, ProjectSkill |
+| `API/Controllers/` | REST endpoints | TasksController, MessagingController, ProjectContextController, ToolsController |
 | `TasksPanel/` | Kanban board UI | TasksPanelDocument + TasksPanelControl (WebView2) |
 | `ChatPanel/` | Messaging UI | ChatPanelDocument + ChatPanelControl (WebView2) |
 | `ActivityPanel/` | Activity feed UI | ActivityPanelDocument (WebView2) |
@@ -104,6 +105,18 @@ When working on ANY kanban ticket:
 | `task_summaries` | task_id, summary_at, previous_status, new_status | Progress snapshots |
 | `helper_sessions` | task_id, prompt, status | Helper session tracking |
 | `terminal_activity` | terminal, status, activity | Terminal state |
+
+### Database Tables (ProjectDatabase.cs — same tasks.db file)
+
+| Table | Key Columns | Purpose |
+|-------|-------------|---------|
+| `projects` | id, name, description, path, source_path, deploy_path, build_command, git_repo_url, git_default_branch, git_auto_commit, is_pinned | Project core record (SQLite-only, replaces JSON registry) |
+| `project_agents` | project_id, agent_name, role, preferred_model | Agents assigned to a project |
+| `project_mcp_servers` | project_id, server_name, is_enabled | MCP servers configured for a project |
+| `project_specialist_agents` | project_id, agent_type, is_enabled, custom_prompt | Specialist agents (verifier, devils-advocate, etc.) |
+| `project_paths` | project_id, path_type, path_value, description | Named filesystem paths for a project |
+| `project_prompts` | project_id, prompt_type, prompt_text, display_order | Stored prompts/instructions |
+| `project_skills` | project_id, skill_name, is_enabled | Skills enabled for a project |
 
 ### Key Patterns
 
@@ -134,6 +147,14 @@ When working on ANY kanban ticket:
 - Plans: Markdown in `plan` field
 - Continuation notes: Free text in `continuation_notes` (session handoff context)
 
+**Project System Architecture (Phase 4 — SQLite-only):**
+- Projects are stored in SQLite (`tasks.db`) via `ProjectDatabase.cs` — NOT in JSON files.
+- `ProjectService.cs` still reads/writes `.claude/project.json` files on disk (for portability) and keeps a `projects.json` registry in `%APPDATA%\MultiTerminal`.
+- `ProjectJsonMigrationService.cs` is a one-time migration tool: reads the JSON registry via `ProjectService`, writes to SQLite via `ProjectDatabase`. Run on startup.
+- `ProjectContextService.cs` provides a single-call "everything you need" context object by joining all 7 project tables. Used by `GET /api/projects/{id}/context`.
+- MessageBroker uses `ProjectService.GetAllRegisteredProjects()` as its project list source (JSON registry). Future refactor will switch this to ProjectDatabase.
+- `ProjectContextController.cs` exposes `GET /api/projects/{id}/context` returning a full `ProjectContext` JSON payload for agent consumption.
+
 ### Task-Specific File Guide
 
 | Working On | Read These Files |
@@ -148,7 +169,8 @@ When working on ANY kanban ticket:
 | **Stale task tracking** | StaleTaskService.cs → TaskDatabase.GetStaleTasks() |
 | **REST API** | MultiTerminalRestServer.cs → Controllers/ |
 | **Terminal spawning** | TerminalSpawner.cs → SpawnedTeammate.cs |
-| **Projects** | Project.cs → ProjectDatabase.cs → ProjectService.cs |
+| **Projects (read/write)** | Project.cs → ProjectDatabase.cs → ProjectContextService.cs → GET /api/projects/{id}/context |
+| **Project migration** | ProjectJsonMigrationService.cs reads ProjectService JSON, writes to ProjectDatabase |
 
 ### Codebase Stats
 

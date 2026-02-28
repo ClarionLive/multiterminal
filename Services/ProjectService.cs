@@ -17,16 +17,18 @@ namespace MultiTerminal.Services
     }
 
     /// <summary>
-    /// Service for managing projects with hybrid storage:
-    /// - Central registry in %APPDATA%\MultiTerminal\projects.json (for discovery and recents)
-    /// - Portable config in each project folder .claude/project.json (for portability)
+    /// Service for managing projects backed by SQLite (ProjectDatabase).
+    /// Project records are stored in the projects table (same tasks.db as TaskDatabase).
+    ///
+    /// Also maintains portable .claude/project.json files in each project folder for
+    /// backward compatibility and migration support.
+    ///
+    /// Phase 4 change: removed in-memory JSON registry cache and FileSystemWatcher.
+    /// All registry read/write operations now go through ProjectDatabase.
     /// </summary>
     public class ProjectService : IDisposable
     {
-        private readonly string _registryPath;
-        private readonly string _appDataFolder;
-        private List<ProjectRegistryEntry> _registry;
-        private FileSystemWatcher _registryWatcher;
+        private readonly ProjectDatabase _projectDb;
         private bool _isDisposed;
 
         /// <summary>
@@ -50,117 +52,35 @@ namespace MultiTerminal.Services
         public event EventHandler<ProjectEventArgs> ProjectRemoved;
 
         /// <summary>
-        /// Fired when the registry file changes externally (e.g., by Claude Code).
+        /// Kept for API compatibility. Fired when the project list changes programmatically.
+        /// Previously fired by a FileSystemWatcher watching projects.json — the watcher has
+        /// been removed as part of the SQLite-only migration.
         /// </summary>
         public event EventHandler RegistryChangedExternally;
 
         public ProjectService()
         {
-            var stackTrace = new System.Diagnostics.StackTrace(true);
-            System.Diagnostics.Trace.WriteLine($"[ProjectService] Constructor called from:");
-            for (int i = 0; i < Math.Min(5, stackTrace.FrameCount); i++)
-            {
-                var frame = stackTrace.GetFrame(i);
-                System.Diagnostics.Trace.WriteLine($"  [{i}] {frame.GetMethod()?.DeclaringType?.Name}.{frame.GetMethod()?.Name} (Line {frame.GetFileLineNumber()})");
-            }
-
-            _appDataFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "MultiTerminal");
-
-            try
-            {
-                if (!Directory.Exists(_appDataFolder))
-                    Directory.CreateDirectory(_appDataFolder);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to create app data folder: {ex.Message}");
-            }
-
-            _registryPath = Path.Combine(_appDataFolder, "projects.json");
-            LoadRegistry();
-            SetupRegistryWatcher();
+            _projectDb = new ProjectDatabase();
         }
-
-        private void SetupRegistryWatcher()
-        {
-            try
-            {
-                _registryWatcher = new FileSystemWatcher
-                {
-                    Path = _appDataFolder,
-                    Filter = "projects.json",
-                    // Include FileName to catch atomic writes (temp file + rename)
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime | NotifyFilters.Size | NotifyFilters.FileName
-                };
-
-                // Subscribe to ALL events to catch any file operation
-                _registryWatcher.Changed += OnRegistryFileChanged;
-                _registryWatcher.Created += OnRegistryFileChanged;
-                _registryWatcher.Renamed += OnRegistryFileRenamed;
-                _registryWatcher.EnableRaisingEvents = true;
-
-                System.Diagnostics.Trace.WriteLine($"[ProjectService] Registry watcher set up for: {_registryPath}");
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Trace.WriteLine($"[ProjectService] Failed to set up registry watcher: {ex.Message}");
-            }
-        }
-
-        private DateTime _lastRegistryChange = DateTime.MinValue;
-
-        private void OnRegistryFileChanged(object sender, FileSystemEventArgs e)
-        {
-            System.Diagnostics.Trace.WriteLine($"[ProjectService] OnRegistryFileChanged triggered: {e.ChangeType}, {e.FullPath}");
-
-            // Debounce - FileSystemWatcher can fire multiple times for a single change
-            var now = DateTime.Now;
-            if ((now - _lastRegistryChange).TotalMilliseconds < 500)
-            {
-                System.Diagnostics.Trace.WriteLine($"[ProjectService] Debounced - ignoring");
-                return;
-            }
-            _lastRegistryChange = now;
-
-            try
-            {
-                // Reload the registry
-                var oldCount = _registry.Count;
-                LoadRegistry();
-                var newCount = _registry.Count;
-
-                System.Diagnostics.Trace.WriteLine($"[ProjectService] Registry reloaded: {oldCount} -> {newCount} projects");
-
-                // Always fire the event when the file changes - let the UI decide what to do
-                System.Diagnostics.Trace.WriteLine($"[ProjectService] Firing RegistryChangedExternally event");
-                RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Trace.WriteLine($"[ProjectService] Error processing registry change: {ex.Message}");
-            }
-        }
-
-        private void OnRegistryFileRenamed(object sender, RenamedEventArgs e)
-        {
-            System.Diagnostics.Trace.WriteLine($"[ProjectService] Registry file renamed: {e.OldName} -> {e.Name}");
-            // If a file was renamed TO projects.json, treat it as a change
-            if (e.Name == "projects.json")
-            {
-                OnRegistryFileChanged(sender, e);
-            }
-        }
-
-        #region Registry Operations
 
         /// <summary>
-        /// Gets all registered projects from the central registry.
+        /// Constructor that accepts an existing ProjectDatabase instance (for DI / testing).
+        /// </summary>
+        public ProjectService(ProjectDatabase projectDb)
+        {
+            _projectDb = projectDb ?? throw new ArgumentNullException(nameof(projectDb));
+        }
+
+        #region Registry Operations (backed by SQLite)
+
+        /// <summary>
+        /// Gets all registered projects from SQLite.
         /// </summary>
         public List<ProjectRegistryEntry> GetAllRegisteredProjects()
         {
-            return _registry.ToList();
+            return _projectDb.GetAllRichProjects()
+                .Select(ProjectRegistryEntry.FromProject)
+                .ToList();
         }
 
         /// <summary>
@@ -168,9 +88,10 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<ProjectRegistryEntry> GetRecentProjects(int maxCount = 10)
         {
-            return _registry
+            return _projectDb.GetAllRichProjects()
                 .OrderByDescending(p => p.LastOpenedAt)
                 .Take(maxCount)
+                .Select(ProjectRegistryEntry.FromProject)
                 .ToList();
         }
 
@@ -179,9 +100,10 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<ProjectRegistryEntry> GetPinnedProjects()
         {
-            return _registry
+            return _projectDb.GetAllRichProjects()
                 .Where(p => p.IsPinned)
                 .OrderBy(p => p.Name)
+                .Select(ProjectRegistryEntry.FromProject)
                 .ToList();
         }
 
@@ -193,9 +115,10 @@ namespace MultiTerminal.Services
             if (string.IsNullOrWhiteSpace(query))
                 return GetAllRegisteredProjects();
 
-            return _registry
+            return _projectDb.GetAllRichProjects()
                 .Where(p => p.Name != null && p.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
                 .OrderBy(p => p.Name)
+                .Select(ProjectRegistryEntry.FromProject)
                 .ToList();
         }
 
@@ -206,6 +129,8 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Loads a full project from its .claude/project.json file.
         /// Returns null if file doesn't exist or is invalid.
+        /// NOTE: This reads from the filesystem (for migration support and portability).
+        /// For SQLite-backed reads, use ProjectDatabase.GetRichProject().
         /// </summary>
         public Project LoadProject(string projectPath)
         {
@@ -245,8 +170,7 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Saves a project to its .claude/project.json file.
-        /// Also updates the central registry.
+        /// Saves a project to its .claude/project.json file and upserts into SQLite.
         /// </summary>
         public void SaveProject(Project project)
         {
@@ -261,19 +185,19 @@ namespace MultiTerminal.Services
             if (!Directory.Exists(claudeFolder))
                 Directory.CreateDirectory(claudeFolder);
 
-            // Save project config
+            // Save portable project config to .claude/project.json
             string configPath = GetProjectConfigPath(project.Path);
             string json = SerializeProjectJson(project);
             File.WriteAllText(configPath, json);
 
-            // Update registry
-            UpdateRegistry(project);
+            // Upsert into SQLite (SQLite is now the authoritative registry)
+            _projectDb.SaveRichProject(project);
 
             ProjectUpdated?.Invoke(this, new ProjectEventArgs(project));
         }
 
         /// <summary>
-        /// Registers a new project (creates .claude/project.json and adds to registry).
+        /// Registers a new project (creates .claude/project.json, upserts to SQLite).
         /// </summary>
         public Project RegisterProject(string path, string name, string description = null)
         {
@@ -293,20 +217,18 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Removes a project from the registry.
+        /// Removes a project from SQLite.
         /// Optionally deletes the .claude/project.json file.
         /// </summary>
         public void UnregisterProject(string projectId, bool deleteLocalConfig = false)
         {
-            var entry = _registry.FirstOrDefault(p => p.Id == projectId);
-            if (entry == null)
+            var richProject = _projectDb.GetRichProject(projectId);
+            if (richProject == null)
                 return;
 
-            Project project = null;
-            if (deleteLocalConfig && !string.IsNullOrEmpty(entry.Path))
+            if (deleteLocalConfig && !string.IsNullOrEmpty(richProject.Path))
             {
-                project = LoadProject(entry.Path);
-                string configPath = GetProjectConfigPath(entry.Path);
+                string configPath = GetProjectConfigPath(richProject.Path);
                 if (File.Exists(configPath))
                 {
                     try
@@ -320,11 +242,10 @@ namespace MultiTerminal.Services
                 }
             }
 
-            _registry.RemoveAll(p => p.Id == projectId);
-            SaveRegistry();
+            _projectDb.DeleteProject(projectId);
 
-            if (project != null)
-                ProjectRemoved?.Invoke(this, new ProjectEventArgs(project));
+            ProjectRemoved?.Invoke(this, new ProjectEventArgs(richProject));
+            RegistryChangedExternally?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>
@@ -332,20 +253,27 @@ namespace MultiTerminal.Services
         /// </summary>
         public void MarkProjectOpened(string projectId)
         {
-            var entry = _registry.FirstOrDefault(p => p.Id == projectId);
-            if (entry != null)
+            var richProject = _projectDb.GetRichProject(projectId);
+            if (richProject != null)
             {
-                entry.LastOpenedAt = DateTime.Now;
-                SaveRegistry();
+                richProject.LastOpenedAt = DateTime.Now;
+                _projectDb.SaveRichProject(richProject);
 
-                // Also update the project file
-                var project = LoadProject(entry.Path);
-                if (project != null)
+                // Also update the portable project.json if it exists
+                if (!string.IsNullOrEmpty(richProject.Path))
                 {
-                    project.LastOpenedAt = DateTime.Now;
-                    SaveProject(project);
-                    ProjectOpened?.Invoke(this, new ProjectEventArgs(project));
+                    var fileProject = LoadProject(richProject.Path);
+                    if (fileProject != null)
+                    {
+                        fileProject.LastOpenedAt = DateTime.Now;
+                        string configPath = GetProjectConfigPath(richProject.Path);
+                        string json = SerializeProjectJson(fileProject);
+                        try { File.WriteAllText(configPath, json); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to update project.json lastOpenedAt: {ex.Message}"); }
+                    }
                 }
+
+                ProjectOpened?.Invoke(this, new ProjectEventArgs(richProject));
             }
         }
 
@@ -354,18 +282,24 @@ namespace MultiTerminal.Services
         /// </summary>
         public void ToggleProjectPinned(string projectId)
         {
-            var entry = _registry.FirstOrDefault(p => p.Id == projectId);
-            if (entry != null)
+            var richProject = _projectDb.GetRichProject(projectId);
+            if (richProject != null)
             {
-                entry.IsPinned = !entry.IsPinned;
-                SaveRegistry();
+                richProject.IsPinned = !richProject.IsPinned;
+                _projectDb.SaveRichProject(richProject);
 
-                // Also update the project file
-                var project = LoadProject(entry.Path);
-                if (project != null)
+                // Also update the portable project.json if it exists
+                if (!string.IsNullOrEmpty(richProject.Path))
                 {
-                    project.IsPinned = entry.IsPinned;
-                    SaveProject(project);
+                    var fileProject = LoadProject(richProject.Path);
+                    if (fileProject != null)
+                    {
+                        fileProject.IsPinned = richProject.IsPinned;
+                        string configPath = GetProjectConfigPath(richProject.Path);
+                        string json = SerializeProjectJson(fileProject);
+                        try { File.WriteAllText(configPath, json); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to update project.json isPinned: {ex.Message}"); }
+                    }
                 }
             }
         }
@@ -399,15 +333,16 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Checks if a discovered project is already in the registry.
+        /// Checks if a discovered project is already in SQLite.
         /// </summary>
         public bool IsProjectRegistered(string projectPath)
         {
             if (string.IsNullOrEmpty(projectPath))
                 return false;
 
-            return _registry.Any(p =>
-                string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase));
+            return _projectDb.GetAllRichProjects()
+                .Any(p => string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase)
+                       || string.Equals(p.SourcePath, projectPath, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>
@@ -418,28 +353,39 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(projectPath))
                 return null;
 
-            return _registry.FirstOrDefault(p =>
-                string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase));
+            var richProject = _projectDb.GetAllRichProjects()
+                .FirstOrDefault(p =>
+                    string.Equals(p.Path, projectPath, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(p.SourcePath, projectPath, StringComparison.OrdinalIgnoreCase));
+
+            return richProject == null ? null : ProjectRegistryEntry.FromProject(richProject);
         }
 
         /// <summary>
-        /// Validates that registry entries still point to valid project folders.
+        /// Validates that SQLite project entries still point to valid project folders.
         /// Removes entries where the path no longer exists.
         /// </summary>
         public int CleanupRegistry()
         {
-            int removed = _registry.RemoveAll(p =>
-                string.IsNullOrEmpty(p.Path) || !Directory.Exists(p.Path));
+            var projects = _projectDb.GetAllRichProjects();
+            int removed = 0;
 
-            if (removed > 0)
-                SaveRegistry();
+            foreach (var project in projects)
+            {
+                string checkPath = project.SourcePath ?? project.Path;
+                if (string.IsNullOrEmpty(checkPath) || !Directory.Exists(checkPath))
+                {
+                    _projectDb.DeleteProject(project.Id);
+                    removed++;
+                }
+            }
 
             return removed;
         }
 
         #endregion
 
-        #region Prompt Management
+        #region Prompt Management (reads from .claude/project.json)
 
         /// <summary>
         /// Gets all prompts for a project (from .claude/project.json).
@@ -506,59 +452,9 @@ namespace MultiTerminal.Services
             return Path.Combine(projectPath, ".claude", "project.json");
         }
 
-        private void UpdateRegistry(Project project)
-        {
-            var entry = _registry.FirstOrDefault(p => p.Id == project.Id);
-            if (entry != null)
-            {
-                // Update existing entry
-                entry.Name = project.Name;
-                entry.Path = project.Path;
-                entry.LastOpenedAt = project.LastOpenedAt;
-                entry.IsPinned = project.IsPinned;
-            }
-            else
-            {
-                // Add new entry
-                _registry.Add(ProjectRegistryEntry.FromProject(project));
-            }
-            SaveRegistry();
-        }
-
-        private void LoadRegistry()
-        {
-            _registry = new List<ProjectRegistryEntry>();
-
-            if (!File.Exists(_registryPath))
-                return;
-
-            try
-            {
-                string json = File.ReadAllText(_registryPath);
-                _registry = ParseRegistryJson(json);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to load registry: {ex.Message}");
-            }
-        }
-
-        private void SaveRegistry()
-        {
-            try
-            {
-                string json = SerializeRegistryJson(_registry);
-                File.WriteAllText(_registryPath, json);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to save registry: {ex.Message}");
-            }
-        }
-
         #endregion
 
-        #region JSON Serialization (no external dependencies)
+        #region JSON Serialization (project.json — for portable project files)
 
         private string SerializeProjectJson(Project project)
         {
@@ -608,34 +504,6 @@ namespace MultiTerminal.Services
             sb.AppendLine("]");
             sb.AppendLine("  }");
 
-            sb.AppendLine("}");
-            return sb.ToString();
-        }
-
-        private string SerializeRegistryJson(List<ProjectRegistryEntry> entries)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("{");
-            sb.AppendLine("  \"version\": 1,");
-            sb.AppendLine("  \"projects\": [");
-
-            for (int i = 0; i < entries.Count; i++)
-            {
-                var e = entries[i];
-                sb.AppendLine("    {");
-                sb.AppendLine($"      \"id\": {JsonEscape(e.Id)},");
-                sb.AppendLine($"      \"name\": {JsonEscape(e.Name)},");
-                sb.AppendLine($"      \"path\": {JsonEscape(e.Path)},");
-                sb.AppendLine($"      \"lastOpenedAt\": {JsonEscape(e.LastOpenedAt.ToString("o"))},");
-                sb.AppendLine($"      \"isPinned\": {(e.IsPinned ? "true" : "false")}");
-                sb.Append("    }");
-                if (i < entries.Count - 1)
-                    sb.AppendLine(",");
-                else
-                    sb.AppendLine();
-            }
-
-            sb.AppendLine("  ]");
             sb.AppendLine("}");
             return sb.ToString();
         }
@@ -735,7 +603,7 @@ namespace MultiTerminal.Services
                             project.TeamAgents = ParseTeamObject(json, ref pos);
                             break;
                         case "hooks":
-                            // Skip hooks - not currently used by ProjectService
+                            // Skip hooks - not used by ProjectService
                             SkipJsonValue(json, ref pos);
                             break;
                         default:
@@ -750,145 +618,6 @@ namespace MultiTerminal.Services
             }
 
             return project;
-        }
-
-        private List<ProjectRegistryEntry> ParseRegistryJson(string json)
-        {
-            var entries = new List<ProjectRegistryEntry>();
-            if (string.IsNullOrWhiteSpace(json))
-                return entries;
-
-            json = json.Trim();
-            if (!json.StartsWith("{"))
-                return entries;
-
-            int pos = 1;
-
-            while (pos < json.Length && json[pos] != '}')
-            {
-                SkipWhitespace(json, ref pos);
-                if (pos >= json.Length || json[pos] == '}')
-                    break;
-
-                string key = ParseJsonString(json, ref pos);
-                SkipWhitespace(json, ref pos);
-
-                if (pos < json.Length && json[pos] == ':')
-                    pos++;
-
-                SkipWhitespace(json, ref pos);
-
-                if (key != null && key.ToLowerInvariant() == "projects")
-                {
-                    entries = ParseRegistryEntriesArray(json, ref pos);
-                }
-                else
-                {
-                    SkipJsonValue(json, ref pos);
-                }
-
-                SkipWhitespace(json, ref pos);
-                if (pos < json.Length && json[pos] == ',')
-                    pos++;
-            }
-
-            return entries;
-        }
-
-        private List<ProjectRegistryEntry> ParseRegistryEntriesArray(string json, ref int pos)
-        {
-            var entries = new List<ProjectRegistryEntry>();
-            SkipWhitespace(json, ref pos);
-
-            if (pos >= json.Length || json[pos] != '[')
-                return entries;
-
-            pos++; // skip '['
-
-            while (pos < json.Length)
-            {
-                SkipWhitespace(json, ref pos);
-                if (pos >= json.Length || json[pos] == ']')
-                    break;
-
-                if (json[pos] == '{')
-                {
-                    var entry = ParseRegistryEntry(json, ref pos);
-                    if (entry != null)
-                        entries.Add(entry);
-                }
-
-                SkipWhitespace(json, ref pos);
-                if (pos < json.Length && json[pos] == ',')
-                    pos++;
-            }
-
-            if (pos < json.Length && json[pos] == ']')
-                pos++;
-
-            return entries;
-        }
-
-        private ProjectRegistryEntry ParseRegistryEntry(string json, ref int pos)
-        {
-            if (json[pos] != '{')
-                return null;
-
-            pos++;
-            var entry = new ProjectRegistryEntry();
-
-            while (pos < json.Length && json[pos] != '}')
-            {
-                SkipWhitespace(json, ref pos);
-                if (pos >= json.Length || json[pos] == '}')
-                    break;
-
-                string key = ParseJsonString(json, ref pos);
-                SkipWhitespace(json, ref pos);
-
-                if (pos < json.Length && json[pos] == ':')
-                    pos++;
-
-                SkipWhitespace(json, ref pos);
-
-                if (key != null)
-                {
-                    switch (key.ToLowerInvariant())
-                    {
-                        case "id":
-                            entry.Id = ParseJsonString(json, ref pos);
-                            break;
-                        case "name":
-                            entry.Name = ParseJsonString(json, ref pos);
-                            break;
-                        case "path":
-                            entry.Path = ParseJsonString(json, ref pos);
-                            break;
-                        case "lastopeenedat":
-                        case "lastopenat":
-                        case "lastopenedat":
-                            string dateStr = ParseJsonString(json, ref pos);
-                            if (DateTime.TryParse(dateStr, out var dt))
-                                entry.LastOpenedAt = dt;
-                            break;
-                        case "ispinned":
-                            entry.IsPinned = ParseJsonBool(json, ref pos);
-                            break;
-                        default:
-                            SkipJsonValue(json, ref pos);
-                            break;
-                    }
-                }
-
-                SkipWhitespace(json, ref pos);
-                if (pos < json.Length && json[pos] == ',')
-                    pos++;
-            }
-
-            if (pos < json.Length && json[pos] == '}')
-                pos++;
-
-            return entry;
         }
 
         private List<Prompt> ParsePromptsArray(string json, ref int pos)
@@ -1227,8 +956,7 @@ namespace MultiTerminal.Services
         {
             if (!_isDisposed)
             {
-                _registryWatcher?.Dispose();
-                _registryWatcher = null;
+                _projectDb?.Dispose();
                 _isDisposed = true;
             }
         }

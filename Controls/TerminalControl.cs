@@ -36,6 +36,7 @@ namespace MultiTerminal.Controls
         private string _pendingTerminalName;
         private string _pendingAutoRunCommand;
         private string _pendingSpawnerName;
+        private string _pendingProjectId;
         private TerminalTheme _pendingTheme = TerminalTheme.Dark;
         private string _terminalTitle = "PowerShell";
         private DebugLogService _debugLogService;
@@ -162,7 +163,7 @@ namespace MultiTerminal.Controls
             if (_pendingStart)
             {
                 _pendingStart = false;
-                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName);
+                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId);
             }
         }
 
@@ -173,7 +174,8 @@ namespace MultiTerminal.Controls
         /// <param name="docId">Document ID for MCP push notifications</param>
         /// <param name="terminalName">Pre-registered terminal name for MCP (null if not pre-registered)</param>
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
-        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
+        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
         {
             if (_terminal != null && _terminal.IsRunning)
             {
@@ -183,7 +185,7 @@ namespace MultiTerminal.Controls
             // If renderer is initialized, start immediately
             if (_renderer.IsInitialized)
             {
-                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName);
+                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId);
             }
             else
             {
@@ -194,6 +196,7 @@ namespace MultiTerminal.Controls
                 _pendingTerminalName = terminalName;
                 _pendingAutoRunCommand = autoRunCommand;
                 _pendingSpawnerName = spawnerName;
+                _pendingProjectId = projectId;
             }
         }
 
@@ -202,7 +205,7 @@ namespace MultiTerminal.Controls
             FontSizeChanged?.Invoke(this, e);
         }
 
-        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null)
+        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
         {
             // Reset Claude Code detection so the event fires again for this new session
             _claudeCodeDetectedThisSession = false;
@@ -222,7 +225,7 @@ namespace MultiTerminal.Controls
 
             try
             {
-                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName);
+                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId);
             }
             catch (Exception ex)
             {
