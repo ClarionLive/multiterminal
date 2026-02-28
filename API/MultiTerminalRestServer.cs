@@ -122,6 +122,9 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.VersioningService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.ChangelogService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.ProjectDatabase>();
+                builder.Services.AddSingleton<MultiTerminal.Services.ProjectContextService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.ProjectJsonMigrationService>();
 
                 // Add controllers for REST API (DebugController gets DebugLogService from MessageBroker directly)
                 builder.Services.AddControllers()
