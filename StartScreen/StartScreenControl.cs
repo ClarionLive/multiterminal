@@ -186,7 +186,6 @@ namespace MultiTerminal.StartScreen
 
             _isInitialized = true;
 
-            _webView.ZoomFactorChanged += (s, _) => { /* bubble zoom if needed in future */ };
             if (Math.Abs(_pendingZoom - 1.0) > 0.01)
                 _webView.ZoomFactor = _pendingZoom;
         }
@@ -362,12 +361,6 @@ namespace MultiTerminal.StartScreen
         private void PostWebMessage(string message)
         {
             _webView?.CoreWebView2?.PostWebMessageAsString(message);
-        }
-
-        private string EscapeJson(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
         }
 
         // ── Cleanup ───────────────────────────────────────────────────────────

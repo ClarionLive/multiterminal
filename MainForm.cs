@@ -1647,6 +1647,7 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenProjectLaunched error: {ex.Message}");
+                doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
                 MessageBox.Show($"Failed to launch project: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -1658,22 +1659,31 @@ namespace MultiTerminal
         {
             if (sender is not TerminalDocument doc) return;
 
-            string terminalName = null;
-            if (_mcpServer?.Broker != null)
+            try
             {
-                terminalName = "Unassigned";
-                _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                string terminalName = null;
+                if (_mcpServer?.Broker != null)
+                {
+                    terminalName = "Unassigned";
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                }
+
+                string dir = _settings?.GetLastDirectory();
+                doc.StartTerminal(dir, terminalName);
+
+                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
+                doc.SetFontSize(terminalFontSize);
+
+                doc.Activate();
+                doc.FocusTerminal();
+                _lastActiveTerminal = doc;
             }
-
-            string dir = _settings?.GetLastDirectory();
-            doc.StartTerminal(dir, terminalName);
-
-            float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
-            doc.SetFontSize(terminalFontSize);
-
-            doc.Activate();
-            doc.FocusTerminal();
-            _lastActiveTerminal = doc;
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenOpenPowerShell error: {ex.Message}");
+                doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
+                MessageBox.Show($"Failed to open PowerShell: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         /// <summary>

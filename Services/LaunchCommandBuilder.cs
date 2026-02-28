@@ -23,10 +23,7 @@ namespace MultiTerminal.Services
         /// <param name="terminalName">Optional terminal display name (passed as env var by ConPtyTerminal).</param>
         /// <param name="docId">Optional terminal doc ID (passed as env var by ConPtyTerminal).</param>
         /// <returns>LaunchCommand with WorkingDirectory and AutoRunCommand ready for ConPtyTerminal.Start().</returns>
-        public static LaunchCommand BuildClaudeCommand(
-            Models.Project project,
-            string terminalName = null,
-            string docId = null)
+        public static LaunchCommand BuildClaudeCommand(Models.Project project)
         {
             string mtSourcePath = GetMtSourcePath();
             string workingDir = ResolveWorkingDirectory(project);
