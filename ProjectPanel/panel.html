@@ -840,6 +840,24 @@
             color: var(--text-secondary);
             font-size: 12px;
             line-height: 1.6;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .hint-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 18px;
+            cursor: pointer;
+            padding: 0 4px;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+        .hint-close:hover {
+            color: var(--text-primary);
         }
 
         .new-project-hint code {
@@ -959,21 +977,12 @@
                     </div>
                 </div>
 
-                <div class="section" id="sessions-section">
-                    <div class="section-header" onclick="toggleSection(this)">
-                        <span class="section-toggle collapsed">▼</span>
-                        <span class="section-title">Claude Sessions</span>
-                        <span class="session-badge" id="sessions-count">0</span>
-                        <button class="sync-btn" id="sync-sessions-btn" onclick="event.stopPropagation(); syncSessions();" title="Sync sessions from Claude">&#x21bb;</button>
-                    </div>
-                    <div class="section-content collapsed">
-                        <input type="text" class="sessions-search" placeholder="Search sessions..." oninput="searchSessions(this.value)">
-                        <div class="sessions-list" id="sessions-list">
-                            <div class="text-content empty">Loading sessions...</div>
-                        </div>
-                    </div>
-                </div>
             `;
+
+            // Re-render associations if they were loaded before stats update wiped them
+            if (currentAssociations) {
+                renderAssociations(currentAssociations);
+            }
         }
 
         // Render Project Info section (type, version, status, createdBy, isPinned)
@@ -1900,10 +1909,16 @@
                         }
                         case 'newProjectHint': {
                             const container = document.getElementById('container');
+                            // Prevent duplicate hints
+                            const existing = container?.querySelector('.new-project-hint');
+                            if (existing) break;
                             if (container) {
                                 const hint = document.createElement('div');
                                 hint.className = 'new-project-hint';
-                                hint.innerHTML = 'To add a new project, run <code>/new-project</code> in a Claude Code terminal.';
+                                hint.innerHTML = `
+                                    <span>To add a new project, run <code>/new-project</code> in a Claude Code terminal.</span>
+                                    <button class="hint-close" onclick="this.parentElement.remove()" title="Dismiss">&times;</button>
+                                `;
                                 container.prepend(hint);
                             }
                             break;

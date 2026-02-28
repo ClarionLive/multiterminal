@@ -292,8 +292,8 @@ namespace MultiTerminal.Docking
             System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Updating renderer with stats for {projectWithAllPrompts.Name}");
             _renderer?.ShowProject(projectWithAllPrompts, stats);
 
-            // Load sessions asynchronously
-            await LoadSessionsForProjectAsync(project.Path);
+            // Sessions section hidden for now (feature incomplete)
+            // await LoadSessionsForProjectAsync(project.Path);
         }
 
         public void ShowClaudeDetectedState(string workingDirectory)
