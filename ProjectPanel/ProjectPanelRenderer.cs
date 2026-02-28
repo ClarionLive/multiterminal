@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -59,6 +60,17 @@ namespace MultiTerminal.ProjectPanel
         /// Event fired when user expands a session to view messages.
         /// </summary>
         public event EventHandler<string> GetSessionMessagesRequested;
+
+        /// <summary>
+        /// Event fired when JS requests a project field update.
+        /// Sender args: (fieldName, newValue)
+        /// </summary>
+        public event EventHandler<FieldUpdateEventArgs> FieldUpdateRequested;
+
+        /// <summary>
+        /// Event fired when JS requests an association add/update/delete.
+        /// </summary>
+        public event EventHandler<AssociationUpdateEventArgs> AssociationUpdateRequested;
 
         /// <summary>
         /// Gets whether the renderer is initialized.
@@ -206,6 +218,15 @@ namespace MultiTerminal.ProjectPanel
                     case "getSessionMessages":
                         GetSessionMessagesRequested?.Invoke(this, message.SessionId);
                         break;
+
+                    case "updateField":
+                        FieldUpdateRequested?.Invoke(this, new FieldUpdateEventArgs(message.Field, message.Value));
+                        break;
+
+                    case "updateAssociation":
+                        AssociationUpdateRequested?.Invoke(this, new AssociationUpdateEventArgs(
+                            message.TableName, message.Action, message.ItemJson));
+                        break;
                 }
             }
             catch (Exception ex)
@@ -231,12 +252,15 @@ namespace MultiTerminal.ProjectPanel
 
         /// <summary>
         /// Display project information.
+        /// Sends "project:{json}" to the WebView2 panel with all 23 project fields.
         /// </summary>
         public void ShowProject(Project project, ProjectStats stats = null)
         {
             System.Diagnostics.Trace.WriteLine($"[ProjectPanelRenderer] ShowProject called: {project?.Name ?? "null"}, IsInitialized={_isInitialized}");
             var sb = new StringBuilder();
             sb.Append("{");
+
+            // Core identity
             sb.Append($"\"name\":\"{EscapeJson(project.Name ?? "")}\",");
             sb.Append($"\"path\":\"{EscapeJson(project.Path ?? "")}\",");
             sb.Append($"\"description\":\"{EscapeJson(project.Description ?? "")}\",");
@@ -248,6 +272,11 @@ namespace MultiTerminal.ProjectPanel
             sb.Append($"\"icon\":\"{EscapeJson(project.Icon ?? "")}\",");
             sb.Append($"\"iconColor\":\"{EscapeJson(project.IconColor ?? "")}\",");
 
+            // Paths (new fields)
+            sb.Append($"\"sourcePath\":\"{EscapeJson(project.SourcePath ?? "")}\",");
+            sb.Append($"\"deployPath\":\"{EscapeJson(project.DeployPath ?? "")}\",");
+            sb.Append($"\"buildOutputPath\":\"{EscapeJson(project.BuildOutputPath ?? "")}\",");
+
             // Build & deploy commands
             sb.Append($"\"buildCommand\":\"{EscapeJson(project.BuildCommand ?? "")}\",");
             sb.Append($"\"deployCommand\":\"{EscapeJson(project.DeployCommand ?? "")}\",");
@@ -257,6 +286,15 @@ namespace MultiTerminal.ProjectPanel
             sb.Append($"\"gitRepoUrl\":\"{EscapeJson(project.GitRepoUrl ?? "")}\",");
             sb.Append($"\"gitDefaultBranch\":\"{EscapeJson(project.GitDefaultBranch ?? "")}\",");
             sb.Append($"\"gitAutoCommit\":{(project.GitAutoCommit ? "true" : "false")},");
+
+            // Status / flags (new fields)
+            sb.Append($"\"isPinned\":{(project.IsPinned ? "true" : "false")},");
+            sb.Append($"\"createdBy\":\"{EscapeJson(project.CreatedBy ?? "")}\",");
+
+            // Timestamps (new fields) — ISO 8601 so JS can parse them
+            sb.Append($"\"createdAt\":\"{EscapeJson(project.CreatedAt == default ? "" : project.CreatedAt.ToString("O"))}\",");
+            sb.Append($"\"updatedAt\":\"{EscapeJson(project.UpdatedAt == default ? "" : project.UpdatedAt.ToString("O"))}\",");
+            sb.Append($"\"lastOpenedAt\":\"{EscapeJson(project.LastOpenedAt == default ? "" : project.LastOpenedAt.ToString("O"))}\",");
 
             if (stats != null)
             {
@@ -289,6 +327,113 @@ namespace MultiTerminal.ProjectPanel
             sb.Append("}");
 
             SendMessage($"project:{sb}");
+        }
+
+        /// <summary>
+        /// Send all association data (agents, MCP servers, specialist agents, paths, prompts, skills)
+        /// to the WebView2 panel. Sends "associations:{json}".
+        /// </summary>
+        public void ShowAssociations(ProjectContext context)
+        {
+            if (context == null)
+            {
+                SendMessage("associations:{}");
+                return;
+            }
+
+            var sb = new StringBuilder();
+            sb.Append("{");
+
+            // Agents
+            sb.Append("\"agents\":[");
+            for (int i = 0; i < context.Agents.Count; i++)
+            {
+                var a = context.Agents[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{a.Id},");
+                sb.Append($"\"agentName\":\"{EscapeJson(a.AgentName ?? "")}\",");
+                sb.Append($"\"role\":\"{EscapeJson(a.Role ?? "")}\",");
+                sb.Append($"\"preferredModel\":\"{EscapeJson(a.PreferredModel ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("],");
+
+            // MCP servers
+            sb.Append("\"mcpServers\":[");
+            for (int i = 0; i < context.McpServers.Count; i++)
+            {
+                var m = context.McpServers[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{m.Id},");
+                sb.Append($"\"serverName\":\"{EscapeJson(m.ServerName ?? "")}\",");
+                sb.Append($"\"isEnabled\":{(m.IsEnabled ? "true" : "false")}");
+                sb.Append("}");
+            }
+            sb.Append("],");
+
+            // Specialist agents
+            sb.Append("\"specialistAgents\":[");
+            for (int i = 0; i < context.SpecialistAgents.Count; i++)
+            {
+                var s = context.SpecialistAgents[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{s.Id},");
+                sb.Append($"\"agentType\":\"{EscapeJson(s.AgentType ?? "")}\",");
+                sb.Append($"\"isEnabled\":{(s.IsEnabled ? "true" : "false")},");
+                sb.Append($"\"customPrompt\":\"{EscapeJson(s.CustomPrompt ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("],");
+
+            // Paths
+            sb.Append("\"projectPaths\":[");
+            for (int i = 0; i < context.Paths.Count; i++)
+            {
+                var p = context.Paths[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{p.Id},");
+                sb.Append($"\"pathType\":\"{EscapeJson(p.PathType ?? "")}\",");
+                sb.Append($"\"pathValue\":\"{EscapeJson(p.PathValue ?? "")}\",");
+                sb.Append($"\"description\":\"{EscapeJson(p.Description ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("],");
+
+            // Prompts (SQLite project_prompts, not legacy JSON Prompts)
+            sb.Append("\"dbPrompts\":[");
+            for (int i = 0; i < context.Prompts.Count; i++)
+            {
+                var pr = context.Prompts[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{pr.Id},");
+                sb.Append($"\"promptType\":\"{EscapeJson(pr.PromptType ?? "")}\",");
+                sb.Append($"\"promptText\":\"{EscapeJson(pr.PromptText ?? "")}\",");
+                sb.Append($"\"displayOrder\":{pr.DisplayOrder}");
+                sb.Append("}");
+            }
+            sb.Append("],");
+
+            // Skills
+            sb.Append("\"skills\":[");
+            for (int i = 0; i < context.Skills.Count; i++)
+            {
+                var sk = context.Skills[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{sk.Id},");
+                sb.Append($"\"skillName\":\"{EscapeJson(sk.SkillName ?? "")}\",");
+                sb.Append($"\"isEnabled\":{(sk.IsEnabled ? "true" : "false")}");
+                sb.Append("}");
+            }
+            sb.Append("]");
+
+            sb.Append("}");
+            SendMessage($"associations:{sb}");
         }
 
         /// <summary>
@@ -434,6 +579,33 @@ namespace MultiTerminal.ProjectPanel
             SendMessage($"fontSize:{size}");
         }
 
+        /// <summary>
+        /// Notify JS that a field save succeeded or failed.
+        /// Sends "fieldSaved:{\"field\":\"name\",\"success\":true}"
+        /// </summary>
+        public void SendFieldSaved(string field, bool success)
+        {
+            SendMessage($"fieldSaved:{{\"field\":\"{EscapeJson(field ?? "")}\",\"success\":{(success ? "true" : "false")}}}");
+        }
+
+        /// <summary>
+        /// Notify JS that an association operation succeeded or failed.
+        /// Sends "associationSaved:{\"tableName\":\"agents\",\"action\":\"add\",\"success\":true}"
+        /// </summary>
+        public void SendAssociationSaved(string tableName, string action, bool success, int newId = 0)
+        {
+            var idPart = newId > 0 ? $",\"newId\":{newId}" : "";
+            SendMessage($"associationSaved:{{\"tableName\":\"{EscapeJson(tableName ?? "")}\",\"action\":\"{EscapeJson(action ?? "")}\",\"success\":{(success ? "true" : "false")}{idPart}}}");
+        }
+
+        /// <summary>
+        /// Ask the panel to show a hint for creating a new project via /new-project.
+        /// </summary>
+        public void ShowNewProjectHint()
+        {
+            SendMessage("newProjectHint:");
+        }
+
         private string EscapeJson(string str)
         {
             if (string.IsNullOrEmpty(str)) return "";
@@ -449,30 +621,51 @@ namespace MultiTerminal.ProjectPanel
         {
             var result = new MessageData();
 
-            // Simple JSON parsing for our specific format
-            json = json.Trim();
-            if (json.StartsWith("{") && json.EndsWith("}"))
+            json = json?.Trim();
+            if (string.IsNullOrEmpty(json) || !json.StartsWith("{"))
+                return result;
+
+            try
             {
-                json = json.Substring(1, json.Length - 2);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
 
-                foreach (var pair in json.Split(','))
-                {
-                    var colonIdx = pair.IndexOf(':');
-                    if (colonIdx > 0)
-                    {
-                        var key = pair.Substring(0, colonIdx).Trim().Trim('"');
-                        var value = pair.Substring(colonIdx + 1).Trim().Trim('"');
+                if (root.TryGetProperty("type", out var typeEl))
+                    result.Type = typeEl.GetString();
 
-                        switch (key)
-                        {
-                            case "type": result.Type = value; break;
-                            case "promptId": result.PromptId = value; break;
-                            case "path": result.Path = value; break;
-                            case "sessionId": result.SessionId = value; break;
-                            case "query": result.Query = value; break;
-                        }
-                    }
-                }
+                if (root.TryGetProperty("promptId", out var promptIdEl))
+                    result.PromptId = promptIdEl.GetString();
+
+                if (root.TryGetProperty("path", out var pathEl))
+                    result.Path = pathEl.GetString();
+
+                if (root.TryGetProperty("sessionId", out var sessionIdEl))
+                    result.SessionId = sessionIdEl.GetString();
+
+                if (root.TryGetProperty("query", out var queryEl))
+                    result.Query = queryEl.GetString();
+
+                // Fields used by editing actions
+                if (root.TryGetProperty("field", out var fieldEl))
+                    result.Field = fieldEl.GetString();
+
+                if (root.TryGetProperty("value", out var valueEl))
+                    result.Value = valueEl.ValueKind == JsonValueKind.String
+                        ? valueEl.GetString()
+                        : valueEl.GetRawText();
+
+                if (root.TryGetProperty("tableName", out var tableEl))
+                    result.TableName = tableEl.GetString();
+
+                if (root.TryGetProperty("action", out var actionEl))
+                    result.Action = actionEl.GetString();
+
+                if (root.TryGetProperty("item", out var itemEl))
+                    result.ItemJson = itemEl.GetRawText();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanelRenderer] ParseJsonMessage failed: {ex.Message}");
             }
 
             return result;
@@ -485,6 +678,12 @@ namespace MultiTerminal.ProjectPanel
             public string Path { get; set; }
             public string SessionId { get; set; }
             public string Query { get; set; }
+            // Editing fields
+            public string Field { get; set; }
+            public string Value { get; set; }
+            public string TableName { get; set; }
+            public string Action { get; set; }
+            public string ItemJson { get; set; }
         }
 
         protected override void Dispose(bool disposing)
@@ -534,5 +733,37 @@ namespace MultiTerminal.ProjectPanel
         public string Role { get; set; }
         public string Content { get; set; }
         public DateTime Timestamp { get; set; }
+    }
+
+    /// <summary>
+    /// Event args for a JS "updateField" message (single field in-place edit).
+    /// </summary>
+    public class FieldUpdateEventArgs : EventArgs
+    {
+        public string Field { get; }
+        public string Value { get; }
+
+        public FieldUpdateEventArgs(string field, string value)
+        {
+            Field = field;
+            Value = value;
+        }
+    }
+
+    /// <summary>
+    /// Event args for a JS "updateAssociation" message (add/update/delete on an association table).
+    /// </summary>
+    public class AssociationUpdateEventArgs : EventArgs
+    {
+        public string TableName { get; }
+        public string Action { get; }
+        public string ItemJson { get; }
+
+        public AssociationUpdateEventArgs(string tableName, string action, string itemJson)
+        {
+            TableName = tableName;
+            Action = action;
+            ItemJson = itemJson;
+        }
     }
 }

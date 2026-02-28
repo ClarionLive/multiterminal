@@ -1,8 +1,8 @@
 {
   "id": "5d7853b8-c695-4684-8f32-dfad644b0669",
   "name": "MultiTerminal",
-  "description": "",
-  "changeLog": "",
+  "description": "Multi-agent coordination system for Claude Code",
+  "changeLog": null,
   "currentVersion": "0.1.0",
   "createdAt": "2026-01-31T15:59:46.6389469-08:00",
   "lastOpenedAt": "2026-02-27T11:18:12.0580604-08:00",
@@ -10,6 +10,6 @@
   "prompts": [
   ],
   "team": {
-    "agents": ["Diana", "Bob", "Charlie"]
+    "agents": ["Diana", "Charlie", "Bob"]
   }
 }

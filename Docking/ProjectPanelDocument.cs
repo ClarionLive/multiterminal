@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using MultiTerminal.Models;
@@ -36,6 +37,8 @@ namespace MultiTerminal.Docking
         // Services
         private ProjectService _projectService;
         private PromptService _promptService;
+        private ProjectDatabase _projectDatabase;
+        private ProjectContextService _projectContextService;
         private static SessionDatabase _sharedSessionDb;
         private static readonly object _sessionDbLock = new object();
         private SessionSyncService _syncService;
@@ -46,7 +49,7 @@ namespace MultiTerminal.Docking
         // Header controls
         private Panel _headerPanel;
         private Button _recentsButton;
-        private Button _manageButton;
+        private Button _newProjectButton;
         private ContextMenuStrip _recentsContextMenu;
 
         // WebView2 renderer
@@ -58,7 +61,6 @@ namespace MultiTerminal.Docking
         #region Events
 
         public event EventHandler<ProjectSelectedEventArgs> ProjectSelected;
-        public event EventHandler OpenProjectManagerRequested;
         public event EventHandler<PromptEventArgs> PromptPasteRequested;
         public event EventHandler<PromptEventArgs> PromptEditRequested;
         public event EventHandler<PromptEventArgs> PromptDeleteRequested;
@@ -105,6 +107,8 @@ namespace MultiTerminal.Docking
             _renderer.SearchSessionsRequested += OnSearchSessionsRequested;
             _renderer.SyncSessionsRequested += OnSyncSessionsRequested;
             _renderer.GetSessionMessagesRequested += OnGetSessionMessagesRequested;
+            _renderer.FieldUpdateRequested += OnFieldUpdateRequested;
+            _renderer.AssociationUpdateRequested += OnAssociationUpdateRequested;
 
             Controls.Add(_renderer);
             Controls.Add(_headerPanel);
@@ -133,20 +137,22 @@ namespace MultiTerminal.Docking
             _recentsButton.FlatAppearance.BorderSize = 1;
             _recentsButton.Click += OnRecentsButtonClick;
 
-            _manageButton = new Button
+            // + button: opens /new-project skill guidance in the panel instead of a dialog
+            _newProjectButton = new Button
             {
-                Text = "Manage",
-                Width = 60,
+                Text = "+",
+                Width = 26,
                 Height = 24,
                 Font = _smallFont,
                 FlatStyle = FlatStyle.Flat,
-                Location = new Point(99, 5)
+                Location = new Point(99, 5),
+                TextAlign = ContentAlignment.MiddleCenter
             };
-            _manageButton.FlatAppearance.BorderSize = 1;
-            _manageButton.Click += OnManageButtonClick;
+            _newProjectButton.FlatAppearance.BorderSize = 1;
+            _newProjectButton.Click += OnNewProjectButtonClick;
 
             panel.Controls.Add(_recentsButton);
-            panel.Controls.Add(_manageButton);
+            panel.Controls.Add(_newProjectButton);
 
             return panel;
         }
@@ -155,6 +161,16 @@ namespace MultiTerminal.Docking
         {
             _projectService = projectService;
             _promptService = promptService;
+        }
+
+        /// <summary>
+        /// Inject ProjectDatabase (and build ProjectContextService) for field/association editing.
+        /// Call this from MainForm after SetServices.
+        /// </summary>
+        public void SetProjectDatabase(ProjectDatabase projectDatabase)
+        {
+            _projectDatabase = projectDatabase;
+            _projectContextService = new ProjectContextService(projectDatabase);
         }
 
         public void SetSessionDatabase(SessionDatabase sessionDatabase)
@@ -234,17 +250,25 @@ namespace MultiTerminal.Docking
                 Description = project.Description,
                 ChangeLog = project.ChangeLog,
                 CreatedAt = project.CreatedAt,
+                UpdatedAt = project.UpdatedAt,
                 LastOpenedAt = project.LastOpenedAt,
                 IsPinned = project.IsPinned,
+                CreatedBy = project.CreatedBy,
                 Prompts = allPrompts,
-                // Pass new fields through to renderer
+                // Project info fields
                 ProjectType = project.ProjectType,
                 CurrentVersion = project.CurrentVersion,
                 Icon = project.Icon,
                 IconColor = project.IconColor,
+                // Path fields (new)
+                SourcePath = project.SourcePath,
+                DeployPath = project.DeployPath,
+                BuildOutputPath = project.BuildOutputPath,
+                // Commands
                 BuildCommand = project.BuildCommand,
                 DeployCommand = project.DeployCommand,
                 LaunchCommand = project.LaunchCommand,
+                // Git
                 GitRepoUrl = project.GitRepoUrl,
                 GitDefaultBranch = project.GitDefaultBranch,
                 GitAutoCommit = project.GitAutoCommit
@@ -253,6 +277,13 @@ namespace MultiTerminal.Docking
             // Show project immediately without stats (to avoid UI freeze)
             System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Calling renderer.ShowProject for {projectWithAllPrompts.Name} (initial, no stats)");
             _renderer?.ShowProject(projectWithAllPrompts, null);
+
+            // Send association data if we have database access
+            if (_projectContextService != null && !string.IsNullOrEmpty(project.Id))
+            {
+                var context = await Task.Run(() => _projectContextService.GetProjectContext(project.Id));
+                _renderer?.ShowAssociations(context);
+            }
 
             // Calculate stats asynchronously in background
             var stats = await Task.Run(() => CalculateProjectStats(project.Path));
@@ -333,6 +364,231 @@ namespace MultiTerminal.Docking
             }
 
             return stats;
+        }
+
+        private void OnFieldUpdateRequested(object sender, FieldUpdateEventArgs e)
+        {
+            if (_currentProject == null || _projectDatabase == null || string.IsNullOrEmpty(e.Field))
+            {
+                _renderer?.SendFieldSaved(e.Field, false);
+                return;
+            }
+
+            try
+            {
+                bool success = _projectDatabase.UpdateProjectField(_currentProject.Id, e.Field, e.Value);
+                _renderer?.SendFieldSaved(e.Field, success);
+
+                if (success)
+                {
+                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Field '{e.Field}' updated to '{e.Value}' for project {_currentProject.Id}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnFieldUpdateRequested error: {ex.Message}");
+                _renderer?.SendFieldSaved(e.Field, false);
+            }
+        }
+
+        private void OnAssociationUpdateRequested(object sender, AssociationUpdateEventArgs e)
+        {
+            if (_currentProject == null || _projectDatabase == null
+                || string.IsNullOrEmpty(e.TableName) || string.IsNullOrEmpty(e.Action))
+            {
+                _renderer?.SendAssociationSaved(e.TableName, e.Action, false);
+                return;
+            }
+
+            // Declare outside try so catch block can reference them for error logging
+            string tableName = e.TableName;
+            string action = e.Action;
+
+            try
+            {
+                bool success = false;
+                int newId = 0;
+                string projectId = _currentProject.Id;
+                string itemJson = e.ItemJson;
+
+                switch (tableName)
+                {
+                    case "agents":
+                        (success, newId) = HandleAgentCrud(projectId, action, itemJson);
+                        break;
+                    case "mcpServers":
+                        (success, newId) = HandleMcpServerCrud(projectId, action, itemJson);
+                        break;
+                    case "specialistAgents":
+                        (success, newId) = HandleSpecialistAgentCrud(projectId, action, itemJson);
+                        break;
+                    case "projectPaths":
+                        (success, newId) = HandlePathCrud(projectId, action, itemJson);
+                        break;
+                    case "dbPrompts":
+                        (success, newId) = HandlePromptCrud(projectId, action, itemJson);
+                        break;
+                    case "skills":
+                        (success, newId) = HandleSkillCrud(projectId, action, itemJson);
+                        break;
+                    default:
+                        System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Unknown association tableName: {tableName}");
+                        break;
+                }
+
+                _renderer?.SendAssociationSaved(tableName, action, success, newId);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnAssociationUpdateRequested error ({tableName}/{action}): {ex.Message}");
+                _renderer?.SendAssociationSaved(tableName, action, false);
+            }
+        }
+
+        private (bool success, int newId) HandleAgentCrud(string projectId, string action, string itemJson)
+        {
+            var item = TryParseItemJson(itemJson);
+            if (!item.HasValue) return (false, 0);
+            var el = item.Value;
+
+            if (action == "delete")
+                return (_projectDatabase.DeleteProjectAgent(projectId, GetJsonString(el, "agentName")), 0);
+
+            _projectDatabase.SaveProjectAgent(new MultiTerminal.Models.ProjectAgent
+            {
+                ProjectId = projectId,
+                AgentName = GetJsonString(el, "agentName"),
+                Role = GetJsonString(el, "role"),
+                PreferredModel = GetJsonString(el, "preferredModel")
+            });
+            return (true, 0);
+        }
+
+        private (bool success, int newId) HandleMcpServerCrud(string projectId, string action, string itemJson)
+        {
+            var item = TryParseItemJson(itemJson);
+            if (!item.HasValue) return (false, 0);
+            var el = item.Value;
+
+            if (action == "delete")
+                return (_projectDatabase.DeleteProjectMcpServer(projectId, GetJsonString(el, "serverName")), 0);
+
+            _projectDatabase.SaveProjectMcpServer(new MultiTerminal.Models.ProjectMcpServer
+            {
+                ProjectId = projectId,
+                ServerName = GetJsonString(el, "serverName"),
+                IsEnabled = GetJsonBool(el, "isEnabled", defaultValue: true)
+            });
+            return (true, 0);
+        }
+
+        private (bool success, int newId) HandleSpecialistAgentCrud(string projectId, string action, string itemJson)
+        {
+            var item = TryParseItemJson(itemJson);
+            if (!item.HasValue) return (false, 0);
+            var el = item.Value;
+
+            if (action == "delete")
+                return (_projectDatabase.DeleteProjectSpecialistAgent(projectId, GetJsonString(el, "agentType")), 0);
+
+            _projectDatabase.SaveProjectSpecialistAgent(new MultiTerminal.Models.ProjectSpecialistAgent
+            {
+                ProjectId = projectId,
+                AgentType = GetJsonString(el, "agentType"),
+                IsEnabled = GetJsonBool(el, "isEnabled", defaultValue: true),
+                CustomPrompt = GetJsonString(el, "customPrompt")
+            });
+            return (true, 0);
+        }
+
+        private (bool success, int newId) HandlePathCrud(string projectId, string action, string itemJson)
+        {
+            var item = TryParseItemJson(itemJson);
+            if (!item.HasValue) return (false, 0);
+            var el = item.Value;
+
+            if (action == "delete")
+                return (_projectDatabase.DeleteProjectPath(GetJsonInt(el, "id")), 0);
+
+            int id = _projectDatabase.SaveProjectPath(new MultiTerminal.Models.ProjectPath
+            {
+                Id = GetJsonInt(el, "id"),
+                ProjectId = projectId,
+                PathType = GetJsonString(el, "pathType"),
+                PathValue = GetJsonString(el, "pathValue"),
+                Description = GetJsonString(el, "description")
+            });
+            return (true, id);
+        }
+
+        private (bool success, int newId) HandlePromptCrud(string projectId, string action, string itemJson)
+        {
+            var item = TryParseItemJson(itemJson);
+            if (!item.HasValue) return (false, 0);
+            var el = item.Value;
+
+            if (action == "delete")
+                return (_projectDatabase.DeleteProjectPrompt(GetJsonInt(el, "id")), 0);
+
+            int id = _projectDatabase.SaveProjectPrompt(new MultiTerminal.Models.ProjectPromptEntry
+            {
+                Id = GetJsonInt(el, "id"),
+                ProjectId = projectId,
+                PromptType = GetJsonString(el, "promptType"),
+                PromptText = GetJsonString(el, "promptText"),
+                DisplayOrder = GetJsonInt(el, "displayOrder")
+            });
+            return (true, id);
+        }
+
+        private (bool success, int newId) HandleSkillCrud(string projectId, string action, string itemJson)
+        {
+            var item = TryParseItemJson(itemJson);
+            if (!item.HasValue) return (false, 0);
+            var el = item.Value;
+
+            if (action == "delete")
+                return (_projectDatabase.DeleteProjectSkill(projectId, GetJsonString(el, "skillName")), 0);
+
+            _projectDatabase.SaveProjectSkill(new MultiTerminal.Models.ProjectSkill
+            {
+                ProjectId = projectId,
+                SkillName = GetJsonString(el, "skillName"),
+                IsEnabled = GetJsonBool(el, "isEnabled", defaultValue: true)
+            });
+            return (true, 0);
+        }
+
+        // Parse itemJson once and return the root element for use by all Handle*Crud methods.
+        private static JsonElement? TryParseItemJson(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            try
+            {
+                // JsonDocument is disposed by the caller via the using block in each Handle* method.
+                // We return a clone of RootElement so the doc can be safely disposed.
+                using var doc = JsonDocument.Parse(json);
+                return doc.RootElement.Clone();
+            }
+            catch { }
+            return null;
+        }
+
+        private static string GetJsonString(JsonElement root, string key)
+        {
+            return root.TryGetProperty(key, out var el) && el.ValueKind == JsonValueKind.String
+                ? el.GetString() : null;
+        }
+
+        private static int GetJsonInt(JsonElement root, string key)
+        {
+            return root.TryGetProperty(key, out var el) && el.TryGetInt32(out int v) ? v : 0;
+        }
+
+        private static bool GetJsonBool(JsonElement root, string key, bool defaultValue = false)
+        {
+            if (!root.TryGetProperty(key, out var el)) return defaultValue;
+            return el.ValueKind == JsonValueKind.True;
         }
 
         private void OnRendererPastePrompt(object sender, string promptId)
@@ -596,9 +852,9 @@ namespace MultiTerminal.Docking
             ShowRecentsMenu();
         }
 
-        private void OnManageButtonClick(object sender, EventArgs e)
+        private void OnNewProjectButtonClick(object sender, EventArgs e)
         {
-            OpenProjectManagerRequested?.Invoke(this, EventArgs.Empty);
+            _renderer?.ShowNewProjectHint();
         }
 
         private void ShowRecentsMenu()
@@ -700,6 +956,7 @@ namespace MultiTerminal.Docking
                 _smallFont?.Dispose();
                 _recentsContextMenu?.Dispose();
                 _renderer?.Dispose();
+                _projectDatabase?.Dispose();
             }
             base.Dispose(disposing);
         }

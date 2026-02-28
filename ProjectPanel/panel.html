@@ -564,6 +564,291 @@
             --success-color: #0d7377;
             --warning-color: #795e26;
         }
+
+        /* Inline editing */
+        .editable {
+            cursor: text;
+            border-radius: 3px;
+            padding: 1px 3px;
+            transition: background 0.15s;
+            display: inline-block;
+            min-width: 20px;
+        }
+
+        .editable:hover {
+            background: var(--bg-hover);
+            outline: 1px dashed var(--border-color);
+        }
+
+        .editable.editing {
+            background: transparent;
+            outline: none;
+        }
+
+        .edit-input {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--accent-color);
+            border-radius: 3px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: inherit;
+            padding: 2px 5px;
+            outline: none;
+            min-width: 80px;
+        }
+
+        .edit-input.multiline {
+            display: block;
+            width: 100%;
+            resize: vertical;
+            min-height: 60px;
+            font-family: inherit;
+        }
+
+        .edit-select {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--accent-color);
+            border-radius: 3px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: inherit;
+            padding: 2px 5px;
+            outline: none;
+        }
+
+        .readonly {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        /* Save flash animation */
+        .save-flash {
+            animation: flash-green 0.6s ease;
+        }
+
+        @keyframes flash-green {
+            0% { background: rgba(78, 201, 176, 0.35); }
+            100% { background: transparent; }
+        }
+
+        /* Toggle switch */
+        .toggle-switch {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .toggle-switch input[type="checkbox"] {
+            display: none;
+        }
+
+        .toggle-track {
+            width: 32px;
+            height: 16px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            position: relative;
+            border: 1px solid var(--border-color);
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        .toggle-track::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 10px;
+            height: 10px;
+            background: var(--text-muted);
+            border-radius: 50%;
+            transition: left 0.2s, background 0.2s;
+        }
+
+        .toggle-switch input:checked + .toggle-track {
+            background: rgba(78, 201, 176, 0.25);
+            border-color: var(--success-color);
+        }
+
+        .toggle-switch input:checked + .toggle-track::after {
+            left: 18px;
+            background: var(--success-color);
+        }
+
+        .toggle-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        /* Paths section */
+        .path-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        .path-label {
+            color: var(--text-secondary);
+            min-width: 90px;
+            flex-shrink: 0;
+        }
+
+        /* Date/meta row */
+        .meta-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+            font-size: 11px;
+        }
+
+        .meta-label {
+            color: var(--text-muted);
+            min-width: 80px;
+            flex-shrink: 0;
+        }
+
+        /* Association rows */
+        .assoc-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 6px;
+            border-radius: 4px;
+            margin-bottom: 3px;
+            background: var(--bg-secondary);
+            transition: background 0.15s;
+        }
+
+        .assoc-row:hover {
+            background: var(--bg-hover);
+        }
+
+        .assoc-row:hover .remove-btn {
+            opacity: 1;
+        }
+
+        .assoc-cell {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .assoc-cell.narrow {
+            flex: 0 0 100px;
+        }
+
+        .assoc-cell.toggle-cell {
+            flex: 0 0 60px;
+        }
+
+        .assoc-cell.prompt-cell {
+            flex: 2;
+        }
+
+        .remove-btn {
+            flex-shrink: 0;
+            background: transparent;
+            border: none;
+            color: #e05252;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            padding: 2px 5px;
+            border-radius: 3px;
+            opacity: 0;
+            transition: opacity 0.15s, background 0.15s;
+        }
+
+        .remove-btn:hover {
+            background: rgba(224, 82, 82, 0.15);
+        }
+
+        .add-btn {
+            display: block;
+            background: transparent;
+            border: 1px dashed var(--border-color);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            margin-top: 4px;
+            width: 100%;
+            text-align: left;
+            transition: border-color 0.15s, color 0.15s;
+        }
+
+        .add-btn:hover {
+            border-color: var(--accent-color);
+            color: var(--accent-color);
+        }
+
+        .assoc-header-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 6px;
+            margin-bottom: 4px;
+        }
+
+        .assoc-col-label {
+            flex: 1;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            color: var(--text-muted);
+        }
+
+        .assoc-col-label.narrow {
+            flex: 0 0 100px;
+        }
+
+        .assoc-col-label.toggle-cell {
+            flex: 0 0 60px;
+        }
+
+        .assoc-empty {
+            color: var(--text-muted);
+            font-style: italic;
+            font-size: 11px;
+            padding: 6px 8px;
+        }
+
+        .section-badge {
+            margin-left: auto;
+            font-size: 10px;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            padding: 2px 6px;
+            border-radius: 10px;
+        }
+
+        /* New-project hint card */
+        .new-project-hint {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--accent-color);
+            border-radius: 6px;
+            padding: 14px 16px;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .new-project-hint code {
+            font-family: 'Cascadia Mono', Consolas, monospace;
+            background: var(--bg-tertiary);
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: var(--success-color);
+        }
     </style>
 </head>
 <body>
@@ -612,11 +897,14 @@
                 ? `<span class="icon" style="${project.iconColor ? 'color:' + escapeHtml(project.iconColor) : ''}">${escapeHtml(project.icon)}</span>`
                 : `<span class="icon">📁</span>`;
 
+            const pathsSectionHtml = renderPaths(project);
+            const metaSectionHtml = renderMeta(project);
+
             container.innerHTML = `
                 <div class="project-header">
                     <div class="project-name">
                         ${iconDisplay}
-                        <span>${escapeHtml(project.name || 'Unnamed Project')}</span>
+                        <span class="editable" data-field="name" data-value="${escapeHtml(project.name || '')}" onclick="startEdit(this)">${escapeHtml(project.name || 'Unnamed Project')}</span>
                     </div>
                     <div class="project-path" onclick="copyPath('${escapeJs(project.path)}')" title="Click to copy path">
                         ${escapeHtml(project.path || '')}
@@ -633,11 +921,13 @@
                         <span class="section-title">Description</span>
                     </div>
                     <div class="section-content">
-                        <div class="text-content ${project.description ? '' : 'empty'}">
+                        <div class="text-content ${project.description ? '' : 'empty'} editable" data-field="description" data-value="${escapeHtml(project.description || '')}" data-multiline="true" onclick="startEdit(this)">
                             ${escapeHtml(project.description || 'No description')}
                         </div>
                     </div>
                 </div>
+
+                ${pathsSectionHtml}
 
                 ${buildDeployHtml}
 
@@ -645,15 +935,19 @@
 
                 <div class="section">
                     <div class="section-header" onclick="toggleSection(this)">
-                        <span class="section-toggle">▼</span>
+                        <span class="section-toggle collapsed">▼</span>
                         <span class="section-title">Change Log</span>
                     </div>
-                    <div class="section-content">
-                        <div class="text-content ${project.changeLog ? '' : 'empty'}">
+                    <div class="section-content collapsed">
+                        <div class="text-content ${project.changeLog ? '' : 'empty'} editable" data-field="changeLog" data-value="${escapeHtml(project.changeLog || '')}" data-multiline="true" onclick="startEdit(this)">
                             ${escapeHtml(project.changeLog || 'No changelog')}
                         </div>
                     </div>
                 </div>
+
+                ${metaSectionHtml}
+
+                <div id="associations-container"></div>
 
                 <div class="section">
                     <div class="section-header" onclick="toggleSection(this)">
@@ -682,11 +976,12 @@
             `;
         }
 
-        // Render Project Info section (type badge, version, icon)
+        // Render Project Info section (type, version, status, createdBy, isPinned)
         function renderProjectInfo(project) {
-            const hasType = project.projectType && project.projectType.length > 0;
-            const hasVersion = project.currentVersion && project.currentVersion.length > 0;
-            if (!hasType && !hasVersion) return '';
+            const projectTypeOptions = ['', 'Clarion COM', 'WebView2 COM', 'Clarion App', 'MT Feature', 'Generic C#', 'Web App', 'Library', 'Other'];
+            const typeOptionsHtml = projectTypeOptions.map(o =>
+                `<option value="${escapeHtml(o)}" ${project.projectType === o ? 'selected' : ''}>${escapeHtml(o) || '(none)'}</option>`
+            ).join('');
 
             let html = `
                 <div class="section">
@@ -695,23 +990,51 @@
                         <span class="section-title">Project Info</span>
                     </div>
                     <div class="section-content">
+                        <div class="info-row">
+                            <span class="info-label">Type</span>
+                            <select class="edit-select" data-field="projectType" onchange="saveSelectField(this)">
+                                ${typeOptionsHtml}
+                            </select>
+                        </div>
             `;
 
-            if (hasType) {
+            if (project.currentVersion != null) {
                 html += `
-                    <div class="info-row">
-                        <span class="info-label">Type</span>
-                        <span class="badge">${escapeHtml(project.projectType)}</span>
-                    </div>
+                        <div class="info-row">
+                            <span class="info-label">Version</span>
+                            <span class="editable badge version" data-field="currentVersion" data-value="${escapeHtml(project.currentVersion || '')}" onclick="startEdit(this)">${escapeHtml(project.currentVersion || '—')}</span>
+                        </div>
                 `;
             }
 
-            if (hasVersion) {
+            if (project.status !== undefined) {
                 html += `
-                    <div class="info-row">
-                        <span class="info-label">Version</span>
-                        <span class="badge version">${escapeHtml(project.currentVersion)}</span>
-                    </div>
+                        <div class="info-row">
+                            <span class="info-label">Status</span>
+                            <span class="editable badge" data-field="status" data-value="${escapeHtml(project.status || '')}" onclick="startEdit(this)">${escapeHtml(project.status || '—')}</span>
+                        </div>
+                `;
+            }
+
+            if (project.createdBy !== undefined) {
+                html += `
+                        <div class="info-row">
+                            <span class="info-label">Created by</span>
+                            <span class="editable" data-field="createdBy" data-value="${escapeHtml(project.createdBy || '')}" onclick="startEdit(this)">${escapeHtml(project.createdBy || '—')}</span>
+                        </div>
+                `;
+            }
+
+            if (project.isPinned !== undefined) {
+                html += `
+                        <div class="info-row">
+                            <span class="info-label">Pinned</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" data-field="isPinned" ${project.isPinned ? 'checked' : ''} onchange="saveToggleField(this)">
+                                <span class="toggle-track"></span>
+                                <span class="toggle-label">${project.isPinned ? 'Yes' : 'No'}</span>
+                            </label>
+                        </div>
                 `;
             }
 
@@ -719,13 +1042,8 @@
             return html;
         }
 
-        // Render Build & Deploy section (build, deploy, launch commands)
+        // Render Build & Deploy section (build, deploy, launch commands) — all editable
         function renderBuildDeploy(project) {
-            const hasBuild = project.buildCommand && project.buildCommand.length > 0;
-            const hasDeploy = project.deployCommand && project.deployCommand.length > 0;
-            const hasLaunch = project.launchCommand && project.launchCommand.length > 0;
-            if (!hasBuild && !hasDeploy && !hasLaunch) return '';
-
             let html = `
                 <div class="section">
                     <div class="section-header" onclick="toggleSection(this)">
@@ -733,49 +1051,25 @@
                         <span class="section-title">Build &amp; Deploy</span>
                     </div>
                     <div class="section-content collapsed">
+                        <div class="command-block">
+                            <div class="command-label">Build</div>
+                            <div class="command-code editable" data-field="buildCommand" data-value="${escapeHtml(project.buildCommand || '')}" onclick="startEdit(this)">${escapeHtml(project.buildCommand || '(none)')}</div>
+                        </div>
+                        <div class="command-block">
+                            <div class="command-label">Deploy</div>
+                            <div class="command-code editable" data-field="deployCommand" data-value="${escapeHtml(project.deployCommand || '')}" onclick="startEdit(this)">${escapeHtml(project.deployCommand || '(none)')}</div>
+                        </div>
+                        <div class="command-block">
+                            <div class="command-label">Launch</div>
+                            <div class="command-code editable" data-field="launchCommand" data-value="${escapeHtml(project.launchCommand || '')}" onclick="startEdit(this)">${escapeHtml(project.launchCommand || '(none)')}</div>
+                        </div>
+                    </div></div>
             `;
-
-            if (hasBuild) {
-                html += `
-                    <div class="command-block">
-                        <div class="command-label">Build</div>
-                        <div class="command-code">${escapeHtml(project.buildCommand)}</div>
-                    </div>
-                `;
-            }
-
-            if (hasDeploy) {
-                html += `
-                    <div class="command-block">
-                        <div class="command-label">Deploy</div>
-                        <div class="command-code">${escapeHtml(project.deployCommand)}</div>
-                    </div>
-                `;
-            }
-
-            if (hasLaunch) {
-                html += `
-                    <div class="command-block">
-                        <div class="command-label">Launch</div>
-                        <div class="command-code">${escapeHtml(project.launchCommand)}</div>
-                    </div>
-                `;
-            }
-
-            html += `</div></div>`;
             return html;
         }
 
-        // Render Git section (repo URL, default branch, auto-commit status)
+        // Render Git section — all editable, gitAutoCommit as toggle
         function renderGit(project) {
-            const hasRepo = project.gitRepoUrl && project.gitRepoUrl.length > 0;
-            const hasBranch = project.gitDefaultBranch && project.gitDefaultBranch.length > 0;
-            if (!hasRepo && !hasBranch) return '';
-
-            const autoCommitStatus = project.gitAutoCommit
-                ? '<span class="git-status enabled">Auto-commit on</span>'
-                : '<span class="git-status disabled">Auto-commit off</span>';
-
             let html = `
                 <div class="section">
                     <div class="section-header" onclick="toggleSection(this)">
@@ -783,34 +1077,74 @@
                         <span class="section-title">Git</span>
                     </div>
                     <div class="section-content collapsed">
-            `;
-
-            if (hasRepo) {
-                html += `
-                    <div class="git-row">
-                        <span class="git-label">Repository</span>
-                        <a class="git-link" href="${escapeHtml(project.gitRepoUrl)}" onclick="event.preventDefault(); copyPath('${escapeJs(project.gitRepoUrl)}')" title="Click to copy URL">${escapeHtml(project.gitRepoUrl)}</a>
-                    </div>
-                `;
-            }
-
-            if (hasBranch) {
-                html += `
-                    <div class="git-row">
-                        <span class="git-label">Branch</span>
-                        <span class="info-value">${escapeHtml(project.gitDefaultBranch)}</span>
-                    </div>
-                `;
-            }
-
-            html += `
-                    <div class="git-row">
-                        <span class="git-label">Commits</span>
-                        ${autoCommitStatus}
-                    </div>
-                </div></div>
+                        <div class="git-row">
+                            <span class="git-label">Repository</span>
+                            <span class="editable git-link" data-field="gitRepoUrl" data-value="${escapeHtml(project.gitRepoUrl || '')}" onclick="startEdit(this)">${escapeHtml(project.gitRepoUrl || '(none)')}</span>
+                        </div>
+                        <div class="git-row">
+                            <span class="git-label">Branch</span>
+                            <span class="editable" data-field="gitDefaultBranch" data-value="${escapeHtml(project.gitDefaultBranch || '')}" onclick="startEdit(this)">${escapeHtml(project.gitDefaultBranch || '(none)')}</span>
+                        </div>
+                        <div class="git-row">
+                            <span class="git-label">Auto-commit</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" data-field="gitAutoCommit" ${project.gitAutoCommit ? 'checked' : ''} onchange="saveToggleField(this)">
+                                <span class="toggle-track"></span>
+                                <span class="toggle-label">${project.gitAutoCommit ? 'On' : 'Off'}</span>
+                            </label>
+                        </div>
+                    </div></div>
             `;
             return html;
+        }
+
+        // Render Paths section (sourcePath, deployPath, buildOutputPath)
+        function renderPaths(project) {
+            const hasAny = project.sourcePath || project.deployPath || project.buildOutputPath;
+            if (!hasAny) return '';
+
+            return `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">▼</span>
+                        <span class="section-title">Paths</span>
+                    </div>
+                    <div class="section-content collapsed">
+                        <div class="path-row">
+                            <span class="path-label">&#x1F4C2; Source</span>
+                            <span class="editable" data-field="sourcePath" data-value="${escapeHtml(project.sourcePath || '')}" onclick="startEdit(this)">${escapeHtml(project.sourcePath || '(none)')}</span>
+                        </div>
+                        <div class="path-row">
+                            <span class="path-label">&#x1F4E6; Deploy</span>
+                            <span class="editable" data-field="deployPath" data-value="${escapeHtml(project.deployPath || '')}" onclick="startEdit(this)">${escapeHtml(project.deployPath || '(none)')}</span>
+                        </div>
+                        <div class="path-row">
+                            <span class="path-label">&#x2699;&#xFE0F; Build Output</span>
+                            <span class="editable" data-field="buildOutputPath" data-value="${escapeHtml(project.buildOutputPath || '')}" onclick="startEdit(this)">${escapeHtml(project.buildOutputPath || '(none)')}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render Meta section (createdAt, updatedAt, lastOpenedAt — read-only)
+        function renderMeta(project) {
+            const hasAny = project.createdAt || project.updatedAt || project.lastOpenedAt;
+            if (!hasAny) return '';
+
+            return `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">▼</span>
+                        <span class="section-title">Timestamps</span>
+                    </div>
+                    <div class="section-content collapsed">
+                        ${project.createdAt ? `<div class="meta-row"><span class="meta-label">Created</span><span class="readonly">${formatDateTime(project.createdAt)}</span></div>` : ''}
+                        ${project.updatedAt ? `<div class="meta-row"><span class="meta-label">Updated</span><span class="readonly">${formatDateTime(project.updatedAt)}</span></div>` : ''}
+                        ${project.lastOpenedAt ? `<div class="meta-row"><span class="meta-label">Last opened</span><span class="readonly">${formatDateTime(project.lastOpenedAt)}</span></div>` : ''}
+                    </div>
+                </div>
+            `;
         }
 
         // Render prompts tree
@@ -1212,6 +1546,291 @@
             sendToHost({ type: 'syncSessions' });
         }
 
+        // ============================================================
+        // INLINE EDITING ENGINE
+        // ============================================================
+
+        let _activeEditor = null; // tracks the currently open editor element
+        const EDIT_BLUR_DELAY = 150; // ms — allows click-on-other-editable to win before blur saves
+
+        // Core edit setup: replaces element content with an input/textarea and wires events.
+        // onCommit(newValue) is called when the user confirms; cancelEdit() is called on Escape.
+        function _openEditor(element, originalValue, isMultiline, onCommit) {
+            if (_activeEditor && _activeEditor !== element) cancelEdit(_activeEditor);
+
+            element.classList.add('editing');
+            element._originalText = element.innerHTML;
+
+            let input;
+            if (isMultiline) {
+                input = document.createElement('textarea');
+                input.className = 'edit-input multiline';
+                input.rows = 4;
+            } else {
+                input = document.createElement('input');
+                input.className = 'edit-input';
+                input.type = 'text';
+            }
+            input.value = originalValue;
+            element.innerHTML = '';
+            element.appendChild(input);
+            input.focus();
+            input.select();
+            _activeEditor = element;
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !isMultiline) { e.preventDefault(); onCommit(input.value); }
+                else if (e.key === 'Escape') { cancelEdit(element); }
+            });
+            input.addEventListener('blur', () => {
+                setTimeout(() => { if (_activeEditor === element) onCommit(input.value); }, EDIT_BLUR_DELAY);
+            });
+        }
+
+        // Core commit: clears editor state, updates element, calls saveFn.
+        function _closeEditor(element, newValue, saveFn) {
+            _activeEditor = null;
+            element.classList.remove('editing');
+            element.dataset.value = newValue;
+            element.innerHTML = escapeHtml(newValue || '—');
+            saveFn(newValue);
+        }
+
+        // Start editing a project field span
+        function startEdit(element) {
+            const field = element.dataset.field;
+            const originalValue = element.dataset.value || '';
+            const isMultiline = element.dataset.multiline === 'true';
+            _openEditor(element, originalValue, isMultiline, (val) => {
+                _closeEditor(element, val, (v) => sendToHost({ type: 'updateField', field: field, value: v }));
+            });
+        }
+
+        // Cancel edit, restore original content
+        function cancelEdit(element) {
+            if (!element) return;
+            _activeEditor = null;
+            element.classList.remove('editing');
+            element.innerHTML = element._originalText || escapeHtml(element.dataset.value || '—');
+        }
+
+        // Save a <select> field immediately on change
+        function saveSelectField(selectEl) {
+            const field = selectEl.dataset.field;
+            sendToHost({ type: 'updateField', field: field, value: selectEl.value });
+            flashElement(selectEl);
+        }
+
+        // Save a toggle checkbox immediately on change
+        function saveToggleField(checkboxEl) {
+            const field = checkboxEl.dataset.field;
+            const value = checkboxEl.checked ? 'true' : 'false';
+            const label = checkboxEl.closest('.toggle-switch')?.querySelector('.toggle-label');
+            if (label) label.textContent = (field === 'gitAutoCommit') ? (checkboxEl.checked ? 'On' : 'Off') : (checkboxEl.checked ? 'Yes' : 'No');
+            sendToHost({ type: 'updateField', field: field, value: value });
+            flashElement(checkboxEl.closest('.toggle-switch'));
+        }
+
+        // Flash an element green to confirm save
+        function flashElement(el) {
+            if (!el) return;
+            el.classList.remove('save-flash');
+            void el.offsetWidth; // force reflow to restart animation
+            el.classList.add('save-flash');
+        }
+
+        // Toggle a checkbox in an association row and save
+        function toggleAssoc(checkboxEl, tableName, id, field) {
+            updateAssociation(tableName, id, field, checkboxEl.checked ? 'true' : 'false');
+            flashElement(checkboxEl.closest('.toggle-switch'));
+        }
+
+        // ============================================================
+        // ASSOCIATION HELPERS
+        // ============================================================
+
+        let currentAssociations = null;
+
+        // Render all 6 association sections into #associations-container
+        function renderAssociations(data) {
+            currentAssociations = data;
+            const container = document.getElementById('associations-container');
+            if (!container) return;
+
+            container.innerHTML =
+                renderAssocSection('Agents', 'agents', data.agents || [], [
+                    { key: 'agentName', label: 'Name' },
+                    { key: 'role', label: 'Role' },
+                    { key: 'preferredModel', label: 'Model', narrow: true }
+                ]) +
+                renderAssocSection('MCP Servers', 'mcpServers', data.mcpServers || [], [
+                    { key: 'serverName', label: 'Server Name' },
+                    { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
+                ]) +
+                renderAssocSection('Skills', 'skills', data.skills || [], [
+                    { key: 'skillName', label: 'Skill Name' },
+                    { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
+                ]) +
+                renderAssocSection('Specialist Agents', 'specialistAgents', data.specialistAgents || [], [
+                    { key: 'agentType', label: 'Type', narrow: true },
+                    { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true },
+                    { key: 'customPrompt', label: 'Custom Prompt', wide: true }
+                ]) +
+                renderAssocSection('Project Paths', 'projectPaths', data.projectPaths || [], [
+                    { key: 'pathType', label: 'Type', narrow: true },
+                    { key: 'pathValue', label: 'Path', wide: true },
+                    { key: 'description', label: 'Description' }
+                ]) +
+                renderAssocSection('DB Prompts', 'dbPrompts', data.dbPrompts || [], [
+                    { key: 'promptType', label: 'Type', narrow: true },
+                    { key: 'promptText', label: 'Text', wide: true },
+                    { key: 'displayOrder', label: 'Order', narrow: true }
+                ]);
+        }
+
+        // Build HTML for one association section
+        function renderAssocSection(title, tableName, rows, columns) {
+            const count = rows.length;
+
+            let colHeaderHtml = columns.map(c => {
+                const cls = c.toggle ? 'assoc-col-label toggle-cell' : (c.narrow ? 'assoc-col-label narrow' : 'assoc-col-label');
+                return `<span class="${cls}">${escapeHtml(c.label)}</span>`;
+            }).join('') + '<span style="flex:0 0 28px"></span>';
+
+            let rowsHtml = '';
+            if (rows.length === 0) {
+                rowsHtml = `<div class="assoc-empty">None</div>`;
+            } else {
+                rows.forEach(row => {
+                    rowsHtml += buildAssocRow(tableName, row, columns);
+                });
+            }
+
+            return `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">▼</span>
+                        <span class="section-title">${escapeHtml(title)}</span>
+                        <span class="section-badge">${count}</span>
+                    </div>
+                    <div class="section-content collapsed">
+                        <div class="assoc-header-row">${colHeaderHtml}</div>
+                        <div id="assoc-rows-${escapeHtml(tableName)}">${rowsHtml}</div>
+                        <button class="add-btn" onclick="addAssociation('${escapeHtml(tableName)}')">+ Add</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Build one assoc row element (HTML string)
+        function buildAssocRow(tableName, row, columns) {
+            const id = row.id || '';
+            let cellsHtml = columns.map(c => {
+                const val = row[c.key] !== undefined ? row[c.key] : '';
+                if (c.toggle) {
+                    const checked = val === true || val === 'true' || val === 1;
+                    return `
+                        <span class="assoc-cell toggle-cell">
+                            <label class="toggle-switch">
+                                <input type="checkbox" ${checked ? 'checked' : ''}
+                                    onchange="toggleAssoc(this, '${escapeHtml(tableName)}', ${id}, '${escapeHtml(c.key)}')">
+                                <span class="toggle-track"></span>
+                            </label>
+                        </span>`;
+                }
+                const cellClass = c.narrow ? 'assoc-cell narrow' : (c.wide ? 'assoc-cell prompt-cell' : 'assoc-cell');
+                return `<span class="${cellClass} editable" data-field="${escapeHtml(c.key)}" data-value="${escapeHtml(String(val))}"
+                    onclick="startAssocEdit(this, '${escapeHtml(tableName)}', ${id})">${escapeHtml(String(val) || '—')}</span>`;
+            }).join('');
+
+            return `
+                <div class="assoc-row" data-table="${escapeHtml(tableName)}" data-id="${id}">
+                    ${cellsHtml}
+                    <button class="remove-btn" onclick="removeAssociation('${escapeHtml(tableName)}', ${id})">&#x2715;</button>
+                </div>`;
+        }
+
+        // Start editing a cell in an assoc row (single-line only)
+        function startAssocEdit(element, tableName, rowId) {
+            const field = element.dataset.field;
+            const originalValue = element.dataset.value || '';
+            _openEditor(element, originalValue, false, (val) => {
+                _closeEditor(element, val, (v) => updateAssociation(tableName, rowId, field, v));
+            });
+        }
+
+        // Primary key field name per table — used when adding a new row
+        const ASSOC_PRIMARY_KEY = {
+            agents: 'agentName',
+            mcpServers: 'serverName',
+            skills: 'skillName',
+            specialistAgents: 'agentType',
+            projectPaths: 'pathValue',
+            dbPrompts: 'promptText'
+        };
+
+        // Add a new association row (single input for primary field, sends to host on confirm)
+        function addAssociation(tableName) {
+            const container = document.getElementById('assoc-rows-' + tableName);
+            if (!container) return;
+
+            const primaryKey = ASSOC_PRIMARY_KEY[tableName] || 'name';
+
+            const newRow = document.createElement('div');
+            newRow.className = 'assoc-row adding';
+            newRow.dataset.table = tableName;
+            newRow.dataset.id = 'new_' + Date.now();
+
+            const input = document.createElement('input');
+            input.className = 'edit-input';
+            input.type = 'text';
+            input.placeholder = 'Enter value...';
+            input.style.flex = '1';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'remove-btn';
+            cancelBtn.style.opacity = '1';
+            cancelBtn.innerHTML = '&#x2715;';
+            cancelBtn.onclick = () => newRow.remove();
+
+            newRow.appendChild(input);
+            newRow.appendChild(cancelBtn);
+            container.appendChild(newRow);
+            input.focus();
+
+            let committed = false;
+            function commitAdd() {
+                if (committed) return;
+                committed = true;
+                const val = input.value.trim();
+                if (!val) { newRow.remove(); return; }
+                sendToHost({ type: 'updateAssociation', tableName: tableName, action: 'add', item: JSON.stringify({ [primaryKey]: val }) });
+                newRow.remove();
+                // Badge will be updated when associationSaved arrives with newId
+            }
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commitAdd(); }
+                else if (e.key === 'Escape') { newRow.remove(); }
+            });
+            input.addEventListener('blur', () => setTimeout(commitAdd, EDIT_BLUR_DELAY));
+        }
+
+        // Remove an association row
+        function removeAssociation(tableName, id) {
+            sendToHost({ type: 'updateAssociation', tableName: tableName, action: 'delete', item: JSON.stringify({ id: id }) });
+            const row = document.querySelector(`.assoc-row[data-table="${tableName}"][data-id="${id}"]`);
+            if (row) row.remove();
+            // Update badge
+            const badge = document.querySelector(`#assoc-rows-${tableName}`)?.closest('.section')?.querySelector('.section-badge');
+            if (badge) badge.textContent = Math.max(0, parseInt(badge.textContent) - 1);
+        }
+
+        // Update a single association field
+        function updateAssociation(tableName, id, field, value) {
+            sendToHost({ type: 'updateAssociation', tableName: tableName, action: 'update', item: JSON.stringify({ id: id, [field]: value }) });
+        }
+
         // Handle messages from C#
         function handleHostMessage(message) {
             if (typeof message === 'string') {
@@ -1258,6 +1877,37 @@
                                 document.body.style.fontSize = size + 'px';
                             }
                             break;
+                        case 'fieldSaved': {
+                            const saved = JSON.parse(data);
+                            if (saved.success) {
+                                // Flash all elements with this data-field
+                                document.querySelectorAll(`[data-field="${saved.field}"]`).forEach(el => flashElement(el));
+                            }
+                            break;
+                        }
+                        case 'associations': {
+                            const assocData = JSON.parse(data);
+                            renderAssociations(assocData);
+                            break;
+                        }
+                        case 'associationSaved': {
+                            const asSaved = JSON.parse(data);
+                            if (asSaved.success && asSaved.newId && asSaved.tableName) {
+                                // Re-request associations to get the full new row rendered
+                                sendToHost({ type: 'getAssociations' });
+                            }
+                            break;
+                        }
+                        case 'newProjectHint': {
+                            const container = document.getElementById('container');
+                            if (container) {
+                                const hint = document.createElement('div');
+                                hint.className = 'new-project-hint';
+                                hint.innerHTML = 'To add a new project, run <code>/new-project</code> in a Claude Code terminal.';
+                                container.prepend(hint);
+                            }
+                            break;
+                        }
                     }
                 }
             }

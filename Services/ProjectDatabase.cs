@@ -310,6 +310,64 @@ namespace MultiTerminal.Services
             return command.ExecuteNonQuery() > 0;
         }
 
+        // Whitelist of project columns that are safe to update via UpdateProjectField.
+        // Boolean fields are stored as INTEGER 0/1 in SQLite.
+        private static readonly HashSet<string> _allowedProjectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "name", "description", "path", "source_path", "deploy_path", "build_output_path",
+            "build_command", "deploy_command", "launch_command", "project_type", "current_version",
+            "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
+            "is_pinned", "status", "created_by", "last_opened_at"
+        };
+
+        // Fields that map to INTEGER 0/1 booleans in the database.
+        private static readonly HashSet<string> _booleanProjectFields = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "git_auto_commit", "is_pinned"
+        };
+
+        /// <summary>
+        /// Update a single project field by column name.
+        /// Uses a whitelist to prevent SQL injection via field name.
+        /// Boolean fields ("git_auto_commit", "is_pinned") accept "true"/"false" strings
+        /// or "1"/"0" and convert to INTEGER automatically.
+        /// </summary>
+        /// <returns>True if updated, false if project not found or field not allowed.</returns>
+        public bool UpdateProjectField(string projectId, string fieldName, string value)
+        {
+            if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(fieldName))
+                return false;
+
+            // Enforce column whitelist — fieldName is embedded directly in SQL so it MUST be validated
+            if (!_allowedProjectFields.Contains(fieldName))
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectDatabase] UpdateProjectField rejected disallowed field: {fieldName}");
+                return false;
+            }
+
+            // Determine the parameter value — booleans are stored as 0/1 INTEGER
+            object paramValue;
+            if (_booleanProjectFields.Contains(fieldName))
+            {
+                bool boolVal = value == "true" || value == "1";
+                paramValue = boolVal ? 1 : 0;
+            }
+            else
+            {
+                paramValue = (object)value ?? DBNull.Value;
+            }
+
+            // Safe to interpolate fieldName here because it passed the whitelist check above
+            string sql = $"UPDATE projects SET {fieldName} = @value, updated_at = @updatedAt WHERE id = @id";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@id", projectId);
+            command.Parameters.AddWithValue("@value", paramValue);
+            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+
+            return command.ExecuteNonQuery() > 0;
+        }
+
         /// <summary>
         /// Delete a project by ID.
         /// </summary>

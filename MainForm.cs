@@ -188,11 +188,11 @@ namespace MultiTerminal
             _projectPanel = new ProjectPanelDocument();
             _projectPanel.SetServices(_projectService, _promptService);
             _projectPanel.SetSessionDatabase(_sessionDatabase); // Inject shared database to prevent duplicate creation
+            _projectPanel.SetProjectDatabase(new MultiTerminal.Services.ProjectDatabase()); // Enable field/association editing
             _projectPanel.SetTheme(_currentTheme);
 
             // Project events
             _projectPanel.ProjectSelected += OnProjectSelected;
-            _projectPanel.OpenProjectManagerRequested += OnOpenProjectManager;
 
             // Prompt events
             _projectPanel.PromptPasteRequested += OnPromptPasteRequested;
