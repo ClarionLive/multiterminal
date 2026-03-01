@@ -92,6 +92,26 @@
             color: var(--accent-color);
         }
 
+        .launch-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--accent-color);
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 5px 12px;
+            font-size: 12px;
+            font-family: inherit;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background 0.15s;
+        }
+
+        .launch-btn:hover {
+            background: var(--accent-hover);
+        }
+
         /* Stats Grid */
         .stats-grid {
             display: grid;
@@ -928,6 +948,7 @@
                     <div class="project-path" onclick="copyPath('${escapeJs(project.path)}')" title="Click to copy path">
                         ${escapeHtml(project.path || '')}
                     </div>
+                    <button class="launch-btn" onclick="launchProject()" title="Open this project in a terminal">&#9654; Launch in Terminal</button>
                 </div>
 
                 ${statsHtml}
@@ -1270,6 +1291,10 @@
         // Copy path to clipboard
         function copyPath(path) {
             sendToHost({ type: 'copyPath', path: path });
+        }
+
+        function launchProject() {
+            sendToHost({ type: 'launchProject' });
         }
 
         // Set theme

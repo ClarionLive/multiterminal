@@ -215,6 +215,7 @@ namespace MultiTerminal
 
             // Project events
             _projectPanel.ProjectSelected += OnProjectSelected;
+            _projectPanel.ProjectLaunchRequested += OnProjectLaunchRequested;
 
             // Prompt events
             _projectPanel.PromptPasteRequested += OnPromptPasteRequested;
@@ -1699,20 +1700,85 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Handles "New Project" from the start screen: opens the EditProjectDialog.
+        /// Handles "New Project" from the start screen.
+        /// Opens the lightweight NewProjectDialog, saves a minimal project record,
+        /// then launches a terminal in the project folder with /new-project auto-injected.
         /// </summary>
         private void OnStartScreenNewProject(object sender, EventArgs e)
         {
-            using var projectDb = new Services.ProjectDatabase();
-            using var dialog = new Dialogs.EditProjectDialog(projectDb, _currentTheme);
-            if (dialog.ShowDialog(this) == DialogResult.OK)
+            if (sender is not TerminalDocument sourceDoc) return;
+
+            var teamLeads = _sharedProjectDatabase?.GetTeamLeadProfiles()
+                            ?? new List<(string, string, string)>();
+
+            using var dialog = new Dialogs.NewProjectDialog(_currentTheme, teamLeads);
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+            try
             {
-                // Refresh all visible start screens so the new project card appears
+                // Create minimal project record in SQLite
+                var project = Models.Project.Create(dialog.ProjectName, dialog.ProjectFolder);
+                project.TeamLead = dialog.SelectedTeamLead;
+                _sharedProjectDatabase?.SaveRichProject(project);
+
+                // Build Claude Code launch command
+                var launchCmd = Services.LaunchCommandBuilder.BuildClaudeCommand(project);
+                string launchDir = launchCmd.WorkingDirectory;
+                string autoRunCommand = launchCmd.AutoRunCommand;
+
+                // Register terminal before starting
+                string terminalName = null;
+                bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
+                if (_mcpServer?.Broker != null)
+                {
+                    terminalName = isTeamLead ? project.TeamLead : "Unassigned";
+                    _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId);
+                }
+
+                // Wire one-shot ClaudeCodeDetected handler to inject /new-project
+                EventHandler newProjectHandler = null;
+                newProjectHandler = async (s, ev) =>
+                {
+                    sourceDoc.ClaudeCodeDetected -= newProjectHandler;
+
+                    // Wait for Claude Code to settle after standard "initializing..." injection
+                    await Task.Delay(3000);
+                    System.Diagnostics.Trace.WriteLine("[MainForm] New project flow: injecting /new-project");
+
+                    bool injected = await sourceDoc.InjectInputAsync("/new-project");
+                    if (!injected)
+                    {
+                        System.Diagnostics.Trace.WriteLine("[MainForm] /new-project JS injection failed, trying direct write");
+                        try { sourceDoc.Terminal.Write("/new-project\r"); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] /new-project fallback failed: {ex.Message}"); }
+                    }
+                };
+                sourceDoc.ClaudeCodeDetected += newProjectHandler;
+
+                // Start terminal in project folder
+                System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir}");
+                sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
+                    projectId: project.Id, isTeamLead: isTeamLead);
+
+                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
+                sourceDoc.SetFontSize(terminalFontSize);
+                sourceDoc.Activate();
+                sourceDoc.FocusTerminal();
+                _lastActiveTerminal = sourceDoc;
+
+                // Refresh other start screens so the new project card appears
                 foreach (var termDoc in _dockPanel.Documents.OfType<TerminalDocument>())
                 {
-                    if (termDoc.IsStartScreenVisible)
-                        termDoc.ShowStartScreen(); // calls RefreshProjects() internally
+                    if (termDoc != sourceDoc && termDoc.IsStartScreenVisible)
+                        termDoc.ShowStartScreen();
                 }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenNewProject error: {ex.Message}");
+                sourceDoc.ShowStartScreen();
+                MessageBox.Show($"Failed to create project: {ex.Message}",
+                    "New Project Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -3700,6 +3766,16 @@ namespace MultiTerminal
         {
             if (e.Project == null) return;
 
+            // Just view the project — no terminal launch
+            _currentProject = e.Project;
+            _projectService?.MarkProjectOpened(e.Project.Id);
+            _projectPanel?.RefreshForProject(e.Project);
+        }
+
+        private void OnProjectLaunchRequested(object sender, ProjectSelectedEventArgs e)
+        {
+            if (e.Project == null) return;
+
             // Show dialog with terminal options
             var result = ShowProjectTerminalDialog(e.Project.Name);
 
@@ -3719,7 +3795,7 @@ namespace MultiTerminal
                         _lastActiveTerminal.Terminal.Write($"cd \"{projectPath}\"\r");
                         // Inject project ID into environment for context hook
                         if (!string.IsNullOrEmpty(e.Project.Id))
-                            _lastActiveTerminal.Terminal.Write($"$env:MULTITERMINAL_PROJECT_ID = '{e.Project.Id}'\r");
+                            _lastActiveTerminal.Terminal.Write($"$env:MULTITERMINAL_PROJECT_ID = '{e.Project.Id.Replace("'", "''")}'\r");
                         targetTerminal = _lastActiveTerminal;
                     }
                     break;
@@ -3755,7 +3831,7 @@ namespace MultiTerminal
                 });
             }
 
-            // Always update project state and panel (unless cancelled)
+            // Update project state and panel (unless cancelled)
             if (result.Action != ProjectTerminalAction.Cancel)
             {
                 _currentProject = e.Project;

@@ -77,6 +77,9 @@ namespace MultiTerminal.ProjectPanel
         /// </summary>
         public event EventHandler RefreshAssociationsRequested;
 
+        /// <summary>Raised when the user clicks "Launch in Terminal" in the project panel.</summary>
+        public event EventHandler LaunchRequested;
+
         /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
@@ -235,6 +238,10 @@ namespace MultiTerminal.ProjectPanel
 
                     case "getAssociations":
                         RefreshAssociationsRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "launchProject":
+                        LaunchRequested?.Invoke(this, EventArgs.Empty);
                         break;
                 }
             }

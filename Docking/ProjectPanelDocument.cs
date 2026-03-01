@@ -61,6 +61,7 @@ namespace MultiTerminal.Docking
         #region Events
 
         public event EventHandler<ProjectSelectedEventArgs> ProjectSelected;
+        public event EventHandler<ProjectSelectedEventArgs> ProjectLaunchRequested;
         public event EventHandler<PromptEventArgs> PromptPasteRequested;
         public event EventHandler<PromptEventArgs> PromptEditRequested;
         public event EventHandler<PromptEventArgs> PromptDeleteRequested;
@@ -110,6 +111,7 @@ namespace MultiTerminal.Docking
             _renderer.FieldUpdateRequested += OnFieldUpdateRequested;
             _renderer.AssociationUpdateRequested += OnAssociationUpdateRequested;
             _renderer.RefreshAssociationsRequested += OnRefreshAssociationsRequested;
+            _renderer.LaunchRequested += OnRendererLaunchRequested;
 
             Controls.Add(_renderer);
             Controls.Add(_headerPanel);
@@ -715,6 +717,14 @@ namespace MultiTerminal.Docking
             }
         }
 
+        private void OnRendererLaunchRequested(object sender, EventArgs e)
+        {
+            if (_currentProject != null)
+            {
+                ProjectLaunchRequested?.Invoke(this, new ProjectSelectedEventArgs(_currentProject, launchClaude: true));
+            }
+        }
+
         private void OnRendererReady(object sender, EventArgs e)
         {
             // Refresh with current state when renderer is ready
@@ -1016,7 +1026,21 @@ namespace MultiTerminal.Docking
             {
                 System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Menu item clicked: {entry.Name} at {entry.Path}");
 
-                var project = _projectService?.LoadProject(entry.Path);
+                // Load from SQLite first, fall back to JSON file
+                Project project = null;
+                if (_projectDatabase != null && !string.IsNullOrEmpty(entry.Id))
+                {
+                    project = _projectDatabase.GetRichProject(entry.Id);
+                    if (project != null)
+                        System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from SQLite: {entry.Id}");
+                }
+                if (project == null)
+                {
+                    project = _projectService?.LoadProject(entry.Path);
+                    if (project != null)
+                        System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from JSON: {entry.Path}");
+                }
+
                 if (project != null)
                 {
                     System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded successfully, firing ProjectSelected event");
@@ -1024,9 +1048,9 @@ namespace MultiTerminal.Docking
                 }
                 else
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Failed to load project at {entry.Path}");
+                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Failed to load project: {entry.Name} (ID: {entry.Id}, Path: {entry.Path})");
                     MessageBox.Show(
-                        $"Could not load project at:\n{entry.Path}\n\nThe .claude/project.json file may be missing.",
+                        $"Could not load project:\n{entry.Name}\n\nNot found in database or at {entry.Path}",
                         "Project Load Failed",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
