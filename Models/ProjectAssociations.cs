@@ -83,4 +83,5 @@ namespace MultiTerminal.Models
         public string SkillName { get; set; }
         public bool IsEnabled { get; set; } = true;
     }
+
 }

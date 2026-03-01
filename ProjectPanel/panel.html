@@ -960,6 +960,47 @@
             text-align: center;
         }
 
+        /* Picker section divider used in MCP picker */
+        .picker-section-header {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            padding: 8px 16px 4px;
+            margin-top: 4px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .picker-section-header:first-child {
+            margin-top: 0;
+            border-top: none;
+        }
+
+        /* Locked picker item — always-included tier, checkbox disabled */
+        .picker-item-locked {
+            opacity: 0.7;
+            cursor: default;
+        }
+
+        .picker-item-locked input[type="checkbox"] {
+            cursor: not-allowed;
+        }
+
+        /* Tier badge displayed inline in picker item description */
+        .picker-tier-badge {
+            display: inline-block;
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            background: var(--accent-color);
+            color: #fff;
+            margin-left: 4px;
+            vertical-align: middle;
+        }
+
         /* New-project hint card */
         .new-project-hint {
             background: var(--bg-secondary);
@@ -997,6 +1038,278 @@
             padding: 2px 6px;
             border-radius: 3px;
             color: var(--success-color);
+        }
+
+        /* MCP Registry Management overlay */
+        .registry-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.55);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .registry-dialog {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            width: 520px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+
+        .registry-dialog-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .registry-dialog-header-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .registry-list {
+            overflow-y: auto;
+            flex: 1;
+            padding: 4px 0;
+        }
+
+        .registry-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 12px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 12px;
+            transition: background 0.12s;
+        }
+
+        .registry-row:hover {
+            background: var(--bg-hover);
+        }
+
+        .registry-row-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .registry-row-name {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .registry-row-desc {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 1px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .tier-badge {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 10px;
+            flex-shrink: 0;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .tier-badge.multiterminal {
+            background: rgba(0, 120, 212, 0.25);
+            color: #4dabf7;
+            border: 1px solid rgba(77, 171, 247, 0.4);
+        }
+
+        .tier-badge.global {
+            background: rgba(78, 201, 176, 0.2);
+            color: #4ec9b0;
+            border: 1px solid rgba(78, 201, 176, 0.35);
+        }
+
+        .tier-badge.optional {
+            background: rgba(220, 220, 170, 0.15);
+            color: #dcdcaa;
+            border: 1px solid rgba(220, 220, 170, 0.3);
+        }
+
+        .transport-badge {
+            font-size: 10px;
+            padding: 1px 5px;
+            border-radius: 8px;
+            flex-shrink: 0;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+        }
+
+        .registry-row-actions {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+
+        .registry-icon-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1;
+            transition: background 0.12s, color 0.12s;
+        }
+
+        .registry-icon-btn:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .registry-icon-btn.danger:hover {
+            color: #f48771;
+        }
+
+        .registry-dialog-footer {
+            padding: 10px 16px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 8px;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .registry-empty {
+            padding: 24px 16px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        /* Registry entry form (add/edit) */
+        .registry-form {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .registry-form-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 2px;
+        }
+
+        .registry-form-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-start;
+        }
+
+        .registry-form-row label {
+            font-size: 11px;
+            color: var(--text-muted);
+            width: 72px;
+            flex-shrink: 0;
+            padding-top: 6px;
+        }
+
+        .registry-form-row input,
+        .registry-form-row select,
+        .registry-form-row textarea {
+            flex: 1;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 12px;
+            padding: 4px 8px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .registry-form-row input:focus,
+        .registry-form-row select:focus,
+        .registry-form-row textarea:focus {
+            border-color: var(--accent-color);
+        }
+
+        .registry-form-row textarea {
+            min-height: 60px;
+            resize: vertical;
+            font-family: 'Cascadia Mono', Consolas, monospace;
+            font-size: 11px;
+        }
+
+        .registry-form-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        /* Notification toast for mcp.json write result */
+        .mcp-toast {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 12px;
+            color: var(--text-primary);
+            z-index: 2000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            animation: fadeInUp 0.2s ease;
+            max-width: 360px;
+            text-align: center;
+        }
+
+        .mcp-toast.success { border-color: var(--success-color); }
+        .mcp-toast.error   { border-color: #f48771; }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+            to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+
+        /* Manage Registry button in section header */
+        .section-manage-btn {
+            font-size: 10px;
+            padding: 1px 7px;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            cursor: pointer;
+            margin-left: auto;
+            transition: background 0.12s, color 0.12s;
+        }
+
+        .section-manage-btn:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
         }
     </style>
 </head>
@@ -1803,6 +2116,7 @@
 
         let currentAssociations = null;
         let cachedAvailableAgents = [];
+        let cachedAvailableMcpServers = [];
 
         // Render all 6 association sections into #associations-container
         function renderAssociations(data) {
@@ -1816,10 +2130,7 @@
                     { key: 'role', label: 'Role' },
                     { key: 'preferredModel', label: 'Model', narrow: true }
                 ]) +
-                renderAssocSection('MCP Servers', 'mcpServers', data.mcpServers || [], [
-                    { key: 'serverName', label: 'Server Name' },
-                    { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
-                ]) +
+                renderMcpServersSection(data.mcpServers || []) +
                 renderAssocSection('Skills', 'skills', data.skills || [], [
                     { key: 'skillName', label: 'Skill Name' },
                     { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
@@ -1905,6 +2216,265 @@
                 </div>`;
         }
 
+        // ============================================================
+        // MCP SERVERS SECTION (custom — adds Manage Registry button)
+        // ============================================================
+
+        // Build the MCP Servers section HTML with a "Manage Registry" button in the header.
+        function renderMcpServersSection(rows) {
+            const count = rows.length;
+            const columns = [
+                { key: 'serverName', label: 'Server Name' },
+                { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
+            ];
+            const tableName = 'mcpServers';
+
+            let colHeaderHtml = columns.map(c => {
+                const cls = c.toggle ? 'assoc-col-label toggle-cell' : 'assoc-col-label';
+                return `<span class="${cls}">${escapeHtml(c.label)}</span>`;
+            }).join('') + '<span style="flex:0 0 28px"></span>';
+
+            let rowsHtml = rows.length === 0
+                ? '<div class="assoc-empty">None enabled</div>'
+                : rows.map(row => buildAssocRow(tableName, row, columns)).join('');
+
+            return `
+                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span class="section-toggle collapsed">&#x25BC;</span>
+                        <span class="section-title">MCP Servers</span>
+                        <span class="section-badge">${count}</span>
+                        <button class="section-manage-btn" onclick="event.stopPropagation(); openMcpRegistryManager()">Manage Registry</button>
+                    </div>
+                    <div class="section-content collapsed">
+                        <div class="assoc-header-row">${colHeaderHtml}</div>
+                        <div id="assoc-rows-mcpServers">${rowsHtml}</div>
+                        <button class="add-btn" onclick="addAssociation('mcpServers')">+ Add</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ============================================================
+        // MCP REGISTRY MANAGEMENT
+        // ============================================================
+
+        let cachedMcpRegistry = [];              // list of McpRegistryEntry from C#
+        const _mcpRegistryMap = new Map();       // serverName → entry object (safe alternative to JSON-in-onclick)
+        let _mcpRegistryPendingOpen = false;
+
+        function openMcpRegistryManager() {
+            _mcpRegistryPendingOpen = true;
+            sendToHost({ type: 'getMcpRegistry' });
+            // Dialog shown when mcpRegistry response arrives (see handleHostMessage)
+        }
+
+        function showMcpRegistryDialog(entries) {
+            const existing = document.querySelector('.registry-overlay');
+            if (existing) existing.remove();
+
+            cachedMcpRegistry = entries || [];
+            _mcpRegistryMap.clear();
+            cachedMcpRegistry.forEach(e => _mcpRegistryMap.set(e.serverName, e));
+
+            const overlay = document.createElement('div');
+            overlay.className = 'registry-overlay';
+            overlay.innerHTML = buildRegistryDialogHtml(cachedMcpRegistry);
+
+            // Close on backdrop click
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+            // Escape to close
+            const onKey = (e) => {
+                if (e.key === 'Escape') {
+                    const dlg = document.querySelector('.registry-overlay');
+                    if (dlg) { dlg.remove(); document.removeEventListener('keydown', onKey); }
+                }
+            };
+            document.addEventListener('keydown', onKey);
+
+            document.body.appendChild(overlay);
+        }
+
+        function buildRegistryDialogHtml(entries) {
+            const listHtml = entries.length === 0
+                ? '<div class="registry-empty">No servers in registry yet. Use Import to load from .mcp.json.</div>'
+                : entries.map(e => buildRegistryRowHtml(e)).join('');
+
+            return `
+                <div class="registry-dialog">
+                    <div class="registry-dialog-header">
+                        <span>MCP Registry</span>
+                        <div class="registry-dialog-header-actions">
+                            <button class="picker-btn" onclick="showRegistryAddForm()">+ Add</button>
+                            <button class="picker-btn" onclick="importMcpJsonFile()" title="Import servers from .mcp.json">&#x2B07; Import</button>
+                        </div>
+                    </div>
+                    <div id="registry-form-area"></div>
+                    <div class="registry-list" id="registry-list">${listHtml}</div>
+                    <div class="registry-dialog-footer">
+                        <span id="registry-status" style="font-size:11px; color:var(--text-muted)"></span>
+                        <button class="picker-btn" onclick="document.querySelector('.registry-overlay').remove()">Close</button>
+                    </div>
+                </div>`;
+        }
+
+        function buildRegistryRowHtml(entry) {
+            const tierClass = entry.tier || 'optional';
+            const tierLabel = tierClass === 'multiterminal' ? 'MT' : tierClass;
+            const desc = entry.description || entry.command || '';
+            const transport = entry.transportType || 'stdio';
+            const name = escapeHtml(entry.serverName || '');
+            const displayName = escapeHtml(entry.displayName || entry.serverName || '');
+            // Store entry in map so edit button can look it up by serverName (avoids JSON-in-attribute)
+            _mcpRegistryMap.set(entry.serverName, entry);
+
+            return `
+                <div class="registry-row" data-server="${name}">
+                    <div class="registry-row-info">
+                        <div class="registry-row-name">${displayName}</div>
+                        ${desc ? `<div class="registry-row-desc">${escapeHtml(desc)}</div>` : ''}
+                    </div>
+                    <span class="tier-badge ${escapeHtml(tierClass)}">${escapeHtml(tierLabel)}</span>
+                    <span class="transport-badge">${escapeHtml(transport)}</span>
+                    <div class="registry-row-actions">
+                        <button class="registry-icon-btn" title="Edit" onclick="showRegistryEditForm(_mcpRegistryMap.get('${name}'))">&#x270E;</button>
+                        <button class="registry-icon-btn danger" title="Delete" onclick="deleteRegistryEntry('${name}')">&#x2715;</button>
+                    </div>
+                </div>`;
+        }
+
+        function showRegistryAddForm() { showRegistryForm(null); }
+        function showRegistryEditForm(entry) { showRegistryForm(entry); }
+
+        function showRegistryForm(entry) {
+            const area = document.getElementById('registry-form-area');
+            if (!area) return;
+
+            const isEdit = !!(entry && entry.serverName);
+            const v = isEdit ? entry : {};
+
+            area.innerHTML = `
+                <div class="registry-form">
+                    <div class="registry-form-title">${isEdit ? 'Edit Server' : 'Add Server'}</div>
+                    <div class="registry-form-row">
+                        <label>Name</label>
+                        <input id="rf-serverName" type="text" placeholder="e.g. my-server"
+                               value="${isEdit ? escapeHtml(v.serverName) : ''}"
+                               ${isEdit ? 'readonly style="opacity:0.7"' : ''}>
+                    </div>
+                    <div class="registry-form-row">
+                        <label>Display</label>
+                        <input id="rf-displayName" type="text" placeholder="e.g. My Server"
+                               value="${isEdit ? escapeHtml(v.displayName || '') : ''}">
+                    </div>
+                    <div class="registry-form-row">
+                        <label>Description</label>
+                        <input id="rf-description" type="text" placeholder="Brief description"
+                               value="${isEdit ? escapeHtml(v.description || '') : ''}">
+                    </div>
+                    <div class="registry-form-row">
+                        <label>Tier</label>
+                        <select id="rf-tier">
+                            <option value="optional"       ${(!isEdit || v.tier==='optional')       ? 'selected':''}>optional</option>
+                            <option value="global"         ${(isEdit  && v.tier==='global')         ? 'selected':''}>global</option>
+                            <option value="multiterminal"  ${(isEdit  && v.tier==='multiterminal')  ? 'selected':''}>multiterminal</option>
+                        </select>
+                    </div>
+                    <div class="registry-form-row">
+                        <label>Transport</label>
+                        <select id="rf-transport">
+                            <option value="stdio" ${(!isEdit || v.transportType==='stdio') ? 'selected':''}>stdio</option>
+                            <option value="http"  ${(isEdit  && v.transportType==='http')  ? 'selected':''}>http</option>
+                            <option value="sse"   ${(isEdit  && v.transportType==='sse')   ? 'selected':''}>sse</option>
+                        </select>
+                    </div>
+                    <div class="registry-form-row">
+                        <label>Command/URL</label>
+                        <input id="rf-command" type="text" placeholder="node, python, https://..."
+                               value="${isEdit ? escapeHtml(v.command || '') : ''}">
+                    </div>
+                    <div class="registry-form-row">
+                        <label>Config JSON</label>
+                        <textarea id="rf-configJson" placeholder='{"command":"node","args":["path/index.js"]}'>${isEdit ? escapeHtml(v.configJson || '') : ''}</textarea>
+                    </div>
+                    <div class="registry-form-actions">
+                        <button class="picker-btn" onclick="document.getElementById('registry-form-area').innerHTML=''">Cancel</button>
+                        <button class="picker-btn primary" onclick="commitRegistryForm()">Save</button>
+                    </div>
+                </div>`;
+        }
+
+        function commitRegistryForm() {
+            const serverName = (document.getElementById('rf-serverName')?.value || '').trim();
+            if (!serverName) { setRegistryStatus('Server name is required', true); return; }
+
+            let configJson = (document.getElementById('rf-configJson')?.value || '').trim() || '{}';
+            try { JSON.parse(configJson); } catch {
+                setRegistryStatus('Config JSON is not valid', true);
+                return;
+            }
+
+            const entry = {
+                serverName:    serverName,
+                displayName:   (document.getElementById('rf-displayName')?.value || '').trim() || serverName,
+                description:   (document.getElementById('rf-description')?.value || '').trim(),
+                tier:          document.getElementById('rf-tier')?.value || 'optional',
+                transportType: document.getElementById('rf-transport')?.value || 'stdio',
+                command:       (document.getElementById('rf-command')?.value || '').trim(),
+                configJson:    configJson
+            };
+
+            sendToHost({ type: 'saveMcpRegistryEntry', item: JSON.stringify(entry) });
+            setRegistryStatus('Saving...');
+        }
+
+        function deleteRegistryEntry(serverName) {
+            if (!confirm(`Delete "${serverName}" from the MCP registry?`)) return;
+            sendToHost({ type: 'deleteMcpRegistryEntry', value: serverName });
+            setRegistryStatus('Deleting...');
+        }
+
+        function importMcpJsonFile() {
+            // Send empty path — C# will open a file dialog
+            sendToHost({ type: 'importMcpJson', path: '' });
+            setRegistryStatus('Opening file picker...');
+        }
+
+        function setRegistryStatus(msg, isError = false) {
+            const el = document.getElementById('registry-status');
+            if (!el) return;
+            el.textContent = msg;
+            el.style.color = isError ? '#f48771' : 'var(--text-muted)';
+        }
+
+        function refreshRegistryList(entries) {
+            cachedMcpRegistry = entries || [];
+            _mcpRegistryMap.clear();
+            cachedMcpRegistry.forEach(e => _mcpRegistryMap.set(e.serverName, e));
+            const list = document.getElementById('registry-list');
+            if (list) {
+                list.innerHTML = entries.length === 0
+                    ? '<div class="registry-empty">No servers in registry yet.</div>'
+                    : entries.map(e => buildRegistryRowHtml(e)).join('');
+            }
+            // Clear form after successful save/delete
+            const formArea = document.getElementById('registry-form-area');
+            if (formArea) formArea.innerHTML = '';
+        }
+
+        // Transient toast notification for .mcp.json write and import results
+        function showMcpToast(message, type = 'success') {
+            const existing = document.querySelector('.mcp-toast');
+            if (existing) existing.remove();
+
+            const toast = document.createElement('div');
+            toast.className = `mcp-toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3500);
+        }
+
         // Start editing a cell in an assoc row (single-line only)
         function startAssocEdit(element, tableName, rowId) {
             const field = element.dataset.field;
@@ -1925,7 +2495,7 @@
         };
 
         // Tables that use a picker popup instead of free-text add
-        const PICKER_TABLES = { agents: true };
+        const PICKER_TABLES = { agents: true, mcpServers: true };
 
         // Add a new association row (or open picker for supported tables)
         function addAssociation(tableName) {
@@ -2019,6 +2589,8 @@
         function openAssociationPicker(tableName) {
             if (tableName === 'agents') {
                 openAgentsPicker();
+            } else if (tableName === 'mcpServers') {
+                openMcpServersPicker();
             }
         }
 
@@ -2158,6 +2730,114 @@
             });
         }
 
+        // Returns true for tier values that are always included in every project (not per-project toggleable).
+        function isMcpTierAlwaysIncluded(tier) {
+            return tier === 'multiterminal' || tier === 'global';
+        }
+
+        function openMcpServersPicker() {
+            // Get currently enabled server names from project associations
+            const currentServers = (currentAssociations?.mcpServers || []);
+            const enabledNames = new Set(currentServers.map(s => s.serverName));
+
+            if (cachedAvailableMcpServers.length === 0) {
+                showPickerDialog('Select MCP Servers', '<div class="picker-empty">No MCP servers found in registry.</div>', null);
+                return;
+            }
+
+            // Split into always-included tiers and optional tier
+            const alwaysIncluded = cachedAvailableMcpServers.filter(s => isMcpTierAlwaysIncluded(s.tier));
+            const optional = cachedAvailableMcpServers.filter(s => !isMcpTierAlwaysIncluded(s.tier));
+
+            let listHtml = '';
+
+            // Always Included section (locked, cannot toggle)
+            if (alwaysIncluded.length > 0) {
+                listHtml += '<div class="picker-section-header">Always Included</div>';
+                alwaysIncluded.forEach(srv => {
+                    const tierLabel = srv.tier === 'multiterminal' ? 'MultiTerminal' : 'Global';
+                    listHtml += `
+                        <label class="picker-item picker-item-locked">
+                            <input type="checkbox" checked disabled
+                                   data-server-name="${escapeHtml(srv.serverName)}"
+                                   data-server-tier="${escapeHtml(srv.tier)}">
+                            <div class="picker-item-info">
+                                <div class="picker-item-name">${escapeHtml(srv.displayName || srv.serverName)}</div>
+                                <div class="picker-item-role">${escapeHtml(srv.description || '')} <span class="picker-tier-badge">${escapeHtml(tierLabel)}</span></div>
+                            </div>
+                        </label>`;
+                });
+            }
+
+            // Optional section (toggleable, pre-checked if already enabled for project)
+            if (optional.length > 0) {
+                listHtml += '<div class="picker-section-header">Optional</div>';
+                optional.forEach(srv => {
+                    const isChecked = enabledNames.has(srv.serverName);
+                    const transportLabel = srv.transportType ? ` (${escapeHtml(srv.transportType)})` : '';
+                    listHtml += `
+                        <label class="picker-item">
+                            <input type="checkbox" data-server-name="${escapeHtml(srv.serverName)}"
+                                   data-server-tier="${escapeHtml(srv.tier)}"
+                                   ${isChecked ? 'checked' : ''}>
+                            <div class="picker-item-info">
+                                <div class="picker-item-name">${escapeHtml(srv.displayName || srv.serverName)}</div>
+                                <div class="picker-item-role">${escapeHtml(srv.description || '')}${transportLabel}</div>
+                            </div>
+                        </label>`;
+                });
+            }
+
+            showPickerDialog('Select MCP Servers', listHtml, () => {
+                commitMcpServersPicker();
+            });
+        }
+
+        function commitMcpServersPicker() {
+            const overlay = document.querySelector('.picker-overlay');
+            if (!overlay) return;
+
+            // Current servers already in project_mcp_servers
+            const currentServers = (currentAssociations?.mcpServers || []);
+            const currentNames = new Set(currentServers.map(s => s.serverName));
+
+            // Read only non-disabled (optional tier) checkboxes
+            const checkboxes = overlay.querySelectorAll('input[type="checkbox"]:not(:disabled)');
+            const nowCheckedNames = new Set();
+            checkboxes.forEach(cb => {
+                if (cb.checked) nowCheckedNames.add(cb.dataset.serverName);
+            });
+
+            // Add optional servers that were just checked
+            nowCheckedNames.forEach(name => {
+                if (!currentNames.has(name)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'mcpServers',
+                        action: 'add',
+                        item: JSON.stringify({ serverName: name, isEnabled: true })
+                    });
+                }
+            });
+
+            // Remove optional servers that were unchecked (skip always-included tiers)
+            currentServers.forEach(s => {
+                if (nowCheckedNames.has(s.serverName)) return; // still checked — keep it
+                const registryEntry = cachedAvailableMcpServers.find(r => r.serverName === s.serverName);
+                if (!registryEntry || !isMcpTierAlwaysIncluded(registryEntry.tier)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'mcpServers',
+                        action: 'delete',
+                        item: JSON.stringify({ serverName: s.serverName })
+                    });
+                }
+            });
+
+            // Notify C# to regenerate .mcp.json for this project (wired by Item 5)
+            sendToHost({ type: 'writeMcpJson' });
+        }
+
         // Handle messages from C#
         function handleHostMessage(message) {
             if (typeof message === 'string') {
@@ -2222,6 +2902,10 @@
                             cachedAvailableAgents = JSON.parse(data);
                             break;
                         }
+                        case 'availableMcpServers': {
+                            cachedAvailableMcpServers = JSON.parse(data);
+                            break;
+                        }
                         case 'associations': {
                             const assocData = JSON.parse(data);
                             renderAssociations(assocData);
@@ -2233,6 +2917,56 @@
                                 // Re-request associations to get fresh data rendered
                                 sendToHost({ type: 'getAssociations' });
                             }
+                            break;
+                        }
+                        case 'mcpRegistry': {
+                            const regEntries = JSON.parse(data);
+                            if (_mcpRegistryPendingOpen) {
+                                _mcpRegistryPendingOpen = false;
+                                showMcpRegistryDialog(regEntries);
+                            } else {
+                                // Refresh an already-open dialog
+                                refreshRegistryList(regEntries);
+                            }
+                            break;
+                        }
+                        case 'mcpRegistrySaved': {
+                            const rSaved = JSON.parse(data);
+                            if (rSaved.success) {
+                                setRegistryStatus('Saved.');
+                                // Reload registry list
+                                sendToHost({ type: 'getMcpRegistry' });
+                            } else {
+                                setRegistryStatus(rSaved.error || 'Save failed', true);
+                            }
+                            break;
+                        }
+                        case 'mcpRegistryDeleted': {
+                            const rDel = JSON.parse(data);
+                            if (rDel.success) {
+                                setRegistryStatus('Deleted.');
+                                sendToHost({ type: 'getMcpRegistry' });
+                            } else {
+                                setRegistryStatus('Delete failed', true);
+                            }
+                            break;
+                        }
+                        case 'mcpImportResult': {
+                            const imp = JSON.parse(data);
+                            if (imp.success) {
+                                setRegistryStatus(`Imported ${imp.count} server(s).`);
+                                // C# NotifyMcpImportResult already pushes updated mcpRegistry — no extra request needed
+                            } else {
+                                setRegistryStatus(imp.error || 'Import failed', true);
+                            }
+                            break;
+                        }
+                        case 'mcpJsonWriteResult': {
+                            const wr = JSON.parse(data);
+                            showMcpToast(
+                                wr.success ? '.mcp.json written successfully.' : ('Write failed: ' + (wr.error || 'unknown error')),
+                                wr.success ? 'success' : 'error'
+                            );
                             break;
                         }
                         case 'newProjectHint': {

@@ -81,6 +81,9 @@ namespace MultiTerminal
         // Shared project database for start screen — created once, disposed with form
         private Services.ProjectDatabase _sharedProjectDatabase;
 
+        // MCP config service — generates .mcp.json for projects from the registry
+        private Services.McpConfigService _mcpConfigService;
+
         // Anti-reentrance: throttle nudges per terminal (5-second cooldown)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastNudgeTime = new();
         private static readonly TimeSpan NudgeThrottle = TimeSpan.FromSeconds(5);
@@ -226,6 +229,15 @@ namespace MultiTerminal
 
             // Session events
             _projectPanel.ViewSessionRequested += OnViewSessionRequested;
+
+            // MCP config events
+            _projectPanel.McpJsonWriteRequested += OnMcpJsonWriteRequested;
+            _projectPanel.McpRegistrySaveRequested += OnMcpRegistrySaveRequested;
+            _projectPanel.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
+            _projectPanel.ImportMcpJsonRequested += OnImportMcpJsonRequested;
+
+            // Initialize McpConfigService — used by OnMcpJsonWriteRequested and OnImportMcpJsonRequested
+            _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase);
 
             // Create debug log service (available immediately)
             _debugLogService = new DebugLogService();
@@ -3770,6 +3782,72 @@ namespace MultiTerminal
             _currentProject = e.Project;
             _projectService?.MarkProjectOpened(e.Project.Id);
             _projectPanel?.RefreshForProject(e.Project);
+        }
+
+        private void OnMcpJsonWriteRequested(object sender, string projectId)
+        {
+            if (_mcpConfigService == null || string.IsNullOrEmpty(projectId))
+            {
+                _projectPanel?.NotifyMcpJsonWriteResult(false, "MCP config service not available");
+                return;
+            }
+            try
+            {
+                _mcpConfigService.WriteMcpJsonToProject(projectId);
+                _projectPanel?.NotifyMcpJsonWriteResult(true);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] OnMcpJsonWriteRequested error: {ex.Message}");
+                _projectPanel?.NotifyMcpJsonWriteResult(false, ex.Message);
+            }
+        }
+
+        private void OnMcpRegistrySaveRequested(object sender, string itemJson)
+        {
+            // ProjectPanelDocument already handled the DB save and sent result back to JS.
+            // MainForm hook is here in case we need to refresh other UI (e.g. availableMcpServers cache).
+            // For now, nothing additional needed.
+        }
+
+        private void OnMcpRegistryDeleteRequested(object sender, string serverName)
+        {
+            // ProjectPanelDocument already handled the DB delete and sent result back to JS.
+        }
+
+        private void OnImportMcpJsonRequested(object sender, string filePath)
+        {
+            if (_mcpConfigService == null)
+            {
+                _projectPanel?.NotifyMcpImportResult(false, 0, "MCP config service not available");
+                return;
+            }
+
+            // If filePath is empty, open a file dialog so the user can pick the file
+            string path = filePath;
+            if (string.IsNullOrEmpty(path))
+            {
+                using var dlg = new OpenFileDialog
+                {
+                    Title = "Import MCP Servers from .mcp.json",
+                    Filter = "MCP Config|*.mcp.json;*.json|All files|*.*",
+                    CheckFileExists = true
+                };
+                if (dlg.ShowDialog() != DialogResult.OK)
+                    return;
+                path = dlg.FileName;
+            }
+
+            try
+            {
+                int count = _mcpConfigService.ImportFromMcpJsonFile(path);
+                _projectPanel?.NotifyMcpImportResult(true, count);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] OnImportMcpJsonRequested error: {ex.Message}");
+                _projectPanel?.NotifyMcpImportResult(false, 0, ex.Message);
+            }
         }
 
         private void OnProjectLaunchRequested(object sender, ProjectSelectedEventArgs e)

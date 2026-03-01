@@ -6,10 +6,12 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// Builds the Claude Code CLI launch command for a project.
-    /// Constructs the full 'claude' command string with MT config flags (--add-dir, --mcp-config,
-    /// --settings) derived dynamically from the assembly location. Returns a LaunchCommand object
+    /// Constructs the full 'claude' command string with MT config flags (--add-dir, --settings)
+    /// derived dynamically from the assembly location. Returns a LaunchCommand object
     /// consumed by TerminalDocument to start ConPtyTerminal with the correct working directory
     /// and auto-run command.
+    /// Note: --mcp-config is no longer passed here; per-project .mcp.json files are generated
+    /// by McpConfigService and written to the project root, where Claude Code picks them up automatically.
     /// </summary>
     public static class LaunchCommandBuilder
     {
@@ -33,7 +35,7 @@ namespace MultiTerminal.Services
 
             // The autoRunCommand is injected into a PowerShell -Command "..." string by ConPtyTerminal.
             // Single quotes in flag values must be doubled ('') because they appear inside PS single-quoted strings.
-            // E.g.: claude --add-dir 'C:\path\to\dir' --mcp-config 'C:\path\.claude\mcp.json' ...
+            // E.g.: claude --add-dir 'C:\path\to\dir' --settings 'C:\path\.claude\settings.local.json' ...
             string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
 
             return new LaunchCommand
@@ -46,8 +48,10 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Builds the optional CLI flags string. Returns empty string if MT source path is unavailable.
-        /// Skips --mcp-config / --settings flags if the files don't exist on disk.
+        /// Skips --settings flag if the file doesn't exist on disk.
         /// All path values have single quotes doubled for PowerShell single-quoted string safety.
+        /// Note: --mcp-config is intentionally omitted. McpConfigService generates per-project .mcp.json
+        /// files in each project's root, which Claude Code discovers automatically.
         /// </summary>
         private static string BuildFlags(string mtSourcePath)
         {
@@ -59,14 +63,6 @@ namespace MultiTerminal.Services
             // --add-dir: Adds MT's CLAUDE.md alongside the project's own CLAUDE.md
             string safeMtPath = EscapeSingleQuotes(mtSourcePath);
             flags += $" --add-dir '{safeMtPath}'";
-
-            // --mcp-config: MT's MCP server configuration (only if file exists)
-            string mcpConfigPath = Path.Combine(mtSourcePath, ".claude", "mcp.json");
-            if (File.Exists(mcpConfigPath))
-            {
-                string safeMcpPath = EscapeSingleQuotes(mcpConfigPath);
-                flags += $" --mcp-config '{safeMcpPath}'";
-            }
 
             // --settings: MT's local settings (only if file exists)
             string settingsPath = Path.Combine(mtSourcePath, ".claude", "settings.local.json");

@@ -69,6 +69,28 @@ namespace MultiTerminal.Docking
         public event EventHandler<NewPromptInCategoryEventArgs> NewPromptInCategoryRequested;
         public event EventHandler<string> ViewSessionRequested;
 
+        /// <summary>
+        /// Raised when the user saves the MCP servers picker and requests .mcp.json regeneration.
+        /// Arg is the project ID.
+        /// </summary>
+        public event EventHandler<string> McpJsonWriteRequested;
+
+        /// <summary>
+        /// Raised when JS requests to save (add/update) a registry entry.
+        /// Arg is the raw JSON of fields.
+        /// </summary>
+        public event EventHandler<string> McpRegistrySaveRequested;
+
+        /// <summary>
+        /// Raised when JS requests to delete a registry entry by server name.
+        /// </summary>
+        public event EventHandler<string> McpRegistryDeleteRequested;
+
+        /// <summary>
+        /// Raised when JS requests to import servers from a .mcp.json file path.
+        /// </summary>
+        public event EventHandler<string> ImportMcpJsonRequested;
+
         #endregion
 
         public ProjectPanelDocument()
@@ -112,6 +134,11 @@ namespace MultiTerminal.Docking
             _renderer.AssociationUpdateRequested += OnAssociationUpdateRequested;
             _renderer.RefreshAssociationsRequested += OnRefreshAssociationsRequested;
             _renderer.LaunchRequested += OnRendererLaunchRequested;
+            _renderer.WriteMcpJsonRequested += OnWriteMcpJsonRequested;
+            _renderer.McpRegistryRequested += OnMcpRegistryRequested;
+            _renderer.McpRegistrySaveRequested += OnMcpRegistrySaveRequested;
+            _renderer.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
+            _renderer.ImportMcpJsonRequested += OnImportMcpJsonRequested;
 
             Controls.Add(_renderer);
             Controls.Add(_headerPanel);
@@ -303,6 +330,9 @@ namespace MultiTerminal.Docking
             // Send available agents for picker popup (reused after stats re-render)
             var availableAgents = SendAvailableAgents();
 
+            // Send MCP registry entries for picker popup (reused after stats re-render)
+            var availableMcpServers = SendAvailableMcpServers();
+
             // Send association data if we have database access
             if (_projectContextService != null && !string.IsNullOrEmpty(project.Id))
             {
@@ -324,6 +354,10 @@ namespace MultiTerminal.Docking
             // Re-send available agents (stats re-render clears the cached data)
             if (availableAgents != null)
                 _renderer?.SendAvailableAgents(availableAgents);
+
+            // Re-send MCP server registry (stats re-render clears the cached data)
+            if (availableMcpServers != null)
+                _renderer?.SendAvailableMcpServers(availableMcpServers);
 
             // Sessions section hidden for now (feature incomplete)
             // await LoadSessionsForProjectAsync(project.Path);
@@ -436,6 +470,26 @@ namespace MultiTerminal.Docking
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableAgents error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Fetches all MCP registry entries and sends them to the panel for the MCP picker popup.
+        /// Returns the fetched entries so the caller can reuse them after stats re-render.
+        /// </summary>
+        private List<MultiTerminal.Models.McpRegistryEntry> SendAvailableMcpServers()
+        {
+            if (_renderer == null || _projectDatabase == null) return null;
+            try
+            {
+                var entries = _projectDatabase.GetAllMcpRegistryEntries();
+                _renderer.SendAvailableMcpServers(entries);
+                return entries;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableMcpServers error: {ex.Message}");
                 return null;
             }
         }
@@ -676,6 +730,138 @@ namespace MultiTerminal.Docking
                 IsEnabled = GetJsonBool(el, "isEnabled", defaultValue: true)
             });
             return (true, 0);
+        }
+
+        // ============================================================
+        // MCP Registry & .mcp.json write handlers
+        // ============================================================
+
+        private void OnWriteMcpJsonRequested(object sender, EventArgs e)
+        {
+            if (_currentProject == null || string.IsNullOrEmpty(_currentProject.Id))
+            {
+                _renderer?.SendMcpJsonWriteResult(false, "No project selected");
+                return;
+            }
+            // Raise event to MainForm which calls McpConfigService.WriteMcpJsonToProject()
+            McpJsonWriteRequested?.Invoke(this, _currentProject.Id);
+        }
+
+        private void OnMcpRegistryRequested(object sender, EventArgs e)
+        {
+            if (_projectDatabase == null)
+            {
+                _renderer?.SendMcpRegistryEntries(new List<MultiTerminal.Models.McpRegistryEntry>());
+                return;
+            }
+            try
+            {
+                var entries = _projectDatabase.GetAllMcpRegistryEntries();
+                _renderer?.SendMcpRegistryEntries(entries);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistryRequested error: {ex.Message}");
+                _renderer?.SendMcpRegistryEntries(new List<MultiTerminal.Models.McpRegistryEntry>());
+            }
+        }
+
+        private void OnMcpRegistrySaveRequested(object sender, string itemJson)
+        {
+            if (_projectDatabase == null || string.IsNullOrEmpty(itemJson))
+            {
+                _renderer?.SendMcpRegistrySaved(false, "Database not available");
+                return;
+            }
+            try
+            {
+                var item = TryParseItemJson(itemJson);
+                if (!item.HasValue)
+                {
+                    _renderer?.SendMcpRegistrySaved(false, "Invalid entry data");
+                    return;
+                }
+                var el = item.Value;
+                var rawTier = GetJsonString(el, "tier") ?? "optional";
+                var tier = (rawTier == "multiterminal" || rawTier == "global" || rawTier == "optional")
+                    ? rawTier : "optional";
+                var entry = new MultiTerminal.Models.McpRegistryEntry
+                {
+                    ServerName    = GetJsonString(el, "serverName") ?? "",
+                    DisplayName   = GetJsonString(el, "displayName") ?? GetJsonString(el, "serverName") ?? "",
+                    Description   = GetJsonString(el, "description") ?? "",
+                    ConfigJson    = GetJsonString(el, "configJson") ?? "{}",
+                    Tier          = tier,
+                    TransportType = GetJsonString(el, "transportType") ?? "stdio",
+                    Command       = GetJsonString(el, "command") ?? ""
+                };
+                _projectDatabase.SaveMcpRegistryEntry(entry);
+                _renderer?.SendMcpRegistrySaved(true);
+                // Raise so MainForm can also handle (e.g. refresh availableMcpServers cache)
+                McpRegistrySaveRequested?.Invoke(this, itemJson);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistrySaveRequested error: {ex.Message}");
+                _renderer?.SendMcpRegistrySaved(false, ex.Message);
+            }
+        }
+
+        private void OnMcpRegistryDeleteRequested(object sender, string serverName)
+        {
+            if (_projectDatabase == null || string.IsNullOrEmpty(serverName))
+            {
+                _renderer?.SendMcpRegistryDeleted(false);
+                return;
+            }
+            try
+            {
+                bool deleted = _projectDatabase.DeleteMcpRegistryEntry(serverName);
+                _renderer?.SendMcpRegistryDeleted(deleted);
+                McpRegistryDeleteRequested?.Invoke(this, serverName);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistryDeleteRequested error: {ex.Message}");
+                _renderer?.SendMcpRegistryDeleted(false);
+            }
+        }
+
+        private void OnImportMcpJsonRequested(object sender, string filePath)
+        {
+            // Delegate to MainForm via event — MainForm has McpConfigService
+            ImportMcpJsonRequested?.Invoke(this, filePath);
+        }
+
+        /// <summary>
+        /// Called by MainForm after McpConfigService.WriteMcpJsonToProject() completes.
+        /// Forwards the result to JS so the user sees a success/error notification.
+        /// </summary>
+        public void NotifyMcpJsonWriteResult(bool success, string error = null)
+        {
+            _renderer?.SendMcpJsonWriteResult(success, error);
+        }
+
+        /// <summary>
+        /// Called by MainForm after McpConfigService.ImportFromMcpJsonFile() completes.
+        /// Forwards result to JS and refreshes the registry list.
+        /// </summary>
+        public void NotifyMcpImportResult(bool success, int count = 0, string error = null)
+        {
+            _renderer?.SendMcpImportResult(success, count, error);
+            if (success && _projectDatabase != null)
+            {
+                // Refresh registry view after a successful import
+                try
+                {
+                    var entries = _projectDatabase.GetAllMcpRegistryEntries();
+                    _renderer?.SendMcpRegistryEntries(entries);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] NotifyMcpImportResult refresh error: {ex.Message}");
+                }
+            }
         }
 
         // Parse itemJson once and return the root element for use by all Handle*Crud methods.

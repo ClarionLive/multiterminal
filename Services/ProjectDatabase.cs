@@ -55,6 +55,7 @@ namespace MultiTerminal.Services
             // Run migrations for schema changes (additive, non-destructive)
             MigrateAddNewProjectColumns();
             MigrateAddAssociationTables();
+            MigrateAddMcpRegistry();
         }
 
         private void CreateSchema()
@@ -1043,6 +1044,204 @@ namespace MultiTerminal.Services
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@id", promptId);
             return command.ExecuteNonQuery() > 0;
+        }
+
+        #endregion
+
+        #region MCP Registry
+
+        /// <summary>
+        /// Migration: creates the mcp_registry table if it does not yet exist.
+        /// Safe to run on every startup — uses CREATE TABLE IF NOT EXISTS.
+        /// </summary>
+        private void MigrateAddMcpRegistry()
+        {
+            const string sql = @"
+                -- Global catalog of all known MCP servers
+                CREATE TABLE IF NOT EXISTS mcp_registry (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_name     TEXT    NOT NULL UNIQUE,
+                    display_name    TEXT    NOT NULL,
+                    description     TEXT,
+                    config_json     TEXT,
+                    tier            TEXT    NOT NULL DEFAULT 'optional',
+                    transport_type  TEXT    NOT NULL DEFAULT 'stdio',
+                    command         TEXT,
+                    created_at      DATETIME NOT NULL,
+                    updated_at      DATETIME NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_mcp_registry_server_name ON mcp_registry(server_name);
+                CREATE INDEX IF NOT EXISTS idx_mcp_registry_tier ON mcp_registry(tier);
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Get all entries in the MCP registry, ordered by tier then server name.
+        /// </summary>
+        public List<MultiTerminal.Models.McpRegistryEntry> GetAllMcpRegistryEntries()
+        {
+            var entries = new List<MultiTerminal.Models.McpRegistryEntry>();
+
+            const string sql = @"
+                SELECT id, server_name, display_name, description, config_json,
+                       tier, transport_type, command, created_at, updated_at
+                FROM mcp_registry
+                ORDER BY
+                    CASE tier
+                        WHEN 'multiterminal' THEN 0
+                        WHEN 'global'        THEN 1
+                        ELSE                      2
+                    END,
+                    server_name
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                entries.Add(ReadMcpRegistryEntry(reader));
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// Get an MCP registry entry by server name. Returns null if not found.
+        /// </summary>
+        public MultiTerminal.Models.McpRegistryEntry GetMcpRegistryEntry(string serverName)
+        {
+            const string sql = @"
+                SELECT id, server_name, display_name, description, config_json,
+                       tier, transport_type, command, created_at, updated_at
+                FROM mcp_registry
+                WHERE server_name = @serverName
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@serverName", serverName);
+            using var reader = command.ExecuteReader();
+
+            return reader.Read() ? ReadMcpRegistryEntry(reader) : null;
+        }
+
+        /// <summary>
+        /// Get all MCP registry entries for a specific tier.
+        /// Tier values: "multiterminal", "global", "optional".
+        /// </summary>
+        public List<MultiTerminal.Models.McpRegistryEntry> GetMcpRegistryEntriesByTier(string tier)
+        {
+            var entries = new List<MultiTerminal.Models.McpRegistryEntry>();
+
+            const string sql = @"
+                SELECT id, server_name, display_name, description, config_json,
+                       tier, transport_type, command, created_at, updated_at
+                FROM mcp_registry
+                WHERE tier = @tier
+                ORDER BY server_name
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@tier", tier);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                entries.Add(ReadMcpRegistryEntry(reader));
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// Save (upsert) an MCP registry entry.
+        /// Uses server_name as the conflict key — if a server with the same name exists, it is updated.
+        /// </summary>
+        public void SaveMcpRegistryEntry(MultiTerminal.Models.McpRegistryEntry entry)
+        {
+            const string sql = @"
+                INSERT INTO mcp_registry
+                    (server_name, display_name, description, config_json, tier, transport_type, command, created_at, updated_at)
+                VALUES
+                    (@serverName, @displayName, @description, @configJson, @tier, @transportType, @command, @createdAt, @updatedAt)
+                ON CONFLICT(server_name) DO UPDATE SET
+                    display_name   = @displayName,
+                    description    = @description,
+                    config_json    = @configJson,
+                    tier           = @tier,
+                    transport_type = @transportType,
+                    command        = @command,
+                    updated_at     = @updatedAt
+            ";
+
+            var now = DateTime.UtcNow;
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@serverName",    entry.ServerName);
+            command.Parameters.AddWithValue("@displayName",   entry.DisplayName ?? entry.ServerName);
+            command.Parameters.AddWithValue("@description",   (object)entry.Description  ?? DBNull.Value);
+            command.Parameters.AddWithValue("@configJson",    (object)entry.ConfigJson    ?? DBNull.Value);
+            command.Parameters.AddWithValue("@tier",          entry.Tier ?? "optional");
+            command.Parameters.AddWithValue("@transportType", entry.TransportType ?? "stdio");
+            command.Parameters.AddWithValue("@command",       (object)entry.Command ?? DBNull.Value);
+            command.Parameters.AddWithValue("@createdAt",     entry.CreatedAt == default ? now : entry.CreatedAt);
+            command.Parameters.AddWithValue("@updatedAt",     now);
+            command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Delete an MCP registry entry by server name.
+        /// </summary>
+        /// <returns>True if a row was deleted; false if not found.</returns>
+        public bool DeleteMcpRegistryEntry(string serverName)
+        {
+            const string sql = "DELETE FROM mcp_registry WHERE server_name = @serverName";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@serverName", serverName);
+            return command.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Get the set of server_names explicitly enabled in project_mcp_servers for a project.
+        /// Used by the MCP picker to pre-check optional servers that are already enabled.
+        /// </summary>
+        public HashSet<string> GetEnabledMcpServerNamesForProject(string projectId)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            const string sql = @"
+                SELECT server_name FROM project_mcp_servers
+                WHERE project_id = @projectId AND is_enabled = 1
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@projectId", projectId);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+                result.Add(reader.GetString(0));
+
+            return result;
+        }
+
+        private MultiTerminal.Models.McpRegistryEntry ReadMcpRegistryEntry(SQLiteDataReader reader)
+        {
+            return new MultiTerminal.Models.McpRegistryEntry
+            {
+                Id            = reader.GetInt32(0),
+                ServerName    = reader.GetString(1),
+                DisplayName   = reader.GetString(2),
+                Description   = reader.IsDBNull(3)  ? null : reader.GetString(3),
+                ConfigJson    = reader.IsDBNull(4)  ? null : reader.GetString(4),
+                Tier          = reader.GetString(5),
+                TransportType = reader.GetString(6),
+                Command       = reader.IsDBNull(7)  ? null : reader.GetString(7),
+                CreatedAt     = reader.GetDateTime(8),
+                UpdatedAt     = reader.GetDateTime(9)
+            };
         }
 
         #endregion

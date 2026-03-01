@@ -125,6 +125,7 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectDatabase>();
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectContextService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectJsonMigrationService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.McpConfigService>();
 
                 // Add controllers for REST API (DebugController gets DebugLogService from MessageBroker directly)
                 builder.Services.AddControllers()
@@ -269,6 +270,11 @@ namespace MultiTerminal.API
                     TimeSpan.FromMinutes(5)
                 );
                 System.Diagnostics.Debug.WriteLine("[API] Stale office agent timer started (5-minute checks)");
+
+                // Seed MCP registry from MT's .claude/mcp.json (idempotent — skips if already done)
+                var mcpConfigService = app.Services.GetRequiredService<MultiTerminal.Services.McpConfigService>();
+                string mtPath = MultiTerminal.Services.LaunchCommandBuilder.GetMtSourcePath();
+                mcpConfigService.SeedRegistryFromMtMcpJson(mtPath);
 
                 // Map REST API endpoints
                 app.MapControllers();

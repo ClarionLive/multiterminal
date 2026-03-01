@@ -81,6 +81,34 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler LaunchRequested;
 
         /// <summary>
+        /// Raised when JS requests a .mcp.json write after committing the MCP servers picker.
+        /// </summary>
+        public event EventHandler WriteMcpJsonRequested;
+
+        /// <summary>
+        /// Raised when JS requests MCP registry data (all entries for the registry management UI).
+        /// </summary>
+        public event EventHandler McpRegistryRequested;
+
+        /// <summary>
+        /// Raised when JS requests a registry entry save (add or update).
+        /// Arg is the raw JSON of the McpRegistryEntry fields.
+        /// </summary>
+        public event EventHandler<string> McpRegistrySaveRequested;
+
+        /// <summary>
+        /// Raised when JS requests a registry entry delete.
+        /// Arg is the server_name to delete.
+        /// </summary>
+        public event EventHandler<string> McpRegistryDeleteRequested;
+
+        /// <summary>
+        /// Raised when JS requests to import servers from a .mcp.json file.
+        /// Arg is the file path selected by the user.
+        /// </summary>
+        public event EventHandler<string> ImportMcpJsonRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -242,6 +270,26 @@ namespace MultiTerminal.ProjectPanel
 
                     case "launchProject":
                         LaunchRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "writeMcpJson":
+                        WriteMcpJsonRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "getMcpRegistry":
+                        McpRegistryRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "saveMcpRegistryEntry":
+                        McpRegistrySaveRequested?.Invoke(this, message.ItemJson ?? "{}");
+                        break;
+
+                    case "deleteMcpRegistryEntry":
+                        McpRegistryDeleteRequested?.Invoke(this, message.Value ?? "");
+                        break;
+
+                    case "importMcpJson":
+                        ImportMcpJsonRequested?.Invoke(this, message.Path ?? "");
                         break;
                 }
             }
@@ -653,6 +701,30 @@ namespace MultiTerminal.ProjectPanel
         }
 
         /// <summary>
+        /// Send all MCP registry entries to the WebView2 for the MCP server picker popup.
+        /// Sends "availableMcpServers:[{\"serverName\":\"...\",\"displayName\":\"...\",\"description\":\"...\",\"tier\":\"...\",\"transportType\":\"...\"},...]"
+        /// </summary>
+        public void SendAvailableMcpServers(List<MultiTerminal.Models.McpRegistryEntry> entries)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"serverName\":\"{EscapeJson(e.ServerName ?? "")}\",");
+                sb.Append($"\"displayName\":\"{EscapeJson(e.DisplayName ?? e.ServerName ?? "")}\",");
+                sb.Append($"\"description\":\"{EscapeJson(e.Description ?? "")}\",");
+                sb.Append($"\"tier\":\"{EscapeJson(e.Tier ?? "optional")}\",");
+                sb.Append($"\"transportType\":\"{EscapeJson(e.TransportType ?? "stdio")}\"");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            SendMessage($"availableMcpServers:{sb}");
+        }
+
+        /// <summary>
         /// Notify JS that an association operation succeeded or failed.
         /// Sends "associationSaved:{\"tableName\":\"agents\",\"action\":\"add\",\"success\":true}"
         /// </summary>
@@ -660,6 +732,78 @@ namespace MultiTerminal.ProjectPanel
         {
             var idPart = newId > 0 ? $",\"newId\":{newId}" : "";
             SendMessage($"associationSaved:{{\"tableName\":\"{EscapeJson(tableName ?? "")}\",\"action\":\"{EscapeJson(action ?? "")}\",\"success\":{(success ? "true" : "false")}{idPart}}}");
+        }
+
+        /// <summary>
+        /// Notify JS of the result of a .mcp.json write operation.
+        /// Sends "mcpJsonWriteResult:{\"success\":true}" or with "error" field on failure.
+        /// </summary>
+        public void SendMcpJsonWriteResult(bool success, string error = null)
+        {
+            var errorPart = (!success && !string.IsNullOrEmpty(error))
+                ? $",\"error\":\"{EscapeJson(error)}\""
+                : "";
+            SendMessage($"mcpJsonWriteResult:{{\"success\":{(success ? "true" : "false")}{errorPart}}}");
+        }
+
+        /// <summary>
+        /// Send all MCP registry entries to the WebView2 for the registry management UI.
+        /// Sends "mcpRegistry:[{...},...]"
+        /// </summary>
+        public void SendMcpRegistryEntries(List<MultiTerminal.Models.McpRegistryEntry> entries)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":{e.Id},");
+                sb.Append($"\"serverName\":\"{EscapeJson(e.ServerName ?? "")}\",");
+                sb.Append($"\"displayName\":\"{EscapeJson(e.DisplayName ?? "")}\",");
+                sb.Append($"\"description\":\"{EscapeJson(e.Description ?? "")}\",");
+                sb.Append($"\"configJson\":\"{EscapeJson(e.ConfigJson ?? "")}\",");
+                sb.Append($"\"tier\":\"{EscapeJson(e.Tier ?? "optional")}\",");
+                sb.Append($"\"transportType\":\"{EscapeJson(e.TransportType ?? "stdio")}\",");
+                sb.Append($"\"command\":\"{EscapeJson(e.Command ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            SendMessage($"mcpRegistry:{sb}");
+        }
+
+        /// <summary>
+        /// Notify JS of a registry entry save result.
+        /// Sends "mcpRegistrySaved:{\"success\":true}" or with "error" on failure.
+        /// </summary>
+        public void SendMcpRegistrySaved(bool success, string error = null)
+        {
+            var errorPart = (!success && !string.IsNullOrEmpty(error))
+                ? $",\"error\":\"{EscapeJson(error)}\""
+                : "";
+            SendMessage($"mcpRegistrySaved:{{\"success\":{(success ? "true" : "false")}{errorPart}}}");
+        }
+
+        /// <summary>
+        /// Notify JS of a registry entry delete result.
+        /// Sends "mcpRegistryDeleted:{\"success\":true}"
+        /// </summary>
+        public void SendMcpRegistryDeleted(bool success)
+        {
+            SendMessage($"mcpRegistryDeleted:{{\"success\":{(success ? "true" : "false")}}}");
+        }
+
+        /// <summary>
+        /// Notify JS of an import-from-file result (how many entries were imported).
+        /// Sends "mcpImportResult:{\"success\":true,\"count\":5}"
+        /// </summary>
+        public void SendMcpImportResult(bool success, int count = 0, string error = null)
+        {
+            var errorPart = (!success && !string.IsNullOrEmpty(error))
+                ? $",\"error\":\"{EscapeJson(error)}\""
+                : "";
+            SendMessage($"mcpImportResult:{{\"success\":{(success ? "true" : "false")},\"count\":{count}{errorPart}}}");
         }
 
         /// <summary>
