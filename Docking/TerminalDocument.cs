@@ -482,9 +482,9 @@ namespace MultiTerminal.Docking
         {
             _tabContextMenu = new ContextMenuStrip();
 
-            // Home — show start screen
+            // Home — stop terminal and show start screen
             var homeItem = new ToolStripMenuItem("Home");
-            homeItem.Click += (s, args) => ShowStartScreen();
+            homeItem.Click += (s, args) => ReturnToStartScreen();
             _tabContextMenu.Items.Add(homeItem);
 
             _tabContextMenu.Items.Add(new ToolStripSeparator());
@@ -574,7 +574,8 @@ namespace MultiTerminal.Docking
         /// <param name="terminalName">Pre-registered terminal name for MCP (null if not pre-registered)</param>
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
+        /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
         {
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -582,6 +583,7 @@ namespace MultiTerminal.Docking
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] autoRunCommand: '{autoRunCommand ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] spawnerName: '{spawnerName ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] projectId: '{projectId ?? "null"}'");
+            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] isTeamLead: '{isTeamLead}'");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _docId: '{_docId}'");
 
             // Hide start screen before launching the shell
@@ -599,7 +601,7 @@ namespace MultiTerminal.Docking
             }
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _terminal.Start returned");
 
             // Update status bar after terminal starts
@@ -1008,6 +1010,20 @@ namespace MultiTerminal.Docking
         public void SetProjectDatabase(ProjectDatabase projectDatabase)
         {
             _startScreen?.Initialize(projectDatabase);
+        }
+
+        /// <summary>
+        /// Stops any running terminal process and returns to the start screen.
+        /// Used by Home context menu and Ctrl+Shift+H hotkey.
+        /// </summary>
+        public void ReturnToStartScreen()
+        {
+            if (_isTerminalStarted)
+            {
+                _terminal.Stop();
+                _isTerminalStarted = false;
+            }
+            ShowStartScreen();
         }
 
         /// <summary>

@@ -274,6 +274,9 @@ namespace MultiTerminal.ProfilePanel
                 profile.AgentInstructions = instrEl.GetString();
             if (element.TryGetProperty("preferredModel", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
                 profile.PreferredModel = modelEl.GetString();
+            if (element.TryGetProperty("isTeamLead", out var teamLeadEl) &&
+                (teamLeadEl.ValueKind == JsonValueKind.True || teamLeadEl.ValueKind == JsonValueKind.False))
+                profile.IsTeamLead = teamLeadEl.GetBoolean();
 
             return profile;
         }
@@ -302,7 +305,8 @@ namespace MultiTerminal.ProfilePanel
                     skills = p.GetSkills(),
                     interests = p.GetInterests(),
                     agentInstructions = p.AgentInstructions,
-                    preferredModel = p.PreferredModel
+                    preferredModel = p.PreferredModel,
+                    isTeamLead = p.IsTeamLead
                 }).ToList();
 
                 string json = JsonSerializer.Serialize(profileData);
@@ -334,7 +338,8 @@ namespace MultiTerminal.ProfilePanel
                     skills = profile.GetSkills(),
                     interests = profile.GetInterests(),
                     agentInstructions = profile.AgentInstructions,
-                    preferredModel = profile.PreferredModel
+                    preferredModel = profile.PreferredModel,
+                    isTeamLead = profile.IsTeamLead
                 };
 
                 string json = JsonSerializer.Serialize(profileData);
@@ -366,7 +371,8 @@ namespace MultiTerminal.ProfilePanel
                     skills = profile.GetSkills(),
                     interests = profile.GetInterests(),
                     agentInstructions = profile.AgentInstructions,
-                    preferredModel = profile.PreferredModel
+                    preferredModel = profile.PreferredModel,
+                    isTeamLead = profile.IsTeamLead
                 };
 
                 string json = JsonSerializer.Serialize(profileData);

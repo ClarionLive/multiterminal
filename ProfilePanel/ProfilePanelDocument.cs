@@ -157,7 +157,8 @@ namespace MultiTerminal.ProfilePanel
                     profile.GetInterests(),
                     profile.GetProjectIds(),
                     profile.AgentInstructions,
-                    profile.PreferredModel
+                    profile.PreferredModel,
+                    profile.IsTeamLead
                 );
 
                 if (result.Success)
@@ -197,7 +198,8 @@ namespace MultiTerminal.ProfilePanel
                     profile.GetInterests(),
                     profile.GetProjectIds(),
                     profile.AgentInstructions,
-                    profile.PreferredModel
+                    profile.PreferredModel,
+                    profile.IsTeamLead
                 );
 
                 if (result.Success)

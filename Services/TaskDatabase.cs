@@ -83,6 +83,7 @@ namespace MultiTerminal.Services
             MigrateAddProjectIdsToProfiles();
             MigrateAddTaskAttachments();
             MigrateAddAgentFieldsToProfiles();
+            MigrateAddTeamLeadToProfiles();
         }
 
         private void CreateSchema()
@@ -2111,8 +2112,8 @@ namespace MultiTerminal.Services
         public void SaveProfile(TeamMemberProfile profile)
         {
             const string sql = @"
-                INSERT INTO team_member_profiles (id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, agent_instructions, preferred_model, created_at, updated_at)
-                VALUES (@id, @displayName, @avatarUrl, @role, @bio, @skillsJson, @interestsJson, @projectIdsJson, @isOnline, @agentInstructions, @preferredModel, @createdAt, @updatedAt)
+                INSERT INTO team_member_profiles (id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, agent_instructions, preferred_model, created_at, updated_at, is_team_lead)
+                VALUES (@id, @displayName, @avatarUrl, @role, @bio, @skillsJson, @interestsJson, @projectIdsJson, @isOnline, @agentInstructions, @preferredModel, @createdAt, @updatedAt, @isTeamLead)
                 ON CONFLICT(id) DO UPDATE SET
                     display_name = @displayName,
                     avatar_url = @avatarUrl,
@@ -2124,7 +2125,8 @@ namespace MultiTerminal.Services
                     is_online = @isOnline,
                     agent_instructions = @agentInstructions,
                     preferred_model = @preferredModel,
-                    updated_at = @updatedAt
+                    updated_at = @updatedAt,
+                    is_team_lead = @isTeamLead
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -2141,6 +2143,7 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@preferredModel", (object)profile.PreferredModel ?? "sonnet");
             command.Parameters.AddWithValue("@createdAt", profile.CreatedAt);
             command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+            command.Parameters.AddWithValue("@isTeamLead", profile.IsTeamLead ? 1 : 0);
 
             command.ExecuteNonQuery();
         }
@@ -2151,7 +2154,7 @@ namespace MultiTerminal.Services
         public TeamMemberProfile GetProfile(string profileId)
         {
             const string sql = @"
-                SELECT id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, created_at, updated_at, agent_instructions, preferred_model
+                SELECT id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, created_at, updated_at, agent_instructions, preferred_model, is_team_lead
                 FROM team_member_profiles
                 WHERE id = @id
             ";
@@ -2176,7 +2179,7 @@ namespace MultiTerminal.Services
             var profiles = new List<TeamMemberProfile>();
 
             const string sql = @"
-                SELECT id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, created_at, updated_at, agent_instructions, preferred_model
+                SELECT id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, created_at, updated_at, agent_instructions, preferred_model, is_team_lead
                 FROM team_member_profiles
                 ORDER BY display_name ASC
             ";
@@ -2266,7 +2269,8 @@ namespace MultiTerminal.Services
                 CreatedAt = reader.GetDateTime(9),
                 UpdatedAt = reader.GetDateTime(10),
                 AgentInstructions = reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetString(11) : null,
-                PreferredModel = reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetString(12) : "sonnet"
+                PreferredModel = reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetString(12) : "sonnet",
+                IsTeamLead = reader.FieldCount > 13 && !reader.IsDBNull(13) && reader.GetInt32(13) == 1
             };
         }
 
@@ -2546,6 +2550,37 @@ namespace MultiTerminal.Services
                 const string sql = "ALTER TABLE team_member_profiles ADD COLUMN preferred_model TEXT DEFAULT 'sonnet'";
                 using var cmd = new SQLiteCommand(sql, _connection);
                 cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Migration to add is_team_lead column to team_member_profiles.
+        /// Designates agents as team leads, triggering special naming on spawn.
+        /// </summary>
+        private void MigrateAddTeamLeadToProfiles()
+        {
+            const string checkSql = "PRAGMA table_info(team_member_profiles)";
+            bool hasIsTeamLead = false;
+
+            using (var command = new SQLiteCommand(checkSql, _connection))
+            using (var reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (reader.GetString(1).Equals("is_team_lead", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasIsTeamLead = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasIsTeamLead)
+            {
+                const string sql = "ALTER TABLE team_member_profiles ADD COLUMN is_team_lead INTEGER DEFAULT 0";
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.ExecuteNonQuery();
+                System.Diagnostics.Debug.WriteLine("[TaskDatabase] Added is_team_lead column to team_member_profiles");
             }
         }
 

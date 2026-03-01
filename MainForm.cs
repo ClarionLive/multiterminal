@@ -156,14 +156,14 @@ namespace MultiTerminal
 
         /// <summary>
         /// Handle global keyboard shortcuts that must work even when WebView2 has focus.
-        /// Ctrl+Shift+H: show start screen on the active terminal tab.
+        /// Ctrl+Shift+H: stop terminal and return to start screen on the active tab.
         /// </summary>
         protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, Keys keyData)
         {
             if (keyData == (Keys.Control | Keys.Shift | Keys.H))
             {
                 var activeTerminal = _dockPanel.ActiveDocument as TerminalDocument;
-                activeTerminal?.ShowStartScreen();
+                activeTerminal?.ReturnToStartScreen();
                 return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
@@ -210,7 +210,7 @@ namespace MultiTerminal
             _projectPanel = new ProjectPanelDocument();
             _projectPanel.SetServices(_projectService, _promptService);
             _projectPanel.SetSessionDatabase(_sessionDatabase); // Inject shared database to prevent duplicate creation
-            _projectPanel.SetProjectDatabase(new MultiTerminal.Services.ProjectDatabase()); // Enable field/association editing
+            _projectPanel.SetProjectDatabase(_sharedProjectDatabase); // Share single connection used by the rest of the app
             _projectPanel.SetTheme(_currentTheme);
 
             // Project events
@@ -1475,7 +1475,7 @@ namespace MultiTerminal
             "Quinn", "Ruby", "Sam", "Tara", "Uma", "Vera", "Wade", "Xena", "Yuri", "Zara"
         };
 
-        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
+        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
         {
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -1484,6 +1484,7 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] identityName: '{identityName ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] autoRunCommand: '{autoRunCommand ?? "null"}'");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] projectId: '{projectId ?? "null"}'");
+            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] isTeamLead: '{isTeamLead}'");
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Creating TerminalDocument...");
             var doc = new TerminalDocument();
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] TerminalDocument created");
@@ -1541,6 +1542,15 @@ namespace MultiTerminal
                 if (!string.IsNullOrEmpty(identityName))
                 {
                     System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Identity name provided: '{identityName}'");
+
+                    // Apply team lead naming convention: "Team Lead {Name} - {3-digit random}"
+                    if (isTeamLead)
+                    {
+                        string suffix = Random.Shared.Next(100, 999).ToString();
+                        identityName = $"Team Lead {identityName} - {suffix}";
+                        System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Team lead naming applied: '{identityName}'");
+                    }
+
                     terminalName = PreRegisterTerminalWithName(doc.DocId, identityName);
                     System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] PreRegisterTerminalWithName returned: '{terminalName}'");
                 }
@@ -1562,8 +1572,8 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}')...");
-                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId);
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead})...");
+                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
                 System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
             }
             else
@@ -2483,7 +2493,7 @@ namespace MultiTerminal
             _settings.SetSessionLayout(preset.ToString());
         }
 
-        private async void RestoreSession()
+        private void RestoreSession()
         {
             System.Diagnostics.Trace.WriteLine("[RestoreSession] Starting...");
             string layoutPath = _settings.GetLayoutFilePath();
@@ -2508,37 +2518,14 @@ namespace MultiTerminal
                     layoutRestored = true;
                     System.Diagnostics.Trace.WriteLine("[RestoreSession] Layout loaded successfully");
 
-                    // Start all restored terminals in parallel for faster loading.
-                    // Terminals that had no saved working directory (PendingWorkingDirectory == null)
-                    // are shown as start screens so the user can pick a project rather than
-                    // auto-starting in an arbitrary fallback directory.
+                    // All restored terminals show start screen so the user can pick a project.
+                    // Previously we auto-started PowerShell for terminals with saved directories,
+                    // but with the start screen feature, users should always choose what to launch.
                     var terminals = _gridManager.GetTerminalDocuments();
-                    var startupTasks = terminals
-                        .Where(doc => !doc.IsTerminalStarted)
-                        .Select(async doc =>
-                        {
-                            // Terminals with no saved directory restore to start screen
-                            if (string.IsNullOrEmpty(doc.PendingWorkingDirectory))
-                            {
-                                doc.ShowStartScreen();
-                                return;
-                            }
-
-                            // Wait for WebView2 renderer to be ready before starting shell
-                            await WaitForRendererReadyAsync(doc);
-
-                            // Don't pre-assign identity names - tabs should show "Unassigned" until Claude CLI starts
-                            // SessionStart hook will set the actual identity when CLI runs
-                            string terminalName = "Unassigned";
-                            if (_mcpServer?.Broker != null)
-                            {
-                                _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
-                            }
-
-                            await StartTerminalAndWaitAsync(doc, doc.PendingWorkingDirectory, terminalName);
-                        });
-
-                    await Task.WhenAll(startupTasks);
+                    foreach (var doc in terminals.Where(d => !d.IsTerminalStarted))
+                    {
+                        doc.ShowStartScreen();
+                    }
 
                     // Focus the first terminal that is running; fall back to first start screen
                     var firstStarted = terminals.FirstOrDefault(d => d.IsTerminalStarted);

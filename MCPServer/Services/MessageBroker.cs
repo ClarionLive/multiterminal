@@ -3737,7 +3737,7 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Create a new team member profile.
         /// </summary>
-        public CreateProfileResult CreateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null)
+        public CreateProfileResult CreateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null, bool? isTeamLead = null)
         {
             if (string.IsNullOrWhiteSpace(id))
             {
@@ -3758,6 +3758,7 @@ namespace MultiTerminal.MCPServer.Services
                 Bio = bio,
                 AgentInstructions = agentInstructions,
                 PreferredModel = preferredModel ?? "sonnet",
+                IsTeamLead = isTeamLead ?? false,
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
             };
@@ -3780,7 +3781,7 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Update an existing team member profile. Only provided fields are updated.
         /// </summary>
-        public UpdateProfileResult UpdateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null)
+        public UpdateProfileResult UpdateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null, bool? isTeamLead = null)
         {
             if (!_profiles.TryGetValue(id, out var profile))
             {
@@ -3797,6 +3798,7 @@ namespace MultiTerminal.MCPServer.Services
             if (projectIds != null) profile.SetProjectIds(projectIds);
             if (agentInstructions != null) profile.AgentInstructions = agentInstructions;
             if (preferredModel != null) profile.PreferredModel = preferredModel;
+            if (isTeamLead.HasValue) profile.IsTeamLead = isTeamLead.Value;
 
             profile.UpdatedAt = DateTime.UtcNow;
 

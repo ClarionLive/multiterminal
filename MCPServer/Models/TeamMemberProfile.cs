@@ -72,6 +72,12 @@ namespace MultiTerminal.MCPServer.Models
         public bool IsOnline { get; set; } = false;
 
         /// <summary>
+        /// Whether this agent is designated as a team lead.
+        /// Team leads receive a "Team Lead {Name} - {suffix}" naming convention on spawn.
+        /// </summary>
+        public bool IsTeamLead { get; set; } = false;
+
+        /// <summary>
         /// When the profile was created.
         /// </summary>
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

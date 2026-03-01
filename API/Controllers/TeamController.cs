@@ -51,7 +51,8 @@ namespace MultiTerminal.API.Controllers
                         agentInstructions = profile.AgentInstructions,
                         role = profile.Role,
                         skills = profile.GetSkills(),
-                        isOnline = profile.IsOnline
+                        isOnline = profile.IsOnline,
+                        isTeamLead = profile.IsTeamLead
                     });
                 }
                 else
@@ -64,7 +65,8 @@ namespace MultiTerminal.API.Controllers
                         agentInstructions = (string)null,
                         role = (string)null,
                         skills = new List<string>(),
-                        isOnline = false
+                        isOnline = false,
+                        isTeamLead = false
                     });
                 }
             }

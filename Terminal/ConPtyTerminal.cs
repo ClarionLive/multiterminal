@@ -80,7 +80,8 @@ namespace MultiTerminal.Terminal
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="spawnerName">Name of the terminal that spawned this one (sets MULTITERMINAL_SPAWNER env var)</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
-        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
+        /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
+        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
         {
             if (_isRunning)
                 throw new InvalidOperationException("Terminal is already running");
@@ -111,7 +112,7 @@ namespace MultiTerminal.Terminal
                 CreatePseudoConsole(cols, rows);
 
                 // Start the shell process
-                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId);
+                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
 
                 // Set running flag BEFORE starting timer/reader (prevents race condition)
                 _isRunning = true;
@@ -253,7 +254,7 @@ namespace MultiTerminal.Terminal
                     ". Make sure you're running Windows 10 version 1809 or later.");
         }
 
-        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null)
+        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
         {
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] shellPath: '{shellPath}'");
@@ -338,6 +339,12 @@ namespace MultiTerminal.Terminal
                 string safeProjectId = projectId.Replace("'", "''");
                 envSetup += $"$env:MULTITERMINAL_PROJECT_ID = '{safeProjectId}'; ";
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_PROJECT_ID = '{projectId}'");
+            }
+
+            if (isTeamLead)
+            {
+                envSetup += "$env:MULTITERMINAL_TEAM_LEAD = 'true'; ";
+                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_TEAM_LEAD = 'true'");
             }
 
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
@@ -611,6 +618,17 @@ namespace MultiTerminal.Terminal
                 _readThread.Join(1000);
             }
             _readThread = null;
+        }
+
+        /// <summary>
+        /// Stops the running terminal process and cleans up resources, but keeps the terminal
+        /// reusable (Start() can be called again). Use this for "return to Home" scenarios
+        /// where the tab stays open but the shell session ends.
+        /// </summary>
+        public void Stop()
+        {
+            if (_isDisposed || !_isRunning) return;
+            Cleanup();
         }
 
         public void Dispose()

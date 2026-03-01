@@ -294,6 +294,14 @@
             background: rgba(236, 72, 153, 0.1);
         }
 
+        .tag.team-lead {
+            border-color: var(--status-warning);
+            color: var(--status-warning);
+            background: rgba(245, 158, 11, 0.15);
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
         /* ============================================
            Profile Edit Modal
            ============================================ */
@@ -590,6 +598,14 @@
                     </div>
 
                     <div class="form-group">
+                        <label class="form-label" for="isTeamLead">
+                            <input type="checkbox" id="isTeamLead" name="isTeamLead" style="margin-right: 6px;">
+                            Team Lead
+                        </label>
+                        <div class="form-help">Designates this agent as a Team Lead (gets special naming and env vars when spawned)</div>
+                    </div>
+
+                    <div class="form-group">
                         <label class="form-label" for="agentInstructions">Agent Instructions</label>
                         <textarea class="form-textarea" id="agentInstructions" name="agentInstructions"
                                   placeholder="Custom instructions for this agent when spawned as a team member..."></textarea>
@@ -721,6 +737,10 @@
                 const skills = profile.skills || [];
                 const interests = profile.interests || [];
 
+                const teamLeadBadge = profile.isTeamLead
+                    ? '<span class="tag team-lead">Team Lead</span>'
+                    : '';
+
                 return `
                     <div class="profile-card" data-profile-id="${profile.id}" style="--member-color: ${memberColor};">
                         <div class="profile-header">
@@ -730,7 +750,7 @@
                                     : initial}
                             </div>
                             <div class="profile-info">
-                                <div class="profile-name">${escapeHtml(displayName)}</div>
+                                <div class="profile-name">${escapeHtml(displayName)}${teamLeadBadge}</div>
                                 ${profile.role ? `<div class="profile-role">${escapeHtml(profile.role)}</div>` : ''}
                             </div>
                         </div>
@@ -784,6 +804,7 @@
             document.getElementById('modalTitle').textContent = 'Create Profile';
             document.getElementById('profileForm').reset();
             document.getElementById('profileId').value = '';
+            document.getElementById('isTeamLead').checked = false;
             updateAvatarPreview('', '');
             document.getElementById('deleteProfileBtn').style.display = 'none'; // Hide delete button for new profiles
             document.getElementById('profileModal').classList.add('active');
@@ -804,6 +825,7 @@
             document.getElementById('skills').value = (profile.skills || []).join(', ');
             document.getElementById('interests').value = (profile.interests || []).join(', ');
             document.getElementById('preferredModel').value = profile.preferredModel || 'sonnet';
+            document.getElementById('isTeamLead').checked = profile.isTeamLead || false;
             document.getElementById('agentInstructions').value = profile.agentInstructions || '';
 
             updateAvatarPreview(profile.avatarUrl, profile.displayName || profile.id);
@@ -854,6 +876,7 @@
             const interests = interestsText ? interestsText.split(',').map(s => s.trim()).filter(s => s) : [];
             const preferredModel = document.getElementById('preferredModel').value;
             const agentInstructions = document.getElementById('agentInstructions').value.trim();
+            const isTeamLead = document.getElementById('isTeamLead').checked;
 
             const profile = {
                 id: id,
@@ -864,7 +887,8 @@
                 skills: skills,
                 interests: interests,
                 preferredModel: preferredModel || 'sonnet',
-                agentInstructions: agentInstructions || null
+                agentInstructions: agentInstructions || null,
+                isTeamLead: isTeamLead
             };
 
             if (ProfileState.isEditing) {
