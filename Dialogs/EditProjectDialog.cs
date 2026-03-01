@@ -84,6 +84,9 @@ namespace MultiTerminal.Dialogs
         private Button cancelButton;
         private TabControl tabControl;
 
+        // Track which tabs the user has visited to avoid reading stale textbox values
+        private readonly HashSet<int> _visitedTabs = new HashSet<int> { 0 };
+
         // Legacy properties for backward compatibility with ProjectManagerDialog
         public string ProjectName
         {
@@ -440,16 +443,8 @@ namespace MultiTerminal.Dialogs
             if (_workingProject == null)
                 _workingProject = new Project { Id = Guid.NewGuid().ToString(), CreatedAt = DateTime.UtcNow };
 
+            // Tab 0 - General (always visited, it's the default selected tab)
             _workingProject.Name = nameTextBox.Text.Trim();
-            _workingProject.Path = pathTextBox.Text.Trim();
-            _workingProject.SourcePath = string.IsNullOrWhiteSpace(sourcePathTextBox.Text)
-                ? pathTextBox.Text.Trim()
-                : sourcePathTextBox.Text.Trim();
-            _workingProject.DeployPath = NullIfEmpty(deployPathTextBox.Text.Trim());
-            _workingProject.BuildOutputPath = NullIfEmpty(buildOutputPathTextBox.Text.Trim());
-            _workingProject.BuildCommand = NullIfEmpty(buildCommandTextBox.Text.Trim());
-            _workingProject.DeployCommand = NullIfEmpty(deployCommandTextBox.Text.Trim());
-            _workingProject.LaunchCommand = NullIfEmpty(launchCommandTextBox.Text.Trim());
             _workingProject.Description = NullIfEmpty(descriptionTextBox.Text.Trim());
             _workingProject.ChangeLog = NullIfEmpty(changeLogTextBox.Text);
             _workingProject.CurrentVersion = string.IsNullOrWhiteSpace(currentVersionTextBox.Text)
@@ -458,12 +453,35 @@ namespace MultiTerminal.Dialogs
             _workingProject.Icon = NullIfEmpty(iconTextBox.Text.Trim());
             _workingProject.IconColor = NullIfEmpty(iconColorTextBox.Text.Trim());
             _workingProject.IsPinned = isPinnedCheckBox.Checked;
-            _workingProject.GitRepoUrl = NullIfEmpty(gitRepoUrlTextBox.Text.Trim());
-            _workingProject.GitDefaultBranch = NullIfEmpty(gitDefaultBranchTextBox.Text.Trim());
-            _workingProject.GitAutoCommit = gitAutoCommitCheckBox.Checked;
-            _workingProject.UpdatedAt = DateTime.UtcNow;
             string selType = projectTypeComboBox.SelectedItem as string;
             _workingProject.ProjectType = string.IsNullOrWhiteSpace(selType) ? null : selType;
+
+            // Tab 1 - Paths & Commands (only read if user visited this tab)
+            if (_visitedTabs.Contains(1))
+            {
+                _workingProject.Path = pathTextBox.Text.Trim();
+                _workingProject.SourcePath = string.IsNullOrWhiteSpace(sourcePathTextBox.Text)
+                    ? pathTextBox.Text.Trim()
+                    : sourcePathTextBox.Text.Trim();
+                _workingProject.DeployPath = NullIfEmpty(deployPathTextBox.Text.Trim());
+                _workingProject.BuildOutputPath = NullIfEmpty(buildOutputPathTextBox.Text.Trim());
+                _workingProject.BuildCommand = NullIfEmpty(buildCommandTextBox.Text.Trim());
+                _workingProject.DeployCommand = NullIfEmpty(deployCommandTextBox.Text.Trim());
+                _workingProject.LaunchCommand = NullIfEmpty(launchCommandTextBox.Text.Trim());
+            }
+
+            // Tab 2 - Git (only read if user visited this tab)
+            if (_visitedTabs.Contains(2))
+            {
+                _workingProject.GitRepoUrl = NullIfEmpty(gitRepoUrlTextBox.Text.Trim());
+                _workingProject.GitDefaultBranch = NullIfEmpty(gitDefaultBranchTextBox.Text.Trim());
+                _workingProject.GitAutoCommit = gitAutoCommitCheckBox.Checked;
+            }
+
+            // Tabs 3-5 (Agents, MCP & Skills, Prompts) use DataGridViews which
+            // store values in managed memory — no handle-creation dependency.
+
+            _workingProject.UpdatedAt = DateTime.UtcNow;
             ResultProject = _workingProject;
         }
 
@@ -687,6 +705,7 @@ namespace MultiTerminal.Dialogs
                 Size = new Size(756, 525),
                 TabIndex = 0
             };
+            this.tabControl.SelectedIndexChanged += (s, e) => _visitedTabs.Add(tabControl.SelectedIndex);
 
             this.saveButton = new Button
             {
@@ -781,7 +800,7 @@ namespace MultiTerminal.Dialogs
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Name = "projectTypeComboBox"
             };
-            this.projectTypeComboBox.Items.AddRange(new object[] { "", "dotnet", "node", "python", "clarion", "other" });
+            this.projectTypeComboBox.Items.AddRange(new object[] { "", "dotnet", "multiterminal", "clarion-com", "clarion-webview2", "clarion", "node", "python", "other" });
             this.projectTypeComboBox.SelectedIndex = 0;
             y += rh;
 

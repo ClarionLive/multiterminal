@@ -1005,6 +1005,12 @@
                                 ${typeOptionsHtml}
                             </select>
                         </div>
+                        <div class="info-row">
+                            <span class="info-label">Team Lead</span>
+                            <select class="edit-select" data-field="teamLead" onchange="saveSelectField(this)">
+                                <option value="">-- None --</option>
+                            </select>
+                        </div>
             `;
 
             if (project.currentVersion != null) {
@@ -1852,6 +1858,11 @@
                         case 'project':
                             currentData = JSON.parse(data);
                             renderProject(currentData);
+                            // Restore team lead dropdown selection (options may already be populated)
+                            if (currentData.teamLead) {
+                                const tlSelect = document.querySelector('[data-field="teamLead"]');
+                                if (tlSelect) tlSelect.value = currentData.teamLead;
+                            }
                             break;
                         case 'welcome':
                             renderWelcome();
@@ -1891,6 +1902,25 @@
                             if (saved.success) {
                                 // Flash all elements with this data-field
                                 document.querySelectorAll(`[data-field="${saved.field}"]`).forEach(el => flashElement(el));
+                            }
+                            break;
+                        }
+                        case 'teamLeadOptions': {
+                            const options = JSON.parse(data);
+                            const select = document.querySelector('[data-field="teamLead"]');
+                            if (select) {
+                                // Keep the first option (-- None --)
+                                while (select.options.length > 1) select.remove(1);
+                                options.forEach(opt => {
+                                    const o = document.createElement('option');
+                                    o.value = opt.id;
+                                    o.textContent = opt.displayName;
+                                    select.add(o);
+                                });
+                                // Set the current project's team lead value
+                                if (currentData && currentData.teamLead) {
+                                    select.value = currentData.teamLead;
+                                }
                             }
                             break;
                         }

@@ -114,6 +114,12 @@ namespace MultiTerminal.Models
         /// </summary>
         public string CreatedBy { get; set; }
 
+        /// <summary>
+        /// The profile display_name of the designated team lead for this project.
+        /// When set, launching from the start screen uses this as the terminal name with isTeamLead=true.
+        /// </summary>
+        public string TeamLead { get; set; }
+
         // ── Git configuration ─────────────────────────────────────────────────
 
         /// <summary>

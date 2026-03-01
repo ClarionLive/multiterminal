@@ -109,6 +109,7 @@ namespace MultiTerminal.Docking
             _renderer.GetSessionMessagesRequested += OnGetSessionMessagesRequested;
             _renderer.FieldUpdateRequested += OnFieldUpdateRequested;
             _renderer.AssociationUpdateRequested += OnAssociationUpdateRequested;
+            _renderer.RefreshAssociationsRequested += OnRefreshAssociationsRequested;
 
             Controls.Add(_renderer);
             Controls.Add(_headerPanel);
@@ -271,12 +272,17 @@ namespace MultiTerminal.Docking
                 // Git
                 GitRepoUrl = project.GitRepoUrl,
                 GitDefaultBranch = project.GitDefaultBranch,
-                GitAutoCommit = project.GitAutoCommit
+                GitAutoCommit = project.GitAutoCommit,
+                // Team lead
+                TeamLead = project.TeamLead
             };
 
             // Show project immediately without stats (to avoid UI freeze)
             System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Calling renderer.ShowProject for {projectWithAllPrompts.Name} (initial, no stats)");
             _renderer?.ShowProject(projectWithAllPrompts, null);
+
+            // Fetch team lead options once and send to dropdown (reused after stats re-render)
+            var teamLeadProfiles = SendTeamLeadOptions();
 
             // Send association data if we have database access
             if (_projectContextService != null && !string.IsNullOrEmpty(project.Id))
@@ -291,6 +297,10 @@ namespace MultiTerminal.Docking
             // Update renderer with stats (back on UI thread)
             System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Updating renderer with stats for {projectWithAllPrompts.Name}");
             _renderer?.ShowProject(projectWithAllPrompts, stats);
+
+            // Re-send cached team lead options (stats re-render clears the dropdown options)
+            if (teamLeadProfiles != null)
+                _renderer?.SendTeamLeadOptions(teamLeadProfiles);
 
             // Sessions section hidden for now (feature incomplete)
             // await LoadSessionsForProjectAsync(project.Path);
@@ -366,6 +376,27 @@ namespace MultiTerminal.Docking
             return stats;
         }
 
+        /// <summary>
+        /// Fetches team lead profiles and sends them to the panel dropdown.
+        /// Returns the fetched profiles so the caller can reuse them (e.g. after a stats re-render)
+        /// without hitting the database again. Returns null if unavailable.
+        /// </summary>
+        private List<(string Id, string DisplayName, string AvatarUrl)> SendTeamLeadOptions()
+        {
+            if (_renderer == null || _projectDatabase == null) return null;
+            try
+            {
+                var profiles = _projectDatabase.GetTeamLeadProfiles();
+                _renderer.SendTeamLeadOptions(profiles);
+                return profiles;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendTeamLeadOptions error: {ex.Message}");
+                return null;
+            }
+        }
+
         private void OnFieldUpdateRequested(object sender, FieldUpdateEventArgs e)
         {
             if (_currentProject == null || _projectDatabase == null || string.IsNullOrEmpty(e.Field))
@@ -388,6 +419,20 @@ namespace MultiTerminal.Docking
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnFieldUpdateRequested error: {ex.Message}");
                 _renderer?.SendFieldSaved(e.Field, false);
+            }
+        }
+
+        private async void OnRefreshAssociationsRequested(object sender, EventArgs e)
+        {
+            if (_currentProject == null || _projectContextService == null) return;
+            try
+            {
+                var context = await Task.Run(() => _projectContextService.GetProjectContext(_currentProject.Id));
+                _renderer?.ShowAssociations(context);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnRefreshAssociationsRequested error: {ex.Message}");
             }
         }
 
@@ -956,7 +1001,7 @@ namespace MultiTerminal.Docking
                 _smallFont?.Dispose();
                 _recentsContextMenu?.Dispose();
                 _renderer?.Dispose();
-                _projectDatabase?.Dispose();
+                _projectDatabase = null; // Shared instance — disposed by MainForm
             }
             base.Dispose(disposing);
         }

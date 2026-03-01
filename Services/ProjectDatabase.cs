@@ -116,7 +116,8 @@ namespace MultiTerminal.Services
                 ("last_opened_at",     "DATETIME"),
                 ("git_repo_url",       "TEXT"),
                 ("git_default_branch", "TEXT"),
-                ("git_auto_commit",    "INTEGER DEFAULT 0")
+                ("git_auto_commit",    "INTEGER DEFAULT 0"),
+                ("team_lead",          "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -317,7 +318,23 @@ namespace MultiTerminal.Services
             "name", "description", "path", "source_path", "deploy_path", "build_output_path",
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
-            "is_pinned", "status", "created_by", "last_opened_at"
+            "is_pinned", "status", "created_by", "last_opened_at", "team_lead"
+        };
+
+        // Map camelCase JS field names to snake_case SQLite column names.
+        // JS sends data-field attributes in camelCase; SQLite columns are snake_case.
+        private static readonly Dictionary<string, string> _fieldNameMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["name"] = "name", ["description"] = "description", ["path"] = "path",
+            ["sourcePath"] = "source_path", ["deployPath"] = "deploy_path",
+            ["buildOutputPath"] = "build_output_path", ["buildCommand"] = "build_command",
+            ["deployCommand"] = "deploy_command", ["launchCommand"] = "launch_command",
+            ["projectType"] = "project_type", ["currentVersion"] = "current_version",
+            ["changeLog"] = "change_log", ["icon"] = "icon", ["iconColor"] = "icon_color",
+            ["gitRepoUrl"] = "git_repo_url", ["gitDefaultBranch"] = "git_default_branch",
+            ["gitAutoCommit"] = "git_auto_commit", ["isPinned"] = "is_pinned",
+            ["status"] = "status", ["createdBy"] = "created_by", ["lastOpenedAt"] = "last_opened_at",
+            ["teamLead"] = "team_lead",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -337,6 +354,10 @@ namespace MultiTerminal.Services
         {
             if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(fieldName))
                 return false;
+
+            // Normalize camelCase from JS to snake_case for SQLite
+            if (_fieldNameMap.TryGetValue(fieldName, out var mapped))
+                fieldName = mapped;
 
             // Enforce column whitelist — fieldName is embedded directly in SQL so it MUST be validated
             if (!_allowedProjectFields.Contains(fieldName))
@@ -434,7 +455,8 @@ namespace MultiTerminal.Services
                 SELECT id, name, description, path, created_by, created_at, updated_at,
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
                        launch_command, project_type, current_version, change_log, is_pinned,
-                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit
+                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
+                       team_lead
                 FROM projects
                 WHERE id = @id
             ";
@@ -462,7 +484,8 @@ namespace MultiTerminal.Services
                 SELECT id, name, description, path, created_by, created_at, updated_at,
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
                        launch_command, project_type, current_version, change_log, is_pinned,
-                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit
+                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
+                       team_lead
                 FROM projects
                 ORDER BY is_pinned DESC, created_at DESC
             ";
@@ -488,11 +511,13 @@ namespace MultiTerminal.Services
                 INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at,
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
                        launch_command, project_type, current_version, change_log, is_pinned,
-                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit)
+                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
+                       team_lead)
                 VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
                        @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
                        @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
-                       @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit)
+                       @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
+                       @teamLead)
                 ON CONFLICT(id) DO UPDATE SET
                     name = @name,
                     description = @description,
@@ -513,7 +538,8 @@ namespace MultiTerminal.Services
                     last_opened_at = @lastOpenedAt,
                     git_repo_url = @gitRepoUrl,
                     git_default_branch = @gitDefaultBranch,
-                    git_auto_commit = @gitAutoCommit
+                    git_auto_commit = @gitAutoCommit,
+                    team_lead = @teamLead
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -540,6 +566,7 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@gitRepoUrl", (object)project.GitRepoUrl ?? DBNull.Value);
             command.Parameters.AddWithValue("@gitDefaultBranch", (object)project.GitDefaultBranch ?? DBNull.Value);
             command.Parameters.AddWithValue("@gitAutoCommit", project.GitAutoCommit ? 1 : 0);
+            command.Parameters.AddWithValue("@teamLead", (object)project.TeamLead ?? DBNull.Value);
 
             command.ExecuteNonQuery();
         }
@@ -570,8 +597,41 @@ namespace MultiTerminal.Services
                 LastOpenedAt = reader.IsDBNull(19) ? default : reader.GetDateTime(19),
                 GitRepoUrl = reader.IsDBNull(20) ? null : reader.GetString(20),
                 GitDefaultBranch = reader.IsDBNull(21) ? null : reader.GetString(21),
-                GitAutoCommit = !reader.IsDBNull(22) && reader.GetInt32(22) == 1
+                GitAutoCommit = !reader.IsDBNull(22) && reader.GetInt32(22) == 1,
+                TeamLead = reader.IsDBNull(23) ? null : reader.GetString(23)
             };
+        }
+
+        /// <summary>
+        /// Get all team member profiles that have is_team_lead = 1.
+        /// Returns a list of lightweight profile summaries (id, displayName, avatarUrl)
+        /// for populating the team lead dropdown in the Project Panel.
+        /// ProjectDatabase shares the same tasks.db file as TaskDatabase, so it can
+        /// query team_member_profiles directly.
+        /// </summary>
+        public List<(string Id, string DisplayName, string AvatarUrl)> GetTeamLeadProfiles()
+        {
+            var result = new List<(string Id, string DisplayName, string AvatarUrl)>();
+
+            const string sql = @"
+                SELECT id, display_name, avatar_url
+                FROM team_member_profiles
+                WHERE is_team_lead = 1
+                ORDER BY COALESCE(display_name, id) ASC
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                string id = reader.GetString(0);
+                string displayName = reader.IsDBNull(1) ? id : reader.GetString(1);
+                string avatarUrl = reader.IsDBNull(2) ? null : reader.GetString(2);
+                result.Add((id, displayName, avatarUrl));
+            }
+
+            return result;
         }
 
         #endregion

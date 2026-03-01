@@ -34,7 +34,7 @@ namespace MultiTerminal.Services
             // The autoRunCommand is injected into a PowerShell -Command "..." string by ConPtyTerminal.
             // Single quotes in flag values must be doubled ('') because they appear inside PS single-quoted strings.
             // E.g.: claude --add-dir 'C:\path\to\dir' --mcp-config 'C:\path\.claude\mcp.json' ...
-            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions";
+            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
 
             return new LaunchCommand
             {

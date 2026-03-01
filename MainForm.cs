@@ -1636,15 +1636,17 @@ namespace MultiTerminal
                 string autoRunCommand = launchCmd.AutoRunCommand;
 
                 // Register terminal before starting (start screen tabs are unregistered)
+                // If the project has a designated team lead, use their name and flag the terminal accordingly
                 string terminalName = null;
+                bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
                 if (_mcpServer?.Broker != null)
                 {
-                    terminalName = "Unassigned";
+                    terminalName = isTeamLead ? project.TeamLead : "Unassigned";
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
                 }
 
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
-                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id);
+                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead);
 
                 // Apply current font size
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;

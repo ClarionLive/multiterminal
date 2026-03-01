@@ -73,6 +73,11 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler<AssociationUpdateEventArgs> AssociationUpdateRequested;
 
         /// <summary>
+        /// Event fired when JS requests a full association refresh (after add/delete).
+        /// </summary>
+        public event EventHandler RefreshAssociationsRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -227,6 +232,10 @@ namespace MultiTerminal.ProjectPanel
                         AssociationUpdateRequested?.Invoke(this, new AssociationUpdateEventArgs(
                             message.TableName, message.Action, message.ItemJson));
                         break;
+
+                    case "getAssociations":
+                        RefreshAssociationsRequested?.Invoke(this, EventArgs.Empty);
+                        break;
                 }
             }
             catch (Exception ex)
@@ -286,6 +295,9 @@ namespace MultiTerminal.ProjectPanel
             sb.Append($"\"gitRepoUrl\":\"{EscapeJson(project.GitRepoUrl ?? "")}\",");
             sb.Append($"\"gitDefaultBranch\":\"{EscapeJson(project.GitDefaultBranch ?? "")}\",");
             sb.Append($"\"gitAutoCommit\":{(project.GitAutoCommit ? "true" : "false")},");
+
+            // Team lead
+            sb.Append($"\"teamLead\":\"{EscapeJson(project.TeamLead ?? "")}\",");
 
             // Status / flags (new fields)
             sb.Append($"\"isPinned\":{(project.IsPinned ? "true" : "false")},");
@@ -586,6 +598,28 @@ namespace MultiTerminal.ProjectPanel
         public void SendFieldSaved(string field, bool success)
         {
             SendMessage($"fieldSaved:{{\"field\":\"{EscapeJson(field ?? "")}\",\"success\":{(success ? "true" : "false")}}}");
+        }
+
+        /// <summary>
+        /// Send team lead profile options to the WebView2 dropdown.
+        /// Sends "teamLeadOptions:[{\"id\":\"Alice\",\"displayName\":\"Alice\"},...]"
+        /// </summary>
+        public void SendTeamLeadOptions(List<(string Id, string DisplayName, string AvatarUrl)> options)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < options.Count; i++)
+            {
+                var o = options[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":\"{EscapeJson(o.Id ?? "")}\",");
+                sb.Append($"\"displayName\":\"{EscapeJson(o.DisplayName ?? "")}\",");
+                sb.Append($"\"avatarUrl\":\"{EscapeJson(o.AvatarUrl ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            SendMessage($"teamLeadOptions:{sb}");
         }
 
         /// <summary>
