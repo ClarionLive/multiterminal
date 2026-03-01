@@ -229,6 +229,20 @@ namespace MultiTerminal.Docking
                 return;
             }
 
+            // Overlay with full SQLite data so SQLite-only fields (e.g. team_lead) are populated
+            // even when the project was loaded from JSON (which lacks those fields).
+            if (_projectDatabase != null && !string.IsNullOrEmpty(project.Id))
+            {
+                var richProject = _projectDatabase.GetRichProject(project.Id);
+                if (richProject != null)
+                {
+                    // Preserve Prompts from the caller — they come from JSON/PromptService
+                    richProject.Prompts = project.Prompts;
+                    project = richProject;
+                    _currentProject = richProject;
+                }
+            }
+
             // Show project immediately with basic info (no stats yet)
             var allPrompts = new List<Prompt>();
             if (project.Prompts != null)
@@ -413,12 +427,43 @@ namespace MultiTerminal.Docking
                 if (success)
                 {
                     System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Field '{e.Field}' updated to '{e.Value}' for project {_currentProject.Id}");
+                    UpdateProjectFieldInMemory(e.Field, e.Value);
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnFieldUpdateRequested error: {ex.Message}");
                 _renderer?.SendFieldSaved(e.Field, false);
+            }
+        }
+
+        /// <summary>
+        /// Keeps _currentProject in sync after an in-place field edit so that subsequent
+        /// ShowProject calls (triggered by async stats completion) display the latest values.
+        /// </summary>
+        private void UpdateProjectFieldInMemory(string camelCaseField, string value)
+        {
+            if (_currentProject == null) return;
+            switch (camelCaseField)
+            {
+                case "name": _currentProject.Name = value; break;
+                case "description": _currentProject.Description = value; break;
+                case "projectType": _currentProject.ProjectType = value; break;
+                case "currentVersion": _currentProject.CurrentVersion = value; break;
+                case "icon": _currentProject.Icon = value; break;
+                case "iconColor": _currentProject.IconColor = value; break;
+                case "sourcePath": _currentProject.SourcePath = value; break;
+                case "deployPath": _currentProject.DeployPath = value; break;
+                case "buildOutputPath": _currentProject.BuildOutputPath = value; break;
+                case "buildCommand": _currentProject.BuildCommand = value; break;
+                case "deployCommand": _currentProject.DeployCommand = value; break;
+                case "launchCommand": _currentProject.LaunchCommand = value; break;
+                case "gitRepoUrl": _currentProject.GitRepoUrl = value; break;
+                case "gitDefaultBranch": _currentProject.GitDefaultBranch = value; break;
+                case "gitAutoCommit": _currentProject.GitAutoCommit = value == "true" || value == "1"; break;
+                case "changeLog": _currentProject.ChangeLog = value; break;
+                case "teamLead": _currentProject.TeamLead = value; break;
+                case "createdBy": _currentProject.CreatedBy = value; break;
             }
         }
 

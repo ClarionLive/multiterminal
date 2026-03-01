@@ -876,6 +876,7 @@
 
     <script>
         let currentData = null;
+        let cachedTeamLeadOptions = [];
 
         // Send message to C# host
         function sendToHost(message) {
@@ -1846,6 +1847,22 @@
             sendToHost({ type: 'updateAssociation', tableName: tableName, action: 'update', item: JSON.stringify({ id: id, [field]: value }) });
         }
 
+        // Re-apply cached team lead options to the dropdown (survives re-renders)
+        function applyTeamLeadOptions() {
+            const select = document.querySelector('[data-field="teamLead"]');
+            if (!select) return;
+            while (select.options.length > 1) select.remove(1);
+            cachedTeamLeadOptions.forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.id;
+                o.textContent = opt.displayName;
+                select.add(o);
+            });
+            if (currentData && currentData.teamLead) {
+                select.value = currentData.teamLead;
+            }
+        }
+
         // Handle messages from C#
         function handleHostMessage(message) {
             if (typeof message === 'string') {
@@ -1858,11 +1875,7 @@
                         case 'project':
                             currentData = JSON.parse(data);
                             renderProject(currentData);
-                            // Restore team lead dropdown selection (options may already be populated)
-                            if (currentData.teamLead) {
-                                const tlSelect = document.querySelector('[data-field="teamLead"]');
-                                if (tlSelect) tlSelect.value = currentData.teamLead;
-                            }
+                            applyTeamLeadOptions(); // Re-apply cached options after re-render
                             break;
                         case 'welcome':
                             renderWelcome();
@@ -1906,22 +1919,8 @@
                             break;
                         }
                         case 'teamLeadOptions': {
-                            const options = JSON.parse(data);
-                            const select = document.querySelector('[data-field="teamLead"]');
-                            if (select) {
-                                // Keep the first option (-- None --)
-                                while (select.options.length > 1) select.remove(1);
-                                options.forEach(opt => {
-                                    const o = document.createElement('option');
-                                    o.value = opt.id;
-                                    o.textContent = opt.displayName;
-                                    select.add(o);
-                                });
-                                // Set the current project's team lead value
-                                if (currentData && currentData.teamLead) {
-                                    select.value = currentData.teamLead;
-                                }
-                            }
+                            cachedTeamLeadOptions = JSON.parse(data);
+                            applyTeamLeadOptions();
                             break;
                         }
                         case 'associations': {
