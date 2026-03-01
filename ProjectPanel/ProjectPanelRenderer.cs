@@ -630,6 +630,29 @@ namespace MultiTerminal.ProjectPanel
         }
 
         /// <summary>
+        /// Send all available agent profiles to the WebView2 for the agents picker popup.
+        /// Sends "availableAgents:[{\"id\":\"Alice\",\"displayName\":\"Alice\",\"role\":\"...\",\"preferredModel\":\"...\"},...]"
+        /// </summary>
+        public void SendAvailableAgents(List<(string Id, string DisplayName, string Role, string PreferredModel)> profiles)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                var p = profiles[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":\"{EscapeJson(p.Id ?? "")}\",");
+                sb.Append($"\"displayName\":\"{EscapeJson(p.DisplayName ?? "")}\",");
+                sb.Append($"\"role\":\"{EscapeJson(p.Role ?? "")}\",");
+                sb.Append($"\"preferredModel\":\"{EscapeJson(p.PreferredModel ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            SendMessage($"availableAgents:{sb}");
+        }
+
+        /// <summary>
         /// Notify JS that an association operation succeeded or failed.
         /// Sends "associationSaved:{\"tableName\":\"agents\",\"action\":\"add\",\"success\":true}"
         /// </summary>

@@ -300,6 +300,9 @@ namespace MultiTerminal.Docking
             // Fetch team lead options once and send to dropdown (reused after stats re-render)
             var teamLeadProfiles = SendTeamLeadOptions();
 
+            // Send available agents for picker popup (reused after stats re-render)
+            var availableAgents = SendAvailableAgents();
+
             // Send association data if we have database access
             if (_projectContextService != null && !string.IsNullOrEmpty(project.Id))
             {
@@ -317,6 +320,10 @@ namespace MultiTerminal.Docking
             // Re-send cached team lead options (stats re-render clears the dropdown options)
             if (teamLeadProfiles != null)
                 _renderer?.SendTeamLeadOptions(teamLeadProfiles);
+
+            // Re-send available agents (stats re-render clears the cached data)
+            if (availableAgents != null)
+                _renderer?.SendAvailableAgents(availableAgents);
 
             // Sessions section hidden for now (feature incomplete)
             // await LoadSessionsForProjectAsync(project.Path);
@@ -409,6 +416,26 @@ namespace MultiTerminal.Docking
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendTeamLeadOptions error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Fetches all profile summaries and sends them to the panel for the agents picker popup.
+        /// Returns the fetched profiles so the caller can reuse them after stats re-render.
+        /// </summary>
+        private List<(string Id, string DisplayName, string Role, string PreferredModel)> SendAvailableAgents()
+        {
+            if (_renderer == null || _projectDatabase == null) return null;
+            try
+            {
+                var profiles = _projectDatabase.GetAllProfileSummaries();
+                _renderer.SendAvailableAgents(profiles);
+                return profiles;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableAgents error: {ex.Message}");
                 return null;
             }
         }

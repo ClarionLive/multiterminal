@@ -849,6 +849,117 @@
             border-radius: 10px;
         }
 
+        /* Picker popup modal */
+        .picker-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .picker-dialog {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            width: 340px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+
+        .picker-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .picker-list {
+            overflow-y: auto;
+            padding: 8px 0;
+            max-height: 50vh;
+        }
+
+        .picker-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 16px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .picker-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .picker-item input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent-color);
+            cursor: pointer;
+        }
+
+        .picker-item-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .picker-item-name {
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+
+        .picker-item-role {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }
+
+        .picker-footer {
+            padding: 10px 16px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .picker-btn {
+            padding: 6px 16px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.15s;
+        }
+
+        .picker-btn:hover {
+            background: var(--bg-hover);
+        }
+
+        .picker-btn.primary {
+            background: var(--accent-color);
+            border-color: var(--accent-color);
+            color: #fff;
+        }
+
+        .picker-btn.primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .picker-empty {
+            color: var(--text-muted);
+            font-style: italic;
+            padding: 16px;
+            text-align: center;
+        }
+
         /* New-project hint card */
         .new-project-hint {
             background: var(--bg-secondary);
@@ -1691,6 +1802,7 @@
         // ============================================================
 
         let currentAssociations = null;
+        let cachedAvailableAgents = [];
 
         // Render all 6 association sections into #associations-container
         function renderAssociations(data) {
@@ -1766,6 +1878,8 @@
         // Build one assoc row element (HTML string)
         function buildAssocRow(tableName, row, columns) {
             const id = row.id || '';
+            const pkField = ASSOC_PRIMARY_KEY[tableName] || 'id';
+            const pkValue = row[pkField] !== undefined ? row[pkField] : id;
             let cellsHtml = columns.map(c => {
                 const val = row[c.key] !== undefined ? row[c.key] : '';
                 if (c.toggle) {
@@ -1787,7 +1901,7 @@
             return `
                 <div class="assoc-row" data-table="${escapeHtml(tableName)}" data-id="${id}">
                     ${cellsHtml}
-                    <button class="remove-btn" onclick="removeAssociation('${escapeHtml(tableName)}', ${id})">&#x2715;</button>
+                    <button class="remove-btn" onclick="removeAssociation('${escapeHtml(tableName)}', '${escapeHtml(String(pkValue))}')">&#x2715;</button>
                 </div>`;
         }
 
@@ -1810,8 +1924,16 @@
             dbPrompts: 'promptText'
         };
 
-        // Add a new association row (single input for primary field, sends to host on confirm)
+        // Tables that use a picker popup instead of free-text add
+        const PICKER_TABLES = { agents: true };
+
+        // Add a new association row (or open picker for supported tables)
         function addAssociation(tableName) {
+            if (PICKER_TABLES[tableName]) {
+                openAssociationPicker(tableName);
+                return;
+            }
+
             const container = document.getElementById('assoc-rows-' + tableName);
             if (!container) return;
 
@@ -1858,9 +1980,11 @@
         }
 
         // Remove an association row
-        function removeAssociation(tableName, id) {
-            sendToHost({ type: 'updateAssociation', tableName: tableName, action: 'delete', item: JSON.stringify({ id: id }) });
-            const row = document.querySelector(`.assoc-row[data-table="${tableName}"][data-id="${id}"]`);
+        function removeAssociation(tableName, pkValue) {
+            const pkField = ASSOC_PRIMARY_KEY[tableName] || 'id';
+            sendToHost({ type: 'updateAssociation', tableName: tableName, action: 'delete', item: JSON.stringify({ [pkField]: pkValue }) });
+            const row = document.querySelector(`.assoc-row[data-table="${tableName}"][data-id="${pkValue}"]`)
+                     || document.querySelector(`.assoc-row[data-table="${tableName}"] .editable[data-value="${pkValue}"]`)?.closest('.assoc-row');
             if (row) row.remove();
             // Update badge
             const badge = document.querySelector(`#assoc-rows-${tableName}`)?.closest('.section')?.querySelector('.section-badge');
@@ -1886,6 +2010,152 @@
             if (currentData && currentData.teamLead) {
                 select.value = currentData.teamLead;
             }
+        }
+
+        // ============================================================
+        // ASSOCIATION PICKER POPUP
+        // ============================================================
+
+        function openAssociationPicker(tableName) {
+            if (tableName === 'agents') {
+                openAgentsPicker();
+            }
+        }
+
+        function openAgentsPicker() {
+            // Get currently assigned agent names
+            const assigned = new Set(
+                (currentAssociations?.agents || []).map(a => a.agentName)
+            );
+
+            // Build picker items from cached available agents
+            const items = cachedAvailableAgents.map(p => ({
+                id: p.id,
+                displayName: p.displayName || p.id,
+                role: p.role || '',
+                preferredModel: p.preferredModel || '',
+                checked: assigned.has(p.displayName) || assigned.has(p.id)
+            }));
+
+            if (items.length === 0) {
+                // No profiles available
+                showPickerDialog('Select Agents', '<div class="picker-empty">No team member profiles found.</div>', null);
+                return;
+            }
+
+            let listHtml = '';
+            items.forEach((item, i) => {
+                const roleText = item.role ? item.role : '';
+                const modelText = item.preferredModel ? ` (${escapeHtml(item.preferredModel)})` : '';
+                listHtml += `
+                    <label class="picker-item">
+                        <input type="checkbox" data-agent-name="${escapeHtml(item.displayName)}"
+                               data-agent-role="${escapeHtml(item.role)}"
+                               data-agent-model="${escapeHtml(item.preferredModel)}"
+                               ${item.checked ? 'checked' : ''}>
+                        <div class="picker-item-info">
+                            <div class="picker-item-name">${escapeHtml(item.displayName)}</div>
+                            <div class="picker-item-role">${escapeHtml(roleText)}${modelText}</div>
+                        </div>
+                    </label>`;
+            });
+
+            showPickerDialog('Select Agents', listHtml, () => {
+                commitAgentsPicker();
+            });
+        }
+
+        function showPickerDialog(title, listHtml, onSave) {
+            // Remove any existing picker
+            const existing = document.querySelector('.picker-overlay');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.className = 'picker-overlay';
+            overlay.innerHTML = `
+                <div class="picker-dialog">
+                    <div class="picker-header">${escapeHtml(title)}</div>
+                    <div class="picker-list">${listHtml}</div>
+                    <div class="picker-footer">
+                        <button class="picker-btn cancel-btn">Cancel</button>
+                        ${onSave ? '<button class="picker-btn primary save-btn">Save</button>' : ''}
+                    </div>
+                </div>`;
+
+            // Wire cancel
+            overlay.querySelector('.cancel-btn').onclick = () => overlay.remove();
+
+            // Close on overlay click (outside dialog)
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+            // Wire save
+            if (onSave) {
+                overlay.querySelector('.save-btn').onclick = () => {
+                    onSave();
+                    overlay.remove();
+                };
+            }
+
+            // Escape to close
+            const onKey = (e) => {
+                if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); }
+            };
+            document.addEventListener('keydown', onKey);
+
+            document.body.appendChild(overlay);
+        }
+
+        function commitAgentsPicker() {
+            const overlay = document.querySelector('.picker-overlay');
+            if (!overlay) return;
+
+            // Get currently assigned agent names
+            const currentAgents = (currentAssociations?.agents || []);
+            const assignedNames = new Set(currentAgents.map(a => a.agentName));
+
+            // Get checked agent names from picker
+            const checkboxes = overlay.querySelectorAll('input[type="checkbox"]');
+            const checkedNames = new Set();
+            const checkedDetails = {};
+            checkboxes.forEach(cb => {
+                if (cb.checked) {
+                    const name = cb.dataset.agentName;
+                    checkedNames.add(name);
+                    checkedDetails[name] = {
+                        role: cb.dataset.agentRole || '',
+                        preferredModel: cb.dataset.agentModel || ''
+                    };
+                }
+            });
+
+            // Compute diff: agents to add
+            checkedNames.forEach(name => {
+                if (!assignedNames.has(name)) {
+                    const details = checkedDetails[name];
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'agents',
+                        action: 'add',
+                        item: JSON.stringify({
+                            agentName: name,
+                            role: details.role,
+                            preferredModel: details.preferredModel
+                        })
+                    });
+                }
+            });
+
+            // Compute diff: agents to remove
+            currentAgents.forEach(a => {
+                if (!checkedNames.has(a.agentName)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'agents',
+                        action: 'delete',
+                        item: JSON.stringify({ agentName: a.agentName })
+                    });
+                }
+            });
         }
 
         // Handle messages from C#
@@ -1948,6 +2218,10 @@
                             applyTeamLeadOptions();
                             break;
                         }
+                        case 'availableAgents': {
+                            cachedAvailableAgents = JSON.parse(data);
+                            break;
+                        }
                         case 'associations': {
                             const assocData = JSON.parse(data);
                             renderAssociations(assocData);
@@ -1955,8 +2229,8 @@
                         }
                         case 'associationSaved': {
                             const asSaved = JSON.parse(data);
-                            if (asSaved.success && asSaved.newId && asSaved.tableName) {
-                                // Re-request associations to get the full new row rendered
+                            if (asSaved.success) {
+                                // Re-request associations to get fresh data rendered
                                 sendToHost({ type: 'getAssociations' });
                             }
                             break;

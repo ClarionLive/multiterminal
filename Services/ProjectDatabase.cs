@@ -634,6 +634,35 @@ namespace MultiTerminal.Services
             return result;
         }
 
+        /// <summary>
+        /// Get all team member profiles as lightweight summaries for picker UIs.
+        /// Returns (id, displayName, role, preferredModel) for each profile.
+        /// </summary>
+        public List<(string Id, string DisplayName, string Role, string PreferredModel)> GetAllProfileSummaries()
+        {
+            var result = new List<(string Id, string DisplayName, string Role, string PreferredModel)>();
+
+            const string sql = @"
+                SELECT id, display_name, role, preferred_model
+                FROM team_member_profiles
+                ORDER BY COALESCE(display_name, id) ASC
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                string id = reader.GetString(0);
+                string displayName = reader.IsDBNull(1) ? id : reader.GetString(1);
+                string role = reader.IsDBNull(2) ? null : reader.GetString(2);
+                string preferredModel = reader.IsDBNull(3) ? null : reader.GetString(3);
+                result.Add((id, displayName, role, preferredModel));
+            }
+
+            return result;
+        }
+
         #endregion
 
         #region Project Agents
