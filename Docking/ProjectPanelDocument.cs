@@ -71,9 +71,10 @@ namespace MultiTerminal.Docking
 
         /// <summary>
         /// Raised when the user saves the MCP servers picker and requests .mcp.json regeneration.
-        /// Arg is the project ID.
+        /// Carries (ProjectId, SourcePath) so the handler can skip a SQLite project lookup —
+        /// projects from the JSON registry may not be in the SQLite projects table yet.
         /// </summary>
-        public event EventHandler<string> McpJsonWriteRequested;
+        public event EventHandler<(string ProjectId, string SourcePath)> McpJsonWriteRequested;
 
         /// <summary>
         /// Raised when JS requests to save (add/update) a registry entry.
@@ -139,6 +140,7 @@ namespace MultiTerminal.Docking
             _renderer.McpRegistrySaveRequested += OnMcpRegistrySaveRequested;
             _renderer.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
             _renderer.ImportMcpJsonRequested += OnImportMcpJsonRequested;
+            _renderer.AvailableMcpServersRequested += OnAvailableMcpServersRequested;
 
             Controls.Add(_renderer);
             Controls.Add(_headerPanel);
@@ -743,8 +745,12 @@ namespace MultiTerminal.Docking
                 _renderer?.SendMcpJsonWriteResult(false, "No project selected");
                 return;
             }
-            // Raise event to MainForm which calls McpConfigService.WriteMcpJsonToProject()
-            McpJsonWriteRequested?.Invoke(this, _currentProject.Id);
+            // Pass source path so McpConfigService can write without a SQLite project lookup.
+            // Projects from the JSON registry may not be in the SQLite projects table yet, so
+            // GetRichProject would return null and the write would fail. The panel always has
+            // _currentProject populated with SourcePath and/or Path from the registry.
+            string sourcePath = _currentProject.SourcePath ?? _currentProject.Path;
+            McpJsonWriteRequested?.Invoke(this, (_currentProject.Id, sourcePath));
         }
 
         private void OnMcpRegistryRequested(object sender, EventArgs e)
@@ -764,6 +770,15 @@ namespace MultiTerminal.Docking
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistryRequested error: {ex.Message}");
                 _renderer?.SendMcpRegistryEntries(new List<MultiTerminal.Models.McpRegistryEntry>());
             }
+        }
+
+        /// <summary>
+        /// Called when JS requests the available MCP servers list for the picker popup.
+        /// Delegates to SendAvailableMcpServers which fetches from DB and sends to the renderer.
+        /// </summary>
+        private void OnAvailableMcpServersRequested(object sender, EventArgs e)
+        {
+            SendAvailableMcpServers();
         }
 
         private void OnMcpRegistrySaveRequested(object sender, string itemJson)

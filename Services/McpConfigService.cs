@@ -186,19 +186,31 @@ namespace MultiTerminal.Services
         /// Creates a .mcp.json.bak backup of any existing file before overwriting.
         /// </summary>
         /// <param name="projectId">Project ID.</param>
+        /// <param name="sourcePath">
+        ///   Optional: caller-provided source path for the project directory.
+        ///   When supplied, the SQLite project lookup is skipped — useful when the project
+        ///   originates from the JSON registry and may not yet be in the SQLite projects table.
+        ///   When null or empty, falls back to a SQLite lookup via GetRichProject().
+        /// </param>
         /// <returns>Full path of the written .mcp.json file.</returns>
-        public string WriteMcpJsonToProject(string projectId)
+        public string WriteMcpJsonToProject(string projectId, string sourcePath = null)
         {
             if (string.IsNullOrWhiteSpace(projectId))
                 throw new ArgumentException("projectId is required", nameof(projectId));
 
-            var project = _projectDb.GetRichProject(projectId);
-            if (project == null)
-                throw new InvalidOperationException($"Project not found: {projectId}");
-
-            string sourcePath = project.SourcePath ?? project.Path;
+            // Use the caller-provided path when available — avoids needing the project in SQLite
+            // (projects from the JSON registry may not be migrated to SQLite yet).
             if (string.IsNullOrWhiteSpace(sourcePath))
-                throw new InvalidOperationException($"Project {project.Name} has no source path configured.");
+            {
+                var project = _projectDb.GetRichProject(projectId);
+                if (project == null)
+                    throw new InvalidOperationException($"Project not found: {projectId}");
+
+                sourcePath = project.SourcePath ?? project.Path;
+            }
+
+            if (string.IsNullOrWhiteSpace(sourcePath))
+                throw new InvalidOperationException($"Project '{projectId}' has no source path configured.");
 
             if (!Directory.Exists(sourcePath))
                 throw new DirectoryNotFoundException($"Project source directory does not exist: {sourcePath}");

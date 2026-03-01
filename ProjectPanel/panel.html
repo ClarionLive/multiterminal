@@ -2117,6 +2117,7 @@
         let currentAssociations = null;
         let cachedAvailableAgents = [];
         let cachedAvailableMcpServers = [];
+        let _mcpPickerPendingOpen = false;  // true when picker was requested but registry was not yet loaded
 
         // Render all 6 association sections into #associations-container
         function renderAssociations(data) {
@@ -2221,8 +2222,23 @@
         // ============================================================
 
         // Build the MCP Servers section HTML with a "Manage Registry" button in the header.
+        // Only shows optional-tier servers (global/multiterminal tier are always included
+        // implicitly and should not appear as per-project toggleable entries).
         function renderMcpServersSection(rows) {
-            const count = rows.length;
+            // Build a set of always-included server names from the registry cache.
+            // If the cache is empty (registry not yet loaded), we show all rows to
+            // avoid a blank list on first render — the re-render after stats will
+            // apply correct filtering once the cache is populated.
+            const alwaysIncludedNames = new Set(
+                cachedAvailableMcpServers
+                    .filter(s => isMcpTierAlwaysIncluded(s.tier))
+                    .map(s => s.serverName)
+            );
+            const optionalRows = cachedAvailableMcpServers.length === 0
+                ? rows   // registry not loaded yet — show all to avoid false-blank
+                : rows.filter(r => !alwaysIncludedNames.has(r.serverName));
+
+            const count = optionalRows.length;
             const columns = [
                 { key: 'serverName', label: 'Server Name' },
                 { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
@@ -2234,9 +2250,9 @@
                 return `<span class="${cls}">${escapeHtml(c.label)}</span>`;
             }).join('') + '<span style="flex:0 0 28px"></span>';
 
-            let rowsHtml = rows.length === 0
+            let rowsHtml = optionalRows.length === 0
                 ? '<div class="assoc-empty">None enabled</div>'
-                : rows.map(row => buildAssocRow(tableName, row, columns)).join('');
+                : optionalRows.map(row => buildAssocRow(tableName, row, columns)).join('');
 
             return `
                 <div class="section">
@@ -2736,14 +2752,18 @@
         }
 
         function openMcpServersPicker() {
+            // If the registry cache is empty, request it from the host and defer opening
+            // until the response arrives. This avoids the "No MCP servers found" flash on
+            // first open when the panel loads before the registry message is delivered.
+            if (cachedAvailableMcpServers.length === 0) {
+                _mcpPickerPendingOpen = true;
+                sendToHost({ type: 'getAvailableMcpServers' });
+                return;
+            }
+
             // Get currently enabled server names from project associations
             const currentServers = (currentAssociations?.mcpServers || []);
             const enabledNames = new Set(currentServers.map(s => s.serverName));
-
-            if (cachedAvailableMcpServers.length === 0) {
-                showPickerDialog('Select MCP Servers', '<div class="picker-empty">No MCP servers found in registry.</div>', null);
-                return;
-            }
 
             // Split into always-included tiers and optional tier
             const alwaysIncluded = cachedAvailableMcpServers.filter(s => isMcpTierAlwaysIncluded(s.tier));
@@ -2903,7 +2923,28 @@
                             break;
                         }
                         case 'availableMcpServers': {
+                            // Only re-render associations if the cache was empty before — that means
+                            // renderMcpServersSection showed all rows unfiltered and needs correction.
+                            // Skip the re-render on the normal load path (cache was already populated).
+                            const wasEmpty = cachedAvailableMcpServers.length === 0;
                             cachedAvailableMcpServers = JSON.parse(data);
+                            // If the picker was deferred because the cache was empty, open it now.
+                            // Guard: only open if the registry is non-empty — if it's empty, clear the
+                            // flag and show the "no servers" dialog directly to prevent an infinite loop
+                            // (openMcpServersPicker would otherwise re-request getAvailableMcpServers).
+                            if (_mcpPickerPendingOpen) {
+                                _mcpPickerPendingOpen = false;
+                                if (cachedAvailableMcpServers.length > 0) {
+                                    openMcpServersPicker();
+                                } else {
+                                    showPickerDialog('Select MCP Servers', '<div class="picker-empty">No MCP servers found in registry.</div>', null);
+                                }
+                            }
+                            // Re-render only when transitioning from empty cache to populated —
+                            // avoids an unnecessary double-render on every normal project load.
+                            if (wasEmpty && currentAssociations) {
+                                renderAssociations(currentAssociations);
+                            }
                             break;
                         }
                         case 'associations': {

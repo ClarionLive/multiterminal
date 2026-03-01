@@ -3784,16 +3784,18 @@ namespace MultiTerminal
             _projectPanel?.RefreshForProject(e.Project);
         }
 
-        private void OnMcpJsonWriteRequested(object sender, string projectId)
+        private void OnMcpJsonWriteRequested(object sender, (string ProjectId, string SourcePath) args)
         {
-            if (_mcpConfigService == null || string.IsNullOrEmpty(projectId))
+            if (_mcpConfigService == null || string.IsNullOrEmpty(args.ProjectId))
             {
                 _projectPanel?.NotifyMcpJsonWriteResult(false, "MCP config service not available");
                 return;
             }
             try
             {
-                _mcpConfigService.WriteMcpJsonToProject(projectId);
+                // Pass sourcePath so McpConfigService can write without a SQLite project lookup.
+                // Projects from the JSON registry may not be in the SQLite projects table yet.
+                _mcpConfigService.WriteMcpJsonToProject(args.ProjectId, args.SourcePath);
                 _projectPanel?.NotifyMcpJsonWriteResult(true);
             }
             catch (Exception ex)

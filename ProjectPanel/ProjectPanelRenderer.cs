@@ -109,6 +109,12 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler<string> ImportMcpJsonRequested;
 
         /// <summary>
+        /// Raised when JS requests the available MCP servers list (registry entries)
+        /// for the picker popup — e.g., when the picker was opened before the cache was populated.
+        /// </summary>
+        public event EventHandler AvailableMcpServersRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -278,6 +284,11 @@ namespace MultiTerminal.ProjectPanel
 
                     case "getMcpRegistry":
                         McpRegistryRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "getAvailableMcpServers":
+                        // JS requests registry data for the picker popup (e.g., on first open before cache is warm).
+                        AvailableMcpServersRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "saveMcpRegistryEntry":
