@@ -702,7 +702,9 @@ namespace MultiTerminal.ProjectPanel
                     result.Action = actionEl.GetString();
 
                 if (root.TryGetProperty("item", out var itemEl))
-                    result.ItemJson = itemEl.GetRawText();
+                    result.ItemJson = itemEl.ValueKind == JsonValueKind.String
+                        ? itemEl.GetString()
+                        : itemEl.GetRawText();
             }
             catch (Exception ex)
             {
