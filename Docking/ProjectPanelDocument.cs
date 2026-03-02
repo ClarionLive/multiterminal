@@ -558,39 +558,26 @@ namespace MultiTerminal.Docking
             if (_renderer == null) return null;
             try
             {
-                var agents = new List<(string AgentType, string Description)>();
-                // Check project-level .claude/agents/
+                var agentMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                // Scan user-level ~/.claude/agents/ first (global agents)
+                var userAgentsDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".claude", "agents");
+                ScanAgentsDirectory(userAgentsDir, agentMap);
+
+                // Scan project-level .claude/agents/ (project agents override user-level)
                 var projectPath = _currentProject?.SourcePath ?? _currentProject?.Path;
                 if (!string.IsNullOrEmpty(projectPath))
                 {
-                    var agentsDir = Path.Combine(projectPath, ".claude", "agents");
-                    if (Directory.Exists(agentsDir))
-                    {
-                        foreach (var file in Directory.GetFiles(agentsDir, "*.md"))
-                        {
-                            var agentType = Path.GetFileNameWithoutExtension(file);
-                            // Read first non-empty line as description
-                            var desc = "";
-                            try
-                            {
-                                using var reader = new StreamReader(file);
-                                string line;
-                                while ((line = reader.ReadLine()) != null)
-                                {
-                                    line = line.Trim().TrimStart('#').Trim();
-                                    if (!string.IsNullOrEmpty(line))
-                                    {
-                                        desc = line.Length > 80 ? line.Substring(0, 80) + "..." : line;
-                                        break;
-                                    }
-                                }
-                            }
-                            catch { /* ignore read errors */ }
-                            agents.Add((agentType, desc));
-                        }
-                    }
+                    var projectAgentsDir = Path.Combine(projectPath, ".claude", "agents");
+                    ScanAgentsDirectory(projectAgentsDir, agentMap);
                 }
-                agents.Sort((a, b) => string.Compare(a.AgentType, b.AgentType, StringComparison.OrdinalIgnoreCase));
+
+                var agents = agentMap
+                    .Select(kv => (AgentType: kv.Key, Description: kv.Value))
+                    .OrderBy(a => a.AgentType, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
                 _renderer.SendAvailableSpecialistAgents(agents);
                 return agents;
             }
@@ -598,6 +585,36 @@ namespace MultiTerminal.Docking
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableSpecialistAgents error: {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Scans a directory for *.md agent definitions and adds them to the map.
+        /// Later calls override earlier entries (project-level overrides user-level).
+        /// </summary>
+        private void ScanAgentsDirectory(string agentsDir, Dictionary<string, string> agentMap)
+        {
+            if (string.IsNullOrEmpty(agentsDir) || !Directory.Exists(agentsDir)) return;
+            foreach (var file in Directory.GetFiles(agentsDir, "*.md"))
+            {
+                var agentType = Path.GetFileNameWithoutExtension(file);
+                var desc = "";
+                try
+                {
+                    using var reader = new StreamReader(file);
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        line = line.Trim().TrimStart('#').Trim();
+                        if (!string.IsNullOrEmpty(line))
+                        {
+                            desc = line.Length > 80 ? line.Substring(0, 80) + "..." : line;
+                            break;
+                        }
+                    }
+                }
+                catch { /* ignore read errors */ }
+                agentMap[agentType] = desc;
             }
         }
 

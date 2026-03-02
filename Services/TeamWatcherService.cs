@@ -1178,6 +1178,42 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Check if a transcript JSONL file looks like it belongs to a Claude Code internal
+        /// system agent (e.g., the compact/summary agent). These are spawned internally by
+        /// Claude Code for housekeeping, not by user code via the Task tool, and shouldn't
+        /// appear in the Agent Panel.
+        /// </summary>
+        private static bool LooksLikeSystemAgent(string filePath)
+        {
+            try
+            {
+                using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var reader = new StreamReader(stream);
+
+                // Check first 5 lines for known system agent signatures
+                for (int i = 0; i < 5; i++)
+                {
+                    string line = reader.ReadLine();
+                    if (string.IsNullOrEmpty(line)) break;
+
+                    // Compact/summary agent: has a distinctive summarization prompt
+                    if (line.Contains("create a detailed summary of the conversation so far"))
+                        return true;
+
+                    // Compact agent also instructs: no tools, only summary output
+                    if (line.Contains("IMPORTANT: Do NOT use any tools") && line.Contains("summary"))
+                        return true;
+                }
+            }
+            catch
+            {
+                // If we can't read, don't filter — err on the side of showing
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// Check if a transcript JSONL file looks like it belongs to a team agent.
         /// Team agent wakeup transcripts contain teammate-message markers in their
         /// first few lines. Non-team subagents (Explore, Plan) have plain task prompts
@@ -1220,6 +1256,13 @@ namespace MultiTerminal.Services
         {
             try
             {
+                // Filter out Claude Code system agents (compact/summary, etc.)
+                if (LooksLikeSystemAgent(transcriptPath))
+                {
+                    LogInfo($"Skipping system agent (compact/summary): {Path.GetFileName(transcriptPath)}");
+                    return;
+                }
+
                 // Derive a short name from the filename: agent-a1ea2e03... → "Subagent a1ea2e03"
                 string fileName = Path.GetFileNameWithoutExtension(transcriptPath); // "agent-a1ea2e03..."
                 string shortHash = fileName.Length > 12 ? fileName.Substring(6, 8) : fileName;

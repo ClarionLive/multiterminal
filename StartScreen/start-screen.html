@@ -907,6 +907,22 @@
             var card = buildCard(project, idx);
             container.appendChild(card);
         });
+
+        // Delay adding pin tooltips to prevent stale tooltip display
+        // when Start Screen is re-shown with mouse already over a pin button
+        setTimeout(function() {
+            var pins = container.querySelectorAll('.card-pin');
+            for (var i = 0; i < pins.length; i++) {
+                var pin = pins[i];
+                var id = pin.getAttribute('data-id');
+                for (var j = 0; j < allProjects.length; j++) {
+                    if (allProjects[j].id === id) {
+                        pin.setAttribute('title', allProjects[j].isPinned ? 'Unpin project' : 'Pin project');
+                        break;
+                    }
+                }
+            }
+        }, 300);
     }
 
     function buildCard(project, idx) {
@@ -930,7 +946,6 @@
                 '</div>' +
                 '<button class="card-pin' + (pinned ? ' pinned' : '') + '" ' +
                     'data-id="' + esc(project.id) + '" ' +
-                    'title="' + (pinned ? 'Unpin' : 'Pin') + ' project" ' +
                     'aria-label="' + (pinned ? 'Unpin' : 'Pin') + '">' +
                     (pinned ? '★' : '☆') +
                 '</button>' +
