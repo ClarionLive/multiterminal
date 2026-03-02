@@ -146,6 +146,8 @@ namespace MultiTerminal.Docking
             _renderer.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
             _renderer.ImportMcpJsonRequested += OnImportMcpJsonRequested;
             _renderer.AvailableMcpServersRequested += OnAvailableMcpServersRequested;
+            _renderer.AvailableSkillsRequested += OnAvailableSkillsRequested;
+            _renderer.AvailableSpecialistAgentsRequested += OnAvailableSpecialistAgentsRequested;
             _renderer.RegenerateAllMcpConfigsRequested += OnRegenerateAllMcpConfigsRequested;
 
             Controls.Add(_renderer);
@@ -341,6 +343,12 @@ namespace MultiTerminal.Docking
             // Send MCP registry entries for picker popup (reused after stats re-render)
             var availableMcpServers = SendAvailableMcpServers();
 
+            // Send available skills for picker popup (reused after stats re-render)
+            var availableSkills = SendAvailableSkills();
+
+            // Send available specialist agents for picker popup (reused after stats re-render)
+            var availableSpecialistAgents = SendAvailableSpecialistAgents();
+
             // Send association data if we have database access
             if (_projectContextService != null && !string.IsNullOrEmpty(project.Id))
             {
@@ -366,6 +374,14 @@ namespace MultiTerminal.Docking
             // Re-send MCP server registry (stats re-render clears the cached data)
             if (availableMcpServers != null)
                 _renderer?.SendAvailableMcpServers(availableMcpServers);
+
+            // Re-send available skills (stats re-render clears the cached data)
+            if (availableSkills != null)
+                _renderer?.SendAvailableSkills(availableSkills);
+
+            // Re-send available specialist agents (stats re-render clears the cached data)
+            if (availableSpecialistAgents != null)
+                _renderer?.SendAvailableSpecialistAgents(availableSpecialistAgents);
 
             // Sessions section hidden for now (feature incomplete)
             // await LoadSessionsForProjectAsync(project.Path);
@@ -498,6 +514,89 @@ namespace MultiTerminal.Docking
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableMcpServers error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Discovers available skill names by scanning ~/.claude/skills/ subdirectories.
+        /// Returns the list so the caller can reuse after stats re-render.
+        /// </summary>
+        private List<string> SendAvailableSkills()
+        {
+            if (_renderer == null) return null;
+            try
+            {
+                var skillsDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".claude", "skills");
+                var skillNames = new List<string>();
+                if (Directory.Exists(skillsDir))
+                {
+                    foreach (var dir in Directory.GetDirectories(skillsDir))
+                    {
+                        skillNames.Add(Path.GetFileName(dir));
+                    }
+                    skillNames.Sort(StringComparer.OrdinalIgnoreCase);
+                }
+                _renderer.SendAvailableSkills(skillNames);
+                return skillNames;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableSkills error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Discovers available specialist agent types by scanning .claude/agents/*.md in the project dir.
+        /// Returns the list so the caller can reuse after stats re-render.
+        /// </summary>
+        private List<(string AgentType, string Description)> SendAvailableSpecialistAgents()
+        {
+            if (_renderer == null) return null;
+            try
+            {
+                var agents = new List<(string AgentType, string Description)>();
+                // Check project-level .claude/agents/
+                var projectPath = _currentProject?.SourcePath ?? _currentProject?.Path;
+                if (!string.IsNullOrEmpty(projectPath))
+                {
+                    var agentsDir = Path.Combine(projectPath, ".claude", "agents");
+                    if (Directory.Exists(agentsDir))
+                    {
+                        foreach (var file in Directory.GetFiles(agentsDir, "*.md"))
+                        {
+                            var agentType = Path.GetFileNameWithoutExtension(file);
+                            // Read first non-empty line as description
+                            var desc = "";
+                            try
+                            {
+                                using var reader = new StreamReader(file);
+                                string line;
+                                while ((line = reader.ReadLine()) != null)
+                                {
+                                    line = line.Trim().TrimStart('#').Trim();
+                                    if (!string.IsNullOrEmpty(line))
+                                    {
+                                        desc = line.Length > 80 ? line.Substring(0, 80) + "..." : line;
+                                        break;
+                                    }
+                                }
+                            }
+                            catch { /* ignore read errors */ }
+                            agents.Add((agentType, desc));
+                        }
+                    }
+                }
+                agents.Sort((a, b) => string.Compare(a.AgentType, b.AgentType, StringComparison.OrdinalIgnoreCase));
+                _renderer.SendAvailableSpecialistAgents(agents);
+                return agents;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableSpecialistAgents error: {ex.Message}");
                 return null;
             }
         }
@@ -785,6 +884,16 @@ namespace MultiTerminal.Docking
         private void OnAvailableMcpServersRequested(object sender, EventArgs e)
         {
             SendAvailableMcpServers();
+        }
+
+        private void OnAvailableSkillsRequested(object sender, EventArgs e)
+        {
+            SendAvailableSkills();
+        }
+
+        private void OnAvailableSpecialistAgentsRequested(object sender, EventArgs e)
+        {
+            SendAvailableSpecialistAgents();
         }
 
         private void OnMcpRegistrySaveRequested(object sender, string itemJson)

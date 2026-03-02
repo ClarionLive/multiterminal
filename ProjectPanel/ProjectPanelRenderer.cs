@@ -120,6 +120,16 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler AvailableMcpServersRequested;
 
         /// <summary>
+        /// Raised when JS requests the available skills list for the picker popup.
+        /// </summary>
+        public event EventHandler AvailableSkillsRequested;
+
+        /// <summary>
+        /// Raised when JS requests the available specialist agents list for the picker popup.
+        /// </summary>
+        public event EventHandler AvailableSpecialistAgentsRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -298,6 +308,14 @@ namespace MultiTerminal.ProjectPanel
                     case "getAvailableMcpServers":
                         // JS requests registry data for the picker popup (e.g., on first open before cache is warm).
                         AvailableMcpServersRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "getAvailableSkills":
+                        AvailableSkillsRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "getAvailableSpecialistAgents":
+                        AvailableSpecialistAgentsRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "saveMcpRegistryEntry":
@@ -742,6 +760,44 @@ namespace MultiTerminal.ProjectPanel
             }
             sb.Append("]");
             SendMessage($"availableMcpServers:{sb}");
+        }
+
+        /// <summary>
+        /// Send all available skill names to the WebView2 for the skills picker popup.
+        /// Sends "availableSkills:[\"skill-name\",...]"
+        /// </summary>
+        public void SendAvailableSkills(List<string> skillNames)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < skillNames.Count; i++)
+            {
+                if (i > 0) sb.Append(",");
+                sb.Append($"\"{EscapeJson(skillNames[i])}\"");
+            }
+            sb.Append("]");
+            SendMessage($"availableSkills:{sb}");
+        }
+
+        /// <summary>
+        /// Send all available specialist agent types to the WebView2 for the specialist agents picker popup.
+        /// Sends "availableSpecialistAgents:[{\"agentType\":\"...\",\"description\":\"...\"},...]"
+        /// </summary>
+        public void SendAvailableSpecialistAgents(List<(string AgentType, string Description)> agents)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < agents.Count; i++)
+            {
+                var a = agents[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"agentType\":\"{EscapeJson(a.AgentType)}\",");
+                sb.Append($"\"description\":\"{EscapeJson(a.Description)}\"");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            SendMessage($"availableSpecialistAgents:{sb}");
         }
 
         /// <summary>

@@ -2118,6 +2118,10 @@
         let cachedAvailableAgents = [];
         let cachedAvailableMcpServers = [];
         let _mcpPickerPendingOpen = false;  // true when picker was requested but registry was not yet loaded
+        let cachedAvailableSkills = [];
+        let _skillsPickerPendingOpen = false;
+        let cachedAvailableSpecialistAgents = [];
+        let _specialistAgentsPickerPendingOpen = false;
 
         // Render all 6 association sections into #associations-container
         function renderAssociations(data) {
@@ -2517,7 +2521,7 @@
         };
 
         // Tables that use a picker popup instead of free-text add
-        const PICKER_TABLES = { agents: true, mcpServers: true };
+        const PICKER_TABLES = { agents: true, mcpServers: true, skills: true, specialistAgents: true };
 
         // Add a new association row (or open picker for supported tables)
         function addAssociation(tableName) {
@@ -2613,6 +2617,10 @@
                 openAgentsPicker();
             } else if (tableName === 'mcpServers') {
                 openMcpServersPicker();
+            } else if (tableName === 'skills') {
+                openSkillsPicker();
+            } else if (tableName === 'specialistAgents') {
+                openSpecialistAgentsPicker();
             }
         }
 
@@ -2747,6 +2755,147 @@
                         tableName: 'agents',
                         action: 'delete',
                         item: JSON.stringify({ agentName: a.agentName })
+                    });
+                }
+            });
+        }
+
+        // ============================================================
+        // SKILLS PICKER
+        // ============================================================
+
+        function openSkillsPicker() {
+            if (cachedAvailableSkills.length === 0) {
+                _skillsPickerPendingOpen = true;
+                sendToHost({ type: 'getAvailableSkills' });
+                return;
+            }
+
+            const currentSkills = (currentAssociations?.skills || []);
+            const enabledNames = new Set(currentSkills.map(s => s.skillName));
+
+            let listHtml = '';
+            cachedAvailableSkills.forEach(name => {
+                const isChecked = enabledNames.has(name);
+                listHtml += `
+                    <label class="picker-item">
+                        <input type="checkbox" data-skill-name="${escapeHtml(name)}"
+                               ${isChecked ? 'checked' : ''}>
+                        <div class="picker-item-info">
+                            <div class="picker-item-name">${escapeHtml(name)}</div>
+                        </div>
+                    </label>`;
+            });
+
+            showPickerDialog('Select Skills', listHtml, () => {
+                commitSkillsPicker();
+            });
+        }
+
+        function commitSkillsPicker() {
+            const overlay = document.querySelector('.picker-overlay');
+            if (!overlay) return;
+
+            const currentSkills = (currentAssociations?.skills || []);
+            const currentNames = new Set(currentSkills.map(s => s.skillName));
+
+            const checkboxes = overlay.querySelectorAll('input[type="checkbox"]');
+            const nowCheckedNames = new Set();
+            checkboxes.forEach(cb => {
+                if (cb.checked) nowCheckedNames.add(cb.dataset.skillName);
+            });
+
+            // Add newly checked skills
+            nowCheckedNames.forEach(name => {
+                if (!currentNames.has(name)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'skills',
+                        action: 'add',
+                        item: JSON.stringify({ skillName: name, isEnabled: true })
+                    });
+                }
+            });
+
+            // Remove unchecked skills
+            currentSkills.forEach(s => {
+                if (!nowCheckedNames.has(s.skillName)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'skills',
+                        action: 'delete',
+                        item: JSON.stringify({ skillName: s.skillName })
+                    });
+                }
+            });
+        }
+
+        // ============================================================
+        // SPECIALIST AGENTS PICKER
+        // ============================================================
+
+        function openSpecialistAgentsPicker() {
+            if (cachedAvailableSpecialistAgents.length === 0) {
+                _specialistAgentsPickerPendingOpen = true;
+                sendToHost({ type: 'getAvailableSpecialistAgents' });
+                return;
+            }
+
+            const currentAgents = (currentAssociations?.specialistAgents || []);
+            const enabledTypes = new Set(currentAgents.map(a => a.agentType));
+
+            let listHtml = '';
+            cachedAvailableSpecialistAgents.forEach(agent => {
+                const isChecked = enabledTypes.has(agent.agentType);
+                listHtml += `
+                    <label class="picker-item">
+                        <input type="checkbox" data-agent-type="${escapeHtml(agent.agentType)}"
+                               ${isChecked ? 'checked' : ''}>
+                        <div class="picker-item-info">
+                            <div class="picker-item-name">${escapeHtml(agent.agentType)}</div>
+                            ${agent.description ? `<div class="picker-item-role">${escapeHtml(agent.description)}</div>` : ''}
+                        </div>
+                    </label>`;
+            });
+
+            showPickerDialog('Select Specialist Agents', listHtml, () => {
+                commitSpecialistAgentsPicker();
+            });
+        }
+
+        function commitSpecialistAgentsPicker() {
+            const overlay = document.querySelector('.picker-overlay');
+            if (!overlay) return;
+
+            const currentAgents = (currentAssociations?.specialistAgents || []);
+            const currentTypes = new Set(currentAgents.map(a => a.agentType));
+
+            const checkboxes = overlay.querySelectorAll('input[type="checkbox"]');
+            const nowCheckedTypes = new Set();
+            checkboxes.forEach(cb => {
+                if (cb.checked) nowCheckedTypes.add(cb.dataset.agentType);
+            });
+
+            // Add newly checked specialist agents
+            nowCheckedTypes.forEach(agentType => {
+                if (!currentTypes.has(agentType)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'specialistAgents',
+                        action: 'add',
+                        item: JSON.stringify({ agentType: agentType, isEnabled: true, customPrompt: '' })
+                    });
+                }
+            });
+
+            // Remove unchecked specialist agents
+            currentAgents.forEach(a => {
+                if (!nowCheckedTypes.has(a.agentType)) {
+                    sendToHost({
+                        type: 'updateAssociation',
+                        tableName: 'specialistAgents',
+                        action: 'delete',
+                        item: JSON.stringify({ agentType: a.agentType })
                     });
                 }
             });
@@ -2950,6 +3099,30 @@
                             // avoids an unnecessary double-render on every normal project load.
                             if (wasEmpty && currentAssociations) {
                                 renderAssociations(currentAssociations);
+                            }
+                            break;
+                        }
+                        case 'availableSkills': {
+                            cachedAvailableSkills = JSON.parse(data);
+                            if (_skillsPickerPendingOpen) {
+                                _skillsPickerPendingOpen = false;
+                                if (cachedAvailableSkills.length > 0) {
+                                    openSkillsPicker();
+                                } else {
+                                    showPickerDialog('Select Skills', '<div class="picker-empty">No skills found in ~/.claude/skills/</div>', null);
+                                }
+                            }
+                            break;
+                        }
+                        case 'availableSpecialistAgents': {
+                            cachedAvailableSpecialistAgents = JSON.parse(data);
+                            if (_specialistAgentsPickerPendingOpen) {
+                                _specialistAgentsPickerPendingOpen = false;
+                                if (cachedAvailableSpecialistAgents.length > 0) {
+                                    openSpecialistAgentsPicker();
+                                } else {
+                                    showPickerDialog('Select Specialist Agents', '<div class="picker-empty">No agents found in .claude/agents/</div>', null);
+                                }
                             }
                             break;
                         }
