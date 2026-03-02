@@ -1,0 +1,602 @@
+<Window x:Class="MultiTerminal.Dialogs.SettingsWpfDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings"
+        Width="520" Height="780"
+        MinWidth="520" MaxWidth="520"
+        MinHeight="780" MaxHeight="780"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Background="#1E1E1E">
+
+    <Window.Resources>
+        <!-- Flat dark TextBox style -->
+        <Style x:Key="DarkTextBox" TargetType="TextBox">
+            <Setter Property="Background" Value="#2D2D30"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CaretBrush" Value="#E0E0E0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsFocused" Value="True">
+                                <Setter Property="BorderBrush" Value="#007ACC"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ToggleButton style used inside ComboBox template (invisible, covers entire area) -->
+        <Style x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="Transparent"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Flat dark ComboBox style -->
+        <Style x:Key="DarkComboBox" TargetType="ComboBox">
+            <Setter Property="Background" Value="#2D2D30"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <Border x:Name="Border"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="3">
+                                <Grid>
+                                    <ContentPresenter x:Name="ContentSite"
+                                                      IsHitTestVisible="False"
+                                                      Content="{TemplateBinding SelectionBoxItem}"
+                                                      ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                      Margin="8,6,28,6"
+                                                      VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="Arrow"
+                                               Text="&#x25BC;"
+                                               FontSize="9"
+                                               Foreground="#A0A0A0"
+                                               HorizontalAlignment="Right"
+                                               VerticalAlignment="Center"
+                                               Margin="0,0,8,0"
+                                               IsHitTestVisible="False"/>
+                                </Grid>
+                            </Border>
+                            <!-- ToggleButton covers entire area to open/close dropdown -->
+                            <ToggleButton Style="{StaticResource ComboBoxToggleButton}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Focusable="False"
+                                          ClickMode="Press"/>
+                            <Popup x:Name="Popup"
+                                   Placement="Bottom"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   PopupAnimation="Slide">
+                                <Grid x:Name="DropDown"
+                                      SnapsToDevicePixels="True"
+                                      MinWidth="{TemplateBinding ActualWidth}"
+                                      MaxHeight="200">
+                                    <Border Background="#2D2D30"
+                                            BorderBrush="#3E3E42"
+                                            BorderThickness="1">
+                                        <ScrollViewer>
+                                            <StackPanel IsItemsHost="True"
+                                                        KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                        </ScrollViewer>
+                                    </Border>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsDropDownOpen" Value="True">
+                                <Setter TargetName="Border" Property="BorderBrush" Value="#007ACC"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Resources>
+                <Style TargetType="ComboBoxItem">
+                    <Setter Property="Background" Value="#2D2D30"/>
+                    <Setter Property="Foreground" Value="#E0E0E0"/>
+                    <Setter Property="Padding" Value="8,5"/>
+                    <Setter Property="FontFamily" Value="Segoe UI"/>
+                    <Setter Property="FontSize" Value="13"/>
+                    <Style.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Background" Value="#3E3E42"/>
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter Property="Background" Value="#007ACC"/>
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </Style.Resources>
+        </Style>
+
+        <!-- Accent (OK) button style -->
+        <Style x:Key="AccentButton" TargetType="Button">
+            <Setter Property="Background" Value="#007ACC"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#008CE0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="12,6"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#1C97EA"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#005A9E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Cancel button style -->
+        <Style x:Key="CancelButton" TargetType="Button">
+            <Setter Property="Background" Value="#3E3E42"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#565656"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="12,6"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#505054"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#5A5A5E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Small action button style (Add/Edit/Delete/Set Default) -->
+        <Style x:Key="SmallActionButton" TargetType="Button">
+            <Setter Property="Background" Value="#3E3E42"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#565656"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#505054"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#5A5A5E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Dark GroupBox style -->
+        <Style x:Key="DarkGroupBox" TargetType="GroupBox">
+            <Setter Property="Foreground" Value="#A0A0A0"/>
+            <Setter Property="Background" Value="#1E1E1E"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GroupBox">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Grid.RowSpan="2"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    Background="{TemplateBinding Background}"
+                                    CornerRadius="3"
+                                    Margin="0,8,0,0"/>
+                            <TextBlock Grid.Row="0"
+                                       Text="{TemplateBinding Header}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       FontFamily="{TemplateBinding FontFamily}"
+                                       FontSize="{TemplateBinding FontSize}"
+                                       FontWeight="SemiBold"
+                                       Background="#1E1E1E"
+                                       Padding="4,0"
+                                       Margin="10,0,0,0"
+                                       HorizontalAlignment="Left"
+                                       VerticalAlignment="Center"/>
+                            <ContentPresenter Grid.Row="1"
+                                              Margin="{TemplateBinding Padding}"
+                                              RecognizesAccessKey="True"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Dark RadioButton style -->
+        <Style x:Key="DarkRadioButton" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+
+        <!-- Dark DataGrid style -->
+        <Style x:Key="DarkDataGrid" TargetType="DataGrid">
+            <Setter Property="Background" Value="#252526"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="RowBackground" Value="#252526"/>
+            <Setter Property="AlternatingRowBackground" Value="#2D2D30"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#3E3E42"/>
+            <Setter Property="VerticalGridLinesBrush" Value="#3E3E42"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="SelectionMode" Value="Single"/>
+            <Setter Property="SelectionUnit" Value="FullRow"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/>
+            <Setter Property="CanUserResizeRows" Value="False"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="ColumnHeaderStyle">
+                <Setter.Value>
+                    <Style TargetType="DataGridColumnHeader">
+                        <Setter Property="Background" Value="#2D2D30"/>
+                        <Setter Property="Foreground" Value="#A0A0A0"/>
+                        <Setter Property="BorderBrush" Value="#3E3E42"/>
+                        <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                        <Setter Property="Padding" Value="8,5"/>
+                        <Setter Property="FontFamily" Value="Segoe UI"/>
+                        <Setter Property="FontSize" Value="12"/>
+                        <Setter Property="FontWeight" Value="SemiBold"/>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="CellStyle">
+                <Setter.Value>
+                    <Style TargetType="DataGridCell">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Setter Property="Foreground" Value="#E0E0E0"/>
+                        <Setter Property="BorderThickness" Value="0"/>
+                        <Setter Property="Padding" Value="4,2"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#007ACC"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="RowStyle">
+                <Setter.Value>
+                    <Style TargetType="DataGridRow">
+                        <Setter Property="Background" Value="#252526"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#2D2D30"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#1A3A5C"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Scrollable form content -->
+        <ScrollViewer Grid.Row="0"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Margin="0">
+            <StackPanel Margin="16,16,16,8">
+
+                <!-- SECTION 1: Font Sizes -->
+                <GroupBox Header="Font Sizes"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <Grid Margin="4,8,4,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="90"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="32"/>
+                            <RowDefinition Height="32"/>
+                            <RowDefinition Height="32"/>
+                            <RowDefinition Height="32"/>
+                            <RowDefinition Height="32"/>
+                            <RowDefinition Height="32"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Toolbar"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ToolbarFontCombo" Grid.Row="0" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Terminal"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="TerminalFontCombo" Grid.Row="1" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Project Panel"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ProjectPanelFontCombo" Grid.Row="2" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Chat Panel"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ChatPanelFontCombo" Grid.Row="3" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Tasks Panel"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="TasksPanelFontCombo" Grid.Row="4" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Activity Panel"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="ActivityPanelFontCombo" Grid.Row="5" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+                    </Grid>
+                </GroupBox>
+
+                <!-- SECTION 2: Terminal Placement -->
+                <GroupBox Header="Terminal Placement"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <Grid Margin="4,8,4,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="90"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="32"/>
+                            <RowDefinition Height="32"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Max Grids"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="MaxGridsCombo" Grid.Row="0" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Max Tabs per Grid"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox x:Name="MaxTabsCombo" Grid.Row="1" Grid.Column="1"
+                                  Style="{StaticResource DarkComboBox}" Height="26"/>
+                    </Grid>
+                </GroupBox>
+
+                <!-- SECTION 3: Agent Panel -->
+                <GroupBox Header="Agent Panel"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <StackPanel Margin="4,8,4,4">
+
+                        <!-- Layout sub-section label -->
+                        <TextBlock Text="Layout"
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+                        <!-- Layout radio buttons: 2x2 grid -->
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="28"/>
+                                <RowDefinition Height="28"/>
+                            </Grid.RowDefinitions>
+                            <RadioButton x:Name="SplitRightRadio"
+                                         Grid.Row="0" Grid.Column="0"
+                                         Content="Split Right"
+                                         GroupName="AgentLayout"
+                                         Style="{StaticResource DarkRadioButton}"/>
+                            <RadioButton x:Name="SplitBelowRadio"
+                                         Grid.Row="0" Grid.Column="1"
+                                         Content="Split Below"
+                                         GroupName="AgentLayout"
+                                         Style="{StaticResource DarkRadioButton}"/>
+                            <RadioButton x:Name="TabbedRightRadio"
+                                         Grid.Row="1" Grid.Column="0"
+                                         Content="Tabbed Right"
+                                         GroupName="AgentLayout"
+                                         Style="{StaticResource DarkRadioButton}"/>
+                            <RadioButton x:Name="DoNotShowRadio"
+                                         Grid.Row="1" Grid.Column="1"
+                                         Content="Do Not Show"
+                                         GroupName="AgentLayout"
+                                         Style="{StaticResource DarkRadioButton}"/>
+                        </Grid>
+
+                        <!-- On Complete sub-section label -->
+                        <TextBlock Text="On Complete"
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+                        <!-- On Complete radio buttons: horizontal -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <RadioButton x:Name="AutoCloseRadio"
+                                         Content="Auto-close"
+                                         GroupName="AgentCloseMode"
+                                         Style="{StaticResource DarkRadioButton}"
+                                         Margin="0,0,24,0"/>
+                            <RadioButton x:Name="KeepOpenRadio"
+                                         Content="Keep open"
+                                         GroupName="AgentCloseMode"
+                                         Style="{StaticResource DarkRadioButton}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </GroupBox>
+
+                <!-- SECTION 4: Claude Commands -->
+                <GroupBox Header="Claude Commands"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <StackPanel Margin="4,8,4,4">
+
+                        <!-- Commands DataGrid -->
+                        <DataGrid x:Name="CommandsGrid"
+                                  Style="{StaticResource DarkDataGrid}"
+                                  Height="150"
+                                  Margin="0,0,0,8">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Command"
+                                                    Binding="{Binding Command}"
+                                                    Width="*"
+                                                    IsReadOnly="True"/>
+                                <DataGridCheckBoxColumn Header="Default"
+                                                        Binding="{Binding IsDefault}"
+                                                        Width="70"
+                                                        IsReadOnly="True"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <!-- Command action buttons -->
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="AddCommandButton"
+                                    Content="Add"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Width="60" Height="26"
+                                    Margin="0,0,6,0"
+                                    Click="AddCommandButton_Click"/>
+                            <Button x:Name="EditCommandButton"
+                                    Content="Edit"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Width="60" Height="26"
+                                    Margin="0,0,6,0"
+                                    Click="EditCommandButton_Click"/>
+                            <Button x:Name="DeleteCommandButton"
+                                    Content="Delete"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Width="60" Height="26"
+                                    Margin="0,0,6,0"
+                                    Click="DeleteCommandButton_Click"/>
+                            <Button x:Name="SetDefaultCommandButton"
+                                    Content="Set Default"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Width="90" Height="26"
+                                    Click="SetDefaultCommandButton_Click"/>
+                        </StackPanel>
+                    </StackPanel>
+                </GroupBox>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Bottom bar with OK / Cancel -->
+        <Border Grid.Row="1"
+                Background="#2D2D30"
+                BorderBrush="#3E3E42"
+                BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal"
+                        HorizontalAlignment="Right"
+                        Margin="12,10">
+                <Button x:Name="OkButton"
+                        Style="{StaticResource AccentButton}"
+                        Content="OK"
+                        Height="32"
+                        Margin="0,0,8,0"
+                        IsDefault="True"
+                        Click="OkButton_Click"/>
+                <Button x:Name="CancelBtn"
+                        Style="{StaticResource CancelButton}"
+                        Content="Cancel"
+                        Height="32"
+                        IsCancel="True"
+                        Click="CancelBtn_Click"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

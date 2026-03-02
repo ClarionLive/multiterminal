@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Windows.Interop;
 using MultiTerminal.ActivityPanel;
 using MultiTerminal.ChatPanel;
 using MultiTerminal.TasksPanel;
@@ -1215,12 +1216,11 @@ namespace MultiTerminal
 
         private void ShowSettingsDialog()
         {
-            using (var dialog = new SettingsDialog(_settings, _currentTheme))
+            var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark);
+            new WindowInteropHelper(dialog) { Owner = this.Handle };
+            if (dialog.ShowDialog() == true)
             {
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                {
-                    ApplySettingsFromDialog(dialog);
-                }
+                ApplySettingsFromDialog(dialog);
             }
         }
 
@@ -1241,7 +1241,7 @@ namespace MultiTerminal
             }
         }
 
-        private void ApplySettingsFromDialog(SettingsDialog dialog)
+        private void ApplySettingsFromDialog(SettingsWpfDialog dialog)
         {
             // Apply toolbar font
             _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, dialog.ToolbarFontSize);

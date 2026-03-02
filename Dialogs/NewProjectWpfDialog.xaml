@@ -42,6 +42,17 @@
             </Setter>
         </Style>
 
+        <!-- ToggleButton style used inside ComboBox template (invisible, covers entire area) -->
+        <Style x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="Transparent"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Flat dark ComboBox style -->
         <Style x:Key="DarkComboBox" TargetType="ComboBox">
             <Setter Property="Background" Value="#2D2D30"/>
@@ -73,9 +84,15 @@
                                                Foreground="#A0A0A0"
                                                HorizontalAlignment="Right"
                                                VerticalAlignment="Center"
-                                               Margin="0,0,8,0"/>
+                                               Margin="0,0,8,0"
+                                               IsHitTestVisible="False"/>
                                 </Grid>
                             </Border>
+                            <!-- ToggleButton covers entire area to open/close dropdown -->
+                            <ToggleButton Style="{StaticResource ComboBoxToggleButton}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Focusable="False"
+                                          ClickMode="Press"/>
                             <Popup x:Name="Popup"
                                    Placement="Bottom"
                                    IsOpen="{TemplateBinding IsDropDownOpen}"
@@ -98,7 +115,7 @@
                             </Popup>
                         </Grid>
                         <ControlTemplate.Triggers>
-                            <Trigger Property="IsFocused" Value="True">
+                            <Trigger Property="IsDropDownOpen" Value="True">
                                 <Setter TargetName="Border" Property="BorderBrush" Value="#007ACC"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
