@@ -235,12 +235,15 @@ namespace MultiTerminal
             _projectPanel.McpRegistrySaveRequested += OnMcpRegistrySaveRequested;
             _projectPanel.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
             _projectPanel.ImportMcpJsonRequested += OnImportMcpJsonRequested;
-
-            // Initialize McpConfigService — used by OnMcpJsonWriteRequested and OnImportMcpJsonRequested
-            _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase);
+            _projectPanel.RegenerateAllMcpConfigsRequested += OnRegenerateAllMcpConfigsRequested;
 
             // Create debug log service (available immediately)
             _debugLogService = new DebugLogService();
+
+            // Initialize McpConfigService — used by OnMcpJsonWriteRequested and OnImportMcpJsonRequested
+            // Pass debug log callback so CLI errors are visible in the debug panel
+            _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase,
+                (source, msg) => _debugLogService?.Info(source, msg));
 
             // Create panel instances early so they can be restored from layout
             // They will be initialized with MCP broker later in InitializeMcpServerAndChatPanel
@@ -1658,6 +1661,9 @@ namespace MultiTerminal
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
                 }
 
+                // Regenerate MCP config files before launch so Claude Code picks up current settings
+                _mcpConfigService?.EnsureMcpConfigsForProject(project.Id, launchDir);
+
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead);
 
@@ -1766,6 +1772,9 @@ namespace MultiTerminal
                     }
                 };
                 sourceDoc.ClaudeCodeDetected += newProjectHandler;
+
+                // Regenerate MCP config files before launch so Claude Code picks up current settings
+                _mcpConfigService?.EnsureMcpConfigsForProject(project.Id, launchDir);
 
                 // Start terminal in project folder
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir}");
@@ -3793,15 +3802,39 @@ namespace MultiTerminal
             }
             try
             {
-                // Pass sourcePath so McpConfigService can write without a SQLite project lookup.
-                // Projects from the JSON registry may not be in the SQLite projects table yet.
-                _mcpConfigService.WriteMcpJsonToProject(args.ProjectId, args.SourcePath);
+                // Regenerate both global and project-level MCP configs.
+                // Global config goes to ~/.claude/.mcp.json (available in all sessions).
+                // Project config goes to {sourcePath}/.mcp.json (project-specific servers).
+                _mcpConfigService.EnsureMcpConfigsForProject(args.ProjectId, args.SourcePath);
                 _projectPanel?.NotifyMcpJsonWriteResult(true);
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[MainForm] OnMcpJsonWriteRequested error: {ex.Message}");
                 _projectPanel?.NotifyMcpJsonWriteResult(false, ex.Message);
+            }
+        }
+
+        private void OnRegenerateAllMcpConfigsRequested(object sender, EventArgs e)
+        {
+            _debugLogService?.Info("McpConfig", "Regenerate ALL requested");
+            if (_mcpConfigService == null)
+            {
+                _debugLogService?.Warning("McpConfig", "McpConfigService is null — cannot regenerate");
+                _projectPanel?.NotifyMcpRegenResult(false, error: "MCP config service not available");
+                return;
+            }
+            try
+            {
+                var (globalCount, projectCount) = _mcpConfigService.RegenerateAllMcpConfigs();
+                _debugLogService?.Info("McpConfig", $"Regenerated: {globalCount} global (CLI), {projectCount} project(s)");
+                _projectPanel?.NotifyMcpRegenResult(true, globalCount, projectCount);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("McpConfig", $"Regeneration failed: {ex.Message}\n{ex.StackTrace}");
+                System.Diagnostics.Debug.WriteLine($"[MainForm] OnRegenerateAllMcpConfigsRequested error: {ex.Message}");
+                _projectPanel?.NotifyMcpRegenResult(false, error: ex.Message);
             }
         }
 

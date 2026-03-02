@@ -92,6 +92,11 @@ namespace MultiTerminal.Docking
         /// </summary>
         public event EventHandler<string> ImportMcpJsonRequested;
 
+        /// <summary>
+        /// Raised when JS requests regeneration of all MCP config files (global + all projects).
+        /// </summary>
+        public event EventHandler RegenerateAllMcpConfigsRequested;
+
         #endregion
 
         public ProjectPanelDocument()
@@ -141,6 +146,7 @@ namespace MultiTerminal.Docking
             _renderer.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
             _renderer.ImportMcpJsonRequested += OnImportMcpJsonRequested;
             _renderer.AvailableMcpServersRequested += OnAvailableMcpServersRequested;
+            _renderer.RegenerateAllMcpConfigsRequested += OnRegenerateAllMcpConfigsRequested;
 
             Controls.Add(_renderer);
             Controls.Add(_headerPanel);
@@ -855,6 +861,19 @@ namespace MultiTerminal.Docking
         public void NotifyMcpJsonWriteResult(bool success, string error = null)
         {
             _renderer?.SendMcpJsonWriteResult(success, error);
+        }
+
+        private void OnRegenerateAllMcpConfigsRequested(object sender, EventArgs e)
+        {
+            RegenerateAllMcpConfigsRequested?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Called by MainForm after regenerating all MCP configs (global via CLI + project files).
+        /// </summary>
+        public void NotifyMcpRegenResult(bool success, int globalCount = 0, int projectCount = 0, string error = null)
+        {
+            _renderer?.SendMcpRegenResult(success, globalCount, projectCount, error);
         }
 
         /// <summary>

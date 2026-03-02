@@ -109,6 +109,11 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler<string> ImportMcpJsonRequested;
 
         /// <summary>
+        /// Raised when JS requests regeneration of all MCP config files (global + all projects).
+        /// </summary>
+        public event EventHandler RegenerateAllMcpConfigsRequested;
+
+        /// <summary>
         /// Raised when JS requests the available MCP servers list (registry entries)
         /// for the picker popup — e.g., when the picker was opened before the cache was populated.
         /// </summary>
@@ -284,6 +289,10 @@ namespace MultiTerminal.ProjectPanel
 
                     case "getMcpRegistry":
                         McpRegistryRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "regenerateAllMcpConfigs":
+                        RegenerateAllMcpConfigsRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "getAvailableMcpServers":
@@ -755,6 +764,17 @@ namespace MultiTerminal.ProjectPanel
                 ? $",\"error\":\"{EscapeJson(error)}\""
                 : "";
             SendMessage($"mcpJsonWriteResult:{{\"success\":{(success ? "true" : "false")}{errorPart}}}");
+        }
+
+        /// <summary>
+        /// Notify JS of the result of a full MCP config regeneration (global via CLI + project files).
+        /// </summary>
+        public void SendMcpRegenResult(bool success, int globalCount = 0, int projectCount = 0, string error = null)
+        {
+            var errorPart = (!success && !string.IsNullOrEmpty(error))
+                ? $",\"error\":\"{EscapeJson(error)}\""
+                : "";
+            SendMessage($"mcpRegenResult:{{\"success\":{(success ? "true" : "false")},\"globalCount\":{globalCount},\"projectCount\":{projectCount}{errorPart}}}");
         }
 
         /// <summary>

@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using MultiTerminal.Models;
@@ -15,6 +18,7 @@ namespace MultiTerminal.Services
     public class McpConfigService
     {
         private readonly ProjectDatabase _projectDb;
+        private readonly Action<string, string> _log;
 
         // Env var key name substrings that indicate the value is a secret.
         // Only applied to values inside "env" objects (not arbitrary string fields).
@@ -27,9 +31,15 @@ namespace MultiTerminal.Services
             "anthropic", "claude", "openai", "gemini", "cohere"
         };
 
-        public McpConfigService(ProjectDatabase projectDb)
+        /// <param name="projectDb">Project database for registry access.</param>
+        /// <param name="log">
+        ///   Optional logging callback (source, message). When null, falls back to Debug.WriteLine.
+        ///   Wire this to DebugLogService.Info for visibility in the MultiTerminal debug panel.
+        /// </param>
+        public McpConfigService(ProjectDatabase projectDb, Action<string, string> log = null)
         {
             _projectDb = projectDb ?? throw new ArgumentNullException(nameof(projectDb));
+            _log = log ?? ((source, msg) => System.Diagnostics.Debug.WriteLine($"[{source}] {msg}"));
         }
 
         /// <summary>
@@ -107,7 +117,7 @@ namespace MultiTerminal.Services
             var existing = _projectDb.GetMcpRegistryEntry("multiterminal");
             if (existing != null)
             {
-                System.Diagnostics.Debug.WriteLine("[McpConfigService] Registry already seeded (multiterminal entry exists), skipping.");
+                _log("McpConfig", "Registry already seeded (multiterminal entry exists), skipping.");
                 return 0;
             }
 
@@ -115,29 +125,30 @@ namespace MultiTerminal.Services
             string mcpJsonPath = Path.Combine(mtSourcePath, ".claude", "mcp.json");
             if (!File.Exists(mcpJsonPath))
             {
-                System.Diagnostics.Debug.WriteLine($"[McpConfigService] No .claude/mcp.json found at {mtSourcePath}, skipping registry seeding.");
+                _log("McpConfig", $"No .claude/mcp.json found at {mtSourcePath}, skipping registry seeding.");
                 return 0;
             }
 
             try
             {
                 int count = ImportFromMcpJsonFile(mcpJsonPath, defaultTier: "optional");
-                System.Diagnostics.Debug.WriteLine($"[McpConfigService] Seeded {count} MCP server(s) from {mcpJsonPath}");
+                _log("McpConfig", $"Seeded {count} MCP server(s) from {mcpJsonPath}");
                 return count;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[McpConfigService] Seeding failed: {ex.Message}");
+                _log("McpConfig", $"Seeding failed: {ex.Message}");
                 return 0;
             }
         }
 
         /// <summary>
-        /// Generates the combined mcpServers JSON object for a project.
-        /// Combines:
-        ///   - All "multiterminal" tier entries (always included — the MT MCP server itself)
-        ///   - All "global" tier entries (always included for every project)
+        /// Generates the project-level mcpServers JSON.
+        /// Includes only:
+        ///   - "multiterminal" tier entries (the MT MCP server itself)
         ///   - "optional" tier entries that are enabled for the given project
+        /// Global-tier servers are NOT included here — they're synced to Claude Code's
+        /// user scope via CLI (see SyncGlobalMcpServers).
         /// Returns a JSON string: {"mcpServers": { ... }}.
         /// </summary>
         public string GenerateMcpJsonForProject(string projectId)
@@ -145,7 +156,7 @@ namespace MultiTerminal.Services
             if (string.IsNullOrWhiteSpace(projectId))
                 throw new ArgumentException("projectId is required", nameof(projectId));
 
-            // Get set of optional server names enabled for this project (reuses existing targeted query)
+            // Get set of optional server names enabled for this project
             var enabledOptional = _projectDb.GetEnabledMcpServerNamesForProject(projectId);
 
             // Gather all registry entries
@@ -158,8 +169,9 @@ namespace MultiTerminal.Services
             bool first = true;
             foreach (var entry in allEntries)
             {
+                // Project-level: multiterminal + enabled optional only.
+                // Global-tier servers are synced via CLI (SyncGlobalMcpServers).
                 bool include = entry.Tier == "multiterminal"
-                            || entry.Tier == "global"
                             || (entry.Tier == "optional" && enabledOptional.Contains(entry.ServerName));
 
                 if (!include) continue;
@@ -167,8 +179,6 @@ namespace MultiTerminal.Services
                 if (!first) sb.AppendLine(",");
                 first = false;
 
-                // Validate ConfigJson is a parseable JSON object before embedding.
-                // Malformed or non-object config_json would produce a broken output file.
                 string configBody = ValidateConfigJsonBody(entry.ConfigJson, entry.ServerName);
                 sb.Append($"    \"{EscapeJsonString(entry.ServerName)}\": {configBody}");
             }
@@ -179,6 +189,267 @@ namespace MultiTerminal.Services
             sb.Append("}");
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Syncs global-tier MCP servers to Claude Code's user scope via the CLI.
+        /// Runs `claude mcp add --scope user` for each global-tier registry entry,
+        /// and removes user-scope servers that were demoted from global in the registry.
+        /// Returns the number of servers synced (added/updated).
+        /// </summary>
+        public int SyncGlobalMcpServers()
+        {
+            var allEntries = _projectDb.GetAllMcpRegistryEntries();
+            var globalEntries = allEntries.Where(e => e.Tier == "global").ToList();
+            int synced = 0;
+
+            foreach (var entry in globalEntries)
+            {
+                try
+                {
+                    // Remove first to ensure clean state (ignore errors — may not exist yet)
+                    RunClaudeCommand($"mcp remove \"{entry.ServerName}\" --scope user");
+
+                    if (AddClaudeMcpServer(entry))
+                        synced++;
+                }
+                catch (Exception ex)
+                {
+                    _log("McpConfig", $"Failed to sync global server '{entry.ServerName}': {ex.Message}");
+                }
+            }
+
+            // Remove user-scope servers that are in our registry but no longer global tier.
+            // (They were demoted from global to optional/multiterminal.)
+            // Never touch servers we don't know about — user may have added them via CLI.
+            var globalNames = new HashSet<string>(
+                globalEntries.Select(e => e.ServerName), StringComparer.OrdinalIgnoreCase);
+            var registryNames = new HashSet<string>(
+                allEntries.Select(e => e.ServerName), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var entry in allEntries)
+            {
+                if (entry.Tier == "global") continue;  // already handled above
+                if (!registryNames.Contains(entry.ServerName)) continue;
+
+                // This server is in our registry but NOT global — remove from user scope
+                try
+                {
+                    RunClaudeCommand($"mcp remove \"{entry.ServerName}\" --scope user");
+                }
+                catch (Exception ex)
+                {
+                    _log("McpConfig", $"Failed to remove demoted server '{entry.ServerName}': {ex.Message}");
+                }
+            }
+
+            _log("McpConfig", $"SyncGlobalMcpServers: synced {synced} of {globalEntries.Count} global server(s)");
+            return synced;
+        }
+
+        /// <summary>
+        /// Adds an MCP server to Claude Code's user scope via CLI.
+        /// Stdio:    claude mcp add {name} --scope user -- {command} {args...}
+        /// HTTP/SSE: claude mcp add {name} --transport {type} --scope user {url}
+        /// Runs silently (no visible window). Returns true on success.
+        /// </summary>
+        private bool AddClaudeMcpServer(McpRegistryEntry entry)
+        {
+            string arguments = BuildMcpAddArguments(entry);
+            if (arguments == null)
+            {
+                _log("McpConfig", $"Could not build CLI args for '{entry.ServerName}' — skipping");
+                return false;
+            }
+
+            var (exitCode, stdout, stderr) = RunClaudeCommand(arguments);
+
+            if (exitCode != 0)
+            {
+                _log("McpConfig", $"Add '{entry.ServerName}' failed: exit={exitCode}, stderr={stderr.Trim()}");
+                return false;
+            }
+
+            _log("McpConfig", $"Added '{entry.ServerName}' to user scope via CLI: {stdout.Trim()}");
+            return true;
+        }
+
+        /// <summary>
+        /// Builds the CLI arguments string for `claude mcp add`.
+        /// Parses the stored config_json to extract command/args (stdio) or url (http/sse).
+        /// Includes -e KEY=VALUE for any env vars in the config.
+        /// Returns null if the config can't be parsed.
+        /// </summary>
+        private string BuildMcpAddArguments(McpRegistryEntry entry)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(
+                    string.IsNullOrWhiteSpace(entry.ConfigJson) ? "{}" : entry.ConfigJson);
+                var root = doc.RootElement;
+
+                if (entry.TransportType == "http" || entry.TransportType == "sse")
+                {
+                    if (!root.TryGetProperty("url", out var urlProp)) return null;
+                    string url = urlProp.GetString();
+                    string envFlags = BuildEnvFlags(root);
+                    return $"mcp add \"{entry.ServerName}\" --transport {entry.TransportType} --scope user {envFlags}\"{url}\"";
+                }
+
+                // stdio transport
+                if (!root.TryGetProperty("command", out var cmdProp)) return null;
+                string command = cmdProp.GetString();
+
+                var argParts = new List<string>();
+                if (root.TryGetProperty("args", out var argsProp))
+                {
+                    foreach (var arg in argsProp.EnumerateArray())
+                    {
+                        string val = arg.GetString();
+                        if (val != null)
+                            argParts.Add($"\"{val}\"");
+                    }
+                }
+
+                string envFlags2 = BuildEnvFlags(root);
+                string argsStr = argParts.Count > 0 ? " " + string.Join(" ", argParts) : "";
+                return $"mcp add \"{entry.ServerName}\" --scope user {envFlags2}-- {command}{argsStr}";
+            }
+            catch (Exception ex)
+            {
+                _log("McpConfig", $"Failed to parse config for '{entry.ServerName}': {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Extracts env vars from config JSON and returns -e KEY=VALUE flags.
+        /// Returns empty string if no env vars present.
+        /// </summary>
+        private static string BuildEnvFlags(JsonElement root)
+        {
+            if (!root.TryGetProperty("env", out var envObj)) return "";
+            if (envObj.ValueKind != JsonValueKind.Object) return "";
+
+            var sb = new StringBuilder();
+            foreach (var prop in envObj.EnumerateObject())
+            {
+                string val = prop.Value.GetString() ?? "";
+                sb.Append($"-e {prop.Name}=\"{val}\" ");
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Runs a `claude` CLI command silently (no visible window, captures output).
+        /// Uses cmd.exe /c to resolve claude.cmd (npm installs the CLI as a .cmd shim;
+        /// Process.Start with UseShellExecute=false calls CreateProcess which only
+        /// resolves .exe files, not .cmd/.bat).
+        /// Returns (exitCode, stdout, stderr). Times out after 15 seconds.
+        /// </summary>
+        private (int ExitCode, string Stdout, string Stderr) RunClaudeCommand(string arguments)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c claude {arguments}",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            _log("McpConfig", $"Running: claude {arguments}");
+
+            using var process = Process.Start(psi);
+            if (process == null)
+            {
+                _log("McpConfig", "ERROR: Failed to start cmd.exe process");
+                return (-1, "", "Failed to start cmd.exe process");
+            }
+
+            string stdout = process.StandardOutput.ReadToEnd();
+            string stderr = process.StandardError.ReadToEnd();
+            bool exited = process.WaitForExit(15000);
+
+            if (!exited)
+            {
+                _log("McpConfig", $"TIMEOUT: claude {arguments} did not exit within 15s");
+                try { process.Kill(); } catch { }
+                return (-2, stdout, "Process timed out after 15 seconds");
+            }
+
+            if (process.ExitCode != 0)
+                _log("McpConfig", $"FAILED (exit={process.ExitCode}): claude {arguments} — stderr: {stderr.Trim()}");
+
+            return (process.ExitCode, stdout, stderr);
+        }
+
+        /// <summary>
+        /// Ensures MCP configs are up-to-date for a project launch:
+        ///   1. Global-tier servers synced to Claude Code user scope via CLI
+        ///   2. Project {sourcePath}/.mcp.json (multiterminal + optional servers)
+        /// Called before terminal launch to guarantee Claude Code picks up current settings.
+        /// </summary>
+        public void EnsureMcpConfigsForProject(string projectId, string sourcePath = null)
+        {
+            // Sync global-tier servers to Claude Code user scope
+            try
+            {
+                SyncGlobalMcpServers();
+            }
+            catch (Exception ex)
+            {
+                _log("McpConfig", $"Failed to sync global MCP servers: {ex.Message}");
+            }
+
+            // Write project-level config
+            try
+            {
+                WriteMcpJsonToProject(projectId, sourcePath);
+            }
+            catch (Exception ex)
+            {
+                _log("McpConfig", $"Failed to write project .mcp.json: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Regenerates all MCP configs: global-tier via CLI + .mcp.json for every project
+        /// that has a source path. Returns (globalCount, projectCount) on success.
+        /// </summary>
+        public (int GlobalCount, int ProjectCount) RegenerateAllMcpConfigs()
+        {
+            _log("McpConfig", "RegenerateAllMcpConfigs: START");
+            int globalCount = SyncGlobalMcpServers();
+            _log("McpConfig", $"RegenerateAllMcpConfigs: synced {globalCount} global server(s) via CLI");
+
+            int projectCount = 0;
+            var projects = _projectDb.GetAllRichProjects();
+            _log("McpConfig", $"RegenerateAllMcpConfigs: found {projects.Count} projects");
+            foreach (var project in projects)
+            {
+                string sourcePath = project.SourcePath ?? project.Path;
+                if (string.IsNullOrWhiteSpace(sourcePath) || !Directory.Exists(sourcePath))
+                {
+                    _log("McpConfig", $"Skipping project '{project.Name}': no valid source path ({sourcePath})");
+                    continue;
+                }
+
+                try
+                {
+                    WriteMcpJsonToProject(project.Id, sourcePath);
+                    projectCount++;
+                    _log("McpConfig", $"Wrote .mcp.json for project '{project.Name}' at {sourcePath}");
+                }
+                catch (Exception ex)
+                {
+                    _log("McpConfig", $"Skipped project '{project.Name}': {ex.Message}");
+                }
+            }
+
+            _log("McpConfig", $"RegenerateAllMcpConfigs: DONE global={globalCount}, projects={projectCount}");
+            return (globalCount, projectCount);
         }
 
         /// <summary>
@@ -222,13 +493,13 @@ namespace MultiTerminal.Services
             if (File.Exists(outputPath))
             {
                 File.Copy(outputPath, backupPath, overwrite: true);
-                System.Diagnostics.Debug.WriteLine($"[McpConfigService] Backed up existing .mcp.json to {backupPath}");
+                _log("McpConfig", $"Backed up existing .mcp.json to {backupPath}");
             }
 
             string content = GenerateMcpJsonForProject(projectId);
             File.WriteAllText(outputPath, content, Encoding.UTF8);
 
-            System.Diagnostics.Debug.WriteLine($"[McpConfigService] Wrote .mcp.json to {outputPath}");
+            _log("McpConfig", $"Wrote .mcp.json to {outputPath}");
             return outputPath;
         }
 
@@ -304,6 +575,7 @@ namespace MultiTerminal.Services
                 using var doc = JsonDocument.Parse(configJson);
                 if (doc.RootElement.ValueKind != JsonValueKind.Object)
                 {
+                    // Static method — can't use _log. This is a rare edge case during JSON generation.
                     System.Diagnostics.Debug.WriteLine(
                         $"[McpConfigService] Warning: config_json for '{serverName}' is not a JSON object (got {doc.RootElement.ValueKind}), using {{}}");
                     return "{}";

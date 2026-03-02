@@ -2324,6 +2324,7 @@
                         <div class="registry-dialog-header-actions">
                             <button class="picker-btn" onclick="showRegistryAddForm()">+ Add</button>
                             <button class="picker-btn" onclick="importMcpJsonFile()" title="Import servers from .mcp.json">&#x2B07; Import</button>
+                            <button class="picker-btn" onclick="regenerateAllMcpConfigs()" title="Regenerate global and all project .mcp.json files from registry">&#x21BB; Regenerate</button>
                         </div>
                     </div>
                     <div id="registry-form-area"></div>
@@ -2455,6 +2456,11 @@
             // Send empty path — C# will open a file dialog
             sendToHost({ type: 'importMcpJson', path: '' });
             setRegistryStatus('Opening file picker...');
+        }
+
+        function regenerateAllMcpConfigs() {
+            sendToHost({ type: 'regenerateAllMcpConfigs' });
+            setRegistryStatus('Regenerating...');
         }
 
         function setRegistryStatus(msg, isError = false) {
@@ -3000,6 +3006,15 @@
                             } else {
                                 setRegistryStatus(imp.error || 'Import failed', true);
                             }
+                            break;
+                        }
+                        case 'mcpRegenResult': {
+                            const rg = JSON.parse(data);
+                            const msg = rg.success
+                                ? `Synced ${rg.globalCount || 0} global + ${rg.projectCount || 0} project(s)`
+                                : ('Regeneration failed: ' + (rg.error || 'unknown error'));
+                            showMcpToast(msg, rg.success ? 'success' : 'error');
+                            setRegistryStatus(rg.success ? 'Done' : msg, !rg.success);
                             break;
                         }
                         case 'mcpJsonWriteResult': {

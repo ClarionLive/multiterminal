@@ -276,6 +276,17 @@ namespace MultiTerminal.API
                 string mtPath = MultiTerminal.Services.LaunchCommandBuilder.GetMtSourcePath();
                 mcpConfigService.SeedRegistryFromMtMcpJson(mtPath);
 
+                // Sync global-tier MCP servers to Claude Code user scope via CLI
+                // so they're available in all Claude Code sessions
+                try
+                {
+                    mcpConfigService.SyncGlobalMcpServers();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[API] Failed to sync global MCP servers on startup: {ex.Message}");
+                }
+
                 // Map REST API endpoints
                 app.MapControllers();
 

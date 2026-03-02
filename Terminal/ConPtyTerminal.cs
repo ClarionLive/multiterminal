@@ -363,7 +363,11 @@ namespace MultiTerminal.Terminal
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] NO autoRunCommand - terminal will start with prompt only");
             }
 
-            string commandLine = $"\"{shellPath}\" -NoLogo -ExecutionPolicy Bypass -NoExit -Command \"{envSetup}{promptFunc}{autoRun}\"";
+            // Use -NoExit only for plain shells (no autoRunCommand). When an autoRunCommand is
+            // specified (e.g. Claude Code), PowerShell should exit after the command finishes so
+            // that ProcessExited fires and the terminal returns to the Start Screen.
+            string noExit = string.IsNullOrEmpty(autoRunCommand) ? "-NoExit " : "";
+            string commandLine = $"\"{shellPath}\" -NoLogo -ExecutionPolicy Bypass {noExit}-Command \"{envSetup}{promptFunc}{autoRun}\"";
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Final command line:");
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess]   {commandLine}");
 
