@@ -28,6 +28,7 @@ namespace MultiTerminal.Terminal
         private FileStream _inputWriter;
         private FileStream _outputReader;
         private Thread _readThread;
+        private Thread _processWaitThread;
 
         private bool _isDisposed;
         private bool _isRunning;
@@ -122,6 +123,12 @@ namespace MultiTerminal.Terminal
 
                 // Start reading output
                 StartReading();
+
+                // Monitor the process for exit — when the process ends, close the
+                // pseudoconsole so the output pipe breaks and ReadLoop can detect EOF.
+                // ConPTY keeps the pipe open even after the attached process exits,
+                // so without this the ReadLoop blocks forever on Read().
+                StartProcessWait();
             }
             catch
             {
@@ -411,6 +418,40 @@ namespace MultiTerminal.Terminal
                 Name = "ConPTY Read Thread"
             };
             _readThread.Start();
+        }
+
+        /// <summary>
+        /// Waits for the shell process to exit, then closes the pseudoconsole.
+        /// ConPTY keeps its output pipe open independently of the process lifetime,
+        /// so ReadLoop would block on Read() forever without this.
+        /// Closing the pseudoconsole breaks the pipe, allowing ReadLoop to detect
+        /// EOF and fire the ProcessExited event.
+        /// </summary>
+        private void StartProcessWait()
+        {
+            _processWaitThread = new Thread(() =>
+            {
+                try
+                {
+                    NativeMethods.WaitForSingleObject(_processHandle, NativeMethods.INFINITE);
+                    System.Diagnostics.Debug.WriteLine("[ConPtyTerminal] Process exited, closing pseudoconsole to unblock ReadLoop");
+
+                    if (!_isDisposed && _pseudoConsoleHandle != IntPtr.Zero)
+                    {
+                        NativeMethods.ClosePseudoConsole(_pseudoConsoleHandle);
+                        _pseudoConsoleHandle = IntPtr.Zero;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ConPtyTerminal] ProcessWait error: {ex.Message}");
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "ConPTY Process Wait"
+            };
+            _processWaitThread.Start();
         }
 
         private void ReadLoop()
