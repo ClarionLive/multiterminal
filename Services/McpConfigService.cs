@@ -503,6 +503,38 @@ namespace MultiTerminal.Services
             return outputPath;
         }
 
+        /// <summary>
+        /// Seeds the MCP registry from the user's Claude Code config (~/.claude.json).
+        /// This file contains MCP servers configured at the user scope via `claude mcp add --scope user`.
+        /// Imported servers default to "global" tier (available to all projects).
+        /// Idempotent — skips servers that already exist in the registry (upsert).
+        /// </summary>
+        /// <returns>Number of servers imported/updated, or 0 if file not found or no mcpServers key.</returns>
+        public int SeedRegistryFromUserConfig()
+        {
+            // %USERPROFILE%\.claude.json — Claude Code's user-level config
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string claudeJsonPath = Path.Combine(userProfile, ".claude.json");
+
+            if (!File.Exists(claudeJsonPath))
+            {
+                _log("McpConfig", $"No user config found at {claudeJsonPath}, skipping user MCP import.");
+                return 0;
+            }
+
+            try
+            {
+                int count = ImportFromMcpJsonFile(claudeJsonPath, defaultTier: "global");
+                _log("McpConfig", $"Imported {count} MCP server(s) from user config {claudeJsonPath}");
+                return count;
+            }
+            catch (Exception ex)
+            {
+                _log("McpConfig", $"Failed to import from user config: {ex.Message}");
+                return 0;
+            }
+        }
+
         // ── Private helpers ────────────────────────────────────────────────────
 
         /// <summary>

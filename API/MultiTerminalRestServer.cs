@@ -276,6 +276,9 @@ namespace MultiTerminal.API
                 string mtPath = MultiTerminal.Services.LaunchCommandBuilder.GetMtSourcePath();
                 mcpConfigService.SeedRegistryFromMtMcpJson(mtPath);
 
+                // Seed MCP registry from user's ~/.claude.json (user-scoped servers → global tier)
+                mcpConfigService.SeedRegistryFromUserConfig();
+
                 // Sync global-tier MCP servers to Claude Code user scope via CLI
                 // so they're available in all Claude Code sessions
                 try
