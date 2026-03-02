@@ -1798,7 +1798,7 @@ namespace MultiTerminal
 
         /// <summary>
         /// Handles "New Project" from the start screen.
-        /// Opens the lightweight NewProjectDialog, saves a minimal project record,
+        /// Opens the WPF NewProjectWpfDialog, saves a minimal project record,
         /// then launches a terminal in the project folder with /new-project auto-injected.
         /// </summary>
         private void OnStartScreenNewProject(object sender, EventArgs e)
@@ -1808,14 +1808,20 @@ namespace MultiTerminal
             var teamLeads = _sharedProjectDatabase?.GetTeamLeadProfiles()
                             ?? new List<(string, string, string)>();
 
-            using var dialog = new Dialogs.NewProjectDialog(_currentTheme, teamLeads);
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var wpfDialog = new Dialogs.NewProjectWpfDialog(_currentTheme.IsDark, teamLeads);
+            var helper = new System.Windows.Interop.WindowInteropHelper(wpfDialog);
+            helper.Owner = this.Handle;
+            if (wpfDialog.ShowDialog() != true) return;
 
             try
             {
+                string projectFolder = wpfDialog.ProjectFolder;
+                System.IO.Directory.CreateDirectory(projectFolder); // no-op if already exists
+
                 // Create minimal project record in SQLite
-                var project = Models.Project.Create(dialog.ProjectName, dialog.ProjectFolder);
-                project.TeamLead = dialog.SelectedTeamLead;
+                var project = Models.Project.Create(wpfDialog.ProjectName, projectFolder);
+                project.TeamLead = wpfDialog.SelectedTeamLead;
+                project.CreatedBy = "new-project-dialog";
                 _sharedProjectDatabase?.SaveRichProject(project);
 
                 // Build Claude Code launch command
