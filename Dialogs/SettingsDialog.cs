@@ -25,9 +25,9 @@ namespace MultiTerminal.Dialogs
         private ComboBox _tasksPanelFontCombo;
         private ComboBox _activityPanelFontCombo;
 
-        // Terminal mode controls
-        private RadioButton _tabModeRadio;
-        private RadioButton _gridModeRadio;
+        // Terminal placement controls
+        private ComboBox _maxGridPanesCombo;
+        private ComboBox _maxTabsPerGridCombo;
 
         // Agent panel controls
         private RadioButton _splitRightRadio;
@@ -65,7 +65,7 @@ namespace MultiTerminal.Dialogs
         private void InitializeComponent()
         {
             Text = "Settings";
-            Size = new Size(500, 720);
+            Size = new Size(500, 750);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -117,16 +117,30 @@ namespace MultiTerminal.Dialogs
             // Terminal Behavior Group
             var terminalGroup = new GroupBox
             {
-                Text = "Terminal Behavior",
+                Text = "Terminal Placement",
                 Location = new Point(leftMargin, yPos),
-                Size = new Size(groupWidth, 60)
+                Size = new Size(groupWidth, 90)
             };
 
-            var modeLabel = new Label { Text = "New Terminal Mode:", Location = new Point(15, 25), AutoSize = true };
-            _tabModeRadio = new RadioButton { Text = "Tab", Location = new Point(160, 23), AutoSize = true };
-            _gridModeRadio = new RadioButton { Text = "Grid", Location = new Point(230, 23), AutoSize = true };
+            var maxGridsLabel = new Label { Text = "Max Grids:", Location = new Point(15, 28), AutoSize = true };
+            _maxGridPanesCombo = new ComboBox
+            {
+                Location = new Point(160, 25),
+                Size = new Size(60, 25),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            for (int i = 1; i <= 9; i++) _maxGridPanesCombo.Items.Add(i.ToString());
 
-            terminalGroup.Controls.AddRange(new Control[] { modeLabel, _tabModeRadio, _gridModeRadio });
+            var maxTabsLabel = new Label { Text = "Max Tabs per Grid:", Location = new Point(15, 58), AutoSize = true };
+            _maxTabsPerGridCombo = new ComboBox
+            {
+                Location = new Point(160, 55),
+                Size = new Size(60, 25),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            for (int i = 1; i <= 10; i++) _maxTabsPerGridCombo.Items.Add(i.ToString());
+
+            terminalGroup.Controls.AddRange(new Control[] { maxGridsLabel, _maxGridPanesCombo, maxTabsLabel, _maxTabsPerGridCombo });
 
             yPos += terminalGroup.Height + 15;
 
@@ -346,10 +360,9 @@ namespace MultiTerminal.Dialogs
             SelectFontSize(_tasksPanelFontCombo, _settings.GetTasksFontSize());
             SelectFontSize(_activityPanelFontCombo, _settings.GetActivityFontSize());
 
-            // Load terminal mode
-            string mode = _settings.GetNewTerminalMode();
-            _tabModeRadio.Checked = mode == "Tab";
-            _gridModeRadio.Checked = mode == "Grid";
+            // Load terminal placement settings
+            _maxGridPanesCombo.SelectedIndex = _settings.GetMaxGridPanes() - 1;
+            _maxTabsPerGridCombo.SelectedIndex = _settings.GetMaxTabsPerGrid() - 1;
 
             // Load agent panel settings
             string agentLayout = _settings.GetAgentPanelLayout();
@@ -557,8 +570,9 @@ namespace MultiTerminal.Dialogs
                 _settings.SetTasksFontSize(GetSelectedFontSize(_tasksPanelFontCombo));
                 _settings.SetActivityFontSize(GetSelectedFontSize(_activityPanelFontCombo));
 
-                // Save terminal mode
-                _settings.SetNewTerminalMode(_gridModeRadio.Checked ? "Grid" : "Tab");
+                // Save terminal placement settings
+                _settings.SetMaxGridPanes(_maxGridPanesCombo.SelectedIndex + 1);
+                _settings.SetMaxTabsPerGrid(_maxTabsPerGridCombo.SelectedIndex + 1);
 
                 // Save agent panel settings
                 string agentLayout = _splitBelowRadio.Checked ? "SplitBelow" :
@@ -583,7 +597,8 @@ namespace MultiTerminal.Dialogs
         public float ChatPanelFontSize => GetSelectedFontSize(_chatPanelFontCombo);
         public float TasksPanelFontSize => GetSelectedFontSize(_tasksPanelFontCombo);
         public float ActivityPanelFontSize => GetSelectedFontSize(_activityPanelFontCombo);
-        public string NewTerminalMode => _gridModeRadio.Checked ? "Grid" : "Tab";
+        public int MaxGridPanes => _maxGridPanesCombo.SelectedIndex + 1;
+        public int MaxTabsPerGrid => _maxTabsPerGridCombo.SelectedIndex + 1;
         public string AgentPanelLayout =>
             _splitBelowRadio.Checked ? "SplitBelow" :
             _tabbedRightRadio.Checked ? "TabbedRight" :

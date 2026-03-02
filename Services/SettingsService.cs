@@ -108,9 +108,11 @@ namespace MultiTerminal.Services
         private const double MinPanelZoom = 0.25;
         private const double MaxPanelZoom = 5.0;
 
-        // New terminal mode settings
-        private const string NewTerminalModeKey = "NewTerminalMode";
-        private const string DefaultNewTerminalMode = "Tab";
+        // Terminal placement settings
+        private const string MaxGridPanesKey = "MaxGridPanes";
+        private const int DefaultMaxGridPanes = 4;
+        private const string MaxTabsPerGridKey = "MaxTabsPerGrid";
+        private const int DefaultMaxTabsPerGrid = 3;
 
         // Agent panel layout settings
         private const string AgentPanelLayoutKey = "AgentPanelLayout";
@@ -357,22 +359,41 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Gets the new terminal mode ("Tab" or "Grid").
+        /// Gets the maximum number of grid panes (1-9).
         /// </summary>
-        public string GetNewTerminalMode()
+        public int GetMaxGridPanes()
         {
-            string value = Get(NewTerminalModeKey);
-            if (value == "Grid")
-                return "Grid";
-            return DefaultNewTerminalMode;
+            string value = Get(MaxGridPanesKey);
+            if (int.TryParse(value, out int result))
+                return Math.Max(1, Math.Min(9, result));
+            return DefaultMaxGridPanes;
         }
 
         /// <summary>
-        /// Sets the new terminal mode ("Tab" or "Grid").
+        /// Sets the maximum number of grid panes (1-9).
         /// </summary>
-        public void SetNewTerminalMode(string mode)
+        public void SetMaxGridPanes(int value)
         {
-            Set(NewTerminalModeKey, mode == "Grid" ? "Grid" : "Tab");
+            Set(MaxGridPanesKey, Math.Max(1, Math.Min(9, value)).ToString());
+        }
+
+        /// <summary>
+        /// Gets the maximum number of tabs per grid pane (1-10).
+        /// </summary>
+        public int GetMaxTabsPerGrid()
+        {
+            string value = Get(MaxTabsPerGridKey);
+            if (int.TryParse(value, out int result))
+                return Math.Max(1, Math.Min(10, result));
+            return DefaultMaxTabsPerGrid;
+        }
+
+        /// <summary>
+        /// Sets the maximum number of tabs per grid pane (1-10).
+        /// </summary>
+        public void SetMaxTabsPerGrid(int value)
+        {
+            Set(MaxTabsPerGridKey, Math.Max(1, Math.Min(10, value)).ToString());
         }
 
         /// <summary>

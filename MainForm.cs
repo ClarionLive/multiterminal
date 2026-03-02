@@ -1526,20 +1526,60 @@ namespace MultiTerminal
 
             string terminalName = null;
 
-            // Show in dock panel based on new terminal mode setting
-            string mode = _settings?.GetNewTerminalMode() ?? "Tab";
+            // Smart terminal placement based on MaxGridPanes and MaxTabsPerGrid settings
+            int maxGrids = _settings?.GetMaxGridPanes() ?? 4;
+            int maxTabs = _settings?.GetMaxTabsPerGrid() ?? 3;
             var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Showing terminal in DockPanel (mode: {mode})...");
-            if (!forceTabMode && mode == "Grid" && activeDoc != null && activeDoc.Pane != null)
+            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Showing terminal in DockPanel (maxGrids: {maxGrids}, maxTabs: {maxTabs}, forceTab: {forceTabMode})...");
+            if (forceTabMode)
             {
-                // Split the active pane horizontally (add to the right)
-                doc.Show(activeDoc.Pane, DockAlignment.Right, 0.5);
+                doc.Show(_dockPanel, DockState.Document);
             }
             else
             {
-                // Default: add as a new tab
-                doc.Show(_dockPanel, DockState.Document);
+                // Get distinct panes containing terminal documents
+                var terminalDocs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
+                var panes = terminalDocs.Select(d => d.Pane).Where(p => p != null).Distinct().ToList();
+                int gridCount = panes.Count;
+
+                if (gridCount == 0)
+                {
+                    // First terminal — just show it
+                    doc.Show(_dockPanel, DockState.Document);
+                }
+                else if (gridCount < maxGrids)
+                {
+                    // Room for another grid pane — split from active pane
+                    var splitFrom = activeDoc?.Pane ?? panes[panes.Count - 1];
+                    doc.Show(splitFrom, DockAlignment.Right, 0.5);
+                }
+                else
+                {
+                    // All grid slots taken — find a pane with room for tabs
+                    DockPane bestPane = null;
+                    int fewestTabs = int.MaxValue;
+                    foreach (var pane in panes)
+                    {
+                        int tabCount = pane.Contents.Count;
+                        if (tabCount < maxTabs && tabCount < fewestTabs)
+                        {
+                            fewestTabs = tabCount;
+                            bestPane = pane;
+                        }
+                    }
+
+                    if (bestPane != null)
+                    {
+                        // Add as tab to the pane with fewest tabs
+                        doc.Show(bestPane, null);
+                    }
+                    else
+                    {
+                        // All panes full — undock as floating window
+                        doc.Show(_dockPanel, DockState.Float);
+                    }
+                }
             }
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Terminal shown in DockPanel");
 
