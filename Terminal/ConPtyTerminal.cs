@@ -115,6 +115,18 @@ namespace MultiTerminal.Terminal
                 // Start the shell process
                 StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
 
+                // Close the pipe ends that belong to the pseudo console.
+                // CreatePseudoConsole() duplicates these handles internally, so our
+                // originals are no longer needed.  Keeping them open is the root cause
+                // of the "stuck terminal" bug: when ClosePseudoConsole() runs later,
+                // it releases ConPTY's copies, but if _outputWriteSide is still open
+                // there is still a writer on the pipe and _outputReader.Read() blocks
+                // forever instead of returning 0 (EOF).
+                _inputReadSide?.Dispose();
+                _inputReadSide = null;
+                _outputWriteSide?.Dispose();
+                _outputWriteSide = null;
+
                 // Set running flag BEFORE starting timer/reader (prevents race condition)
                 _isRunning = true;
 

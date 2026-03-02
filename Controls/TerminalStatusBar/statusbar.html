@@ -141,6 +141,41 @@
         }
 
         /* ============================================
+           Home Button
+           ============================================ */
+        .home-button {
+            flex-shrink: 0;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+            padding: 0;
+        }
+
+        .home-button:hover {
+            background: var(--bg-panel);
+            color: var(--text-primary);
+            border-color: var(--text-muted);
+        }
+
+        .home-button:active {
+            transform: scale(0.95);
+        }
+
+        .home-button svg {
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
+        }
+
+        /* ============================================
            Helper: Get member color by name
            ============================================ */
         .avatar[data-member="Alice"],
@@ -179,12 +214,20 @@
                 <span class="task-label">Ready to work</span>
             </div>
         </div>
+        <button class="home-button" id="home-button" title="Return to Start Screen (Ctrl+Shift+H)" onclick="onHomeClick()">
+            <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+        </button>
     </div>
 
     <script>
         // WebView2 communication
         function postMessage(type, data) {
             window.chrome.webview.postMessage({ type, ...data });
+        }
+
+        // Home button handler
+        function onHomeClick() {
+            postMessage('home', {});
         }
 
         // Notify C# that JS is ready

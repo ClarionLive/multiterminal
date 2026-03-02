@@ -30,6 +30,11 @@ namespace MultiTerminal.Controls
         public event EventHandler Ready;
 
         /// <summary>
+        /// Event fired when the user clicks the Home button on the status bar.
+        /// </summary>
+        public event EventHandler HomeRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -174,6 +179,11 @@ namespace MultiTerminal.Controls
                         }
 
                         Ready?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (type == "home")
+                    {
+                        _debugLogService?.Trace("TerminalStatusBar", "Home button clicked");
+                        HomeRequested?.Invoke(this, EventArgs.Empty);
                     }
                 }
             }

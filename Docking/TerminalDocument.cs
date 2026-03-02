@@ -272,6 +272,7 @@ namespace MultiTerminal.Docking
                     UpdateStatusBar();
                 }
             };
+            _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
 
             // Create terminal control
             _terminal = new TerminalControl
@@ -920,6 +921,9 @@ namespace MultiTerminal.Docking
                 return;
             }
 
+            // Reset terminal state so the tab can be reused for a new session
+            _isTerminalStarted = false;
+
             // Return to start screen on process exit so the tab can be reused
             ShowStartScreen();
 
@@ -1029,11 +1033,18 @@ namespace MultiTerminal.Docking
         /// <summary>
         /// Show the start screen and hide the terminal area.
         /// Called on new tab creation (before shell starts) and after shell exit.
+        /// WebView2 controls use native HWNDs that don't respect WinForms Z-order,
+        /// so we must explicitly hide the terminal controls to prevent them painting
+        /// over the start screen.
         /// </summary>
         public void ShowStartScreen()
         {
             if (_startScreen == null) return;
             _isStartScreenVisible = true;
+
+            // Hide terminal area to prevent WebView2 HWND Z-order conflicts
+            _terminalAgentSplitter.Visible = false;
+            _statusBar.Visible = false;
 
             // Show start screen over the entire content area
             _startScreen.BringToFront();
@@ -1051,12 +1062,17 @@ namespace MultiTerminal.Docking
         /// <summary>
         /// Hide the start screen and reveal the terminal area.
         /// Called by StartTerminal() just before the shell launches.
+        /// Must re-show terminal controls that were hidden by ShowStartScreen().
         /// </summary>
         public void HideStartScreen()
         {
             if (_startScreen == null) return;
             _isStartScreenVisible = false;
             _startScreen.Visible = false;
+
+            // Re-show terminal area (hidden by ShowStartScreen to fix WebView2 Z-order)
+            _terminalAgentSplitter.Visible = true;
+            _statusBar.Visible = true;
         }
 
         /// <summary>
