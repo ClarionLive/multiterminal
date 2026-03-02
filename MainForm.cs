@@ -1658,11 +1658,50 @@ namespace MultiTerminal
                 if (_mcpServer?.Broker != null)
                 {
                     terminalName = isTeamLead ? project.TeamLead : "Unassigned";
+
+                    // Check if this identity is already active in another terminal
+                    if (isTeamLead)
+                    {
+                        var activeTerminals = _mcpServer.Broker.GetTerminals();
+                        bool nameInUse = activeTerminals.Any(t =>
+                            t.Name.Equals(terminalName, StringComparison.OrdinalIgnoreCase) &&
+                            t.IsConnected &&
+                            !string.IsNullOrEmpty(t.DocId) &&
+                            !t.DocId.Equals(doc.DocId, StringComparison.OrdinalIgnoreCase));
+
+                        if (nameInUse)
+                        {
+                            var identities = GetAvailableIdentities(launchDir);
+                            using var picker = new Dialogs.IdentityPickerDialog(terminalName, identities, _currentTheme);
+                            if (picker.ShowDialog(this) == DialogResult.OK)
+                            {
+                                terminalName = picker.SelectedIdentity;
+                                isTeamLead = false; // Alternative identity, not the designated team lead
+                            }
+                            else
+                            {
+                                return; // User cancelled
+                            }
+                        }
+                    }
+
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
                 }
 
-                // Regenerate MCP config files before launch so Claude Code picks up current settings
-                _mcpConfigService?.EnsureMcpConfigsForProject(project.Id, launchDir);
+                // Write project .mcp.json synchronously (fast file I/O, needed before launch)
+                try { _mcpConfigService?.WriteMcpJsonToProject(project.Id, launchDir); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config write failed: {ex.Message}"); }
+
+                // Sync global MCP servers in background (slow subprocess calls, not needed before launch)
+                if (_mcpConfigService != null)
+                {
+                    var mcp = _mcpConfigService;
+                    System.Threading.Tasks.Task.Run(() =>
+                    {
+                        try { mcp.SyncGlobalMcpServers(); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] Background MCP sync failed: {ex.Message}"); }
+                    });
+                }
 
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead);
@@ -1773,8 +1812,20 @@ namespace MultiTerminal
                 };
                 sourceDoc.ClaudeCodeDetected += newProjectHandler;
 
-                // Regenerate MCP config files before launch so Claude Code picks up current settings
-                _mcpConfigService?.EnsureMcpConfigsForProject(project.Id, launchDir);
+                // Write project .mcp.json synchronously (fast file I/O, needed before launch)
+                try { _mcpConfigService?.WriteMcpJsonToProject(project.Id, launchDir); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config write failed: {ex.Message}"); }
+
+                // Sync global MCP servers in background (slow subprocess calls, not needed before launch)
+                if (_mcpConfigService != null)
+                {
+                    var mcp = _mcpConfigService;
+                    System.Threading.Tasks.Task.Run(() =>
+                    {
+                        try { mcp.SyncGlobalMcpServers(); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] Background MCP sync failed: {ex.Message}"); }
+                    });
+                }
 
                 // Start terminal in project folder
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir}");
@@ -3399,28 +3450,30 @@ namespace MultiTerminal
                 _teamWatcher.MemberRemoved += (s, e) =>
                 {
                     string panelKey = $"team:{e.TeamName}:{e.MemberName}";
-                    _debugLogService?.Info("MainForm", $"Native teammate removed: {e.MemberName} from team {e.TeamName}, keeping panel visible as disconnected");
+                    _debugLogService?.Info("MainForm", $"Native teammate removed: {e.MemberName} from team {e.TeamName}, closing panel");
 
-                    void MarkDisconnected()
+                    void CloseAgentPanel()
                     {
-                        // Keep the panel visible so the user can review the conversation.
-                        // Just update the title to indicate the agent is disconnected.
-                        if (_agentPanelMap.TryGetValue(panelKey, out var panel) && !panel.IsDisposed)
+                        // Close floating panel
+                        if (_agentPanelMap.Remove(panelKey, out var panel) && !panel.IsDisposed)
                         {
-                            panel.Text = $"Agent: {e.MemberName} (disconnected)";
+                            panel.DetachAgent();
+                            panel.HideOnClose = false;
+                            panel.Close();
                         }
 
-                        // Also handle embedded panels
-                        if (_embeddedAgentMap.TryGetValue(panelKey, out var embedded))
+                        // Close embedded panel
+                        if (_embeddedAgentMap.Remove(panelKey, out var embedded))
                         {
-                            embedded.Control?.SetStatusLabel("disconnected");
+                            embedded.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(embedded.Slot);
+                            embedded.Control?.Dispose();
                         }
                     }
 
                     if (InvokeRequired)
-                        Invoke(new Action(MarkDisconnected));
+                        Invoke(new Action(CloseAgentPanel));
                     else
-                        MarkDisconnected();
+                        CloseAgentPanel();
                 };
 
                 _teamWatcher.SubagentDiscovered += (s, e) =>
@@ -3587,24 +3640,26 @@ namespace MultiTerminal
         {
             string prefix = $"team:{teamName}:";
 
-            // Mark floating panels as disconnected (keep visible for conversation review)
+            // Close and remove floating panels
             var teamKeys = _agentPanelMap.Keys.Where(k => k.StartsWith(prefix)).ToList();
             foreach (var key in teamKeys)
             {
-                if (_agentPanelMap.TryGetValue(key, out var panel) && !panel.IsDisposed)
+                if (_agentPanelMap.Remove(key, out var panel) && !panel.IsDisposed)
                 {
-                    string memberName = key.Substring(prefix.Length);
-                    panel.Text = $"Agent: {memberName} (disconnected)";
+                    panel.DetachAgent();
+                    panel.HideOnClose = false;
+                    panel.Close();
                 }
             }
 
-            // Mark embedded panels as disconnected
+            // Close and remove embedded panels
             var embeddedKeys = _embeddedAgentMap.Keys.Where(k => k.StartsWith(prefix)).ToList();
             foreach (var key in embeddedKeys)
             {
-                if (_embeddedAgentMap.TryGetValue(key, out var info))
+                if (_embeddedAgentMap.Remove(key, out var info))
                 {
-                    info.Control?.SetStatusLabel("disconnected");
+                    info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
+                    info.Control?.Dispose();
                 }
             }
         }
