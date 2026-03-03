@@ -86,4 +86,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
+  <!-- Auto-copy build output to staged/ folder after every Release build -->
+  <Target Name="CopyToStaged" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Message Importance="high" Text="Copying build output to staged/ ..." />
+    <Exec Command="robocopy $(OutputPath) $(ProjectDir)staged /MIR /XD runtimes /NFL /NDL /NJH /NJS" IgnoreExitCode="true" />
+    <Message Importance="high" Text="Build output copied to staged/" />
+  </Target>
 </Project>

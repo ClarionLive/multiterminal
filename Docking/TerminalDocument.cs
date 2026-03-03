@@ -352,7 +352,7 @@ namespace MultiTerminal.Docking
                 Orientation = Orientation.Horizontal, // top/bottom split
                 FixedPanel = FixedPanel.Panel2, // task HUD keeps fixed size on resize
                 BorderStyle = BorderStyle.None,
-                SplitterWidth = 3,
+                SplitterWidth = 6,
                 BackColor = Color.FromArgb(40, 40, 50),
                 Panel1MinSize = 100,
                 Panel2MinSize = 80
@@ -399,7 +399,7 @@ namespace MultiTerminal.Docking
                 Orientation = Orientation.Vertical, // left/right split
                 FixedPanel = FixedPanel.Panel2, // agent panel keeps fixed size on resize
                 BorderStyle = BorderStyle.None,
-                SplitterWidth = 3,
+                SplitterWidth = 6,
                 BackColor = Color.FromArgb(40, 40, 50), // subtle splitter color
                 Panel1MinSize = 100,
                 Panel2MinSize = 80
