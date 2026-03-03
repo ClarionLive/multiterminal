@@ -1511,6 +1511,9 @@ namespace MultiTerminal
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
+            doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
+            doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -2030,6 +2033,9 @@ namespace MultiTerminal
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
+            doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
+            doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -2090,6 +2096,9 @@ namespace MultiTerminal
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
+            doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
+            doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -2198,6 +2207,58 @@ namespace MultiTerminal
             // Save all terminal states immediately so per-terminal font sizes
             // persist even on crash (not just on clean app close)
             SaveSession();
+        }
+
+        private void OnAgentSplitRatioChanged(object sender, double ratio)
+        {
+            _settings?.SetAgentPanelSplitRatio(ratio);
+            // Apply to all other terminals
+            var source = sender as TerminalDocument;
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                if (doc != source) doc.ApplyAgentSplitRatio(ratio);
+            }
+        }
+
+        private void OnHudSplitRatioChanged(object sender, double ratio)
+        {
+            _settings?.SetHudSplitRatio(ratio);
+            // Apply to all other terminals
+            var source = sender as TerminalDocument;
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                if (doc != source) doc.ApplyHudSplitRatio(ratio);
+            }
+        }
+
+        private bool _suppressHudZoomSync;
+        private bool _suppressAgentPanelZoomSync;
+
+        private void OnTaskHudZoomChanged(object sender, double zoom)
+        {
+            if (_suppressHudZoomSync) return;
+            _suppressHudZoomSync = true;
+            _settings?.SetTaskHudZoom(zoom);
+            // Apply to all other terminals
+            var source = sender as TerminalDocument;
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                if (doc != source) doc.ApplyTaskHudZoom(zoom);
+            }
+            _suppressHudZoomSync = false;
+        }
+
+        private void OnEmbeddedAgentPanelZoomChanged(double zoom)
+        {
+            if (_suppressAgentPanelZoomSync) return;
+            _suppressAgentPanelZoomSync = true;
+            _settings?.SetAgentPanelZoom(zoom);
+            // Apply to all other embedded agent panels
+            foreach (var kvp in _embeddedAgentMap)
+            {
+                kvp.Value.Control.SetZoomFactor(zoom);
+            }
+            _suppressAgentPanelZoomSync = false;
         }
 
         private void OnTerminalClicked(object sender, EventArgs e)
@@ -2667,9 +2728,7 @@ namespace MultiTerminal
             {
                 WorkingDirectory = t.GetWorkingDirectory() ?? _settings?.GetLastDirectory(),
                 FontSize = t.GetFontSize(),
-                CustomTitle = t.CustomTitle,
-                AgentPanelZoom = t.GetAgentPanelZoom(),
-                TaskHudZoom = t.GetTaskHudZoom()
+                CustomTitle = t.CustomTitle
             }).ToList();
 
             _settings.SetSessionTerminals(sessionData);
@@ -3002,6 +3061,9 @@ namespace MultiTerminal
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
+            doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
+            doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -3017,8 +3079,6 @@ namespace MultiTerminal
             {
                 doc.PendingWorkingDirectory = sessionInfo.WorkingDirectory;
                 doc.SetFontSize(sessionInfo.FontSize);
-                doc.SetTaskHudZoom(sessionInfo.TaskHudZoom);
-                doc.SetAgentPanelZoom(sessionInfo.AgentPanelZoom);
                 if (!string.IsNullOrEmpty(sessionInfo.CustomTitle))
                 {
                     doc.CustomTitle = sessionInfo.CustomTitle;
@@ -3027,6 +3087,14 @@ namespace MultiTerminal
             else
             {
                 doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
+            }
+
+            // Apply global split ratios and zoom levels
+            if (_settings != null)
+            {
+                doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
+                doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
+                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
             }
 
             _lastActiveTerminal = doc;
@@ -3222,10 +3290,10 @@ namespace MultiTerminal
                     control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
                     control.ApplyTheme(_currentTheme == TerminalTheme.Dark);
 
-                    // Apply stored zoom from the spawner terminal and wire zoom changes back
-                    double agentZoom = spawnerTerminal.GetAgentPanelZoom();
+                    // Apply global agent panel zoom and propagate changes to all panels
+                    double agentZoom = _settings?.GetAgentPanelZoom() ?? 1.0;
                     control.SetZoomFactor(agentZoom);
-                    control.ZoomChanged += (s, zoom) => spawnerTerminal.SetAgentPanelZoom(zoom);
+                    control.ZoomChanged += (s, zoom) => OnEmbeddedAgentPanelZoomChanged(zoom);
 
                     _embeddedAgentMap[panelKey] = (control, slot, spawnerTerminal);
 
@@ -4190,6 +4258,9 @@ namespace MultiTerminal
             doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
             doc.TerminalExited += OnTerminalExited;
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
+            doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
+            doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;

@@ -128,9 +128,10 @@ namespace MultiTerminal.Docking
         /// </summary>
         public Func<string[]> GetAvailableIdentities { get; set; }
 
-        // Per-terminal zoom levels for WebView2 panels
-        private double _agentPanelZoom = 1.0;
-        private double _taskHudZoom = 1.0;
+        // Split ratios for splitter containers (global, applied from settings)
+        private double _agentSplitRatio = 0.75;
+        private double _hudSplitRatio = 0.75;
+        private bool _suppressSplitterEvents;
 
         // Track the last known working directory for session persistence
         private string _lastKnownDirectory;
@@ -331,8 +332,8 @@ namespace MultiTerminal.Docking
                 Dock = DockStyle.Fill
             };
 
-            // Persist task HUD zoom changes back to this terminal's stored zoom level
-            _taskHud.ZoomChanged += (s, zoom) => { _taskHudZoom = zoom; };
+            // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
+            _taskHud.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
 
             // Create SplitContainer: terminal (top, 75%) | task HUD (bottom, 25%)
             // Task HUD only spans terminal width, not the agent panel
@@ -362,22 +363,25 @@ namespace MultiTerminal.Docking
             {
                 _terminalHudSplitter.Panel2Collapsed = !show;
 
-                // Re-apply the 75/25 split every time HUD becomes visible.
+                // Re-apply the saved split ratio every time HUD becomes visible.
                 // WinForms doesn't reliably restore SplitterDistance when uncollapsing Panel2.
                 if (show && _terminalHudSplitter.Height > 0)
                 {
                     try
                     {
-                        int distance = (int)(_terminalHudSplitter.Height * 0.75);
+                        _suppressSplitterEvents = true;
+                        int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
                         if (distance > _terminalHudSplitter.Panel1MinSize)
                             _terminalHudSplitter.SplitterDistance = distance;
                     }
                     catch { /* bounds during layout */ }
+                    finally { _suppressSplitterEvents = false; }
                 }
             };
 
-            // Set the 75/25 split once the splitter has a valid height
+            // Set the saved split ratio once the splitter has a valid height
             _terminalHudSplitter.SizeChanged += OnHudSplitterSizeChanged;
+            _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
 
             // Create SplitContainer: terminal+hud (left, 75%) | agent panel (right, 25%)
             _terminalAgentSplitter = new SplitContainer
@@ -395,8 +399,35 @@ namespace MultiTerminal.Docking
             _terminalAgentSplitter.Panel1.Controls.Add(_terminalHudSplitter);
             _terminalAgentSplitter.Panel2.Controls.Add(_embeddedAgentPanel);
 
-            // Set the 75/25 split once the splitter has a valid width
+            // Hide agent panel until an agent is spawned (same pattern as task HUD)
+            _terminalAgentSplitter.Panel2Collapsed = true;
+
+            _embeddedAgentPanel.VisibilityRequested += (s, show) =>
+            {
+                _terminalAgentSplitter.Panel2Collapsed = !show;
+
+                // Re-apply the saved split ratio when uncollapsing — WinForms doesn't
+                // reliably restore SplitterDistance after Panel2Collapsed changes.
+                if (show && _terminalAgentSplitter.Width > 0)
+                {
+                    try
+                    {
+                        _suppressSplitterEvents = true;
+                        int distance = (int)(_terminalAgentSplitter.Width * _agentSplitRatio);
+                        if (distance > _terminalAgentSplitter.Panel1MinSize &&
+                            distance < _terminalAgentSplitter.Width - _terminalAgentSplitter.Panel2MinSize)
+                        {
+                            _terminalAgentSplitter.SplitterDistance = distance;
+                        }
+                    }
+                    catch { /* WinForms sizing edge case — safe to ignore */ }
+                    finally { _suppressSplitterEvents = false; }
+                }
+            };
+
+            // Set the saved split ratio once the splitter has a valid width
             _terminalAgentSplitter.SizeChanged += OnSplitterSizeChanged;
+            _terminalAgentSplitter.SplitterMoved += OnAgentSplitterMoved;
 
             // Layout order: _terminalAgentSplitter (Fill) | _statusBar (Top)
             Controls.Add(_terminalAgentSplitter);
@@ -432,7 +463,7 @@ namespace MultiTerminal.Docking
         private bool _initialHudSplitApplied;
 
         /// <summary>
-        /// Sets the 75/25 splitter distance once the container has a valid width.
+        /// Sets the saved splitter ratio once the container has a valid width.
         /// </summary>
         private void OnSplitterSizeChanged(object sender, EventArgs e)
         {
@@ -441,7 +472,8 @@ namespace MultiTerminal.Docking
 
             try
             {
-                int distance = (int)(_terminalAgentSplitter.Width * 0.75);
+                _suppressSplitterEvents = true;
+                int distance = (int)(_terminalAgentSplitter.Width * _agentSplitRatio);
                 if (distance > _terminalAgentSplitter.Panel1MinSize &&
                     distance < _terminalAgentSplitter.Width - _terminalAgentSplitter.Panel2MinSize)
                 {
@@ -453,10 +485,11 @@ namespace MultiTerminal.Docking
             {
                 // Ignore if splitter distance is out of bounds during layout
             }
+            finally { _suppressSplitterEvents = false; }
         }
 
         /// <summary>
-        /// Sets the 75/25 horizontal splitter distance for terminal vs task HUD.
+        /// Sets the saved splitter ratio for terminal vs task HUD.
         /// </summary>
         private void OnHudSplitterSizeChanged(object sender, EventArgs e)
         {
@@ -465,7 +498,8 @@ namespace MultiTerminal.Docking
 
             try
             {
-                int distance = (int)(_terminalHudSplitter.Height * 0.75);
+                _suppressSplitterEvents = true;
+                int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
                 if (distance > _terminalHudSplitter.Panel1MinSize &&
                     distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
                 {
@@ -477,6 +511,31 @@ namespace MultiTerminal.Docking
             {
                 // Ignore if splitter distance is out of bounds during layout
             }
+            finally { _suppressSplitterEvents = false; }
+        }
+
+        /// <summary>
+        /// Fires when the user drags the agent panel splitter.
+        /// </summary>
+        private void OnAgentSplitterMoved(object sender, SplitterEventArgs e)
+        {
+            if (_suppressSplitterEvents) return;
+            if (_terminalAgentSplitter.Width <= 0) return;
+            double ratio = (double)_terminalAgentSplitter.SplitterDistance / _terminalAgentSplitter.Width;
+            _agentSplitRatio = ratio;
+            AgentSplitRatioChanged?.Invoke(this, ratio);
+        }
+
+        /// <summary>
+        /// Fires when the user drags the HUD splitter.
+        /// </summary>
+        private void OnHudSplitterMoved(object sender, SplitterEventArgs e)
+        {
+            if (_suppressSplitterEvents) return;
+            if (_terminalHudSplitter.Height <= 0) return;
+            double ratio = (double)_terminalHudSplitter.SplitterDistance / _terminalHudSplitter.Height;
+            _hudSplitRatio = ratio;
+            HudSplitRatioChanged?.Invoke(this, ratio);
         }
 
         private void InitializeTabContextMenu()
@@ -656,32 +715,63 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Gets the stored zoom level for the agent panel associated with this terminal.
+        /// Applies a zoom level to the task HUD WebView2 immediately.
         /// </summary>
-        public double GetAgentPanelZoom() => _agentPanelZoom;
-
-        /// <summary>
-        /// Stores the agent panel zoom level for this terminal.
-        /// Agent panel controls are managed by MainForm; it applies the zoom when creating/attaching panels.
-        /// </summary>
-        public void SetAgentPanelZoom(double zoom)
+        public void ApplyTaskHudZoom(double zoom)
         {
-            _agentPanelZoom = zoom;
-        }
-
-        /// <summary>
-        /// Gets the stored zoom level for the task HUD of this terminal.
-        /// </summary>
-        public double GetTaskHudZoom() => _taskHudZoom;
-
-        /// <summary>
-        /// Sets the zoom level for the task HUD and applies it immediately if the HUD exists.
-        /// </summary>
-        public void SetTaskHudZoom(double zoom)
-        {
-            _taskHudZoom = zoom;
             _taskHud?.SetZoomFactor(zoom);
         }
+
+        /// <summary>
+        /// Sets the agent panel split ratio and applies it immediately if the splitter is visible.
+        /// </summary>
+        public void ApplyAgentSplitRatio(double ratio)
+        {
+            _agentSplitRatio = ratio;
+            if (_terminalAgentSplitter.Panel2Collapsed || _terminalAgentSplitter.Width <= 0) return;
+            try
+            {
+                _suppressSplitterEvents = true;
+                int distance = (int)(_terminalAgentSplitter.Width * ratio);
+                if (distance > _terminalAgentSplitter.Panel1MinSize &&
+                    distance < _terminalAgentSplitter.Width - _terminalAgentSplitter.Panel2MinSize)
+                {
+                    _terminalAgentSplitter.SplitterDistance = distance;
+                }
+            }
+            catch { }
+            finally { _suppressSplitterEvents = false; }
+        }
+
+        /// <summary>
+        /// Sets the HUD split ratio and applies it immediately if the splitter is visible.
+        /// </summary>
+        public void ApplyHudSplitRatio(double ratio)
+        {
+            _hudSplitRatio = ratio;
+            if (_terminalHudSplitter.Panel2Collapsed || _terminalHudSplitter.Height <= 0) return;
+            try
+            {
+                _suppressSplitterEvents = true;
+                int distance = (int)(_terminalHudSplitter.Height * ratio);
+                if (distance > _terminalHudSplitter.Panel1MinSize &&
+                    distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
+                {
+                    _terminalHudSplitter.SplitterDistance = distance;
+                }
+            }
+            catch { }
+            finally { _suppressSplitterEvents = false; }
+        }
+
+        /// <summary>Fired when user drags the agent panel splitter. Arg is the new ratio.</summary>
+        public event EventHandler<double> AgentSplitRatioChanged;
+
+        /// <summary>Fired when user drags the HUD splitter. Arg is the new ratio.</summary>
+        public event EventHandler<double> HudSplitRatioChanged;
+
+        /// <summary>Fired when user Ctrl+wheels in the task HUD. Arg is the new zoom factor.</summary>
+        public event EventHandler<double> TaskHudZoomChanged;
 
         /// <summary>
         /// Injects text input into the terminal as if the user typed it.

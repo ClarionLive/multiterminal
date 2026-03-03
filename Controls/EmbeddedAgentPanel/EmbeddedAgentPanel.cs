@@ -25,6 +25,12 @@ namespace MultiTerminal.Controls
         private static readonly Color DarkBorderColor = Color.FromArgb(50, 50, 50);
         private static readonly Color LightBorderColor = Color.FromArgb(200, 200, 200);
 
+        /// <summary>
+        /// Fired when agent slots change between empty and non-empty.
+        /// True = has agents (show panel), False = no agents (hide panel).
+        /// </summary>
+        public event EventHandler<bool> VisibilityRequested;
+
         public EmbeddedAgentPanel()
         {
             SuspendLayout();
@@ -147,11 +153,13 @@ namespace MultiTerminal.Controls
                 _agentLayout.Visible = false;
                 _noAgentsLabel.Visible = true;
                 _agentLayout.ResumeLayout(false);
+                VisibilityRequested?.Invoke(this, false);
                 return;
             }
 
             _noAgentsLabel.Visible = false;
             _agentLayout.Visible = true;
+            VisibilityRequested?.Invoke(this, true);
 
             _agentLayout.RowCount = _agentSlots.Count;
             float rowPercent = 100f / _agentSlots.Count;

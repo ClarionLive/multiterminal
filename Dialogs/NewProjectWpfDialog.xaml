@@ -76,8 +76,11 @@
                                                       IsHitTestVisible="False"
                                                       Content="{TemplateBinding SelectionBoxItem}"
                                                       ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                                      Margin="8,6,28,6"
-                                                      VerticalAlignment="Center"/>
+                                                      Margin="8,4,28,4"
+                                                      VerticalAlignment="Center"
+                                                      TextBlock.FontSize="{TemplateBinding FontSize}"
+                                                      TextBlock.Foreground="{TemplateBinding Foreground}"
+                                                      TextBlock.FontFamily="{TemplateBinding FontFamily}"/>
                                     <TextBlock x:Name="Arrow"
                                                Text="&#x25BC;"
                                                FontSize="9"

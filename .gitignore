@@ -43,6 +43,9 @@ debug-log-*.txt
 .DS_Store
 Thumbs.db
 
+# Git-stint worktrees
+.stint/
+
 # Misc artifacts
 nul
 cq-windows-amd64.exe

@@ -122,6 +122,18 @@ namespace MultiTerminal.Services
         private const string AgentPanelCloseModeKey = "AgentPanelCloseMode";
         private const string DefaultAgentPanelCloseMode = "ManualClose";
 
+        // Global agent/HUD layout settings (shared across all terminals)
+        private const string AgentPanelZoomKey = "AgentPanelZoom";
+        private const string TaskHudZoomKey = "TaskHudZoom";
+        private const string AgentPanelSplitRatioKey = "AgentPanelSplitRatio";
+        private const string HudSplitRatioKey = "HudSplitRatio";
+        private const double DefaultAgentPanelZoom = 1.0;
+        private const double DefaultTaskHudZoom = 1.0;
+        private const double DefaultAgentPanelSplitRatio = 0.75;
+        private const double DefaultHudSplitRatio = 0.75;
+        private const double MinSplitRatio = 0.2;
+        private const double MaxSplitRatio = 0.95;
+
         // Claude commands settings
         private const string ClaudeCommandsKey = "ClaudeCommands";
 
@@ -437,6 +449,96 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Gets the global agent panel WebView2 zoom level (shared across all terminals).
+        /// </summary>
+        public double GetAgentPanelZoom()
+        {
+            string value = Get(AgentPanelZoomKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            {
+                return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            }
+            return DefaultAgentPanelZoom;
+        }
+
+        /// <summary>
+        /// Sets the global agent panel WebView2 zoom level.
+        /// </summary>
+        public void SetAgentPanelZoom(double zoom)
+        {
+            zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            Set(AgentPanelZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the global task HUD WebView2 zoom level (shared across all terminals).
+        /// </summary>
+        public double GetTaskHudZoom()
+        {
+            string value = Get(TaskHudZoomKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            {
+                return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            }
+            return DefaultTaskHudZoom;
+        }
+
+        /// <summary>
+        /// Sets the global task HUD WebView2 zoom level.
+        /// </summary>
+        public void SetTaskHudZoom(double zoom)
+        {
+            zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            Set(TaskHudZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the global agent panel split ratio (terminal+HUD width vs agent panel width).
+        /// Default 0.75 means terminal gets 75% of the width.
+        /// </summary>
+        public double GetAgentPanelSplitRatio()
+        {
+            string value = Get(AgentPanelSplitRatioKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double ratio))
+            {
+                return Math.Max(MinSplitRatio, Math.Min(MaxSplitRatio, ratio));
+            }
+            return DefaultAgentPanelSplitRatio;
+        }
+
+        /// <summary>
+        /// Sets the global agent panel split ratio.
+        /// </summary>
+        public void SetAgentPanelSplitRatio(double ratio)
+        {
+            ratio = Math.Max(MinSplitRatio, Math.Min(MaxSplitRatio, ratio));
+            Set(AgentPanelSplitRatioKey, ratio.ToString("F3", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the global HUD split ratio (terminal height vs HUD height).
+        /// Default 0.75 means terminal gets 75% of the height.
+        /// </summary>
+        public double GetHudSplitRatio()
+        {
+            string value = Get(HudSplitRatioKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double ratio))
+            {
+                return Math.Max(MinSplitRatio, Math.Min(MaxSplitRatio, ratio));
+            }
+            return DefaultHudSplitRatio;
+        }
+
+        /// <summary>
+        /// Sets the global HUD split ratio.
+        /// </summary>
+        public void SetHudSplitRatio(double ratio)
+        {
+            ratio = Math.Max(MinSplitRatio, Math.Min(MaxSplitRatio, ratio));
+            Set(HudSplitRatioKey, ratio.ToString("F3", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
         /// Gets the list of configured Claude commands.
         /// </summary>
         public List<ClaudeCommand> GetClaudeCommands()
@@ -622,16 +724,6 @@ namespace MultiTerminal.Services
                         {
                             info.CustomTitle = parts[2];
                         }
-                        // AgentPanelZoom is optional (fourth part)
-                        if (parts.Length >= 4 && double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out double agentZoom))
-                        {
-                            info.AgentPanelZoom = agentZoom;
-                        }
-                        // TaskHudZoom is optional (fifth part)
-                        if (parts.Length >= 5 && double.TryParse(parts[4], NumberStyles.Float, CultureInfo.InvariantCulture, out double hudZoom))
-                        {
-                            info.TaskHudZoom = hudZoom;
-                        }
                         result.Add(info);
                     }
                 }
@@ -662,9 +754,7 @@ namespace MultiTerminal.Services
                 string dir = t.WorkingDirectory ?? "";
                 string size = t.FontSize.ToString("F1", CultureInfo.InvariantCulture);
                 string title = t.CustomTitle ?? "";
-                string agentZoom = t.AgentPanelZoom.ToString("F2", CultureInfo.InvariantCulture);
-                string hudZoom = t.TaskHudZoom.ToString("F2", CultureInfo.InvariantCulture);
-                entries.Add($"{dir}|{size}|{title}|{agentZoom}|{hudZoom}");
+                entries.Add($"{dir}|{size}|{title}");
             }
             Set(SessionTerminalsKey, string.Join(";", entries));
         }

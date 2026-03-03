@@ -19,15 +19,5 @@ namespace MultiTerminal.Models
         /// Custom user-defined tab title (optional).
         /// </summary>
         public string CustomTitle { get; set; }
-
-        /// <summary>
-        /// Zoom level of the agent panel WebView2 for this terminal session (default 1.0).
-        /// </summary>
-        public double AgentPanelZoom { get; set; } = 1.0;
-
-        /// <summary>
-        /// Zoom level of the task HUD WebView2 for this terminal session (default 1.0).
-        /// </summary>
-        public double TaskHudZoom { get; set; } = 1.0;
     }
 }
