@@ -4,7 +4,9 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 using MultiTerminal.Controls;
 using MultiTerminal.Dialogs;
@@ -133,6 +135,10 @@ namespace MultiTerminal.Docking
         private double _hudSplitRatio = 0.75;
         private bool _suppressSplitterEvents;
 
+        // Status line polling timer — reads temp file written by Claude Code statusline script
+        private System.Threading.Timer _statusLineTimer;
+        private string _lastStatusLineContent;
+
         // Track the last known working directory for session persistence
         private string _lastKnownDirectory;
 
@@ -182,6 +188,8 @@ namespace MultiTerminal.Docking
             {
                 _customTitle = value;
                 UpdateTabTitle();
+                // Start polling for status line data once we know the terminal name
+                StartStatusLinePolling();
             }
         }
 
@@ -274,6 +282,7 @@ namespace MultiTerminal.Docking
                 }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
+            _statusBar.OpenFolderRequested += OnOpenFolderRequested;
 
             // Create terminal control
             _terminal = new TerminalControl
@@ -1112,6 +1121,7 @@ namespace MultiTerminal.Docking
         /// </summary>
         public void ReturnToStartScreen()
         {
+            StopStatusLinePolling();
             if (_isTerminalStarted)
             {
                 _terminal.Stop();
@@ -1306,10 +1316,91 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument", "_statusBar.UpdateStatus call completed");
         }
 
+        /// <summary>
+        /// Starts polling the status line temp file for Claude Code session data.
+        /// Called when the terminal identity is known (CustomTitle is set).
+        /// </summary>
+        public void StartStatusLinePolling()
+        {
+            if (_statusLineTimer != null) return;
+
+            string terminalName = CustomTitle;
+            if (string.IsNullOrEmpty(terminalName)) return;
+
+            _statusLineTimer = new System.Threading.Timer(_ =>
+            {
+                try
+                {
+                    string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}.json");
+                    if (!File.Exists(filePath)) return;
+
+                    string content = File.ReadAllText(filePath);
+                    if (string.IsNullOrEmpty(content) || content == _lastStatusLineContent) return;
+                    _lastStatusLineContent = content;
+
+                    using var doc = JsonDocument.Parse(content);
+                    var root = doc.RootElement;
+
+                    string model = root.TryGetProperty("model", out var m) ? m.GetString() : null;
+                    string folder = root.TryGetProperty("folder", out var f) ? f.GetString() : null;
+                    string gitBranch = root.TryGetProperty("gitBranch", out var gb) ? gb.GetString() : null;
+                    string gitStatus = root.TryGetProperty("gitStatus", out var gs) ? gs.GetString() : null;
+                    bool gitDirty = root.TryGetProperty("gitDirty", out var gd) && gd.GetBoolean();
+                    int? contextPct = root.TryGetProperty("contextPct", out var cp) && cp.ValueKind == JsonValueKind.Number
+                        ? cp.GetInt32() : (int?)null;
+
+                    // Marshal to UI thread
+                    if (IsHandleCreated && !IsDisposed)
+                    {
+                        BeginInvoke(new Action(() =>
+                        {
+                            _statusBar?.UpdateStatusLine(model, folder, gitBranch, gitStatus, gitDirty, contextPct);
+                        }));
+                    }
+                }
+                catch
+                {
+                    // Silently ignore parse/IO errors — file may be mid-write
+                }
+            }, null, 1000, 2000); // Start after 1s, poll every 2s
+        }
+
+        /// <summary>
+        /// Stops the status line polling timer.
+        /// </summary>
+        public void StopStatusLinePolling()
+        {
+            _statusLineTimer?.Dispose();
+            _statusLineTimer = null;
+        }
+
+        /// <summary>
+        /// Handles the Open Folder button click from the status bar.
+        /// Opens the folder in Windows Explorer.
+        /// </summary>
+        private void OnOpenFolderRequested(object sender, string folderPath)
+        {
+            if (string.IsNullOrEmpty(folderPath)) return;
+
+            try
+            {
+                if (Directory.Exists(folderPath))
+                {
+                    Process.Start("explorer.exe", folderPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("TerminalDocument", $"Failed to open folder: {ex.Message}");
+            }
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
+                StopStatusLinePolling();
+
                 _projectFileWatcher?.Dispose();
                 _projectFileWatcher = null;
 

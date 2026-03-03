@@ -1645,9 +1645,15 @@ namespace MultiTerminal
                 doc.ShowStartScreen();
             }
 
-            // Apply specified or default font size
+            // Apply specified or default font size and saved split ratios
             float terminalFontSize = fontSize ?? _settings?.GetTerminalFontSize() ?? 10f;
             doc.SetFontSize(terminalFontSize);
+            if (_settings != null)
+            {
+                doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
+                doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
+                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+            }
 
             // Focus the new terminal and track it as last active
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Focusing terminal...");
@@ -2075,9 +2081,15 @@ namespace MultiTerminal
             string dir = workingDirectory ?? _settings?.GetLastDirectory();
             doc.StartTerminal(dir, terminalName);
 
-            // Apply font size
+            // Apply font size and saved split ratios
             float terminalFontSize = fontSize ?? _settings?.GetTerminalFontSize() ?? 10f;
             doc.SetFontSize(terminalFontSize);
+            if (_settings != null)
+            {
+                doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
+                doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
+                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+            }
 
             _lastActiveTerminal = doc;
 
@@ -2124,9 +2136,15 @@ namespace MultiTerminal
             // Show as tab
             doc.Show(_dockPanel, DockState.Document);
 
-            // Apply font size
+            // Apply font size and saved split ratios
             float terminalFontSize = fontSize ?? _settings?.GetTerminalFontSize() ?? 10f;
             doc.SetFontSize(terminalFontSize);
+            if (_settings != null)
+            {
+                doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
+                doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
+                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+            }
 
             _lastActiveTerminal = doc;
 
@@ -4281,9 +4299,15 @@ namespace MultiTerminal
             // Start the terminal
             doc.StartTerminal(_settings?.GetLastDirectory());
 
-            // Apply font size
+            // Apply font size and saved split ratios
             float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
             doc.SetFontSize(terminalFontSize);
+            if (_settings != null)
+            {
+                doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
+                doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
+                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+            }
 
             return doc;
         }

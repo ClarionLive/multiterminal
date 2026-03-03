@@ -22,6 +22,7 @@ namespace MultiTerminal.Controls
         private bool _isInitializing;
         private bool _isDarkTheme = true;
         private string _pendingUpdateJson;
+        private string _pendingStatusLineJson;
         private DebugLogService _debugLogService;
 
         /// <summary>
@@ -33,6 +34,12 @@ namespace MultiTerminal.Controls
         /// Event fired when the user clicks the Home button on the status bar.
         /// </summary>
         public event EventHandler HomeRequested;
+
+        /// <summary>
+        /// Event fired when the user clicks the Open Folder button on the status bar.
+        /// The string argument is the folder path.
+        /// </summary>
+        public event EventHandler<string> OpenFolderRequested;
 
         /// <summary>
         /// Gets whether the renderer is initialized.
@@ -58,7 +65,7 @@ namespace MultiTerminal.Controls
 
             BackColor = Color.FromArgb(30, 30, 30);
             Name = "TerminalStatusBarRenderer";
-            Height = 50; // Fixed height for status bar
+            Height = 90; // 3-row status bar: identity + folder + statusline
             Dock = DockStyle.Top;
 
             _webView = new WebView2
@@ -171,11 +178,16 @@ namespace MultiTerminal.Controls
                         // Send theme
                         SendMessage($"theme:{(_isDarkTheme ? "dark" : "light")}");
 
-                        // Send pending update if any
+                        // Send pending updates if any
                         if (!string.IsNullOrEmpty(_pendingUpdateJson))
                         {
                             SendMessage($"update:{_pendingUpdateJson}");
                             _pendingUpdateJson = null;
+                        }
+                        if (!string.IsNullOrEmpty(_pendingStatusLineJson))
+                        {
+                            SendMessage($"statusline:{_pendingStatusLineJson}");
+                            _pendingStatusLineJson = null;
                         }
 
                         Ready?.Invoke(this, EventArgs.Empty);
@@ -184,6 +196,15 @@ namespace MultiTerminal.Controls
                     {
                         _debugLogService?.Trace("TerminalStatusBar", "Home button clicked");
                         HomeRequested?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (type == "openFolder")
+                    {
+                        if (root.TryGetProperty("path", out var pathEl))
+                        {
+                            string folderPath = pathEl.GetString();
+                            _debugLogService?.Trace("TerminalStatusBar", $"Open folder requested: {folderPath}");
+                            OpenFolderRequested?.Invoke(this, folderPath);
+                        }
                     }
                 }
             }
@@ -236,6 +257,33 @@ namespace MultiTerminal.Controls
                 _debugLogService?.Trace("TerminalStatusBar", "Queuing update (not initialized yet)");
                 // Queue for when ready
                 _pendingUpdateJson = json;
+            }
+        }
+
+        /// <summary>
+        /// Updates the status line (rows 2 and 3) with Claude Code session data.
+        /// </summary>
+        public void UpdateStatusLine(string model, string folder, string gitBranch, string gitStatus, bool gitDirty, int? contextPct)
+        {
+            var data = new
+            {
+                model = model ?? "claude",
+                folder = folder ?? "",
+                gitBranch = gitBranch ?? "",
+                gitStatus = gitStatus ?? "",
+                gitDirty = gitDirty,
+                contextPct = contextPct
+            };
+
+            string json = JsonSerializer.Serialize(data);
+
+            if (_isInitialized)
+            {
+                SendMessage($"statusline:{json}");
+            }
+            else
+            {
+                _pendingStatusLineJson = json;
             }
         }
 
