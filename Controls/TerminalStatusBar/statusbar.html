@@ -23,6 +23,16 @@
             --text-muted: #71717a;
             --border-color: #3f3f50;
 
+            /* Status line colors */
+            --ctx-green: #22c55e;
+            --ctx-yellow: #eab308;
+            --ctx-orange: #f97316;
+            --ctx-red: #ef4444;
+            --bar-empty: #3f3f50;
+            --model-bg: #1a3a2a;
+            --model-bg-dirty: #3a3a1a;
+            --git-bg: #1a2a3a;
+
             /* Spacing */
             --spacing-xs: 4px;
             --spacing-sm: 8px;
@@ -41,6 +51,10 @@
             --text-secondary: #52525b;
             --text-muted: #a1a1aa;
             --border-color: #d4d4d8;
+            --bar-empty: #d4d4d8;
+            --model-bg: #dcfce7;
+            --model-bg-dirty: #fef9c3;
+            --git-bg: #dbeafe;
         }
 
         /* ============================================
@@ -54,7 +68,7 @@
 
         html, body {
             width: 100%;
-            height: 50px;
+            height: 90px;
             overflow: hidden;
         }
 
@@ -67,16 +81,25 @@
         }
 
         /* ============================================
-           Status Bar Layout
+           Status Bar Container
            ============================================ */
-        .status-bar {
+        .status-bar-container {
             display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 8px 12px;
+            flex-direction: column;
+            height: 90px;
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
-            height: 50px;
+        }
+
+        /* ============================================
+           Row 1: Identity
+           ============================================ */
+        .row-identity {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 12px 2px 12px;
+            min-height: 34px;
         }
 
         .avatar-container {
@@ -85,15 +108,15 @@
         }
 
         .avatar {
-            width: 32px;
-            height: 32px;
+            width: 28px;
+            height: 28px;
             border-radius: 50%;
             background: var(--member-color, var(--bg-panel));
             display: flex;
             align-items: center;
             justify-content: center;
             font-weight: 600;
-            font-size: 14px;
+            font-size: 12px;
             color: white;
             text-transform: uppercase;
         }
@@ -109,23 +132,22 @@
             position: absolute;
             bottom: -2px;
             right: -2px;
-            width: 10px;
-            height: 10px;
+            width: 9px;
+            height: 9px;
             border-radius: 50%;
-            background: #22c55e; /* green for active */
+            background: #22c55e;
             border: 2px solid var(--bg-card);
         }
 
         .info-container {
             flex: 1;
-            min-width: 0; /* Allow text truncation */
+            min-width: 0;
         }
 
         .terminal-name {
             font-size: var(--font-size-sm);
             font-weight: 600;
             color: var(--text-primary);
-            margin-bottom: 2px;
         }
 
         .current-task {
@@ -140,13 +162,10 @@
             color: var(--text-muted);
         }
 
-        /* ============================================
-           Home Button
-           ============================================ */
         .home-button {
             flex-shrink: 0;
-            width: 32px;
-            height: 32px;
+            width: 28px;
+            height: 28px;
             border-radius: 6px;
             border: 1px solid var(--border-color);
             background: transparent;
@@ -170,53 +189,233 @@
         }
 
         .home-button svg {
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             fill: currentColor;
         }
 
         /* ============================================
-           Helper: Get member color by name
+           Row 2: Folder Path
+           ============================================ */
+        .row-folder {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 12px;
+            min-height: 22px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .folder-icon {
+            flex-shrink: 0;
+            font-size: var(--font-size-xs);
+            color: var(--text-muted);
+        }
+
+        .folder-path {
+            flex: 1;
+            min-width: 0;
+            font-size: var(--font-size-xs);
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+            cursor: default;
+        }
+
+        .open-folder-button {
+            flex-shrink: 0;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+            padding: 0;
+        }
+
+        .open-folder-button:hover {
+            background: var(--bg-panel);
+            color: var(--text-primary);
+            border-color: var(--border-color);
+        }
+
+        .open-folder-button:active {
+            transform: scale(0.95);
+        }
+
+        .open-folder-button svg {
+            width: 13px;
+            height: 13px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* ============================================
+           Row 3: Status Line (model / git / context)
+           ============================================ */
+        .row-statusline {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            padding: 0 12px;
+            min-height: 22px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .sl-segment {
+            display: inline-flex;
+            align-items: center;
+            padding: 1px 7px;
+            font-size: var(--font-size-xs);
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+            white-space: nowrap;
+            height: 18px;
+            border-radius: 3px;
+            margin-right: 6px;
+        }
+
+        .sl-model {
+            background: var(--model-bg);
+            color: var(--ctx-green);
+            font-weight: 600;
+        }
+
+        .sl-model.dirty {
+            background: var(--model-bg-dirty);
+            color: var(--ctx-yellow);
+        }
+
+        .sl-git {
+            background: var(--git-bg);
+            color: #60a5fa;
+        }
+
+        .sl-git-status {
+            margin-left: 4px;
+            color: var(--ctx-yellow);
+        }
+
+        .sl-context {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+            font-size: var(--font-size-xs);
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+        }
+
+        .context-bar {
+            display: inline-flex;
+            gap: 1px;
+            height: 10px;
+            align-items: flex-end;
+        }
+
+        .context-bar-segment {
+            width: 6px;
+            border-radius: 1px;
+            transition: height 0.3s ease, background 0.3s ease;
+        }
+
+        .context-pct {
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            min-width: 28px;
+            text-align: right;
+        }
+
+        /* Context bar color classes */
+        .ctx-green { background: var(--ctx-green); }
+        .ctx-yellow { background: var(--ctx-yellow); }
+        .ctx-orange { background: var(--ctx-orange); }
+        .ctx-red { background: var(--ctx-red); }
+        .ctx-empty { background: var(--bar-empty); }
+
+        .ctx-blink {
+            animation: blink 1s ease-in-out infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* Hidden state for rows 2-3 before data arrives */
+        .row-folder.hidden,
+        .row-statusline.hidden {
+            display: none;
+        }
+
+        /* ============================================
+           Avatar member colors
            ============================================ */
         .avatar[data-member="Alice"],
-        .avatar[data-member="alice"] {
-            background: var(--color-alice);
-        }
-
+        .avatar[data-member="alice"] { background: var(--color-alice); }
         .avatar[data-member="Bob"],
-        .avatar[data-member="bob"] {
-            background: var(--color-bob);
-        }
-
+        .avatar[data-member="bob"] { background: var(--color-bob); }
         .avatar[data-member="Charlie"],
-        .avatar[data-member="charlie"] {
-            background: var(--color-charlie);
-        }
-
+        .avatar[data-member="charlie"] { background: var(--color-charlie); }
         .avatar[data-member="Diana"],
-        .avatar[data-member="diana"] {
-            background: var(--color-diana);
-        }
+        .avatar[data-member="diana"] { background: var(--color-diana); }
     </style>
 </head>
 <body>
-    <div class="status-bar">
-        <div class="avatar-container">
-            <div class="avatar" id="avatar" data-member="">
-                <span id="avatar-initials">?</span>
-                <img id="avatar-image" class="avatar-image" style="display: none;" />
+    <div class="status-bar-container">
+        <!-- Row 1: Identity -->
+        <div class="row-identity">
+            <div class="avatar-container">
+                <div class="avatar" id="avatar" data-member="">
+                    <span id="avatar-initials">?</span>
+                    <img id="avatar-image" class="avatar-image" style="display: none;" />
+                </div>
+                <div class="status-indicator" id="status-indicator"></div>
             </div>
-            <div class="status-indicator" id="status-indicator"></div>
-        </div>
-        <div class="info-container">
-            <div class="terminal-name" id="terminal-name">Terminal</div>
-            <div class="current-task" id="current-task">
-                <span class="task-label">Ready to work</span>
+            <div class="info-container">
+                <div class="terminal-name" id="terminal-name">Terminal</div>
+                <div class="current-task" id="current-task">
+                    <span class="task-label">Ready to work</span>
+                </div>
             </div>
+            <button class="home-button" id="home-button" title="Return to Start Screen (Ctrl+Shift+H)" onclick="onHomeClick()">
+                <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+            </button>
         </div>
-        <button class="home-button" id="home-button" title="Return to Start Screen (Ctrl+Shift+H)" onclick="onHomeClick()">
-            <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
-        </button>
+
+        <!-- Row 2: Folder Path -->
+        <div class="row-folder hidden" id="row-folder">
+            <span class="folder-icon">&#128193;</span>
+            <span class="folder-path" id="folder-path" title="" data-path=""></span>
+            <button class="open-folder-button" id="open-folder-button" title="Open in Explorer" onclick="onOpenFolderClick()">
+                <svg viewBox="0 0 24 24">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                    <polyline points="15 3 21 3 21 9"/>
+                    <line x1="10" y1="14" x2="21" y2="3"/>
+                </svg>
+            </button>
+        </div>
+
+        <!-- Row 3: Status Line (model / git / context) -->
+        <div class="row-statusline hidden" id="row-statusline">
+            <span class="sl-segment sl-model" id="sl-model">claude</span>
+            <span class="sl-segment sl-git" id="sl-git" style="display:none">
+                <span id="sl-git-branch"></span>
+                <span class="sl-git-status" id="sl-git-status"></span>
+            </span>
+            <span class="sl-context" id="sl-context">
+                <span class="context-bar" id="context-bar"></span>
+                <span class="context-pct" id="context-pct">--%</span>
+            </span>
+        </div>
     </div>
 
     <script>
@@ -225,9 +424,15 @@
             window.chrome.webview.postMessage({ type, ...data });
         }
 
-        // Home button handler
         function onHomeClick() {
             postMessage('home', {});
+        }
+
+        function onOpenFolderClick() {
+            var path = document.getElementById('folder-path').getAttribute('data-path') || '';
+            if (path) {
+                postMessage('openFolder', { path: path });
+            }
         }
 
         // Notify C# that JS is ready
@@ -238,98 +443,153 @@
             document.body.classList.toggle('light', !isDark);
         }
 
-        // Update status bar data
+        // Update identity (Row 1) - existing functionality
         function updateStatus(data) {
-            console.log('[StatusBar JS] updateStatus called with data:', JSON.stringify(data, null, 2));
-            const { name, avatarUrl, activityDescription, taskTitle, taskId, status } = data;
-
-            console.log('[StatusBar JS] Parsed values:');
-            console.log('  - name:', name);
-            console.log('  - avatarUrl:', avatarUrl);
-            console.log('  - activityDescription:', activityDescription);
-            console.log('  - taskTitle:', taskTitle);
-            console.log('  - taskId:', taskId);
-            console.log('  - status:', status);
+            var name = data.name;
+            var avatarUrl = data.avatarUrl;
+            var activityDescription = data.activityDescription;
+            var taskTitle = data.taskTitle;
+            var taskId = data.taskId;
+            var status = data.status;
 
             // Update name
-            const nameEl = document.getElementById('terminal-name');
-            console.log('[StatusBar JS] Setting terminal name to:', name || 'Terminal');
-            nameEl.textContent = name || 'Terminal';
+            document.getElementById('terminal-name').textContent = name || 'Terminal';
 
             // Update avatar
-            const avatarEl = document.getElementById('avatar');
-            const initialsEl = document.getElementById('avatar-initials');
-            const imageEl = document.getElementById('avatar-image');
-
+            var avatarEl = document.getElementById('avatar');
+            var initialsEl = document.getElementById('avatar-initials');
+            var imageEl = document.getElementById('avatar-image');
             avatarEl.setAttribute('data-member', name || '');
 
-            // Check for valid avatar URL (not empty, not "null" string)
             if (avatarUrl && avatarUrl.trim() !== '' && avatarUrl !== 'null') {
-                // Show avatar image
                 imageEl.src = avatarUrl;
                 imageEl.style.display = 'block';
                 initialsEl.style.display = 'none';
             } else {
-                // Show initials
-                const initials = (name || 'T').substring(0, 1).toUpperCase();
-                initialsEl.textContent = initials;
+                initialsEl.textContent = (name || 'T').substring(0, 1).toUpperCase();
                 initialsEl.style.display = 'block';
                 imageEl.style.display = 'none';
             }
 
-            // Update task/activity (priority: activityDescription > taskTitle > status-based text)
-            const taskEl = document.getElementById('current-task');
+            // Update task/activity
+            var taskEl = document.getElementById('current-task');
             if (activityDescription && activityDescription.trim() !== '') {
-                // Show activity description
                 taskEl.innerHTML = escapeHtml(activityDescription);
             } else if (taskTitle && taskTitle.trim() !== '') {
-                // Show task title
-                taskEl.innerHTML = `<span class="task-label">Task:</span> ${escapeHtml(taskTitle)}`;
-            } else if (status) {
-                // Show status-based text
-                const statusText = status === 'active' ? 'Working' :
+                taskEl.innerHTML = '<span class="task-label">Task:</span> ' + escapeHtml(taskTitle);
+            } else {
+                var statusText = status === 'active' ? 'Working' :
                                  status === 'idle' ? 'Ready to work' :
                                  status === 'offline' ? 'Offline' : 'Ready to work';
-                taskEl.innerHTML = `<span class="task-label">${statusText}</span>`;
-            } else {
-                taskEl.innerHTML = `<span class="task-label">Ready to work</span>`;
+                taskEl.innerHTML = '<span class="task-label">' + statusText + '</span>';
             }
 
             // Update status indicator color
-            const indicatorEl = document.getElementById('status-indicator');
-            if (status === 'active') {
-                indicatorEl.style.background = '#22c55e'; // green
-            } else if (status === 'busy') {
-                indicatorEl.style.background = '#3b82f6'; // blue
-            } else if (status === 'idle') {
-                indicatorEl.style.background = '#eab308'; // yellow
-            } else {
-                indicatorEl.style.background = '#6b7280'; // gray
+            var indicatorEl = document.getElementById('status-indicator');
+            if (status === 'active') indicatorEl.style.background = '#22c55e';
+            else if (status === 'busy') indicatorEl.style.background = '#3b82f6';
+            else if (status === 'idle') indicatorEl.style.background = '#eab308';
+            else indicatorEl.style.background = '#6b7280';
+        }
+
+        // Update status line (Rows 2 & 3)
+        function updateStatusLine(data) {
+            var model = data.model;
+            var folder = data.folder;
+            var gitBranch = data.gitBranch;
+            var gitStatus = data.gitStatus;
+            var gitDirty = data.gitDirty;
+            var contextPct = data.contextPct;
+
+            // Row 2: Folder path
+            if (folder) {
+                var folderPathEl = document.getElementById('folder-path');
+                folderPathEl.textContent = folder;
+                folderPathEl.title = folder;
+                folderPathEl.setAttribute('data-path', folder);
+                document.getElementById('row-folder').classList.remove('hidden');
             }
+
+            // Row 3: Status line
+            document.getElementById('row-statusline').classList.remove('hidden');
+
+            // Model badge
+            var modelEl = document.getElementById('sl-model');
+            modelEl.textContent = model || 'claude';
+            if (gitDirty) modelEl.classList.add('dirty');
+            else modelEl.classList.remove('dirty');
+
+            // Git branch & status
+            var gitSegment = document.getElementById('sl-git');
+            if (gitBranch) {
+                document.getElementById('sl-git-branch').textContent = '\uE0A0 ' + gitBranch;
+                document.getElementById('sl-git-status').textContent = gitStatus || '';
+                gitSegment.style.display = '';
+            } else {
+                gitSegment.style.display = 'none';
+            }
+
+            // Context usage bar
+            updateContextBar(contextPct);
+        }
+
+        function updateContextBar(pct) {
+            var barEl = document.getElementById('context-bar');
+            var pctEl = document.getElementById('context-pct');
+
+            if (pct === null || pct === undefined) {
+                pctEl.textContent = '--%';
+                barEl.innerHTML = '';
+                return;
+            }
+
+            pctEl.textContent = pct + '%';
+
+            // Color based on usage level
+            var colorClass, blink = false;
+            if (pct > 95) { colorClass = 'ctx-red'; blink = true; }
+            else if (pct > 85) { colorClass = 'ctx-orange'; }
+            else if (pct > 70) { colorClass = 'ctx-yellow'; }
+            else { colorClass = 'ctx-green'; }
+
+            // Build 10-segment bar
+            var totalSegments = 10;
+            var filled = Math.min(Math.round(pct / 10), totalSegments);
+            var html = '';
+            for (var i = 0; i < totalSegments; i++) {
+                var isFilled = i < filled;
+                var cls = isFilled ? colorClass : 'ctx-empty';
+                var blinkCls = (isFilled && blink) ? ' ctx-blink' : '';
+                var h = isFilled ? 10 : 6;
+                html += '<div class="context-bar-segment ' + cls + blinkCls + '" style="height:' + h + 'px"></div>';
+            }
+            barEl.innerHTML = html;
+
+            // Color the percentage text
+            pctEl.className = 'context-pct';
+            if (pct > 95) pctEl.style.color = 'var(--ctx-red)';
+            else if (pct > 85) pctEl.style.color = 'var(--ctx-orange)';
+            else if (pct > 70) pctEl.style.color = 'var(--ctx-yellow)';
+            else pctEl.style.color = 'var(--text-secondary)';
         }
 
         function escapeHtml(text) {
-            const div = document.createElement('div');
+            var div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
 
-        // Listen for messages from C# (must use chrome.webview for WebView2)
+        // Listen for messages from C#
         if (window.chrome && window.chrome.webview) {
-            window.chrome.webview.addEventListener('message', (event) => {
-                console.log('[StatusBar JS] Received message from C#:', event.data);
-                const data = event.data;
+            window.chrome.webview.addEventListener('message', function(event) {
+                var data = event.data;
                 if (typeof data === 'string') {
                     if (data.startsWith('theme:')) {
-                        const isDark = data.split(':')[1] === 'dark';
-                        console.log('[StatusBar JS] Applying theme:', isDark ? 'dark' : 'light');
-                        applyTheme(isDark);
+                        applyTheme(data.split(':')[1] === 'dark');
                     } else if (data.startsWith('update:')) {
-                        const json = data.substring(7);
-                        console.log('[StatusBar JS] Update JSON received:', json);
-                        const statusData = JSON.parse(json);
-                        console.log('[StatusBar JS] Parsed status data:', statusData);
-                        updateStatus(statusData);
+                        updateStatus(JSON.parse(data.substring(7)));
+                    } else if (data.startsWith('statusline:')) {
+                        updateStatusLine(JSON.parse(data.substring(11)));
                     }
                 }
             });
