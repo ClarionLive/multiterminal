@@ -16,6 +16,9 @@ namespace MultiTerminal.Services
         private SQLiteConnection _connection;
         private bool _isDisposed;
 
+        // FTS5 availability flag — checked once at init, falls back to LIKE queries if unavailable
+        private bool _fts5Available;
+
         /// <summary>
         /// Gets the path to the tasks database.
         /// </summary>
@@ -84,6 +87,10 @@ namespace MultiTerminal.Services
             MigrateAddTaskAttachments();
             MigrateAddAgentFieldsToProfiles();
             MigrateAddTeamLeadToProfiles();
+            MigrateAddSessionLineage();
+
+            // Check FTS5 support after all tables are created
+            _fts5Available = CheckFts5Available();
         }
 
         private void CreateSchema()
@@ -210,6 +217,45 @@ namespace MultiTerminal.Services
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_profiles_display_name ON team_member_profiles(display_name);
+
+                -- Session lineage: tracks parent/child relationships between Claude Code sessions
+                CREATE TABLE IF NOT EXISTS session_lineage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL UNIQUE,
+                    parent_session_id TEXT,
+                    task_id TEXT,
+                    agent_name TEXT NOT NULL,
+                    session_type TEXT NOT NULL DEFAULT 'terminal',
+                    summary TEXT,
+                    session_file_path TEXT,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (task_id) REFERENCES tasks(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_session_lineage_session ON session_lineage(session_id);
+                CREATE INDEX IF NOT EXISTS idx_session_lineage_parent ON session_lineage(parent_session_id);
+                CREATE INDEX IF NOT EXISTS idx_session_lineage_task ON session_lineage(task_id);
+                CREATE INDEX IF NOT EXISTS idx_session_lineage_agent ON session_lineage(agent_name);
+
+                -- Session messages: stores individual messages extracted from session JSONL files
+                CREATE TABLE IF NOT EXISTS session_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    task_id TEXT,
+                    agent_name TEXT,
+                    message_index INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    tool_name TEXT,
+                    timestamp TEXT,
+                    FOREIGN KEY (session_id) REFERENCES session_lineage(session_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
+                CREATE INDEX IF NOT EXISTS idx_session_messages_task ON session_messages(task_id);
+                CREATE INDEX IF NOT EXISTS idx_session_messages_role ON session_messages(role);
             ";
 
             using var command = new SQLiteCommand(schema, _connection);
@@ -2965,6 +3011,430 @@ namespace MultiTerminal.Services
                 FileSizeBytes = reader.GetInt64(6),
                 AddedBy = reader.IsDBNull(7) ? null : reader.GetString(7),
                 CreatedAt = reader.GetDateTime(8)
+            };
+        }
+
+        #endregion
+
+        #region Session Lineage
+
+        /// <summary>
+        /// Migration: ensure session_lineage and session_messages tables exist.
+        /// CreateSchema handles IF NOT EXISTS, but this runs the FTS5 virtual table creation
+        /// which needs special error handling for SQLite builds without FTS5.
+        /// </summary>
+        private void MigrateAddSessionLineage()
+        {
+            // Attempt to create the FTS5 virtual table and its sync triggers.
+            // Wrapped in try/catch because FTS5 is a compile-time SQLite option that may be absent.
+            try
+            {
+                const string fts5Sql = @"
+                    CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+                        content,
+                        content='session_messages',
+                        content_rowid='id',
+                        tokenize='porter'
+                    );
+
+                    -- Trigger: keep FTS index in sync on INSERT
+                    CREATE TRIGGER IF NOT EXISTS session_messages_ai
+                    AFTER INSERT ON session_messages BEGIN
+                        INSERT INTO session_messages_fts(rowid, content)
+                        VALUES (new.id, new.content);
+                    END;
+
+                    -- Trigger: keep FTS index in sync on DELETE
+                    CREATE TRIGGER IF NOT EXISTS session_messages_ad
+                    AFTER DELETE ON session_messages BEGIN
+                        INSERT INTO session_messages_fts(session_messages_fts, rowid, content)
+                        VALUES ('delete', old.id, old.content);
+                    END;
+
+                    -- Trigger: keep FTS index in sync on UPDATE
+                    CREATE TRIGGER IF NOT EXISTS session_messages_au
+                    AFTER UPDATE ON session_messages BEGIN
+                        INSERT INTO session_messages_fts(session_messages_fts, rowid, content)
+                        VALUES ('delete', old.id, old.content);
+                        INSERT INTO session_messages_fts(rowid, content)
+                        VALUES (new.id, new.content);
+                    END;
+                ";
+                using var cmd = new SQLiteCommand(fts5Sql, _connection);
+                cmd.ExecuteNonQuery();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TaskDatabase] FTS5 not available, session message search will use LIKE fallback: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Checks whether FTS5 is available in this SQLite build by querying the virtual table.
+        /// </summary>
+        private bool CheckFts5Available()
+        {
+            try
+            {
+                const string sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='session_messages_fts'";
+                using var cmd = new SQLiteCommand(sql, _connection);
+                var result = cmd.ExecuteScalar();
+                return result != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Saves a session lineage record (upsert by session_id).
+        /// </summary>
+        public void SaveSessionLineage(SessionLineageRecord record)
+        {
+            const string sql = @"
+                INSERT INTO session_lineage
+                    (session_id, parent_session_id, task_id, agent_name, session_type, summary, session_file_path, started_at, ended_at, created_at)
+                VALUES
+                    (@sessionId, @parentSessionId, @taskId, @agentName, @sessionType, @summary, @sessionFilePath, @startedAt, @endedAt, @createdAt)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    parent_session_id = @parentSessionId,
+                    task_id           = COALESCE(@taskId, task_id),
+                    agent_name        = @agentName,
+                    session_type      = @sessionType,
+                    summary           = COALESCE(@summary, summary),
+                    session_file_path = COALESCE(@sessionFilePath, session_file_path),
+                    started_at        = COALESCE(@startedAt, started_at),
+                    ended_at          = COALESCE(@endedAt, ended_at)
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@sessionId", record.SessionId);
+            command.Parameters.AddWithValue("@parentSessionId", (object)record.ParentSessionId ?? DBNull.Value);
+            command.Parameters.AddWithValue("@taskId", (object)record.TaskId ?? DBNull.Value);
+            command.Parameters.AddWithValue("@agentName", record.AgentName);
+            command.Parameters.AddWithValue("@sessionType", record.SessionType ?? "terminal");
+            command.Parameters.AddWithValue("@summary", (object)record.Summary ?? DBNull.Value);
+            command.Parameters.AddWithValue("@sessionFilePath", (object)record.SessionFilePath ?? DBNull.Value);
+            command.Parameters.AddWithValue("@startedAt", (object)record.StartedAt ?? DBNull.Value);
+            command.Parameters.AddWithValue("@endedAt", (object)record.EndedAt ?? DBNull.Value);
+            command.Parameters.AddWithValue("@createdAt", record.CreatedAt ?? DateTime.UtcNow.ToString("O"));
+
+            command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Gets all session lineage records linked to a task, ordered newest first.
+        /// </summary>
+        public List<SessionLineageRecord> GetSessionsByTask(string taskId)
+        {
+            var results = new List<SessionLineageRecord>();
+
+            const string sql = @"
+                SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
+                       summary, session_file_path, started_at, ended_at, created_at
+                FROM session_lineage
+                WHERE task_id = @taskId
+                ORDER BY created_at DESC
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                results.Add(ReadSessionLineageFromReader(reader));
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Walks the session lineage chain starting from the given session_id,
+        /// following parent_session_id links upward. Returns the chain ordered from
+        /// oldest ancestor to newest descendant.
+        /// </summary>
+        public List<SessionLineageRecord> GetSessionLineage(string sessionId)
+        {
+            // Walk parent links using a recursive CTE
+            const string sql = @"
+                WITH RECURSIVE chain(id, session_id, parent_session_id, task_id, agent_name,
+                    session_type, summary, session_file_path, started_at, ended_at, created_at, depth) AS
+                (
+                    -- Anchor: start from the requested session
+                    SELECT id, session_id, parent_session_id, task_id, agent_name,
+                           session_type, summary, session_file_path, started_at, ended_at, created_at, 0
+                    FROM session_lineage WHERE session_id = @sessionId
+
+                    UNION ALL
+
+                    -- Walk up to parent sessions
+                    SELECT sl.id, sl.session_id, sl.parent_session_id, sl.task_id, sl.agent_name,
+                           sl.session_type, sl.summary, sl.session_file_path, sl.started_at, sl.ended_at, sl.created_at, chain.depth + 1
+                    FROM session_lineage sl
+                    JOIN chain ON sl.session_id = chain.parent_session_id
+                    WHERE chain.depth < 50  -- guard against circular references
+                )
+                SELECT id, session_id, parent_session_id, task_id, agent_name,
+                       session_type, summary, session_file_path, started_at, ended_at, created_at
+                FROM chain
+                ORDER BY depth DESC  -- oldest ancestor first
+            ";
+
+            var results = new List<SessionLineageRecord>();
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                results.Add(ReadSessionLineageFromReader(reader));
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Bulk-inserts session messages for a session. Existing messages for this
+        /// session are deleted first (replace-all semantics). Runs in a transaction.
+        /// </summary>
+        public void SaveSessionMessages(string sessionId, List<SessionMessageRecord> messages)
+        {
+            using var transaction = _connection.BeginTransaction();
+            try
+            {
+                // Clear existing messages for this session (e.g. re-import)
+                const string deleteSql = "DELETE FROM session_messages WHERE session_id = @sessionId";
+                using (var delCmd = new SQLiteCommand(deleteSql, _connection, transaction))
+                {
+                    delCmd.Parameters.AddWithValue("@sessionId", sessionId);
+                    delCmd.ExecuteNonQuery();
+                }
+
+                const string insertSql = @"
+                    INSERT INTO session_messages
+                        (session_id, task_id, agent_name, message_index, role, content, tool_name, timestamp)
+                    VALUES
+                        (@sessionId, @taskId, @agentName, @messageIndex, @role, @content, @toolName, @timestamp)
+                ";
+
+                foreach (var msg in messages)
+                {
+                    using var cmd = new SQLiteCommand(insertSql, _connection, transaction);
+                    cmd.Parameters.AddWithValue("@sessionId", sessionId);
+                    cmd.Parameters.AddWithValue("@taskId", (object)msg.TaskId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@agentName", (object)msg.AgentName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@messageIndex", msg.MessageIndex);
+                    cmd.Parameters.AddWithValue("@role", msg.Role);
+                    cmd.Parameters.AddWithValue("@content", (object)msg.Content ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@toolName", (object)msg.ToolName ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@timestamp", (object)msg.Timestamp ?? DBNull.Value);
+                    cmd.ExecuteNonQuery();
+                }
+
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Returns session messages without full-text search, supporting optional filters.
+        /// Used when no query text is provided — returns all matching messages.
+        /// </summary>
+        public List<SessionMessageRecord> GetSessionMessages(
+            string taskId = null,
+            string role = null,
+            string agentName = null,
+            int limit = 100)
+        {
+            var results = new List<SessionMessageRecord>();
+
+            var sql = @"
+                SELECT id, session_id, task_id, agent_name, message_index,
+                       role, content, tool_name, timestamp
+                FROM session_messages
+                WHERE 1=1
+            ";
+
+            if (taskId != null) sql += " AND task_id = @taskId";
+            if (role != null) sql += " AND role = @role";
+            if (agentName != null) sql += " AND agent_name = @agentName";
+            sql += " ORDER BY session_id, message_index LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            if (taskId != null) cmd.Parameters.AddWithValue("@taskId", taskId);
+            if (role != null) cmd.Parameters.AddWithValue("@role", role);
+            if (agentName != null) cmd.Parameters.AddWithValue("@agentName", agentName);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionMessageFromReader(reader));
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Searches session messages for the given query text. Uses FTS5 if available,
+        /// falls back to LIKE queries. Supports optional filters for sessionId, taskId,
+        /// role, and agentName. Returns matching messages ordered by session, then message_index.
+        /// </summary>
+        public List<SessionMessageRecord> SearchSessionMessages(
+            string query,
+            string sessionId = null,
+            string taskId = null,
+            string role = null,
+            string agentName = null,
+            int limit = 100)
+        {
+            // Guard: clamp query length to prevent oversized FTS5 expressions
+            if (query != null && query.Length > 500)
+                query = query.Substring(0, 500);
+
+            if (_fts5Available)
+            {
+                // FTS5 path with fallback: malformed FTS5 syntax (e.g. bare "AND", "*", empty)
+                // causes a SQLiteException. Catch and retry via the LIKE path.
+                try
+                {
+                    return ExecuteFts5Search(query, sessionId, taskId, role, agentName, limit);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[TaskDatabase] FTS5 query failed, falling back to LIKE: {ex.Message}");
+                }
+            }
+
+            return ExecuteLikeSearch(query, sessionId, taskId, role, agentName, limit);
+        }
+
+        private List<SessionMessageRecord> ExecuteFts5Search(
+            string query, string sessionId, string taskId, string role, string agentName, int limit)
+        {
+            var results = new List<SessionMessageRecord>();
+
+            var sql = @"
+                SELECT sm.id, sm.session_id, sm.task_id, sm.agent_name, sm.message_index,
+                       sm.role, sm.content, sm.tool_name, sm.timestamp
+                FROM session_messages sm
+                JOIN session_messages_fts fts ON sm.id = fts.rowid
+                WHERE session_messages_fts MATCH @query
+            ";
+
+            if (sessionId != null) sql += " AND sm.session_id = @sessionId";
+            if (taskId != null) sql += " AND sm.task_id = @taskId";
+            if (role != null) sql += " AND sm.role = @role";
+            if (agentName != null) sql += " AND sm.agent_name = @agentName";
+            sql += " ORDER BY sm.session_id, sm.message_index LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@query", query);
+            if (sessionId != null) cmd.Parameters.AddWithValue("@sessionId", sessionId);
+            if (taskId != null) cmd.Parameters.AddWithValue("@taskId", taskId);
+            if (role != null) cmd.Parameters.AddWithValue("@role", role);
+            if (agentName != null) cmd.Parameters.AddWithValue("@agentName", agentName);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionMessageFromReader(reader));
+            }
+
+            return results;
+        }
+
+        private List<SessionMessageRecord> ExecuteLikeSearch(
+            string query, string sessionId, string taskId, string role, string agentName, int limit)
+        {
+            var results = new List<SessionMessageRecord>();
+
+            var sql = @"
+                SELECT id, session_id, task_id, agent_name, message_index,
+                       role, content, tool_name, timestamp
+                FROM session_messages
+                WHERE content LIKE @query
+            ";
+
+            if (sessionId != null) sql += " AND session_id = @sessionId";
+            if (taskId != null) sql += " AND task_id = @taskId";
+            if (role != null) sql += " AND role = @role";
+            if (agentName != null) sql += " AND agent_name = @agentName";
+            sql += " ORDER BY session_id, message_index LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@query", $"%{query}%");
+            if (sessionId != null) cmd.Parameters.AddWithValue("@sessionId", sessionId);
+            if (taskId != null) cmd.Parameters.AddWithValue("@taskId", taskId);
+            if (role != null) cmd.Parameters.AddWithValue("@role", role);
+            if (agentName != null) cmd.Parameters.AddWithValue("@agentName", agentName);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionMessageFromReader(reader));
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Deletes all session messages for a given session_id.
+        /// </summary>
+        public void DeleteSessionMessages(string sessionId)
+        {
+            const string sql = "DELETE FROM session_messages WHERE session_id = @sessionId";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns true if FTS5 full-text search is available in this SQLite build.
+        /// </summary>
+        public bool IsFts5Available => _fts5Available;
+
+        private static SessionLineageRecord ReadSessionLineageFromReader(SQLiteDataReader reader)
+        {
+            return new SessionLineageRecord
+            {
+                DbId = reader.GetInt32(0),
+                SessionId = reader.GetString(1),
+                ParentSessionId = reader.IsDBNull(2) ? null : reader.GetString(2),
+                TaskId = reader.IsDBNull(3) ? null : reader.GetString(3),
+                AgentName = reader.GetString(4),
+                SessionType = reader.GetString(5),
+                Summary = reader.IsDBNull(6) ? null : reader.GetString(6),
+                SessionFilePath = reader.IsDBNull(7) ? null : reader.GetString(7),
+                StartedAt = reader.IsDBNull(8) ? null : reader.GetString(8),
+                EndedAt = reader.IsDBNull(9) ? null : reader.GetString(9),
+                CreatedAt = reader.IsDBNull(10) ? null : reader.GetString(10)
+            };
+        }
+
+        private static SessionMessageRecord ReadSessionMessageFromReader(SQLiteDataReader reader)
+        {
+            return new SessionMessageRecord
+            {
+                DbId = reader.GetInt32(0),
+                SessionId = reader.GetString(1),
+                TaskId = reader.IsDBNull(2) ? null : reader.GetString(2),
+                AgentName = reader.IsDBNull(3) ? null : reader.GetString(3),
+                MessageIndex = reader.GetInt32(4),
+                Role = reader.GetString(5),
+                Content = reader.IsDBNull(6) ? null : reader.GetString(6),
+                ToolName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                Timestamp = reader.IsDBNull(8) ? null : reader.GetString(8)
             };
         }
 

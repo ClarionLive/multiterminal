@@ -291,6 +291,9 @@ namespace MultiTerminal
                 _debugLogService.Info("MainForm", "MCP Server created, debug logging initialized");
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 7: Debug logging initialized");
 
+                // Wire up SessionLineageService — uses the broker's shared TaskDatabase
+                _mcpServer.Broker.SessionLineageService = new Services.SessionLineageService(_mcpServer.Broker.TaskDb);
+
                 // Note: Profiles are set to offline in MessageBroker constructor before loading
 
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 8: Wiring ServerError event");

@@ -199,6 +199,19 @@ namespace MultiTerminal.MCPServer.Services
         public MultiTerminal.Services.ChangelogService ChangelogService { get; set; }
 
         /// <summary>
+        /// Session lineage service for importing JSONL session files and querying
+        /// the parent/child session chain linked to tasks.
+        /// Set via DI after broker is created.
+        /// </summary>
+        public MultiTerminal.Services.SessionLineageService SessionLineageService { get; set; }
+
+        /// <summary>
+        /// Raised when session lineage data is updated (session imported or linked to a task).
+        /// Event arg is the session ID that was updated.
+        /// </summary>
+        public event EventHandler<string> SessionLineageUpdated;
+
+        /// <summary>
         /// Project service for managing .claude/project.json files.
         /// Set via DI after broker is created.
         /// </summary>
