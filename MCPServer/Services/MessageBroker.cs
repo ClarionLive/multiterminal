@@ -212,6 +212,12 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<string> SessionLineageUpdated;
 
         /// <summary>
+        /// Knowledge database for institutional memory — knowledge entries and code digests.
+        /// Set via DI after broker is created (shares tasks.db via TaskDatabase).
+        /// </summary>
+        public MultiTerminal.Services.KnowledgeDatabase KnowledgeDb { get; set; }
+
+        /// <summary>
         /// Project service for managing .claude/project.json files.
         /// Set via DI after broker is created.
         /// </summary>

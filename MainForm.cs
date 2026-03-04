@@ -295,6 +295,9 @@ namespace MultiTerminal
                 // Wire up SessionLineageService — uses the broker's shared TaskDatabase
                 _mcpServer.Broker.SessionLineageService = new Services.SessionLineageService(_mcpServer.Broker.TaskDb);
 
+                // Wire up KnowledgeDatabase — institutional memory (shares tasks.db via TaskDatabase)
+                _mcpServer.Broker.KnowledgeDb = new Services.KnowledgeDatabase(_mcpServer.Broker.TaskDb);
+
                 // Auto-sync Claude Code sessions on startup (background, non-blocking)
                 // Scans all registered projects from SQLite, not just CWD
                 var lineageService = _mcpServer.Broker.SessionLineageService;

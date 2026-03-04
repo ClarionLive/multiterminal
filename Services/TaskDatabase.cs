@@ -88,6 +88,7 @@ namespace MultiTerminal.Services
             MigrateAddAgentFieldsToProfiles();
             MigrateAddTeamLeadToProfiles();
             MigrateAddSessionLineage();
+            MigrateAddKnowledgeBase();
 
             // Check FTS5 support after all tables are created
             _fts5Available = CheckFts5Available();
@@ -256,6 +257,49 @@ namespace MultiTerminal.Services
                 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id);
                 CREATE INDEX IF NOT EXISTS idx_session_messages_task ON session_messages(task_id);
                 CREATE INDEX IF NOT EXISTS idx_session_messages_role ON session_messages(role);
+
+                -- Knowledge entries: institutional memory facts, decisions, and patterns
+                CREATE TABLE IF NOT EXISTS knowledge_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source_type TEXT NOT NULL DEFAULT 'manual',
+                    source_id TEXT,
+                    source_agent TEXT,
+                    tags TEXT,
+                    confidence TEXT NOT NULL DEFAULT 'confirmed',
+                    superseded_by INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge_entries(project_id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge_entries(category);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_confidence ON knowledge_entries(confidence);
+
+                -- Code digests: per-file summaries for fast agent orientation
+                CREATE TABLE IF NOT EXISTS code_digests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT,
+                    file_path TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    purpose TEXT,
+                    key_classes TEXT,
+                    key_methods TEXT,
+                    patterns TEXT,
+                    gotchas TEXT,
+                    dependencies TEXT,
+                    line_count INTEGER,
+                    digest_model TEXT DEFAULT 'haiku',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(project_id, file_path)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_digests_project ON code_digests(project_id);
+                CREATE INDEX IF NOT EXISTS idx_digests_hash ON code_digests(file_hash);
             ";
 
             using var command = new SQLiteCommand(schema, _connection);
@@ -3526,6 +3570,69 @@ namespace MultiTerminal.Services
                 Timestamp = reader.IsDBNull(8) ? null : reader.GetString(8)
             };
         }
+
+        #endregion
+
+        #region Knowledge Base
+
+        /// <summary>
+        /// Migration: ensures knowledge_entries_fts virtual table and sync triggers exist.
+        /// Uses the same FTS5 + trigger pattern as MigrateAddSessionLineage.
+        /// Falls back gracefully if FTS5 is not compiled into this SQLite build.
+        /// </summary>
+        private void MigrateAddKnowledgeBase()
+        {
+            // Attempt to create the FTS5 virtual table and its sync triggers.
+            // Wrapped in try/catch because FTS5 is a compile-time SQLite option that may be absent.
+            try
+            {
+                const string fts5Sql = @"
+                    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_entries_fts USING fts5(
+                        title,
+                        content,
+                        tags,
+                        content='knowledge_entries',
+                        content_rowid='id',
+                        tokenize='porter'
+                    );
+
+                    -- Trigger: keep FTS index in sync on INSERT
+                    CREATE TRIGGER IF NOT EXISTS knowledge_entries_ai
+                    AFTER INSERT ON knowledge_entries BEGIN
+                        INSERT INTO knowledge_entries_fts(rowid, title, content, tags)
+                        VALUES (new.id, new.title, new.content, new.tags);
+                    END;
+
+                    -- Trigger: keep FTS index in sync on DELETE
+                    CREATE TRIGGER IF NOT EXISTS knowledge_entries_ad
+                    AFTER DELETE ON knowledge_entries BEGIN
+                        INSERT INTO knowledge_entries_fts(knowledge_entries_fts, rowid, title, content, tags)
+                        VALUES ('delete', old.id, old.title, old.content, old.tags);
+                    END;
+
+                    -- Trigger: keep FTS index in sync on UPDATE
+                    CREATE TRIGGER IF NOT EXISTS knowledge_entries_au
+                    AFTER UPDATE ON knowledge_entries BEGIN
+                        INSERT INTO knowledge_entries_fts(knowledge_entries_fts, rowid, title, content, tags)
+                        VALUES ('delete', old.id, old.title, old.content, old.tags);
+                        INSERT INTO knowledge_entries_fts(rowid, title, content, tags)
+                        VALUES (new.id, new.title, new.content, new.tags);
+                    END;
+                ";
+                using var cmd = new SQLiteCommand(fts5Sql, _connection);
+                cmd.ExecuteNonQuery();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TaskDatabase] FTS5 not available, knowledge search will use LIKE fallback: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Exposes the shared SQLite connection so that KnowledgeDatabase can share the
+        /// same connection without opening a second WAL handle on the same file.
+        /// </summary>
+        internal SQLiteConnection Connection => _connection;
 
         #endregion
 
