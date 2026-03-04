@@ -295,6 +295,46 @@ namespace MultiTerminal
                 // Wire up SessionLineageService — uses the broker's shared TaskDatabase
                 _mcpServer.Broker.SessionLineageService = new Services.SessionLineageService(_mcpServer.Broker.TaskDb);
 
+                // Auto-sync Claude Code sessions on startup (background, non-blocking)
+                // Scans all registered projects from SQLite, not just CWD
+                var lineageService = _mcpServer.Broker.SessionLineageService;
+                var debugLog = _debugLogService;
+                var projectDb = _sharedProjectDatabase;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        var projects = projectDb?.GetAllProjects();
+                        if (projects == null || projects.Count == 0)
+                            return;
+
+                        int totalImported = 0, totalSkipped = 0, totalFailed = 0;
+
+                        foreach (var project in projects)
+                        {
+                            if (string.IsNullOrEmpty(project.Path))
+                                continue;
+
+                            string claudeFolder = Services.SessionLineageService.GetClaudeProjectFolder(project.Path);
+                            if (claudeFolder == null)
+                                continue;
+
+                            debugLog?.Info("MainForm", $"Session sync [{project.Name}]: scanning {claudeFolder}");
+                            var result = lineageService.SyncNewSessions(claudeFolder);
+                            totalImported += result.Imported;
+                            totalSkipped += result.Skipped;
+                            totalFailed += result.Failed;
+                            debugLog?.Info("MainForm", $"Session sync [{project.Name}]: {result.Imported} imported, {result.Skipped} skipped, {result.Failed} failed");
+                        }
+
+                        debugLog?.Info("MainForm", $"Session sync totals: {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
+                    }
+                    catch (Exception ex)
+                    {
+                        debugLog?.Error("MainForm", $"Session sync error: {ex.Message}");
+                    }
+                });
+
                 // Note: Profiles are set to offline in MessageBroker constructor before loading
 
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 8: Wiring ServerError event");

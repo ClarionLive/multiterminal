@@ -18,6 +18,17 @@ namespace MultiTerminal.Services
     }
 
     /// <summary>
+    /// Result of an incremental session sync operation.
+    /// </summary>
+    public class SyncResult
+    {
+        public int Imported { get; set; }
+        public int Skipped { get; set; }
+        public int Failed { get; set; }
+        public int Total => Imported + Skipped + Failed;
+    }
+
+    /// <summary>
     /// Imports Claude Code session JSONL files into the session_lineage and session_messages
     /// tables in TaskDatabase. Tracks parent/child session relationships (lineage chains),
     /// extracts user/assistant messages with flattened content arrays, and exposes
@@ -142,6 +153,103 @@ namespace MultiTerminal.Services
             return count;
         }
 
+        /// <summary>
+        /// Converts a project filesystem path to the corresponding .claude/projects/ folder path.
+        /// Returns null if the folder doesn't exist.
+        /// </summary>
+        public static string GetClaudeProjectFolder(string projectPath)
+        {
+            string claudeProjectsRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".claude", "projects");
+
+            if (!Directory.Exists(claudeProjectsRoot))
+                return null;
+
+            // Claude's folder name format: drive letter + path segments joined with dashes
+            string normalized = projectPath.Replace("\\", "/").TrimEnd('/');
+            string folderName = normalized.Replace(":", "-").Replace("/", "-");
+
+            string claudeProjectPath = Path.Combine(claudeProjectsRoot, folderName);
+            return Directory.Exists(claudeProjectPath) ? claudeProjectPath : null;
+        }
+
+        /// <summary>
+        /// Incrementally syncs sessions from a Claude project folder, skipping those
+        /// already imported. Much faster than ImportAllSessionsFromFolder for large folders.
+        /// </summary>
+        /// <param name="claudeProjectPath">Path to the .claude/projects/{project-folder}/ directory.</param>
+        /// <param name="defaultAgentName">Agent name for sessions with no known agent.</param>
+        /// <param name="defaultTaskId">Task ID for unlinked sessions. Defaults to "__unlinked__".</param>
+        /// <returns>A SyncResult with counts of imported, skipped, and failed sessions.</returns>
+        public SyncResult SyncNewSessions(string claudeProjectPath, string defaultAgentName = "Unknown", string defaultTaskId = "__unlinked__")
+        {
+            var result = new SyncResult();
+
+            if (!Directory.Exists(claudeProjectPath))
+                return result;
+
+            // Get already-imported session IDs in one query
+            var importedIds = _db.GetImportedSessionIds();
+
+            // Top-level JSONL files
+            foreach (var file in Directory.GetFiles(claudeProjectPath, "*.jsonl"))
+            {
+                string sessionId = Path.GetFileNameWithoutExtension(file);
+                if (importedIds.Contains(sessionId))
+                {
+                    result.Skipped++;
+                    continue;
+                }
+
+                try
+                {
+                    var r = ImportSession(file, defaultTaskId, defaultAgentName);
+                    if (r.Success)
+                        result.Imported++;
+                    else
+                        result.Failed++;
+                }
+                catch
+                {
+                    result.Failed++;
+                }
+            }
+
+            // Subagent JSONL files inside <sessionId>/subagents/
+            foreach (var sessionDir in Directory.GetDirectories(claudeProjectPath))
+            {
+                string subagentsDir = Path.Combine(sessionDir, "subagents");
+                if (!Directory.Exists(subagentsDir))
+                    continue;
+
+                foreach (var file in Directory.GetFiles(subagentsDir, "*.jsonl"))
+                {
+                    string sessionId = Path.GetFileNameWithoutExtension(file);
+                    if (importedIds.Contains(sessionId))
+                    {
+                        result.Skipped++;
+                        continue;
+                    }
+
+                    try
+                    {
+                        var r = ImportSession(file, defaultTaskId, defaultAgentName, sessionType: "subagent");
+                        if (r.Success)
+                            result.Imported++;
+                        else
+                            result.Failed++;
+                    }
+                    catch
+                    {
+                        result.Failed++;
+                    }
+                }
+            }
+
+            return result;
+        }
+
         #endregion
 
         #region Query
@@ -158,6 +266,34 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionLineageRecord> GetSessionLineage(string sessionId)
             => _db.GetSessionLineage(sessionId);
+
+        /// <summary>
+        /// Returns the most recent session for the given project path by converting the
+        /// project path to its .claude/projects/ folder and querying by file path prefix.
+        /// Returns null if the project folder doesn't exist or no sessions are found.
+        /// </summary>
+        public SessionLineageRecord GetMostRecentSessionForProject(string projectPath)
+        {
+            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            if (claudeFolder == null)
+                return null;
+
+            return _db.GetMostRecentSessionByFolder(claudeFolder);
+        }
+
+        /// <summary>
+        /// Updates the summary field on a session lineage record.
+        /// Returns the number of rows affected.
+        /// </summary>
+        public int UpdateSessionSummary(string sessionId, string summary)
+            => _db.UpdateSessionSummary(sessionId, summary);
+
+        /// <summary>
+        /// Returns the last N assistant messages for a session, ordered most-recent-first.
+        /// Provides raw material for lazy summary generation when no cached summary exists.
+        /// </summary>
+        public List<SessionMessageRecord> GetRecentSessionMessages(string sessionId, int limit = 20)
+            => _db.GetRecentSessionMessages(sessionId, "assistant", limit);
 
         /// <summary>
         /// Searches session messages with optional filters for taskId, role, and agentName.

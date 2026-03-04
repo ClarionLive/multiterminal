@@ -3124,6 +3124,24 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Returns all session IDs that have already been imported into the lineage table.
+        /// Used to skip re-importing existing sessions during bulk sync.
+        /// </summary>
+        public HashSet<string> GetImportedSessionIds()
+        {
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            const string sql = "SELECT session_id FROM session_lineage";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                ids.Add(reader.GetString(0));
+            }
+            return ids;
+        }
+
+        /// <summary>
         /// Gets all session lineage records linked to a task, ordered newest first.
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByTask(string taskId)
@@ -3379,6 +3397,77 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@limit", limit);
 
             using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionMessageFromReader(reader));
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Returns the most recent session lineage record whose session_file_path starts with
+        /// the given folder prefix. Ordered by ended_at DESC, then created_at DESC.
+        /// Returns null if no matching record is found.
+        /// </summary>
+        public SessionLineageRecord GetMostRecentSessionByFolder(string claudeProjectFolder)
+        {
+            // Normalize: ensure trailing separator so we don't match sibling folders sharing a prefix
+            string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+
+            const string sql = @"
+                SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
+                       summary, session_file_path, started_at, ended_at, created_at
+                FROM session_lineage
+                WHERE session_file_path LIKE @folder || '%'
+                ORDER BY ended_at DESC, created_at DESC
+                LIMIT 1
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@folder", folderPrefix);
+            using var reader = command.ExecuteReader();
+
+            return reader.Read() ? ReadSessionLineageFromReader(reader) : null;
+        }
+
+        /// <summary>
+        /// Updates the summary field for a session lineage record.
+        /// Returns the number of rows affected (0 if sessionId not found).
+        /// </summary>
+        public int UpdateSessionSummary(string sessionId, string summary)
+        {
+            const string sql = "UPDATE session_lineage SET summary = @summary WHERE session_id = @sessionId";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@summary", (object)summary ?? DBNull.Value);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            return command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns the last N messages for a session, filtered to the given role, ordered
+        /// by message_index DESC (most recent first). Useful for generating session summaries.
+        /// </summary>
+        public List<SessionMessageRecord> GetRecentSessionMessages(string sessionId, string role, int limit)
+        {
+            var results = new List<SessionMessageRecord>();
+
+            const string sql = @"
+                SELECT id, session_id, task_id, agent_name, message_index,
+                       role, content, tool_name, timestamp
+                FROM session_messages
+                WHERE session_id = @sessionId AND role = @role
+                ORDER BY message_index DESC
+                LIMIT @limit
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            command.Parameters.AddWithValue("@role", role);
+            command.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 results.Add(ReadSessionMessageFromReader(reader));

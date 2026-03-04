@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
@@ -103,6 +105,99 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Incrementally sync sessions from a Claude project folder.
+        /// Skips already-imported sessions for fast re-sync.
+        /// </summary>
+        [HttpPost("sync")]
+        public IActionResult SyncSessions([FromBody] SyncSessionsRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request?.ClaudeProjectPath))
+                return BadRequest(new { error = "claudeProjectPath is required" });
+
+            // Guard against path traversal
+            string allowedRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".claude", "projects");
+            string fullPath = Path.GetFullPath(request.ClaudeProjectPath);
+            if (!fullPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { error = "claudeProjectPath must be within the Claude projects directory" });
+
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            var result = service.SyncNewSessions(
+                request.ClaudeProjectPath,
+                request.AgentName ?? "Unknown",
+                request.TaskId ?? "__unlinked__"
+            );
+
+            return Ok(new
+            {
+                success = true,
+                imported = result.Imported,
+                skipped = result.Skipped,
+                failed = result.Failed,
+                total = result.Total
+            });
+        }
+
+        /// <summary>
+        /// Returns the most recent session for a project folder.
+        /// If the session has no cached summary, also returns the last 10 assistant messages
+        /// so the caller can generate a summary lazily.
+        /// </summary>
+        [HttpGet("latest")]
+        public IActionResult GetLatestSession([FromQuery] string projectPath)
+        {
+            if (string.IsNullOrWhiteSpace(projectPath))
+                return BadRequest(new { error = "projectPath is required" });
+
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            var session = service.GetMostRecentSessionForProject(projectPath);
+            if (session == null)
+                return NotFound(new { error = "No session found for the given project path" });
+
+            // Only fetch recent messages when there is no cached summary
+            IList<object> recentMessages = null;
+            if (string.IsNullOrEmpty(session.Summary))
+            {
+                var msgs = service.GetRecentSessionMessages(session.SessionId, limit: 10);
+                recentMessages = msgs.Cast<object>().ToList();
+            }
+
+            return Ok(new
+            {
+                session,
+                summary = session.Summary,
+                recentMessages
+            });
+        }
+
+        /// <summary>
+        /// Saves a generated summary to a session lineage record.
+        /// </summary>
+        [HttpPut("{sessionId}/summary")]
+        public IActionResult UpdateSessionSummary(string sessionId, [FromBody] UpdateSessionSummaryRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request?.Summary))
+                return BadRequest(new { error = "summary is required" });
+
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            int rows = service.UpdateSessionSummary(sessionId, request.Summary);
+            if (rows == 0)
+                return NotFound(new { error = $"Session '{sessionId}' not found" });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
         /// Full-text search across session messages.
         /// Uses SQLite FTS5 when available, falls back to LIKE search.
         /// </summary>
@@ -141,6 +236,13 @@ namespace MultiTerminal.API.Controllers
 
     // Request models
 
+    public class SyncSessionsRequest
+    {
+        public string ClaudeProjectPath { get; set; }
+        public string AgentName { get; set; }
+        public string TaskId { get; set; }
+    }
+
     public class ImportSessionRequest
     {
         public string SessionFilePath { get; set; }
@@ -150,5 +252,10 @@ namespace MultiTerminal.API.Controllers
         public string SessionType { get; set; }
         /// <summary>Parent session GUID for lineage chaining. Optional.</summary>
         public string ParentSessionId { get; set; }
+    }
+
+    public class UpdateSessionSummaryRequest
+    {
+        public string Summary { get; set; }
     }
 }

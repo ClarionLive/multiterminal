@@ -287,6 +287,55 @@ async function main() {
             console.log('No tasks assigned. Use list_tasks to see the board or claim_task to pick up work.');
           }
 
+          // Inject last session recap (non-blocking — skip if API is unavailable)
+          try {
+            const http = require('http');
+            const projectPath = process.cwd();
+            const sessionRecap = await new Promise((resolve) => {
+              const req = http.request({
+                hostname: 'localhost',
+                port: 5050,
+                path: `/api/session-lineage/latest?projectPath=${encodeURIComponent(projectPath)}`,
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 3000
+              }, (res) => {
+                let body = '';
+                res.on('data', (chunk) => { body += chunk; });
+                res.on('end', () => {
+                  try {
+                    resolve(JSON.parse(body));
+                  } catch (e) {
+                    resolve(null);
+                  }
+                });
+              });
+              req.on('error', () => resolve(null));
+              req.on('timeout', () => { req.destroy(); resolve(null); });
+              req.end();
+            });
+
+            if (sessionRecap && sessionRecap.session) {
+              const sessionId = sessionRecap.session.sessionId || sessionRecap.session.id;
+              console.log('');
+              if (sessionRecap.summary) {
+                console.log(`## Last Session Recap\n${sessionRecap.summary}`);
+              } else {
+                const msgs = sessionRecap.recentMessages || [];
+                if (msgs.length > 0) {
+                  const msgLines = msgs.map((m, i) => {
+                    const preview = (m.content || '').substring(0, 300);
+                    return `${i + 1}. [${m.role}] ${preview}${(m.content || '').length > 300 ? '...' : ''}`;
+                  }).join('\n');
+                  console.log(`## Last Session (no summary cached)\nRecent activity from your last session:\n${msgLines}`);
+                  console.log(`NOTE: No cached summary for session ${sessionId}. The project-management skill will generate one.`);
+                }
+              }
+            }
+          } catch (sessionErr) {
+            // Session recap is non-critical — never block startup
+          }
+
           // Auto-invoke project management on session start
           console.log('');
           console.log('AUTO-RUN SKILL: You MUST run /project-management as your FIRST action before responding to the user. This is mandatory - use the Skill tool with skill="project-management" immediately.');
