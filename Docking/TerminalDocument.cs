@@ -27,6 +27,7 @@ namespace MultiTerminal.Docking
     {
         private TerminalControl _terminal;
         private TerminalStatusBarRenderer _statusBar;
+        private Splitter _statusBarSplitter;
         private TaskHudRenderer _taskHud;
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
@@ -132,8 +133,9 @@ namespace MultiTerminal.Docking
 
         // Split ratios for splitter containers (global, applied from settings)
         private double _agentSplitRatio = 0.75;
-        private double _hudSplitRatio = 0.75;
+        private double _hudSplitRatio = 0.60;
         private bool _suppressSplitterEvents;
+        private bool _isDisposing;
 
         // Status line polling timer — reads temp file written by Claude Code statusline script
         private System.Threading.Timer _statusLineTimer;
@@ -353,7 +355,7 @@ namespace MultiTerminal.Docking
                 FixedPanel = FixedPanel.Panel2, // task HUD keeps fixed size on resize
                 BorderStyle = BorderStyle.None,
                 SplitterWidth = 6,
-                BackColor = Color.FromArgb(40, 40, 50),
+                BackColor = Color.FromArgb(80, 80, 110),
                 Panel1MinSize = 100,
                 Panel2MinSize = 80
             };
@@ -370,29 +372,48 @@ namespace MultiTerminal.Docking
             // never fires → panel never uncollapses).
             _taskHud.HudVisibilityRequested += (s, show) =>
             {
+                // Capture the ratio BEFORE uncollapsing. WinForms fires async
+                // SplitterMoved events after Panel2Collapsed changes, which would
+                // overwrite _hudSplitRatio with a bogus default value.
+                double ratioToApply = _hudSplitRatio;
+
+                // Keep events suppressed from uncollapse through the deferred
+                // BeginInvoke so no stray SplitterMoved can corrupt the ratio.
+                _suppressSplitterEvents = true;
                 _terminalHudSplitter.Panel2Collapsed = !show;
 
-                // Re-apply the saved split ratio every time HUD becomes visible.
-                // WinForms doesn't reliably restore SplitterDistance when uncollapsing Panel2.
-                if (show && _terminalHudSplitter.Height > 0)
+                if (show && _terminalHudSplitter.Height > 0 && IsHandleCreated)
                 {
-                    try
+                    // Defer ratio application until after WinForms finishes its
+                    // layout pass. Events stay suppressed until the callback runs.
+                    BeginInvoke((Action)(() =>
                     {
-                        _suppressSplitterEvents = true;
-                        int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
-                        if (distance > _terminalHudSplitter.Panel1MinSize)
-                            _terminalHudSplitter.SplitterDistance = distance;
-                    }
-                    catch { /* bounds during layout */ }
-                    finally { _suppressSplitterEvents = false; }
+                        try
+                        {
+                            int distance = (int)(_terminalHudSplitter.Height * ratioToApply);
+                            if (distance > _terminalHudSplitter.Panel1MinSize)
+                                _terminalHudSplitter.SplitterDistance = distance;
+                            // Restore in case stray events slipped through
+                            _hudSplitRatio = ratioToApply;
+                        }
+                        catch { /* bounds during layout */ }
+                        finally { _suppressSplitterEvents = false; }
+                    }));
+                }
+                else
+                {
+                    _suppressSplitterEvents = false;
                 }
             };
 
-            // Set the saved split ratio once the splitter has a valid height
+            // Set the saved split ratio once the splitter has a valid height.
+            // SplitterMoved is hooked AFTER the initial ratio is applied (in OnHudSplitterSizeChanged)
+            // to prevent WinForms layout events from overwriting the saved ratio during init.
             _terminalHudSplitter.SizeChanged += OnHudSplitterSizeChanged;
-            _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
 
             // Create SplitContainer: terminal+hud (left, 75%) | agent panel (right, 25%)
+            // Panel2MinSize is set in OnSplitterSizeChanged once the control has a valid width,
+            // because setting it here (400px) exceeds the default ~150px width and throws.
             _terminalAgentSplitter = new SplitContainer
             {
                 Dock = DockStyle.Fill,
@@ -400,9 +421,9 @@ namespace MultiTerminal.Docking
                 FixedPanel = FixedPanel.Panel2, // agent panel keeps fixed size on resize
                 BorderStyle = BorderStyle.None,
                 SplitterWidth = 6,
-                BackColor = Color.FromArgb(40, 40, 50), // subtle splitter color
+                BackColor = Color.FromArgb(80, 80, 110),
                 Panel1MinSize = 100,
-                Panel2MinSize = 80
+                Panel2MinSize = 25
             };
 
             _terminalAgentSplitter.Panel1.Controls.Add(_terminalHudSplitter);
@@ -413,33 +434,59 @@ namespace MultiTerminal.Docking
 
             _embeddedAgentPanel.VisibilityRequested += (s, show) =>
             {
-                _terminalAgentSplitter.Panel2Collapsed = !show;
-
-                // Re-apply the saved split ratio when uncollapsing — WinForms doesn't
-                // reliably restore SplitterDistance after Panel2Collapsed changes.
-                if (show && _terminalAgentSplitter.Width > 0)
+                // Suppress splitter events during collapse/uncollapse to prevent
+                // WinForms' internal SplitterDistance adjustment from overwriting
+                // _agentSplitRatio and saving a wrong value to settings.
+                try
                 {
-                    try
+                    _suppressSplitterEvents = true;
+                    _terminalAgentSplitter.Panel2Collapsed = !show;
+                }
+                finally { _suppressSplitterEvents = false; }
+
+                // Defer ratio application until after WinForms finishes its layout pass.
+                // Setting SplitterDistance immediately after uncollapsing is unreliable
+                // because WinForms resets it during its own layout processing.
+                if (show && _terminalAgentSplitter.Width > 0 && IsHandleCreated)
+                {
+                    BeginInvoke((Action)(() =>
                     {
-                        _suppressSplitterEvents = true;
-                        int distance = (int)(_terminalAgentSplitter.Width * _agentSplitRatio);
-                        if (distance > _terminalAgentSplitter.Panel1MinSize &&
-                            distance < _terminalAgentSplitter.Width - _terminalAgentSplitter.Panel2MinSize)
+                        try
                         {
-                            _terminalAgentSplitter.SplitterDistance = distance;
+                            _suppressSplitterEvents = true;
+                            int distance = (int)(_terminalAgentSplitter.Width * _agentSplitRatio);
+                            if (distance > _terminalAgentSplitter.Panel1MinSize &&
+                                distance < _terminalAgentSplitter.Width - _terminalAgentSplitter.Panel2MinSize)
+                            {
+                                _terminalAgentSplitter.SplitterDistance = distance;
+                            }
                         }
-                    }
-                    catch { /* WinForms sizing edge case — safe to ignore */ }
-                    finally { _suppressSplitterEvents = false; }
+                        catch { /* WinForms sizing edge case -- safe to ignore */ }
+                        finally { _suppressSplitterEvents = false; }
+                    }));
                 }
             };
 
-            // Set the saved split ratio once the splitter has a valid width
+            // Set the saved split ratio once the splitter has a valid width.
+            // SplitterMoved is hooked AFTER the initial ratio is applied (in OnSplitterSizeChanged)
+            // to prevent WinForms layout events from overwriting the saved ratio during init.
             _terminalAgentSplitter.SizeChanged += OnSplitterSizeChanged;
-            _terminalAgentSplitter.SplitterMoved += OnAgentSplitterMoved;
 
-            // Layout order: _terminalAgentSplitter (Fill) | _statusBar (Top)
+            // Splitter handle between status bar and terminal area
+            _statusBarSplitter = new Splitter
+            {
+                Dock = DockStyle.Top,
+                Height = 6,
+                Cursor = Cursors.HSplit,
+                BackColor = Color.FromArgb(50, 50, 70),
+                MinSize = 60,    // min status bar height
+                MinExtra = 200   // min remaining space for terminal
+            };
+            _statusBarSplitter.SplitterMoved += OnStatusBarSplitterMoved;
+
+            // Layout order: _terminalAgentSplitter (Fill) | _statusBarSplitter (Top) | _statusBar (Top)
             Controls.Add(_terminalAgentSplitter);
+            Controls.Add(_statusBarSplitter);
             Controls.Add(_statusBar);
 
             // Start screen: overlays the full client area, shown before terminal starts
@@ -482,12 +529,18 @@ namespace MultiTerminal.Docking
             try
             {
                 _suppressSplitterEvents = true;
+                // Apply the real Panel2MinSize now that the control has a valid width
+                // (can't set 400 at construction time when default width is ~150)
+                if (_terminalAgentSplitter.Width > 506)
+                    _terminalAgentSplitter.Panel2MinSize = 400;
                 int distance = (int)(_terminalAgentSplitter.Width * _agentSplitRatio);
                 if (distance > _terminalAgentSplitter.Panel1MinSize &&
                     distance < _terminalAgentSplitter.Width - _terminalAgentSplitter.Panel2MinSize)
                 {
                     _terminalAgentSplitter.SplitterDistance = distance;
                     _initialSplitApplied = true;
+                    // Now safe to listen for user-initiated splitter drags
+                    _terminalAgentSplitter.SplitterMoved += OnAgentSplitterMoved;
                 }
             }
             catch
@@ -514,6 +567,8 @@ namespace MultiTerminal.Docking
                 {
                     _terminalHudSplitter.SplitterDistance = distance;
                     _initialHudSplitApplied = true;
+                    // Now safe to listen for user-initiated splitter drags
+                    _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
                 }
             }
             catch
@@ -528,7 +583,8 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnAgentSplitterMoved(object sender, SplitterEventArgs e)
         {
-            if (_suppressSplitterEvents) return;
+            if (_suppressSplitterEvents || _isDisposing) return;
+            if (_terminalAgentSplitter == null || _terminalAgentSplitter.Panel2Collapsed) return;
             if (_terminalAgentSplitter.Width <= 0) return;
             double ratio = (double)_terminalAgentSplitter.SplitterDistance / _terminalAgentSplitter.Width;
             _agentSplitRatio = ratio;
@@ -540,11 +596,36 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnHudSplitterMoved(object sender, SplitterEventArgs e)
         {
-            if (_suppressSplitterEvents) return;
+            if (_suppressSplitterEvents || _isDisposing) return;
+            if (_terminalHudSplitter == null || _terminalHudSplitter.Panel2Collapsed) return;
             if (_terminalHudSplitter.Height <= 0) return;
             double ratio = (double)_terminalHudSplitter.SplitterDistance / _terminalHudSplitter.Height;
             _hudSplitRatio = ratio;
             HudSplitRatioChanged?.Invoke(this, ratio);
+        }
+
+        /// <summary>
+        /// Fires when the user drags the status bar splitter.
+        /// </summary>
+        private void OnStatusBarSplitterMoved(object sender, SplitterEventArgs e)
+        {
+            if (_statusBar == null) return;
+            int height = _statusBar.Height;
+            if (height > 0)
+            {
+                StatusBarHeightChanged?.Invoke(this, height);
+            }
+        }
+
+        /// <summary>
+        /// Applies a saved status bar height.
+        /// </summary>
+        public void ApplyStatusBarHeight(int height)
+        {
+            if (_statusBar != null && height > 0)
+            {
+                _statusBar.Height = height;
+            }
         }
 
         private void InitializeTabContextMenu()
@@ -694,8 +775,14 @@ namespace MultiTerminal.Docking
             if (_terminalAgentSplitter != null)
             {
                 _terminalAgentSplitter.BackColor = theme.IsDark
-                    ? Color.FromArgb(40, 40, 50)
-                    : Color.FromArgb(210, 210, 215);
+                    ? Color.FromArgb(80, 80, 110)
+                    : Color.FromArgb(180, 180, 200);
+            }
+            if (_terminalHudSplitter != null)
+            {
+                _terminalHudSplitter.BackColor = theme.IsDark
+                    ? Color.FromArgb(80, 80, 110)
+                    : Color.FromArgb(180, 180, 200);
             }
         }
 
@@ -778,6 +865,9 @@ namespace MultiTerminal.Docking
 
         /// <summary>Fired when user drags the HUD splitter. Arg is the new ratio.</summary>
         public event EventHandler<double> HudSplitRatioChanged;
+
+        /// <summary>Fired when user drags the status bar splitter. Arg is the new height in pixels.</summary>
+        public event EventHandler<int> StatusBarHeightChanged;
 
         /// <summary>Fired when user Ctrl+wheels in the task HUD. Arg is the new zoom factor.</summary>
         public event EventHandler<double> TaskHudZoomChanged;
@@ -1144,6 +1234,7 @@ namespace MultiTerminal.Docking
 
             // Hide terminal area to prevent WebView2 HWND Z-order conflicts
             _terminalAgentSplitter.Visible = false;
+            if (_statusBarSplitter != null) _statusBarSplitter.Visible = false;
             _statusBar.Visible = false;
 
             // Show start screen over the entire content area
@@ -1172,6 +1263,7 @@ namespace MultiTerminal.Docking
 
             // Re-show terminal area (hidden by ShowStartScreen to fix WebView2 Z-order)
             _terminalAgentSplitter.Visible = true;
+            if (_statusBarSplitter != null) _statusBarSplitter.Visible = true;
             _statusBar.Visible = true;
         }
 
@@ -1336,7 +1428,11 @@ namespace MultiTerminal.Docking
 
                     string content = File.ReadAllText(filePath);
                     if (string.IsNullOrEmpty(content) || content == _lastStatusLineContent) return;
-                    _lastStatusLineContent = content;
+
+                    // Only cache content AFTER successfully delivering to UI thread.
+                    // Otherwise, if IsHandleCreated is false on first read, the content
+                    // gets cached but never delivered — and subsequent polls skip it.
+                    if (!IsHandleCreated || IsDisposed) return;
 
                     using var doc = JsonDocument.Parse(content);
                     var root = doc.RootElement;
@@ -1350,13 +1446,12 @@ namespace MultiTerminal.Docking
                         ? cp.GetInt32() : (int?)null;
 
                     // Marshal to UI thread
-                    if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke(new Action(() =>
                     {
-                        BeginInvoke(new Action(() =>
-                        {
-                            _statusBar?.UpdateStatusLine(model, folder, gitBranch, gitStatus, gitDirty, contextPct);
-                        }));
-                    }
+                        _statusBar?.UpdateStatusLine(model, folder, gitBranch, gitStatus, gitDirty, contextPct);
+                    }));
+
+                    _lastStatusLineContent = content;
                 }
                 catch
                 {
@@ -1399,6 +1494,10 @@ namespace MultiTerminal.Docking
         {
             if (disposing)
             {
+                // Prevent stray splitter events from saving bogus ratios during teardown
+                _isDisposing = true;
+                _suppressSplitterEvents = true;
+
                 StopStatusLinePolling();
 
                 _projectFileWatcher?.Dispose();
@@ -1416,10 +1515,25 @@ namespace MultiTerminal.Docking
                     _messageBroker.ActivityService.ActivityUpdated -= OnActivityUpdated;
                 }
 
+                // Unsubscribe splitter events BEFORE disposing child controls
+                // to prevent WinForms layout changes from firing save events
+                if (_terminalHudSplitter != null)
+                {
+                    _terminalHudSplitter.SizeChanged -= OnHudSplitterSizeChanged;
+                    _terminalHudSplitter.SplitterMoved -= OnHudSplitterMoved;
+                }
+
                 if (_taskHud != null)
                 {
                     _taskHud.Dispose();
                     _taskHud = null;
+                }
+
+                if (_statusBarSplitter != null)
+                {
+                    _statusBarSplitter.SplitterMoved -= OnStatusBarSplitterMoved;
+                    _statusBarSplitter.Dispose();
+                    _statusBarSplitter = null;
                 }
 
                 if (_statusBar != null)
@@ -1437,6 +1551,7 @@ namespace MultiTerminal.Docking
                 if (_terminalAgentSplitter != null)
                 {
                     _terminalAgentSplitter.SizeChanged -= OnSplitterSizeChanged;
+                    _terminalAgentSplitter.SplitterMoved -= OnAgentSplitterMoved;
                     _terminalAgentSplitter.Dispose();
                     _terminalAgentSplitter = null;
                 }
