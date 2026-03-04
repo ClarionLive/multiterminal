@@ -65,7 +65,7 @@ namespace MultiTerminal.Controls
 
             BackColor = Color.FromArgb(30, 30, 30);
             Name = "TerminalStatusBarRenderer";
-            Height = 105; // 3-row status bar: identity + folder + statusline
+            Height = 140; // 3-row status bar: identity + folder + statusline
             Dock = DockStyle.Top;
 
             _webView = new WebView2

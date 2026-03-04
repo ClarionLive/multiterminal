@@ -122,6 +122,12 @@ namespace MultiTerminal.Services
         private const string AgentPanelCloseModeKey = "AgentPanelCloseMode";
         private const string DefaultAgentPanelCloseMode = "ManualClose";
 
+        // Status bar height setting
+        private const string StatusBarHeightKey = "StatusBarHeight";
+        private const int DefaultStatusBarHeight = 140;
+        private const int MinStatusBarHeight = 60;
+        private const int MaxStatusBarHeight = 400;
+
         // Global agent/HUD layout settings (shared across all terminals)
         private const string AgentPanelZoomKey = "AgentPanelZoom";
         private const string TaskHudZoomKey = "TaskHudZoom";
@@ -130,9 +136,10 @@ namespace MultiTerminal.Services
         private const double DefaultAgentPanelZoom = 1.0;
         private const double DefaultTaskHudZoom = 1.0;
         private const double DefaultAgentPanelSplitRatio = 0.75;
-        private const double DefaultHudSplitRatio = 0.75;
+        private const double DefaultHudSplitRatio = 0.60;
         private const double MinSplitRatio = 0.2;
         private const double MaxSplitRatio = 0.95;
+        private const double MaxHudSplitRatio = 0.95; // Physical Panel2MinSize (80px) is the real constraint
 
         // Claude commands settings
         private const string ClaudeCommandsKey = "ClaudeCommands";
@@ -524,7 +531,7 @@ namespace MultiTerminal.Services
             string value = Get(HudSplitRatioKey);
             if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double ratio))
             {
-                return Math.Max(MinSplitRatio, Math.Min(MaxSplitRatio, ratio));
+                return Math.Max(MinSplitRatio, Math.Min(MaxHudSplitRatio, ratio));
             }
             return DefaultHudSplitRatio;
         }
@@ -534,8 +541,30 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SetHudSplitRatio(double ratio)
         {
-            ratio = Math.Max(MinSplitRatio, Math.Min(MaxSplitRatio, ratio));
+            ratio = Math.Max(MinSplitRatio, Math.Min(MaxHudSplitRatio, ratio));
             Set(HudSplitRatioKey, ratio.ToString("F3", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the saved status bar height in pixels.
+        /// </summary>
+        public int GetStatusBarHeight()
+        {
+            string value = Get(StatusBarHeightKey);
+            if (!string.IsNullOrEmpty(value) && int.TryParse(value, out int height))
+            {
+                return Math.Max(MinStatusBarHeight, Math.Min(MaxStatusBarHeight, height));
+            }
+            return DefaultStatusBarHeight;
+        }
+
+        /// <summary>
+        /// Sets the status bar height in pixels.
+        /// </summary>
+        public void SetStatusBarHeight(int height)
+        {
+            height = Math.Max(MinStatusBarHeight, Math.Min(MaxStatusBarHeight, height));
+            Set(StatusBarHeightKey, height.ToString());
         }
 
         /// <summary>

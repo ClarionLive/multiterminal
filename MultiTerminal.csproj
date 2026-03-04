@@ -12,6 +12,7 @@
     <PublishSingleFile>false</PublishSingleFile>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Deterministic>false</Deterministic>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <!-- Specify minimum Windows version to suppress CA1416 platform warnings -->

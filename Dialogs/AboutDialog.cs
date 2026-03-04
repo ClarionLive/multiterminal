@@ -59,7 +59,7 @@ namespace MultiTerminal.Dialogs
             var version = Assembly.GetExecutingAssembly().GetName().Version;
             var versionLabel = new Label
             {
-                Text = $"Version {version.Major}.{version.Minor}.{version.Build}",
+                Text = $"Version {version.Major}.{version.Minor}.{version.Build}.{version.Revision}",
                 Location = new Point(leftMargin, yPos),
                 AutoSize = true
             };

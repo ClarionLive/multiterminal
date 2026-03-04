@@ -39,8 +39,8 @@
 
             /* Typography */
             --font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-            --font-size-xs: 13px;
-            --font-size-sm: 14px;
+            --font-size-xs: 15px;
+            --font-size-sm: 16px;
         }
 
         /* Light theme overrides */
@@ -68,7 +68,7 @@
 
         html, body {
             width: 100%;
-            height: 105px;
+            height: 140px;
             overflow: hidden;
         }
 
@@ -86,7 +86,7 @@
         .status-bar-container {
             display: flex;
             flex-direction: column;
-            height: 105px;
+            height: 140px;
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
         }
@@ -99,7 +99,7 @@
             align-items: center;
             gap: 10px;
             padding: 6px 12px 2px 12px;
-            min-height: 34px;
+            min-height: 40px;
         }
 
         .avatar-container {
@@ -202,7 +202,7 @@
             align-items: center;
             gap: 6px;
             padding: 0 12px;
-            min-height: 26px;
+            min-height: 30px;
             border-top: 1px solid var(--border-color);
         }
 
@@ -268,18 +268,18 @@
             align-items: center;
             gap: 0;
             padding: 0 12px;
-            min-height: 26px;
+            min-height: 30px;
             border-top: 1px solid var(--border-color);
         }
 
         .sl-segment {
             display: inline-flex;
             align-items: center;
-            padding: 2px 7px;
+            padding: 2px 8px;
             font-size: var(--font-size-xs);
             font-family: 'Cascadia Code', 'Consolas', monospace;
             white-space: nowrap;
-            height: 22px;
+            height: 24px;
             border-radius: 3px;
             margin-right: 6px;
         }
@@ -300,9 +300,22 @@
             color: #60a5fa;
         }
 
+        .git-branch-icon {
+            margin-right: 4px;
+            opacity: 0.8;
+            vertical-align: middle;
+        }
+
         .sl-git-status {
-            margin-left: 4px;
+            margin-left: 6px;
             color: var(--ctx-yellow);
+        }
+
+        .context-label {
+            color: var(--text-muted);
+            font-size: var(--font-size-xs);
+            font-family: var(--font-family);
+            margin-right: 4px;
         }
 
         .sl-context {
@@ -408,10 +421,12 @@
         <div class="row-statusline hidden" id="row-statusline">
             <span class="sl-segment sl-model" id="sl-model">claude</span>
             <span class="sl-segment sl-git" id="sl-git" style="display:none">
+                <svg class="git-branch-icon" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Z"/></svg>
                 <span id="sl-git-branch"></span>
                 <span class="sl-git-status" id="sl-git-status"></span>
             </span>
             <span class="sl-context" id="sl-context">
+                <span class="context-label">Context:</span>
                 <span class="context-bar" id="context-bar"></span>
                 <span class="context-pct" id="context-pct">--%</span>
             </span>
@@ -522,8 +537,8 @@
             // Git branch & status
             var gitSegment = document.getElementById('sl-git');
             if (gitBranch) {
-                document.getElementById('sl-git-branch').textContent = '\uE0A0 ' + gitBranch;
-                document.getElementById('sl-git-status').textContent = gitStatus || '';
+                document.getElementById('sl-git-branch').textContent = gitBranch;
+                document.getElementById('sl-git-status').textContent = formatGitStatus(gitStatus);
                 gitSegment.style.display = '';
             } else {
                 gitSegment.style.display = 'none';
@@ -571,6 +586,22 @@
             else if (pct > 85) pctEl.style.color = 'var(--ctx-orange)';
             else if (pct > 70) pctEl.style.color = 'var(--ctx-yellow)';
             else pctEl.style.color = 'var(--text-secondary)';
+        }
+
+        function formatGitStatus(raw) {
+            if (!raw) return '';
+            // Parse statusline.js format: ↡N=behind, ⇡N=ahead, +N=staged, !N=modified
+            var parts = [];
+            var m;
+            m = raw.match(/\u21e1(\d+)/); // ⇡ ahead
+            if (m) parts.push(m[1] + ' ahead');
+            m = raw.match(/\u21e3(\d+)/); // ⇣ behind
+            if (m) parts.push(m[1] + ' behind');
+            m = raw.match(/\+(\d+)/);
+            if (m) parts.push(m[1] + ' staged');
+            m = raw.match(/!(\d+)/);
+            if (m) parts.push(m[1] + ' modified');
+            return parts.length > 0 ? parts.join(', ') : raw;
         }
 
         function escapeHtml(text) {

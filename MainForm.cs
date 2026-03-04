@@ -146,7 +146,8 @@ namespace MultiTerminal
         {
             SuspendLayout();
 
-            Text = "MultiTerminal";
+            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            Text = $"MultiTerminal v{version.Major}.{version.Minor}.{version.Build}.{version.Revision}";
             Size = new Size(1200, 800);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = Color.FromArgb(30, 30, 30);
@@ -1318,12 +1319,10 @@ namespace MultiTerminal
             float toolbarFontSize = _settings.GetToolbarFontSize();
             _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, toolbarFontSize);
 
-            // Restore project panel visibility and font size
-            bool showProjectPanel = _settings.Get("ShowPromptsPanel") == "true"; // Keep same setting key for compatibility
+            // Restore panel font sizes
             float projectFontSize = _settings.GetPromptsFontSize();
             _projectPanel?.SetFontSize(projectFontSize);
 
-            // Apply font sizes to other panels
             float chatFontSize = _settings.GetChatFontSize();
             _chatPanel?.SetFontSize(chatFontSize);
 
@@ -1339,22 +1338,14 @@ namespace MultiTerminal
             _chatPanel?.SetZoomFactor(_settings.GetChatPanelZoom());
             _officePanel?.SetZoomFactor(_settings.GetOfficePanelZoom());
 
-            // DISABLED: Project panel auto-show causes DockPanel to deserialize and create duplicate services via reflection
-            // TODO: Fix DockPanel deserialization to not create new service instances
-            /*
-            if (showProjectPanel)
+            // Migrate legacy ShowPromptsPanel setting to new Panel_ProjectPanel_Visible format
+            if (_settings.Get("ShowPromptsPanel") == "true" && _settings.Get("Panel_ProjectPanel_Visible") == null)
             {
-                this.Shown += (s, e) =>
-                {
-                    System.Diagnostics.Trace.WriteLine("[MainForm] Shown event: Showing project panel...");
-                    _projectPanel.Show(_dockPanel, DockState.DockLeft);
-                    System.Diagnostics.Trace.WriteLine("[MainForm] Shown event: Calling RefreshProjectPanel...");
-                    RefreshProjectPanel();
-                    System.Diagnostics.Trace.WriteLine("[MainForm] Shown event: RefreshProjectPanel completed");
-                };
+                _settings.Set("Panel_ProjectPanel_Visible", "true");
+                _settings.Set("Panel_ProjectPanel_DockState", "DockLeft");
             }
-            */
-            System.Diagnostics.Trace.WriteLine($"[MainForm] LoadSettings: showProjectPanel={showProjectPanel} (auto-show disabled)");
+
+            // Panel visibility is restored in RestorePanelStates() called from RestoreSession
         }
 
         private bool IsVisibleOnAnyScreen(Rectangle rect)
@@ -1516,6 +1507,7 @@ namespace MultiTerminal
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
             doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
@@ -1653,6 +1645,7 @@ namespace MultiTerminal
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
                 doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
             // Focus the new terminal and track it as last active
@@ -2044,6 +2037,7 @@ namespace MultiTerminal
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
             doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
@@ -2089,6 +2083,7 @@ namespace MultiTerminal
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
                 doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
             _lastActiveTerminal = doc;
@@ -2113,6 +2108,7 @@ namespace MultiTerminal
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
             doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
@@ -2144,6 +2140,7 @@ namespace MultiTerminal
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
                 doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
             _lastActiveTerminal = doc;
@@ -2249,6 +2246,17 @@ namespace MultiTerminal
             foreach (var doc in _gridManager.GetTerminalDocuments())
             {
                 if (doc != source) doc.ApplyHudSplitRatio(ratio);
+            }
+        }
+
+        private void OnStatusBarHeightChanged(object sender, int height)
+        {
+            _settings?.SetStatusBarHeight(height);
+            // Apply to all other terminals
+            var source = sender as TerminalDocument;
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                if (doc != source) doc.ApplyStatusBarHeight(height);
             }
         }
 
@@ -2668,7 +2676,7 @@ namespace MultiTerminal
 
             _settings.SetWindowState(WindowState);
 
-            // Save dock panel layout
+            // Save dock panel layout (used by LoadFromXml on restore)
             try
             {
                 _dockPanel.SaveAsXml(_settings.GetLayoutFilePath());
@@ -2678,8 +2686,15 @@ namespace MultiTerminal
                 System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to save layout: {ex.Message}");
             }
 
-            // Save project panel state
-            _settings.Set("ShowPromptsPanel", (_projectPanel?.Visible ?? false) ? "true" : "false");
+            // Save all panel visibility and dock positions
+            SavePanelState("ProjectPanel", _projectPanel);
+            SavePanelState("ChatPanel", _chatPanel);
+            SavePanelState("TasksPanel", _tasksPanel);
+            SavePanelState("ActivityPanel", _activityPanel);
+            SavePanelState("ProfilePanel", _profilePanel);
+            SavePanelState("InboxPanel", _inboxPanel);
+            SavePanelState("OfficePanel", _officePanel);
+            SavePanelState("DebugPanel", _debugPanel);
 
             // Save session before closing
             SaveSession();
@@ -2759,69 +2774,195 @@ namespace MultiTerminal
             _settings.SetSessionLayout(preset.ToString());
         }
 
+        private void SavePanelState(string panelKey, DockContent panel)
+        {
+            if (panel == null || panel.IsDisposed)
+            {
+                _settings.Set($"Panel_{panelKey}_Visible", "false");
+                return;
+            }
+            _settings.Set($"Panel_{panelKey}_Visible", panel.Visible ? "true" : "false");
+            // Use VisibleState instead of DockState — it preserves the last docked position
+            // even when the panel is hidden (DockState returns Hidden/Unknown when not visible)
+            _settings.Set($"Panel_{panelKey}_DockState", panel.VisibleState.ToString());
+        }
+
+        private DockState GetSavedDockState(string panelKey, DockState defaultDock)
+        {
+            var savedState = _settings.Get($"Panel_{panelKey}_DockState");
+            if (!string.IsNullOrEmpty(savedState) && Enum.TryParse<DockState>(savedState, out var parsed))
+            {
+                if (parsed == DockState.DockLeft || parsed == DockState.DockRight ||
+                    parsed == DockState.DockTop || parsed == DockState.DockBottom ||
+                    parsed == DockState.Document)
+                {
+                    return parsed;
+                }
+            }
+            return defaultDock;
+        }
+
+        private void RestorePanelStates()
+        {
+            bool isDark = _currentTheme.IsDark;
+
+            if (RestoreSinglePanel("ProjectPanel", _projectPanel, DockState.DockLeft))
+            {
+                _projectPanel.SetTheme(_currentTheme);
+                RefreshProjectPanel();
+            }
+            if (RestoreSinglePanel("ChatPanel", _chatPanel, DockState.DockRight))
+                _chatPanel.ApplyTheme(isDark);
+            if (RestoreSinglePanel("TasksPanel", _tasksPanel, DockState.DockBottom))
+                _tasksPanel.ApplyTheme(isDark);
+            if (RestoreSinglePanel("ActivityPanel", _activityPanel, DockState.DockRight))
+                _activityPanel.ApplyTheme(isDark);
+            if (RestoreSinglePanel("ProfilePanel", _profilePanel, DockState.DockRight))
+                _profilePanel.SetTheme(isDark);
+            if (RestoreSinglePanel("InboxPanel", _inboxPanel, DockState.DockRight))
+                _inboxPanel.ApplyTheme(isDark);
+            if (RestoreSinglePanel("OfficePanel", _officePanel, DockState.DockRight))
+                _officePanel.ApplyTheme(isDark);
+            RestoreSinglePanel("DebugPanel", _debugPanel, DockState.DockBottom);
+        }
+
+        private void ApplyThemesToPanels()
+        {
+            bool isDark = _currentTheme.IsDark;
+            if (_projectPanel != null && !_projectPanel.IsDisposed && _projectPanel.Visible)
+            {
+                _projectPanel.SetTheme(_currentTheme);
+                RefreshProjectPanel();
+            }
+            if (_chatPanel != null && !_chatPanel.IsDisposed && _chatPanel.Visible)
+                _chatPanel.ApplyTheme(isDark);
+            if (_tasksPanel != null && !_tasksPanel.IsDisposed && _tasksPanel.Visible)
+                _tasksPanel.ApplyTheme(isDark);
+            if (_activityPanel != null && !_activityPanel.IsDisposed && _activityPanel.Visible)
+                _activityPanel.ApplyTheme(isDark);
+            if (_profilePanel != null && !_profilePanel.IsDisposed && _profilePanel.Visible)
+                _profilePanel.SetTheme(isDark);
+            if (_inboxPanel != null && !_inboxPanel.IsDisposed && _inboxPanel.Visible)
+                _inboxPanel.ApplyTheme(isDark);
+            if (_officePanel != null && !_officePanel.IsDisposed && _officePanel.Visible)
+                _officePanel.ApplyTheme(isDark);
+        }
+
+        private bool RestoreSinglePanel(string panelKey, DockContent panel, DockState defaultDock)
+        {
+            if (panel == null || panel.IsDisposed) return false;
+            if (_settings.Get($"Panel_{panelKey}_Visible") != "true") return false;
+
+            // Parse saved dock state, fall back to default
+            var dockState = defaultDock;
+            var savedState = _settings.Get($"Panel_{panelKey}_DockState");
+            if (!string.IsNullOrEmpty(savedState) && Enum.TryParse<DockState>(savedState, out var parsed))
+            {
+                // Only use valid dockable states (not Hidden, Unknown, or Float)
+                if (parsed == DockState.DockLeft || parsed == DockState.DockRight ||
+                    parsed == DockState.DockTop || parsed == DockState.DockBottom ||
+                    parsed == DockState.Document)
+                {
+                    dockState = parsed;
+                }
+            }
+
+            try
+            {
+                panel.Show(_dockPanel, dockState);
+                System.Diagnostics.Trace.WriteLine($"[RestoreSession] Restored {panelKey} at {dockState}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RestoreSession] Failed to restore {panelKey}: {ex.Message}");
+                return false;
+            }
+        }
+
         private void RestoreSession()
         {
             System.Diagnostics.Trace.WriteLine("[RestoreSession] Starting...");
-            string layoutPath = _settings.GetLayoutFilePath();
-            System.Diagnostics.Trace.WriteLine($"[RestoreSession] Layout path: {layoutPath}");
 
             _pendingTerminalSessions = _settings.GetSessionTerminals();
-            _terminalRestoreIndex = 0;
-            System.Diagnostics.Trace.WriteLine($"[RestoreSession] Pending terminal sessions: {_pendingTerminalSessions?.Count ?? 0}");
+            int terminalCount = _pendingTerminalSessions?.Count ?? 0;
+            System.Diagnostics.Trace.WriteLine($"[RestoreSession] Session terminals: {terminalCount}");
 
-            bool layoutRestored = false;
+            bool restoredFromXml = false;
+            string layoutPath = _settings.GetLayoutFilePath();
 
-            // Try to restore from XML layout if it exists and we have terminal sessions
-            bool layoutExists = File.Exists(layoutPath);
-            System.Diagnostics.Trace.WriteLine($"[RestoreSession] Layout file exists: {layoutExists}");
-
-            if (layoutExists && _pendingTerminalSessions?.Count > 0)
+            // Try XML-based restore first — preserves full layout (positions, proportions, dock sides)
+            if (terminalCount > 0 && System.IO.File.Exists(layoutPath))
             {
-                System.Diagnostics.Trace.WriteLine("[RestoreSession] Attempting to load layout from XML...");
                 try
                 {
+                    _terminalRestoreIndex = 0;
                     _dockPanel.LoadFromXml(layoutPath, GetContentFromPersistString);
-                    layoutRestored = true;
-                    System.Diagnostics.Trace.WriteLine("[RestoreSession] Layout loaded successfully");
+                    restoredFromXml = true;
+                    System.Diagnostics.Trace.WriteLine("[RestoreSession] Restored layout from XML");
 
-                    // All restored terminals show start screen so the user can pick a project.
-                    // Previously we auto-started PowerShell for terminals with saved directories,
-                    // but with the start screen feature, users should always choose what to launch.
-                    var terminals = _gridManager.GetTerminalDocuments();
-                    foreach (var doc in terminals.Where(d => !d.IsTerminalStarted))
+                    // Apply themes to restored panels (LoadFromXml restores positions but not runtime state)
+                    ApplyThemesToPanels();
+
+                    // Show start screens on restored terminals
+                    foreach (var pane in _dockPanel.Contents.OfType<TerminalDocument>())
                     {
-                        doc.ShowStartScreen();
+                        pane.ShowStartScreen();
                     }
 
-                    // Focus the first terminal that is running; fall back to first start screen
-                    var firstStarted = terminals.FirstOrDefault(d => d.IsTerminalStarted);
-                    var firstDoc = firstStarted ?? terminals.FirstOrDefault();
-                    if (firstDoc != null)
+                    // Focus the first terminal
+                    var firstTerminal = _dockPanel.Contents.OfType<TerminalDocument>().FirstOrDefault();
+                    if (firstTerminal != null)
                     {
-                        firstDoc.Activate();
-                        if (firstDoc.IsTerminalStarted)
-                            firstDoc.FocusTerminal();
-                        _lastActiveTerminal = firstDoc;
+                        firstTerminal.Activate();
+                        _lastActiveTerminal = firstTerminal;
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to restore layout: {ex.Message}");
-                    layoutRestored = false;
+                    System.Diagnostics.Debug.WriteLine($"[RestoreSession] XML restore failed, falling back to manual: {ex.Message}");
+                    restoredFromXml = false;
                 }
             }
 
-            if (!layoutRestored)
+            // Fallback: manual restore from session data
+            if (!restoredFromXml)
             {
-                System.Diagnostics.Trace.WriteLine("[RestoreSession] Layout not restored, creating default terminal...");
-                // Fall back to creating a single terminal
-                AddNewTerminal();
-                System.Diagnostics.Trace.WriteLine("[RestoreSession] Default terminal created");
+                if (terminalCount == 0)
+                {
+                    System.Diagnostics.Trace.WriteLine("[RestoreSession] No session data, creating default terminal...");
+                    AddNewTerminal();
+                }
+                else
+                {
+                    foreach (var session in _pendingTerminalSessions)
+                    {
+                        var doc = CreateTerminalForRestore(session);
+                        doc.Show(_dockPanel, DockState.Document);
+                        doc.ShowStartScreen();
+                    }
+
+                    // Apply grid layout to arrange terminals evenly
+                    var terminals = _gridManager.GetTerminalDocuments();
+                    if (terminals.Count > 1)
+                    {
+                        var preset = GridLayoutManager.GetRecommendedPreset(terminals.Count);
+                        _gridManager.ApplyPreset(preset);
+                        System.Diagnostics.Trace.WriteLine($"[RestoreSession] Applied preset {preset} for {terminals.Count} terminals");
+                    }
+
+                    // Focus the first terminal
+                    var firstDoc = terminals.FirstOrDefault();
+                    if (firstDoc != null)
+                    {
+                        firstDoc.Activate();
+                        _lastActiveTerminal = firstDoc;
+                    }
+                }
+
+                // Restore panel visibility and dock positions from saved state (manual mode only)
+                RestorePanelStates();
             }
-
-            System.Diagnostics.Trace.WriteLine("[RestoreSession] Completed");
-
-            _pendingTerminalSessions = null;
 
             // Refresh project panel now that terminals have their directories
             System.Diagnostics.Trace.WriteLine("[RestoreSession] Calling RefreshProjectPanel...");
@@ -3084,6 +3225,7 @@ namespace MultiTerminal
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
             doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
@@ -3116,6 +3258,7 @@ namespace MultiTerminal
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
                 doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
             _lastActiveTerminal = doc;
@@ -3134,7 +3277,7 @@ namespace MultiTerminal
             }
             else
             {
-                _projectPanel.Show(_dockPanel, DockState.DockLeft);
+                _projectPanel.Show(_dockPanel, GetSavedDockState("ProjectPanel", DockState.DockLeft));
                 RefreshProjectPanel();
             }
         }
@@ -3153,7 +3296,7 @@ namespace MultiTerminal
                     _chatPanel.UpdateConnectionStatus(true);
                 }
                 _chatPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _chatPanel.Show(_dockPanel, DockState.DockRight);
+                _chatPanel.Show(_dockPanel, GetSavedDockState("ChatPanel", DockState.DockRight));
                 return;
             }
 
@@ -3163,7 +3306,7 @@ namespace MultiTerminal
             }
             else
             {
-                _chatPanel.Show(_dockPanel, DockState.DockRight);
+                _chatPanel.Show(_dockPanel, GetSavedDockState("ChatPanel", DockState.DockRight));
                 _chatPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
@@ -3179,7 +3322,7 @@ namespace MultiTerminal
                     _activityPanel.Initialize(_mcpServer.Broker.ActivityService, _mcpServer.PoolCoordinator, _mcpServer.Broker, _mcpServer.Broker.TaskDb);
                 }
                 _activityPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _activityPanel.Show(_dockPanel, DockState.DockRight);
+                _activityPanel.Show(_dockPanel, GetSavedDockState("ActivityPanel", DockState.DockRight));
                 return;
             }
 
@@ -3189,7 +3332,7 @@ namespace MultiTerminal
             }
             else
             {
-                _activityPanel.Show(_dockPanel, DockState.DockRight);
+                _activityPanel.Show(_dockPanel, GetSavedDockState("ActivityPanel", DockState.DockRight));
                 _activityPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
@@ -3205,7 +3348,7 @@ namespace MultiTerminal
                     _officePanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService);
                 }
                 _officePanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _officePanel.Show(_dockPanel, DockState.DockRight);
+                _officePanel.Show(_dockPanel, GetSavedDockState("OfficePanel", DockState.DockRight));
                 return;
             }
 
@@ -3215,7 +3358,7 @@ namespace MultiTerminal
             }
             else
             {
-                _officePanel.Show(_dockPanel, DockState.DockRight);
+                _officePanel.Show(_dockPanel, GetSavedDockState("OfficePanel", DockState.DockRight));
                 _officePanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
@@ -3845,7 +3988,7 @@ namespace MultiTerminal
                     _tasksPanel.InjectRequested += OnChatInjectRequested;
                 }
                 _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _tasksPanel.Show(_dockPanel, DockState.DockRight);
+                _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
                 return;
             }
 
@@ -3855,7 +3998,7 @@ namespace MultiTerminal
             }
             else
             {
-                _tasksPanel.Show(_dockPanel, DockState.DockRight);
+                _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
                 _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
@@ -3870,7 +4013,7 @@ namespace MultiTerminal
                     _inboxPanel.Initialize(_mcpServer.Broker);
                 }
                 _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _inboxPanel.Show(_dockPanel, DockState.DockRight);
+                _inboxPanel.Show(_dockPanel, GetSavedDockState("InboxPanel", DockState.DockRight));
                 return;
             }
 
@@ -3880,7 +4023,7 @@ namespace MultiTerminal
             }
             else
             {
-                _inboxPanel.Show(_dockPanel, DockState.DockRight);
+                _inboxPanel.Show(_dockPanel, GetSavedDockState("InboxPanel", DockState.DockRight));
                 _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
@@ -3896,7 +4039,7 @@ namespace MultiTerminal
                     _profilePanel.SetMessageBroker(_mcpServer.Broker);
                 }
                 _profilePanel.SetTheme(_currentTheme == TerminalTheme.Dark);
-                _profilePanel.Show(_dockPanel, DockState.DockRight);
+                _profilePanel.Show(_dockPanel, GetSavedDockState("ProfilePanel", DockState.DockRight));
                 return;
             }
 
@@ -3906,7 +4049,7 @@ namespace MultiTerminal
             }
             else
             {
-                _profilePanel.Show(_dockPanel, DockState.DockRight);
+                _profilePanel.Show(_dockPanel, GetSavedDockState("ProfilePanel", DockState.DockRight));
                 _profilePanel.SetTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
@@ -3918,7 +4061,7 @@ namespace MultiTerminal
             {
                 _debugPanel = new DebugPanel();
                 _debugPanel.Initialize(_debugLogService);
-                _debugPanel.Show(_dockPanel, DockState.DockBottom);
+                _debugPanel.Show(_dockPanel, GetSavedDockState("DebugPanel", DockState.DockBottom));
                 return;
             }
 
@@ -3928,7 +4071,7 @@ namespace MultiTerminal
             }
             else
             {
-                _debugPanel.Show(_dockPanel, DockState.DockBottom);
+                _debugPanel.Show(_dockPanel, GetSavedDockState("DebugPanel", DockState.DockBottom));
             }
         }
 
@@ -4281,6 +4424,7 @@ namespace MultiTerminal
             doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+            doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
             doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
@@ -4307,6 +4451,7 @@ namespace MultiTerminal
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
                 doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
             return doc;
