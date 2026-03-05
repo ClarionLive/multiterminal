@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MultiTerminal Deployment - Build, deploy, configure, and troubleshoot">
+  <title>Deployment - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <div class="nav-section-title">Reference</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link active">Deployment</a>
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Deployment Guide</h1>
+        <p class="lead">How to build, deploy, configure, and maintain MultiTerminal on a Windows machine.</p>
+
+        <!-- Prerequisites -->
+        <h2 id="prerequisites">Prerequisites</h2>
+        <div class="card">
+          <h3>Required Software</h3>
+          <table>
+            <thead><tr><th>Software</th><th>Version</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td>.NET 8 SDK</td><td>8.0+</td><td>Build and run the application (self-contained deployment includes runtime)</td></tr>
+              <tr><td>WebView2 Runtime</td><td>Evergreen</td><td>Chromium rendering for all HTML panels (pre-installed on Windows 11)</td></tr>
+              <tr><td>Node.js</td><td>18+</td><td>MCP server execution and session history server</td></tr>
+              <tr><td>Claude Code CLI</td><td>Latest</td><td>Terminal agent sessions (installed via <code>npm install -g @anthropic-ai/claude-code</code>)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>System Requirements</h3>
+          <ul>
+            <li><strong>OS:</strong> Windows 10 (1809+) or Windows 11, x64 only</li>
+            <li><strong>RAM:</strong> 4 GB minimum, 8 GB recommended (each WebView2 panel uses Chromium)</li>
+            <li><strong>Disk:</strong> ~400 MB for application, plus runtime data in %APPDATA%</li>
+            <li><strong>Network:</strong> Internet access for Claude Code API calls; localhost:5050 for REST API</li>
+          </ul>
+        </div>
+
+        <!-- Build Process -->
+        <h2 id="build-process">Build Process</h2>
+
+        <h3>Building from Source</h3>
+        <p>MultiTerminal is built using MSBuild (via .NET SDK). The project targets <code>net8.0-windows</code> with self-contained deployment for x64.</p>
+
+        <pre><code># Build in Release mode (self-contained, single output directory)
+dotnet publish -c Release -r win-x64 --self-contained true
+
+# Or using MSBuild directly
+msbuild MultiTerminal.csproj /p:Configuration=Release /p:RuntimeIdentifier=win-x64</code></pre>
+
+        <h3>Build Output</h3>
+        <p>The build produces output in:</p>
+        <pre><code>bin\Release\net8.0-windows\win-x64\publish\</code></pre>
+        <p>This folder contains the complete self-contained deployment (~385 MB, ~1,262 files). See <a href="distribution.html">Distribution</a> for a complete file audit.</p>
+
+        <h3>Build via MCP Tool</h3>
+        <p>When working inside MultiTerminal, agents can trigger builds using the <code>build_project</code> MCP tool from the windows-build-runner server. This compiles the latest source code without needing to exit the application.</p>
+
+        <!-- Deploy Workflow -->
+        <h2 id="deploy-workflow">Deploy Workflow</h2>
+
+        <div class="card">
+          <h3>Important: Live Binary</h3>
+          <p>The running application is served from the <strong>Deploy folder</strong> (<code>H:\DevLaptop\ClarionPowerShell\Deploy\</code>). You cannot overwrite files while the application is running. The deploy workflow requires closing the application first.</p>
+        </div>
+
+        <h3>deploy.ps1 Script</h3>
+        <p>The deployment script handles copying build output to the Deploy folder:</p>
+
+        <ol>
+          <li><strong>Close MultiTerminal</strong> - Exit the running application completely</li>
+          <li><strong>Run deploy.ps1</strong> - Copies build output from <code>bin\Release\</code> to <code>Deploy\</code></li>
+          <li><strong>Relaunch MultiTerminal</strong> - Start <code>Deploy\MultiTerminal.exe</code></li>
+        </ol>
+
+        <pre><code># From the source directory:
+.\deploy.ps1
+
+# Then relaunch:
+H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
+
+        <div class="card">
+          <h3>Agent Limitations</h3>
+          <ul>
+            <li>Agents <strong>can</strong> trigger <code>build_project</code> to compile source code</li>
+            <li>Agents <strong>cannot</strong> copy files to the Deploy folder (locked by running process)</li>
+            <li>Only John (the user) can close the app, run deploy.ps1, and relaunch</li>
+          </ul>
+        </div>
+
+        <!-- Configuration Files -->
+        <h2 id="configuration">Configuration Files</h2>
+
+        <h3>Application Configuration</h3>
+        <table>
+          <thead><tr><th>File</th><th>Location</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>MultiTerminal.runtimeconfig.json</code></td>
+              <td>Deploy folder</td>
+              <td>Specifies .NET 8 runtime version, GC settings, and thread pool configuration. Rarely needs modification.</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal.deps.json</code></td>
+              <td>Deploy folder</td>
+              <td>Auto-generated dependency manifest. Do not edit manually.</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal.dll.config</code></td>
+              <td>Deploy folder</td>
+              <td>Application settings (connection strings, feature flags). Edit to customize behavior.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Claude Code Configuration</h3>
+        <table>
+          <thead><tr><th>File</th><th>Location</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>.claude/CLAUDE.md</code></td>
+              <td>Project root</td>
+              <td>Project instructions loaded into every agent's context (~16 KB). Contains architecture reference, patterns, and conventions.</td>
+            </tr>
+            <tr>
+              <td><code>.claude/project.json</code></td>
+              <td>Project root</td>
+              <td>Project identity (unique ID, name, timestamps). Links the project to MultiTerminal's registry.</td>
+            </tr>
+            <tr>
+              <td><code>.claude/settings.json</code></td>
+              <td>Project root</td>
+              <td>Project-level Claude Code settings (experimental features, etc.).</td>
+            </tr>
+            <tr>
+              <td><code>.claude/settings.local.json</code></td>
+              <td>Project root</td>
+              <td>Local permission presets for MCP tools and shell commands. Not committed to git.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Global Claude Configuration</h3>
+        <table>
+          <thead><tr><th>File</th><th>Location</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>CLAUDE.md</code></td>
+              <td><code>~/.claude/</code></td>
+              <td>User-level instructions applied to all projects (e.g., PowerShell preference, tool priorities).</td>
+            </tr>
+            <tr>
+              <td><code>settings.json</code></td>
+              <td><code>~/.claude/</code></td>
+              <td>Global Claude Code settings (experimental features like agent teams).</td>
+            </tr>
+            <tr>
+              <td><code>mcp_servers.json</code></td>
+              <td><code>~/.claude/</code></td>
+              <td>Global MCP server registrations (multiterminal, session-history, sqlite, etc.).</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Database Locations -->
+        <h2 id="databases">Database Locations</h2>
+        <p>All databases are SQLite files created automatically on first run. Located in the user's AppData directory:</p>
+
+        <table>
+          <thead><tr><th>Database</th><th>Path</th><th>Contents</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>tasks.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\tasks.db</code></td>
+              <td>
+                Kanban tasks, checklists, plans, helpers, continuation notes, stale tracking.
+                Team profiles, activity feed, inbox notifications, terminal registrations.
+                Projects, agents, MCP config, specialist agents, paths, prompts, skills.
+              </td>
+            </tr>
+            <tr>
+              <td><code>sessions.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\sessions.db</code></td>
+              <td>Terminal session persistence: identities, Claude Code session IDs, working directories, timestamps.</td>
+            </tr>
+            <tr>
+              <td><code>knowledge.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\knowledge.db</code></td>
+              <td>Institutional memory: knowledge entries (6 categories), code digests, FTS5 full-text search index.</td>
+            </tr>
+            <tr>
+              <td><code>message_queue.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\message_queue.db</code></td>
+              <td>Reliable message delivery queue: pending messages, retry counts, delivery timestamps, expiry.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="card">
+          <h3>Database Management</h3>
+          <ul>
+            <li><strong>Backup:</strong> Copy the entire <code>%APPDATA%\MultiTerminal\</code> folder</li>
+            <li><strong>Reset:</strong> Delete individual .db files to reset that subsystem (auto-recreated on next launch)</li>
+            <li><strong>Migrate:</strong> Copy .db files to a new machine's <code>%APPDATA%\MultiTerminal\</code></li>
+            <li><strong>Schema:</strong> Migrations run automatically; no manual schema updates needed</li>
+            <li><strong>Inspect:</strong> Use any SQLite browser (DB Browser for SQLite, or the sqlite MCP server)</li>
+          </ul>
+        </div>
+
+        <!-- MCP Server Setup -->
+        <h2 id="mcp-setup">MCP Server Setup</h2>
+
+        <h3>Built-in MCP Server (Port 5050)</h3>
+        <p>MultiTerminal includes an embedded ASP.NET Core web server that serves both the REST API and the MCP protocol endpoint:</p>
+        <ul>
+          <li><strong>REST API:</strong> <code>http://localhost:5050/api/</code> - Tasks, messaging, projects, tools</li>
+          <li><strong>MCP Endpoint:</strong> <code>http://localhost:5050/mcp</code> - Model Context Protocol for Claude Code agents</li>
+        </ul>
+        <p>This server starts automatically when MultiTerminal launches. No separate configuration is needed.</p>
+
+        <h3>Claude Code MCP Registration</h3>
+        <p>Register the MultiTerminal MCP server so Claude Code can discover its tools:</p>
+
+        <pre><code># In ~/.claude/settings.json or project .claude/settings.json:
+{
+  "mcpServers": {
+    "multiterminal": {
+      "url": "http://localhost:5050/mcp"
+    }
+  }
+}</code></pre>
+
+        <h3>Additional MCP Servers</h3>
+        <p>MultiTerminal can work with additional MCP servers configured in <code>~/.claude/mcp_servers.json</code>:</p>
+
+        <table>
+          <thead><tr><th>Server</th><th>Type</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>multiterminal</td>
+              <td>HTTP (built-in)</td>
+              <td>Core task management, messaging, project context</td>
+            </tr>
+            <tr>
+              <td>mcp-session-history</td>
+              <td>stdio (Node.js)</td>
+              <td>Session history search and embeddings</td>
+            </tr>
+            <tr>
+              <td>sqlite</td>
+              <td>stdio (Node.js)</td>
+              <td>Direct SQLite database queries</td>
+            </tr>
+            <tr>
+              <td>mssql</td>
+              <td>stdio (Node.js)</td>
+              <td>SQL Server database access (optional)</td>
+            </tr>
+            <tr>
+              <td>everything-search</td>
+              <td>stdio (Node.js)</td>
+              <td>Instant file search via voidtools Everything index</td>
+            </tr>
+            <tr>
+              <td>windows-build-runner</td>
+              <td>stdio (Node.js)</td>
+              <td>Build and compile projects from within agents</td>
+            </tr>
+            <tr>
+              <td>windowssnapit</td>
+              <td>stdio (Node.js)</td>
+              <td>Screenshot capture and clipboard reading</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>MCP Three-Tier System</h3>
+        <p>MultiTerminal organizes MCP servers in three tiers:</p>
+        <ol>
+          <li><strong>MultiTerminal (always on):</strong> The built-in server on port 5050</li>
+          <li><strong>Global:</strong> Servers registered in <code>~/.claude/mcp_servers.json</code>, available to all projects</li>
+          <li><strong>Project-specific:</strong> Servers configured per-project via the Project Panel, enabled/disabled as needed</li>
+        </ol>
+
+        <!-- Claude Integration -->
+        <h2 id="claude-integration">Claude Code Integration</h2>
+
+        <h3>.claude/ Folder Structure</h3>
+        <pre><code>.claude/
++-- CLAUDE.md              (project instructions - loaded into agent context)
++-- project.json           (project identity and metadata)
++-- settings.json          (Claude Code settings)
++-- settings.local.json    (local permissions - not in git)
++-- agents/                (specialist agent definitions)
+|   +-- debugger.md
+|   +-- devils-advocate.md
+|   +-- security-auditor.md
+|   +-- session-distiller.md
+|   +-- session-summarizer.md
+|   +-- test-designer.md
+|   +-- verifier.md
++-- hooks/                 (event hooks for activity tracking)
++-- skills/                (custom slash commands)
++-- rules/                 (additional behavioral rules)
++-- messages/              (inter-session message store)
++-- research/              (research artifacts)</code></pre>
+
+        <h3>Hooks</h3>
+        <p>Claude Code hooks integrate terminal activity with MultiTerminal's services:</p>
+        <table>
+          <thead><tr><th>Hook</th><th>Event</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>activity-hook.js</code></td>
+              <td>PreToolUse, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop</td>
+              <td>Records tool usage, builds, and agent events to the activity feed</td>
+            </tr>
+            <tr>
+              <td><code>pool-context.js</code></td>
+              <td>SessionStart</td>
+              <td>Injects active plan, task assignments, and pool activity at session start</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Environment Variables</h3>
+        <table>
+          <thead><tr><th>Variable</th><th>Set By</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>MULTITERMINAL_DOC_ID</code></td>
+              <td>Terminal launch</td>
+              <td>Unique document ID for terminal registration</td>
+            </tr>
+            <tr>
+              <td><code>MULTITERMINAL_PROJECT_ID</code></td>
+              <td>Terminal launch</td>
+              <td>Project ID for context injection via startup hook</td>
+            </tr>
+            <tr>
+              <td><code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS</code></td>
+              <td>User config</td>
+              <td>Enable native Claude Code team agent support (set to <code>1</code>)</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Installation Steps -->
+        <h2 id="installation">Fresh Installation</h2>
+
+        <h3>Step 1: Deploy Application Files</h3>
+        <pre><code># Create installation directory
+New-Item -ItemType Directory -Path "C:\Applications\MultiTerminal" -Force
+
+# Copy all files from the build output (or existing Deploy folder)
+Copy-Item -Path "path\to\publish\*" -Destination "C:\Applications\MultiTerminal\" -Recurse -Force</code></pre>
+
+        <h3>Step 2: Install MCP Session History (Optional)</h3>
+        <pre><code>cd "C:\Applications\MultiTerminal\mcp-session-history"
+npm install</code></pre>
+
+        <h3>Step 3: Deploy Claude Code Hooks</h3>
+        <pre><code># Create hooks directory
+New-Item -ItemType Directory -Path "$env:USERPROFILE\.claude\hooks" -Force
+
+# Copy hook files
+Copy-Item "activity-hook.js" "$env:USERPROFILE\.claude\hooks\"
+Copy-Item "pool-context.js"  "$env:USERPROFILE\.claude\hooks\"</code></pre>
+        <p>Edit both hook files to update hard-coded paths to your installation directory.</p>
+
+        <h3>Step 4: Configure Claude Code Hooks</h3>
+        <p>Create <code>~/.claude/hooks.json</code> with the hook event bindings. See <a href="getting-started.html">Quick Start</a> for the complete hooks.json template.</p>
+
+        <h3>Step 5: Register MCP Servers</h3>
+        <p>Create or edit <code>~/.claude/mcp_servers.json</code> to register the multiterminal and session-history servers.</p>
+
+        <h3>Step 6: Create Data Directory</h3>
+        <pre><code>New-Item -ItemType Directory -Path "$env:APPDATA\MultiTerminal" -Force</code></pre>
+        <p>The application will create database files automatically on first run.</p>
+
+        <h3>Step 7: Launch</h3>
+        <pre><code>C:\Applications\MultiTerminal\MultiTerminal.exe</code></pre>
+
+        <!-- Verification -->
+        <h2 id="verification">Verification Checklist</h2>
+        <div class="card">
+          <h3>Post-Installation Verification</h3>
+          <ul>
+            <li>MultiTerminal.exe launches without errors</li>
+            <li>Database files created at <code>%APPDATA%\MultiTerminal\</code></li>
+            <li>WebView2 panels load (Tasks, Chat, Activity panels render HTML)</li>
+            <li>New Terminal button opens a working terminal with ConPty</li>
+            <li>Claude Code can connect and use MCP tools (<code>list_terminals</code>, <code>list_tasks</code>)</li>
+            <li>Activity feed shows tool usage events from Claude Code sessions</li>
+            <li>Inter-terminal messaging works (register two terminals, send a message)</li>
+            <li>Task creation and kanban board updates work</li>
+            <li>Session persistence works (close and reopen - terminals restore)</li>
+          </ul>
+        </div>
+
+        <!-- Troubleshooting -->
+        <h2 id="troubleshooting">Troubleshooting</h2>
+
+        <table>
+          <thead><tr><th>Issue</th><th>Cause</th><th>Solution</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Application won't start</td>
+              <td>Missing runtime files</td>
+              <td>Verify all files from <a href="distribution.html#critical-files">critical files checklist</a> exist in the Deploy folder</td>
+            </tr>
+            <tr>
+              <td>WebView2 panels blank</td>
+              <td>WebView2 Runtime not installed</td>
+              <td>Install WebView2 Evergreen Runtime from Microsoft</td>
+            </tr>
+            <tr>
+              <td>MCP tools not available in Claude Code</td>
+              <td>MCP server not registered</td>
+              <td>Verify <code>~/.claude/settings.json</code> or <code>mcp_servers.json</code> contains the multiterminal entry</td>
+            </tr>
+            <tr>
+              <td>Port 5050 already in use</td>
+              <td>Another instance running or port conflict</td>
+              <td>Close other MultiTerminal instances; check with <code>netstat -ano | findstr 5050</code></td>
+            </tr>
+            <tr>
+              <td>Database errors on startup</td>
+              <td><code>%APPDATA%\MultiTerminal</code> folder missing or not writable</td>
+              <td>Create the folder manually: <code>mkdir %APPDATA%\MultiTerminal</code></td>
+            </tr>
+            <tr>
+              <td><code>better-sqlite3</code> module not found</td>
+              <td>Node modules not installed for session history</td>
+              <td>Run <code>npm install</code> in the <code>mcp-session-history</code> directory</td>
+            </tr>
+            <tr>
+              <td>Hooks not executing</td>
+              <td>hooks.json missing or paths incorrect</td>
+              <td>Verify <code>~/.claude/hooks.json</code> exists and all paths point to actual files</td>
+            </tr>
+            <tr>
+              <td>Terminal shows blank screen</td>
+              <td>ConPty initialization failure</td>
+              <td>Check Debug panel for errors; ensure terminal.html exists in Deploy folder</td>
+            </tr>
+            <tr>
+              <td>Messages not delivered</td>
+              <td>Terminal not registered or webhook failure</td>
+              <td>Ensure terminals call <code>register_terminal</code> at startup; check Debug panel for delivery errors</td>
+            </tr>
+            <tr>
+              <td>Session restore fails</td>
+              <td>Corrupted layout XML or missing session data</td>
+              <td>Delete the layout XML file from <code>%APPDATA%\MultiTerminal\</code> to reset to defaults</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="card">
+          <h3>Debug Panel</h3>
+          <p>The built-in Debug panel (toolbar button: Debug) shows internal log messages that help diagnose issues with MCP server startup, WebView2 initialization, message routing, database operations, and session restore. Enable it when troubleshooting.</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
+</body>
+</html>

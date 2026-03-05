@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MultiTerminal Features - Complete reference for all user-facing features">
+  <title>Features - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <div class="nav-section-title">Reference</div>
+        <a href="features.html" class="nav-link active">Features</a>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Features</h1>
+        <p class="lead">Complete reference for every user-facing feature in MultiTerminal. The application is a Windows desktop host for multiple Claude Code terminal sessions with integrated project management, team coordination, and institutional memory.</p>
+
+        <!-- Table of Contents -->
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#ui-panels">UI Panels (9 panels + controls)</a></li>
+            <li><a href="#terminal-management">Terminal Management</a></li>
+            <li><a href="#kanban-board">Kanban Board</a></li>
+            <li><a href="#messaging">Messaging</a></li>
+            <li><a href="#project-management">Project Management</a></li>
+            <li><a href="#team-agent-system">Team &amp; Agent System</a></li>
+            <li><a href="#institutional-memory">Institutional Memory</a></li>
+            <li><a href="#settings-theme">Settings &amp; Theme</a></li>
+            <li><a href="#dialogs">Dialogs</a></li>
+          </ol>
+        </div>
+
+        <!-- =========================================== -->
+        <!-- 1. UI PANELS -->
+        <!-- =========================================== -->
+        <h2 id="ui-panels">1. UI Panels</h2>
+        <p>MultiTerminal uses a VS-style docking framework (DockPanelSuite). All panels can be toggled from the toolbar, dragged to dock at any edge, floated as windows, or auto-hidden as slide-out tabs.</p>
+
+        <!-- Tasks Panel -->
+        <h3 id="panel-tasks">Tasks Panel (Kanban Board)</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Tasks &nbsp;|&nbsp; <strong>HTML:</strong> <code>TasksPanel/tasks-panel.html</code></p>
+          <p>A full Kanban board with three columns: <strong>To Do</strong>, <strong>In Progress</strong>, and <strong>Done</strong>. Tasks are cards that display title, assignee, helper count, checklist progress, and priority. Drag-and-drop between columns changes task status. Click a card to view details, edit the plan, or manage the checklist.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>Click <strong>+ New Task</strong> to create a task from the board</li>
+            <li>Drag cards between columns to change status</li>
+            <li>Click a card to expand details, plan, and checklist</li>
+            <li>Priority badges color-code urgency</li>
+            <li>Stale task indicators show tasks with no recent activity</li>
+          </ul>
+        </div>
+
+        <!-- Chat Panel -->
+        <h3 id="panel-chat">Chat Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Chat &nbsp;|&nbsp; <strong>HTML:</strong> <code>ChatPanel/chat-panel.html</code></p>
+          <p>Real-time messaging between terminal sessions. Agents and users can send point-to-point messages or broadcasts. The panel shows a conversation thread with sender names, timestamps, and message content.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>Select a recipient from the terminal list dropdown</li>
+            <li>Type and send messages (Enter to send)</li>
+            <li>Use "Broadcast" to send to all registered terminals</li>
+            <li>Messages appear in real-time via WebSocket push</li>
+            <li>Chat history persists across sessions (view via History button)</li>
+          </ul>
+        </div>
+
+        <!-- Activity Panel -->
+        <h3 id="panel-activity">Activity Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Activity &nbsp;|&nbsp; <strong>HTML:</strong> <code>ActivityPanel/panel.html</code></p>
+          <p>A real-time activity feed showing everything happening across all terminals. Events include tool usage (file reads, edits, bash commands), build events, subagent spawning, task status changes, and message sends.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>Events stream in real-time with terminal name, event type, and timestamp</li>
+            <li>Filter by event type or terminal</li>
+            <li>Color-coded event badges distinguish tool calls, builds, and errors</li>
+            <li>Useful as a "mission control" view when running multi-agent workflows</li>
+          </ul>
+        </div>
+
+        <!-- Project Panel -->
+        <h3 id="panel-project">Project Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Project &nbsp;|&nbsp; <strong>HTML:</strong> <code>ProjectPanel/panel.html</code></p>
+          <p>Manage projects registered with MultiTerminal. View and edit project details, assign agents, configure MCP servers, manage named paths, store prompts, and enable specialist agents.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>Browse registered projects with search and filter</li>
+            <li>Edit project name, description, paths, build commands, and git settings</li>
+            <li>Assign agents with roles and preferred models</li>
+            <li>Configure MCP servers per project (enable/disable)</li>
+            <li>Manage specialist agents (verifier, debugger, security auditor, etc.)</li>
+            <li>Store reusable prompts and instructions</li>
+          </ul>
+        </div>
+
+        <!-- Profile Panel -->
+        <h3 id="panel-profile">Profile Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Profiles &nbsp;|&nbsp; <strong>HTML:</strong> <code>ProfilePanel/panel.html</code></p>
+          <p>Displays team member profiles for all registered agents. Each profile shows avatar, display name, specialties, current availability, and role description.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>View all team member profiles in a grid or list layout</li>
+            <li>See agent specialties (e.g., "backend", "documentation", "testing")</li>
+            <li>Check availability status (active, idle, offline)</li>
+            <li>Profiles are created and updated by agents via MCP tools</li>
+          </ul>
+        </div>
+
+        <!-- Inbox Panel -->
+        <h3 id="panel-inbox">Inbox Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Inbox &nbsp;|&nbsp; <strong>HTML:</strong> <code>InboxPanel/inbox-panel.html</code></p>
+          <p>Notification center for task updates, checklist transitions, message alerts, and system events. The inbox badge shows unread count on the toolbar button.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>View notifications grouped by task or type</li>
+            <li>Click a notification to navigate to the related task or message</li>
+            <li>Mark notifications as read individually or in bulk</li>
+            <li>Checklist transition notes appear as inbox items automatically</li>
+            <li>Reply to inbox items directly</li>
+          </ul>
+        </div>
+
+        <!-- Office Panel -->
+        <h3 id="panel-office">Office Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Office &nbsp;|&nbsp; <strong>HTML:</strong> <code>OfficePanel/panel.html</code></p>
+          <p>An animated visualization of the team "office" showing agent presence and activity. Agents appear as characters in a pixel-art style office environment, with their status reflected in their visual state.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>See which agents are currently active (animated) or idle</li>
+            <li>Visual representation of the team workspace</li>
+            <li>Agent positions update based on registration and activity</li>
+          </ul>
+        </div>
+
+        <!-- Agent Panel -->
+        <h3 id="panel-agent">Agent Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Agent &nbsp;|&nbsp; <strong>HTML:</strong> <code>AgentPanel/agent-panel.html</code></p>
+          <p>Observe spawned Claude Code team agents. When native Claude Code teams are active, this panel streams the transcript of each agent's conversation in real-time via the TeamWatcherService.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>Select a team agent from the dropdown to observe their work</li>
+            <li>Transcript streams in real-time (read-only observation)</li>
+            <li>See agent tool calls, reasoning, and outputs</li>
+            <li>Multiple agent panels can be opened simultaneously</li>
+          </ul>
+        </div>
+
+        <!-- Start Screen -->
+        <h3 id="panel-start">Start Screen</h3>
+        <div class="card">
+          <p><strong>HTML:</strong> <code>StartScreen/start-screen.html</code></p>
+          <p>The welcome screen displayed when MultiTerminal launches with no restored session. Shows registered projects with quick-launch buttons, recent sessions, and getting-started guidance.</p>
+        </div>
+
+        <!-- Controls -->
+        <h3 id="panel-controls">Terminal Controls</h3>
+
+        <h4>Terminal Status Bar</h4>
+        <div class="card">
+          <p><strong>HTML:</strong> <code>Controls/TerminalStatusBar/statusbar.html</code></p>
+          <p>A 3-row status bar displayed below each terminal:</p>
+          <ul>
+            <li><strong>Row 1:</strong> Current folder path</li>
+            <li><strong>Row 2:</strong> Model name, git branch, and status indicators</li>
+            <li><strong>Row 3:</strong> Context window usage meter (tokens used / max)</li>
+          </ul>
+        </div>
+
+        <h4>Task HUD</h4>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> HUD &nbsp;|&nbsp; <strong>HTML:</strong> <code>Controls/TaskHudPanel/task-hud.html</code></p>
+          <p>A heads-up display overlay on the active terminal showing the current task title, status, and checklist progress. Provides at-a-glance awareness of what the terminal is working on.</p>
+        </div>
+
+        <h4>Task Lifecycle Board</h4>
+        <div class="card">
+          <p><strong>HTML:</strong> <code>TaskLifecycleBoard/lifecycle-board.html</code></p>
+          <p>A detailed task lifecycle view showing the full progression of a task through its checklist items: pending, coding, testing, and done. Provides a more granular view than the kanban board.</p>
+        </div>
+
+        <h4>Debug Panel</h4>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Debug</p>
+          <p>Displays internal debug log messages from the application. Useful for troubleshooting MCP server issues, message delivery, WebView2 initialization, and database operations. Supports pause/resume and clear operations.</p>
+        </div>
+
+        <!-- =========================================== -->
+        <!-- 2. TERMINAL MANAGEMENT -->
+        <!-- =========================================== -->
+        <h2 id="terminal-management">2. Terminal Management</h2>
+
+        <h3>ConPty Hosting</h3>
+        <p>Each terminal tab hosts a ConPty (Windows Console Pseudo-Terminal) instance rendered inside a WebView2 control. This provides a full terminal emulator experience with proper ANSI escape code support, colors, cursor positioning, and resize handling.</p>
+
+        <h3>Tab Creation &amp; Management</h3>
+        <div class="card">
+          <ul>
+            <li><strong>New Terminal:</strong> Click "New Terminal" in the toolbar to open a fresh terminal tab</li>
+            <li><strong>Tab Rename:</strong> Right-click a tab to rename it (sets the terminal's display identity)</li>
+            <li><strong>Tab Close:</strong> Close tabs individually; the terminal process is terminated</li>
+            <li><strong>Tab Reorder:</strong> Drag tabs to reorder within the dock panel</li>
+            <li><strong>Grid Layouts:</strong> Use the Grid Layout dropdown to arrange terminals in 2x2, 2x3, 3x2, horizontal, or vertical layouts</li>
+          </ul>
+        </div>
+
+        <h3>Status Bar (3-Row Layout)</h3>
+        <p>Each terminal has a status bar at the bottom rendered via WebView2:</p>
+        <ul>
+          <li><strong>Row 1 (Folder):</strong> Current working directory path</li>
+          <li><strong>Row 2 (Model/Git):</strong> Active Claude model, git branch name, and dirty/clean indicator</li>
+          <li><strong>Row 3 (Context):</strong> Visual progress bar showing context window token usage</li>
+        </ul>
+
+        <h3>Session Persistence</h3>
+        <p>Terminal sessions are automatically saved and restored across application restarts:</p>
+        <ul>
+          <li>Terminal identity (name), working directory, and Claude Code session ID are persisted</li>
+          <li>On restart, terminals are recreated with their previous identity and can resume Claude Code sessions</li>
+          <li>Session history is stored in SQLite for long-term access</li>
+          <li>The docking layout (panel positions, sizes, visibility) is saved as an XML layout file</li>
+        </ul>
+
+        <h3>Start Screen</h3>
+        <p>When launching with no saved session, the Start Screen panel displays registered projects. Click a project to open a terminal in that project's directory with its configuration pre-loaded.</p>
+
+        <!-- =========================================== -->
+        <!-- 3. KANBAN BOARD -->
+        <!-- =========================================== -->
+        <h2 id="kanban-board">3. Kanban Board</h2>
+
+        <h3>Task Lifecycle</h3>
+        <p>Tasks follow a defined lifecycle with status transitions:</p>
+        <table>
+          <thead><tr><th>Status</th><th>Meaning</th><th>Next Status</th></tr></thead>
+          <tbody>
+            <tr><td><code>todo</code></td><td>Task created, waiting to be picked up</td><td>in_progress</td></tr>
+            <tr><td><code>in_progress</code></td><td>An agent has claimed the task and is actively working</td><td>done, todo (if unclaimed)</td></tr>
+            <tr><td><code>done</code></td><td>Task completed and verified</td><td>(terminal state)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Checklists</h3>
+        <p>Each task can have a checklist of work items. Checklist items have their own status lifecycle:</p>
+        <table>
+          <thead><tr><th>Status</th><th>Meaning</th><th>Transitions</th></tr></thead>
+          <tbody>
+            <tr><td><code>pending</code></td><td>Not yet started</td><td>coding</td></tr>
+            <tr><td><code>coding</code></td><td>Agent is implementing this item</td><td>testing</td></tr>
+            <tr><td><code>testing</code></td><td>Implementation complete, awaiting PM/tester review</td><td>done, coding (if failed)</td></tr>
+            <tr><td><code>done</code></td><td>Verified and accepted by PM/tester</td><td>(terminal state)</td></tr>
+          </tbody>
+        </table>
+        <p>Each transition requires notes explaining what was done or what needs fixing. Transition notes are delivered as inbox notifications.</p>
+
+        <h3>Plans</h3>
+        <p>Tasks can have a markdown plan field describing the implementation approach. Plans are written by agents during the planning phase and serve as the work specification.</p>
+
+        <h3>Helpers</h3>
+        <p>Additional agents can be assigned as "helpers" to a task. The helper system allows multiple agents to collaborate on a single task, each handling different aspects of the work.</p>
+
+        <h3>Continuation Notes</h3>
+        <p>Free-text field for session handoff context. When an agent's session ends mid-task, continuation notes capture the current state so the next session (or a different agent) can pick up where it left off.</p>
+
+        <h3>Stale Task Tracking</h3>
+        <p>Tasks with no recent activity are flagged as "stale" by the StaleTaskService. This helps identify blocked or abandoned work items that need attention.</p>
+
+        <h3>Priority System</h3>
+        <p>Tasks can be assigned priority levels that affect their visual presentation on the board. Higher-priority tasks are highlighted with color-coded badges.</p>
+
+        <!-- =========================================== -->
+        <!-- 4. MESSAGING -->
+        <!-- =========================================== -->
+        <h2 id="messaging">4. Messaging</h2>
+
+        <h3>Point-to-Point Chat</h3>
+        <p>Any registered terminal can send a direct message to any other registered terminal. Messages are routed through the MessageBroker and delivered to the recipient's terminal via webhook injection.</p>
+
+        <h3>Broadcasts</h3>
+        <p>A terminal can broadcast a message to all other registered terminals simultaneously. Broadcasts are used for team-wide announcements.</p>
+
+        <h3>Inbox Notifications</h3>
+        <p>The inbox system delivers notifications for:</p>
+        <ul>
+          <li>New messages directed at your terminal</li>
+          <li>Task assignment changes (claimed, status updated)</li>
+          <li>Checklist transitions with notes</li>
+          <li>Helper assignments</li>
+          <li>System events (stale task warnings)</li>
+        </ul>
+
+        <h3>Reliable Delivery</h3>
+        <p>Messages use a reliable delivery system backed by the <code>message_queue.db</code> database:</p>
+        <ul>
+          <li>Messages are queued in SQLite before delivery</li>
+          <li>Failed deliveries are retried on a timer (every 2 seconds)</li>
+          <li>Message deduplication prevents double-delivery</li>
+          <li>Messages expire after a configurable TTL</li>
+        </ul>
+
+        <h3>Push Notifications (Nudge System)</h3>
+        <p>When a message arrives for a terminal, the InboxMonitorService injects a <code>[cm]</code> (check messages) nudge into the terminal. Claude Code agents are trained to immediately check their messages when they see this nudge. A 5-second throttle prevents nudge storms.</p>
+
+        <!-- =========================================== -->
+        <!-- 5. PROJECT MANAGEMENT -->
+        <!-- =========================================== -->
+        <h2 id="project-management">5. Project Management</h2>
+
+        <h3>Project Registration</h3>
+        <p>Projects are registered in SQLite with metadata including:</p>
+        <ul>
+          <li>Name, description, and primary path</li>
+          <li>Source path and deploy path</li>
+          <li>Build command</li>
+          <li>Git repository URL, default branch, and auto-commit preference</li>
+          <li>Pinned status for quick access</li>
+        </ul>
+
+        <h3>Context Service</h3>
+        <p>The <code>ProjectContextService</code> provides a single API call (<code>GET /api/projects/{id}/context</code>) that returns everything an agent needs to know about a project: core details, agents, MCP servers, specialist agents, named paths, prompts, and skills.</p>
+
+        <h3>Agent Assignment</h3>
+        <p>Projects can have named agents assigned with roles (lead, member) and preferred Claude models. This determines which agents are spawned when working on the project.</p>
+
+        <h3>MCP Configuration</h3>
+        <p>Each project can have MCP servers configured and enabled/disabled. The <code>McpConfigService</code> generates <code>.mcp.json</code> files from the registry for Claude Code consumption.</p>
+
+        <h3>Specialist Agents</h3>
+        <p>Projects can enable specialist agents with custom prompts:</p>
+        <ul>
+          <li><strong>Verifier:</strong> Confirms work is genuinely complete after coding</li>
+          <li><strong>Devils Advocate:</strong> Scores plans 0-100, blocks bad approaches</li>
+          <li><strong>Test Designer:</strong> Generates acceptance criteria per checklist item</li>
+          <li><strong>Security Auditor:</strong> OWASP Top 10 scanning, injection detection</li>
+          <li><strong>Debugger:</strong> Root cause analysis when testing fails</li>
+          <li><strong>Session Distiller:</strong> Compresses session learnings into memory</li>
+        </ul>
+
+        <h3>New Project Wizard</h3>
+        <p>The <code>/new-project</code> skill provides a 13-step conversational wizard for registering new projects. It supports 5 archetypes: Clarion COM, WebView2, Clarion App, MT Feature, and Generic C#.</p>
+
+        <!-- =========================================== -->
+        <!-- 6. TEAM & AGENT SYSTEM -->
+        <!-- =========================================== -->
+        <h2 id="team-agent-system">6. Team &amp; Agent System</h2>
+
+        <h3>Native Claude Code Teams</h3>
+        <p>MultiTerminal supports Claude Code's native team agent system (requires <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code>). Teams are created via <code>TeamCreate</code>, and agents are spawned as subagents that appear in the Agent Panel.</p>
+
+        <h3>Spawned Agents (AgentProcess)</h3>
+        <p>The TerminalSpawner service can launch Claude Code processes programmatically. Each spawned agent:</p>
+        <ul>
+          <li>Gets its own terminal with a unique identity</li>
+          <li>Is registered in the messaging system automatically</li>
+          <li>Can communicate with other terminals via MCP tools</li>
+          <li>Has its transcript monitored by TeamWatcherService</li>
+        </ul>
+
+        <h3>TeamWatcherService</h3>
+        <p>Monitors JSONL transcript files produced by native team agents. Streams transcript events to the Agent Panel in real-time using a file-tailing approach (TranscriptTailer).</p>
+
+        <h3>Agent Naming Convention</h3>
+        <table>
+          <thead><tr><th>System</th><th>Format</th><th>Example</th><th>Use For</th></tr></thead>
+          <tbody>
+            <tr><td>MultiTerminal</td><td>Plain name</td><td>Alice, Diana</td><td>Planning/design (interactive)</td></tr>
+            <tr><td>Native Teams</td><td>"Agent " prefix</td><td>Agent Alice</td><td>Coding sprints (parallel)</td></tr>
+          </tbody>
+        </table>
+
+        <!-- =========================================== -->
+        <!-- 7. INSTITUTIONAL MEMORY -->
+        <!-- =========================================== -->
+        <h2 id="institutional-memory">7. Institutional Memory</h2>
+
+        <h3>Knowledge Base</h3>
+        <p>The knowledge base stores reusable insights organized into 6 semantic categories:</p>
+        <table>
+          <thead><tr><th>Category</th><th>Purpose</th><th>Example</th></tr></thead>
+          <tbody>
+            <tr><td><code>decision</code></td><td>Architectural and design decisions</td><td>"Chose SQLite over JSON files for project storage"</td></tr>
+            <tr><td><code>pattern</code></td><td>Established coding patterns</td><td>"All panels follow Initialize(broker) + ApplyTheme(isDark) pattern"</td></tr>
+            <tr><td><code>gotcha</code></td><td>Non-obvious pitfalls</td><td>"WebView2 init blocks UI thread if done in constructor"</td></tr>
+            <tr><td><code>anti_pattern</code></td><td>Things to avoid</td><td>"Never use $env:VARNAME in Bash tool - gets mangled"</td></tr>
+            <tr><td><code>debug_insight</code></td><td>Debugging discoveries</td><td>"SplitterMoved fires during restore, corrupting ratios"</td></tr>
+            <tr><td><code>preference</code></td><td>User/team preferences</td><td>"Always use PowerShell syntax in terminal commands"</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Confidence Levels</h3>
+        <p>Each knowledge entry has a confidence level:</p>
+        <ul>
+          <li><strong>observed:</strong> Seen once, may need verification</li>
+          <li><strong>confirmed:</strong> Verified across multiple interactions</li>
+          <li><strong>deprecated:</strong> Superseded by newer knowledge</li>
+        </ul>
+
+        <h3>Code Digests</h3>
+        <p>Compressed summaries of codebase structure that agents can query to understand the project without reading every file. Digests capture file purposes, key classes, and relationships.</p>
+
+        <h3>Session Lineage</h3>
+        <p>Tracks the chain of Claude Code sessions for a terminal identity, enabling agents to understand the history of work done on a project across multiple sessions.</p>
+
+        <h3>Full-Text Search</h3>
+        <p>The knowledge database supports full-text search across all entries, enabling agents to query institutional memory with natural language.</p>
+
+        <!-- =========================================== -->
+        <!-- 8. SETTINGS & THEME -->
+        <!-- =========================================== -->
+        <h2 id="settings-theme">8. Settings &amp; Theme</h2>
+
+        <h3>Dark / Light Theme</h3>
+        <p>Toggle between dark and light themes using the sun/moon button in the toolbar. The theme applies to:</p>
+        <ul>
+          <li>Main form and toolbar</li>
+          <li>All docking panels</li>
+          <li>All WebView2 HTML panels (via <code>ApplyTheme</code> callback)</li>
+          <li>Terminal background and text colors</li>
+        </ul>
+
+        <h3>Font Settings</h3>
+        <p>The Settings dialog (WPF-based) allows configuring:</p>
+        <ul>
+          <li>Terminal font family and size</li>
+          <li>Font changes propagate to all open terminals in real-time</li>
+        </ul>
+
+        <h3>Docking Layout</h3>
+        <p>Panel positions, sizes, and visibility are saved automatically when the application closes and restored on next launch. The layout is stored as an XML file.</p>
+
+        <h3>Grid Layout Presets</h3>
+        <p>The Grid Layout dropdown provides preset arrangements for terminal tabs:</p>
+        <ul>
+          <li>2x2, 2x3, 3x2 grids</li>
+          <li>2 or 3 horizontal splits</li>
+          <li>2 or 3 vertical splits</li>
+          <li>Reset to Tabs (single tabbed view)</li>
+        </ul>
+
+        <h3>Toolbar</h3>
+        <p>The main toolbar contains buttons for all panel toggles, layout controls, and settings:</p>
+        <p>
+          <code>New Terminal</code> | <code>Project</code> | <code>Chat</code> | <code>History</code> | <code>Activity</code> | <code>Tasks</code> | <code>Profiles</code> | <code>Inbox</code> | <code>Office</code> | <code>Agent</code> | <code>Debug</code> | <code>HUD</code> | <code>Recent</code> | <code>Grid Layout</code> | Theme | Settings | About
+        </p>
+
+        <!-- =========================================== -->
+        <!-- 9. DIALOGS -->
+        <!-- =========================================== -->
+        <h2 id="dialogs">9. Dialogs</h2>
+        <p>Modal dialogs for specific operations:</p>
+
+        <table>
+          <thead>
+            <tr><th>Dialog</th><th>Purpose</th><th>Opened Via</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Settings (WPF)</strong></td>
+              <td>Configure terminal font, size, and application preferences</td>
+              <td>Toolbar gear button</td>
+            </tr>
+            <tr>
+              <td><strong>New Project (WPF)</strong></td>
+              <td>Register a new project with paths, build command, and git config</td>
+              <td>Project panel "New" button</td>
+            </tr>
+            <tr>
+              <td><strong>Project Manager</strong></td>
+              <td>Browse, edit, and manage all registered projects</td>
+              <td>Project panel</td>
+            </tr>
+            <tr>
+              <td><strong>Edit Project</strong></td>
+              <td>Edit details of a specific project</td>
+              <td>Project Manager dialog</td>
+            </tr>
+            <tr>
+              <td><strong>Chat History</strong></td>
+              <td>View historical chat messages with search and filtering</td>
+              <td>Toolbar "History" button</td>
+            </tr>
+            <tr>
+              <td><strong>Session Viewer</strong></td>
+              <td>Browse Claude Code session history and metadata</td>
+              <td>Terminal context menu</td>
+            </tr>
+            <tr>
+              <td><strong>Identity Picker</strong></td>
+              <td>Select or create a terminal identity (name) for session resumption</td>
+              <td>Terminal startup</td>
+            </tr>
+            <tr>
+              <td><strong>Rename Tab</strong></td>
+              <td>Rename a terminal tab (changes the display name)</td>
+              <td>Right-click terminal tab</td>
+            </tr>
+            <tr>
+              <td><strong>Save Prompt</strong></td>
+              <td>Save a reusable prompt to the project's prompt collection</td>
+              <td>Project panel</td>
+            </tr>
+            <tr>
+              <td><strong>About</strong></td>
+              <td>Application version, build info, and credits</td>
+              <td>Toolbar info button</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MultiTerminal Documentation - Multi-agent coordination system for Claude Code">
+  <title>MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Hamburger (mobile) -->
+<button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+
+<!-- Sidebar overlay (mobile) -->
+<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+<div class="page-wrapper">
+
+  <!-- Sidebar Navigation -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-icon">MT</span>
+        MultiTerminal
+      </div>
+      <div class="tagline">Documentation</div>
+    </div>
+    <nav>
+      <div class="nav-section-title">Getting Started</div>
+      <a href="getting-started.html" class="nav-link">Getting Started</a>
+
+      <div class="nav-section-title">Reference</div>
+      <a href="features.html" class="nav-link">Features</a>
+      <a href="api-reference.html" class="nav-link">REST API</a>
+      <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+
+      <div class="nav-section-title">Technical</div>
+      <a href="architecture.html" class="nav-link">Architecture</a>
+      <a href="distribution.html" class="nav-link">Distribution</a>
+      <a href="deployment.html" class="nav-link">Deployment</a>
+
+      <div class="nav-section-title"></div>
+      <a href="index.html" class="nav-link active">Home</a>
+    </nav>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="content-container">
+
+      <!-- Hero Section -->
+      <section class="hero">
+        <h1>MultiTerminal</h1>
+        <p class="tagline">Multi-agent coordination system for Claude Code</p>
+        <p class="version">WinForms Desktop App &middot; .NET 8 &middot; WebView2</p>
+      </section>
+
+      <!-- Quick Navigation Cards -->
+      <h2>Documentation</h2>
+      <div class="card-grid">
+
+        <div class="card">
+          <a href="getting-started.html">
+            <h3>Getting Started</h3>
+            <p>System requirements, installation, first launch walkthrough, and key concepts.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="features.html">
+            <h3>Features</h3>
+            <p>Kanban board, messaging, projects, team agents, knowledge base, and more.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="api-reference.html">
+            <h3>REST API</h3>
+            <p>HTTP endpoints on port 5050 for tasks, messaging, projects, and tools.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="mcp-tools.html">
+            <h3>MCP Tools</h3>
+            <p>Model Context Protocol tools for Claude Code agent integration.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="architecture.html">
+            <h3>Architecture</h3>
+            <p>System layers, data flow, database schema, and key design patterns.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="distribution.html">
+            <h3>Distribution</h3>
+            <p>Packaging, publishing, and distributing MultiTerminal.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="deployment.html">
+            <h3>Deployment</h3>
+            <p>Build process, deploy workflow, and environment configuration.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="styles.css">
+            <h3>Stylesheet</h3>
+            <p>Shared CSS with dark/light theming used across all documentation pages.</p>
+          </a>
+        </div>
+
+      </div>
+
+      <!-- Feature Highlights -->
+      <h2>Feature Highlights</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <h3>9 UI Panels</h3>
+          <p>Kanban board, chat, activity feed, inbox, profiles, projects, launcher, agents, and terminals &mdash; all in a dockable layout.</p>
+        </div>
+        <div class="card">
+          <h3>REST API (Port 5050)</h3>
+          <p>Full HTTP API for tasks, messaging, projects, and self-documenting tool discovery.</p>
+        </div>
+        <div class="card">
+          <h3>MCP Server</h3>
+          <p>Node.js MCP server exposes 40+ tools to Claude Code agents via the Model Context Protocol.</p>
+        </div>
+        <div class="card">
+          <h3>Team Agents</h3>
+          <p>Spawn, monitor, and coordinate multiple Claude Code agent teammates from a single desktop.</p>
+        </div>
+        <div class="card">
+          <h3>Knowledge Base</h3>
+          <p>Institutional memory system with code digests, session history, and queryable knowledge entries.</p>
+        </div>
+        <div class="card">
+          <h3>Project Management</h3>
+          <p>SQLite-backed project registry with agents, MCP servers, paths, prompts, and skills per project.</p>
+        </div>
+      </div>
+
+      <!-- Quick Links -->
+      <h2>Quick Links</h2>
+      <div class="quick-links">
+        <a href="getting-started.html">Installation</a>
+        <a href="features.html">Kanban Board</a>
+        <a href="api-reference.html">API Endpoints</a>
+        <a href="mcp-tools.html">MCP Tool List</a>
+        <a href="architecture.html">Database Schema</a>
+        <a href="deployment.html">Build &amp; Deploy</a>
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <p>MultiTerminal &copy; 2026. See <code>THIRD-PARTY-NOTICES.md</code> for license information.</p>
+      </footer>
+
+    </div>
+  </main>
+
+</div>
+
+<!-- Theme Toggle -->
+<button class="theme-toggle" aria-label="Toggle theme" onclick="toggleTheme()">&#9790;</button>
+
+<script>
+/* Theme toggle */
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme') || 'dark';
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('mt-docs-theme', next);
+}
+
+/* Restore saved theme */
+(function() {
+  var saved = localStorage.getItem('mt-docs-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+/* Mobile sidebar toggle */
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.querySelector('.sidebar-overlay').classList.toggle('visible');
+}
+</script>
+
+</body>
+</html>

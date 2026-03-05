@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Complete REST API reference for MultiTerminal — all endpoints with request/response JSON examples and curl commands.">
+  <title>REST API Reference - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page-wrapper">
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <span class="logo-icon">MT</span>
+      <span class="logo-text">MultiTerminal</span>
+    </div>
+    <span class="version">Documentation</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-section-title">Getting Started</div>
+    <a href="getting-started.html" class="nav-link">Quick Start</a>
+    <div class="nav-section-title">Reference</div>
+    <a href="features.html" class="nav-link">Features</a>
+    <a href="api-reference.html" class="nav-link active">REST API</a>
+    <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+    <div class="nav-section-title">Technical</div>
+    <a href="architecture.html" class="nav-link">Architecture</a>
+    <a href="distribution.html" class="nav-link">Distribution</a>
+    <a href="deployment.html" class="nav-link">Deployment</a>
+    <div class="nav-section-title"></div>
+    <a href="index.html" class="nav-link">&larr; Home</a>
+  </nav>
+</aside>
+
+<main class="main-content">
+<div class="content-container">
+  <h1>REST API Reference</h1>
+  <p class="lead">Complete reference for the MultiTerminal REST API running on <code>http://localhost:5050</code>. All endpoints accept and return JSON.</p>
+
+  <nav class="toc">
+    <h3>On This Page</h3>
+    <ul>
+      <li><a href="#health">Health &amp; Discovery</a></li>
+      <li><a href="#messaging">Messaging</a></li>
+      <li><a href="#tasks">Tasks</a></li>
+      <li><a href="#checklist">Checklist Workflow</a></li>
+      <li><a href="#inbox">Inbox &amp; Notifications</a></li>
+      <li><a href="#attachments">Attachments</a></li>
+      <li><a href="#office">Office Panel</a></li>
+      <li><a href="#spawn">Agent Spawning</a></li>
+      <li><a href="#agent-panels">Agent Panels</a></li>
+      <li><a href="#knowledge">Knowledge Base</a></li>
+      <li><a href="#session-lineage">Session Lineage</a></li>
+      <li><a href="#projects">Projects</a></li>
+      <li><a href="#team">Team</a></li>
+      <li><a href="#debug">Debug</a></li>
+    </ul>
+  </nav>
+
+  <!-- ================================================================== -->
+  <h2 id="health">Health &amp; Discovery</h2>
+  <!-- ================================================================== -->
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/</code>
+  </div>
+  <p>Basic health check. Returns a confirmation that the API is running.</p>
+  <h4>Response</h4>
+  <pre><code>"MultiTerminal API is running"</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/health</code>
+  </div>
+  <p>Health check with port information.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "status": "healthy",
+  "port": 5050
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/health</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tools</code>
+  </div>
+  <p>Self-documenting endpoint. Lists all available API endpoints with method, path, and description.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "baseUrl": "http://localhost:5050",
+  "endpoints": [
+    { "method": "GET", "path": "/", "description": "Health check - API is running" },
+    { "method": "POST", "path": "/api/messaging/register", "description": "Register a terminal (name, docId)" },
+    ...
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tools</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="messaging">Messaging</h2>
+  <!-- ================================================================== -->
+  <p>Terminal registration and inter-terminal messaging. All messaging endpoints are under <code>/api/messaging</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/messaging/register</code>
+  </div>
+  <p>Register a terminal with the messaging system. Returns a unique terminal ID used for subsequent messaging calls.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "name": "Alice",
+  "docId": "abc123"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "terminalId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}</code></pre>
+  <h4>Error Response</h4>
+  <pre><code>{
+  "error": "Terminal already registered"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/messaging/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice","docId":"abc123"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/messaging/send</code>
+  </div>
+  <p>Send a direct message to another terminal by name.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "fromTerminalId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "to": "Bob",
+  "message": "Hello, can you help with the database migration?"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "from": "Alice",
+  "to": "Bob"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/messaging/send \
+  -H "Content-Type: application/json" \
+  -d '{"fromTerminalId":"a1b2c3d4","to":"Bob","message":"Hello!"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/messaging/broadcast</code>
+  </div>
+  <p>Broadcast a message to all registered terminals.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "fromTerminalId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "Build is ready for testing!"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "from": "Alice",
+  "recipientCount": 3
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/messaging/broadcast \
+  -H "Content-Type: application/json" \
+  -d '{"fromTerminalId":"a1b2c3d4","message":"Build ready!"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/messaging/messages/{terminalId}</code>
+  </div>
+  <p>Get pending messages for a terminal. Messages are consumed on read (delivered once).</p>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "from": "Bob",
+    "to": "Alice",
+    "message": "Sure, I can help!",
+    "timestamp": "2026-03-05T10:30:00Z"
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/messaging/messages/a1b2c3d4</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/messaging/terminals</code>
+  </div>
+  <p>List all registered terminals with their names, IDs, and last-active timestamps.</p>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Alice",
+    "docId": "abc123",
+    "lastActiveAt": "2026-03-05T10:30:00Z"
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/messaging/terminals</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/messaging/disconnect</code>
+  </div>
+  <p>Disconnect a terminal by name. Used by session-end hooks for cleanup.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "name": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "name": "Alice"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/messaging/disconnect \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice"}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="tasks">Tasks</h2>
+  <!-- ================================================================== -->
+  <p>CRUD operations for kanban tasks. All task endpoints are under <code>/api/tasks</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks</code>
+  </div>
+  <p>List all tasks, optionally filtered by status.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>status</code></td><td>string</td><td><code>all</code></td><td>Filter: <code>all</code>, <code>todo</code>, <code>in_progress</code>, <code>done</code>, <code>suggestion</code></td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "id": "c0ce8037",
+    "title": "Add dark mode",
+    "description": "Implement dark mode theme switching",
+    "status": "in_progress",
+    "assignee": "Alice",
+    "createdBy": "John",
+    "createdAt": "2026-03-05T08:00:00Z",
+    "priority": "normal",
+    "subStatus": "active",
+    "checklistJson": "[...]",
+    "plan": "...",
+    "continuationNotes": "..."
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks?status=in_progress</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}</code>
+  </div>
+  <p>Get a specific task by ID.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "id": "c0ce8037",
+  "title": "Add dark mode",
+  "status": "in_progress",
+  ...
+}</code></pre>
+  <h4>Error (404)</h4>
+  <pre><code>{ "error": "Task c0ce8037 not found" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/detail</code>
+  </div>
+  <p>Get full task detail including parsed checklist with notes history, helpers, and progress summary.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "task": { "id": "c0ce8037", "title": "Add dark mode", ... },
+  "checklistSummary": {
+    "total": 5,
+    "done": 2,
+    "coding": 1,
+    "testing": 1,
+    "pending": 1
+  },
+  "checklist": [
+    {
+      "item": "Create theme service",
+      "status": "done",
+      "notes": [
+        { "text": "Implemented ThemeService with light/dark toggle", "at": "2026-03-05T09:00:00Z", "by": "Alice" }
+      ],
+      "assignee": "Alice",
+      "cycleCount": 0
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037/detail</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks</code>
+  </div>
+  <p>Create a new kanban task.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "title": "Fix login bug",
+  "description": "Users get 500 error on login when password contains special characters",
+  "createdBy": "Alice",
+  "status": "todo",
+  "priority": "high"
+}</code></pre>
+  <table>
+    <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>title</code></td><td>string</td><td>Yes</td><td>-</td><td>Task title</td></tr>
+      <tr><td><code>description</code></td><td>string</td><td>Yes</td><td>-</td><td>Task description</td></tr>
+      <tr><td><code>createdBy</code></td><td>string</td><td>Yes</td><td>-</td><td>Creator name</td></tr>
+      <tr><td><code>status</code></td><td>string</td><td>No</td><td><code>todo</code></td><td>Initial status</td></tr>
+      <tr><td><code>priority</code></td><td>string</td><td>No</td><td><code>normal</code></td><td><code>low</code>, <code>normal</code>, <code>high</code></td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "taskId": "a1b2c3d4",
+  "task": { "id": "a1b2c3d4", "title": "Fix login bug", ... }
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Fix login bug","description":"Details","createdBy":"Alice","status":"todo","priority":"high"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/status</code>
+  </div>
+  <p>Update a task's status.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "status": "in_progress",
+  "updatedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PATCH http://localhost:5050/api/tasks/c0ce8037/status \
+  -H "Content-Type: application/json" \
+  -d '{"status":"in_progress","updatedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/assign</code>
+  </div>
+  <p>Assign (claim) a task to a team member.</p>
+  <h4>Request Body</h4>
+  <pre><code>{ "assignee": "Alice" }</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/assign \
+  -H "Content-Type: application/json" \
+  -d '{"assignee":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/activate</code>
+  </div>
+  <p>Set a task as the active task for its assignee. Auto-pauses any other active tasks for the same person (enforces "one active task" rule).</p>
+  <h4>Request Body</h4>
+  <pre><code>{ "updatedBy": "Alice" }</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "pausedTaskIds": ["d4e5f6a7"],
+  "pausedTaskTitles": ["Refactor auth module"]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/activate \
+  -H "Content-Type: application/json" \
+  -d '{"updatedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/helpers</code>
+  </div>
+  <p>Add a helper to a task. Helpers assist without being the primary assignee.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "helper": "Bob",
+  "addedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "helperCount": 2 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/helpers \
+  -H "Content-Type: application/json" \
+  -d '{"helper":"Bob","addedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/tasks/{taskId}/helpers/{helperName}</code>
+  </div>
+  <p>Remove a helper from a task.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "helperCount": 1 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE http://localhost:5050/api/tasks/c0ce8037/helpers/Bob</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/tasks/{taskId}</code>
+  </div>
+  <p>Delete a task.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>deletedBy</code></td><td>string</td><td>Yes</td><td>Name of person deleting</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE "http://localhost:5050/api/tasks/c0ce8037?deletedBy=Alice"</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="checklist">Checklist Workflow</h2>
+  <!-- ================================================================== -->
+  <p>Enhanced checklist management with state machine transitions. The lifecycle is: <code>pending &rarr; coding &rarr; testing &rarr; done</code> (cycling allowed between <code>coding</code> and <code>testing</code>).</p>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/checklist</code>
+  </div>
+  <p>Replace all checklist items. Use for initial setup or bulk editing.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "checklistJson": "[{\"item\":\"Setup database\",\"status\":\"pending\",\"notes\":[]},{\"item\":\"Create API\",\"status\":\"pending\",\"notes\":[]}]"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PATCH http://localhost:5050/api/tasks/c0ce8037/checklist \
+  -H "Content-Type: application/json" \
+  -d '{"checklistJson":"[{\"item\":\"Setup database\",\"status\":\"pending\",\"notes\":[]}]"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/checklist/{itemIndex}/transition</code>
+  </div>
+  <p>Transition a checklist item to a new status. Enforces the state machine and tracks cycle count for escalation.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "newStatus": "testing",
+  "notes": "Implemented database schema and CRUD operations",
+  "updatedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "itemName": "Setup database",
+  "previousStatus": "coding",
+  "newStatus": "testing",
+  "cycleCount": 0,
+  "escalationTriggered": false
+}</code></pre>
+  <p><strong>Note:</strong> If <code>cycleCount</code> reaches 3, <code>escalationTriggered</code> becomes <code>true</code> and an inbox notification is sent to the PM.</p>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/checklist/0/transition \
+  -H "Content-Type: application/json" \
+  -d '{"newStatus":"testing","notes":"Schema and CRUD done","updatedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/checklist/{itemIndex}/assign</code>
+  </div>
+  <p>Assign a checklist item to a specific agent.</p>
+  <h4>Request Body</h4>
+  <pre><code>{ "assignee": "Alice" }</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/checklist/0/assign \
+  -H "Content-Type: application/json" \
+  -d '{"assignee":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/plan</code>
+  </div>
+  <p>Set or update the implementation plan (markdown formatted).</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "plan": "## Phase 1: Database\n- Create migrations\n- Add indexes\n\n## Phase 2: API\n- REST endpoints\n- Validation",
+  "updatedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PATCH http://localhost:5050/api/tasks/c0ce8037/plan \
+  -H "Content-Type: application/json" \
+  -d '{"plan":"## Phase 1\n- Step 1","updatedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/summary</code>
+  </div>
+  <p>Update implementation summary and/or test results. Pass <code>null</code> for fields you don't want to change.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "implementationSummary": "Added ThemeService with dark/light toggle and CSS variable support",
+  "testResults": "All 12 unit tests passing. Manual UI verification complete.",
+  "updatedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PATCH http://localhost:5050/api/tasks/c0ce8037/summary \
+  -H "Content-Type: application/json" \
+  -d '{"implementationSummary":"Added theme service","updatedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method patch">PATCH</span> <code>/api/tasks/{taskId}/continuation</code>
+  </div>
+  <p>Update continuation notes for session handoff. Describes where to pick up work.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "continuationNotes": "Working on checklist item 3 (API validation). File: Controllers/TasksController.cs. Next: add input sanitization for title field.",
+  "updatedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PATCH http://localhost:5050/api/tasks/c0ce8037/continuation \
+  -H "Content-Type: application/json" \
+  -d '{"continuationNotes":"Pick up at item 3","updatedBy":"Alice"}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="inbox">Inbox &amp; Notifications</h2>
+  <!-- ================================================================== -->
+  <p>Inbox notifications for task events like checklist items ready for testing, escalations, and helper requests. Endpoints are under <code>/api/tasks/inbox</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/inbox/{userId}</code>
+  </div>
+  <p>Get inbox messages for a user.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>unreadOnly</code></td><td>boolean</td><td><code>false</code></td><td>Only return unread messages</td></tr>
+      <tr><td><code>limit</code></td><td>integer</td><td><code>50</code></td><td>Max messages to return</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "messages": [
+    {
+      "id": "abc12345",
+      "userId": "john",
+      "taskId": "c0ce8037",
+      "taskTitle": "Add dark mode",
+      "checklistItemIndex": 2,
+      "checklistItemName": "Add validation",
+      "type": "ready_for_testing",
+      "summary": "Alice finished 'Add validation' - ready for testing",
+      "createdAt": "2026-03-05T10:30:00Z",
+      "createdBy": "Alice",
+      "readAt": null,
+      "replyText": null,
+      "repliedAt": null
+    }
+  ],
+  "unreadCount": 5,
+  "totalCount": 1
+}</code></pre>
+  <p><strong>Message types:</strong> <code>ready_for_testing</code>, <code>escalation</code>, <code>task_complete</code>, <code>helper_request</code></p>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/tasks/inbox/john?unreadOnly=true"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/inbox/{messageId}/read</code>
+  </div>
+  <p>Mark a single inbox message as read.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/inbox/abc12345/read</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/inbox/{userId}/read-all</code>
+  </div>
+  <p>Mark all inbox messages as read for a user.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/inbox/john/read-all</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/inbox/{messageId}/reply</code>
+  </div>
+  <p>Reply to an inbox message. Auto-marks the message as read.</p>
+  <h4>Request Body</h4>
+  <pre><code>{ "replyText": "Looks good, marking as done" }</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/inbox/abc12345/reply \
+  -H "Content-Type: application/json" \
+  -d '{"replyText":"Looks good, marking as done"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/inbox/{userId}/unread-count</code>
+  </div>
+  <p>Get unread inbox message count for a user.</p>
+  <h4>Response</h4>
+  <pre><code>{ "count": 5 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/inbox/john/unread-count</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="attachments">Attachments</h2>
+  <!-- ================================================================== -->
+  <p>Image attachments for tasks and checklist items. Stored as binary blobs in SQLite.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/attachments</code>
+  </div>
+  <p>Get attachment metadata for a task, optionally filtered by checklist item index.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>itemIndex</code></td><td>integer</td><td>-</td><td>Filter by checklist item index</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "id": "att-12345",
+    "taskId": "c0ce8037",
+    "checklistItemIndex": 0,
+    "fileName": "screenshot.png",
+    "mimeType": "image/png",
+    "addedBy": "John",
+    "addedAt": "2026-03-05T10:00:00Z"
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/tasks/c0ce8037/attachments?itemIndex=0"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/attachments/{attachmentId}/image</code>
+  </div>
+  <p>Get raw binary image data for an attachment. Returns the file with appropriate MIME type.</p>
+  <h4>Response</h4>
+  <p>Raw binary image data with <code>Content-Type</code> header (e.g., <code>image/png</code>).</p>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/attachments/att-12345/image -o screenshot.png</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/attachments/{attachmentId}/base64</code>
+  </div>
+  <p>Get attachment image as base64-encoded string with metadata. Useful for agents that need to analyze images.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "base64": "iVBORw0KGgoAAAANSUhEUgAA...",
+  "mimeType": "image/png",
+  "fileName": "screenshot.png"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/attachments/att-12345/base64</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/attachments</code>
+  </div>
+  <p>Add a base64-encoded image attachment to a task or checklist item.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "checklistItemIndex": 0,
+  "fileName": "bug-screenshot.png",
+  "mimeType": "image/png",
+  "base64Data": "iVBORw0KGgoAAAANSUhEUgAA...",
+  "addedBy": "John"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "attachmentId": "att-67890" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/attachments \
+  -H "Content-Type: application/json" \
+  -d '{"checklistItemIndex":0,"fileName":"bug.png","mimeType":"image/png","base64Data":"...","addedBy":"John"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/tasks/attachments/{attachmentId}</code>
+  </div>
+  <p>Delete an attachment by ID.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE http://localhost:5050/api/tasks/attachments/att-12345</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="office">Office Panel</h2>
+  <!-- ================================================================== -->
+  <p>Agent presence tracking for the Office Panel UI. Triggers walk-in/exit animations. Endpoints are under <code>/api/office</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/office/agents</code>
+  </div>
+  <p>Notify that an agent has been spawned. Triggers walk-in animation in the Office Panel.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "name": "Alice",
+  "spawnedBy": "John"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "agentName": "Alice" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/office/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice","spawnedBy":"John"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/office/agents/{name}</code>
+  </div>
+  <p>Notify that an agent has departed. Triggers exit animation in the Office Panel.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "agentName": "Alice" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE http://localhost:5050/api/office/agents/Alice</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/office/agents</code>
+  </div>
+  <p>List all currently active office agents.</p>
+  <h4>Response</h4>
+  <pre><code>[
+  { "name": "Alice", "spawnedBy": "John", "spawnedAt": "2026-03-05T10:00:00Z" },
+  { "name": "Bob", "spawnedBy": "Alice", "spawnedAt": "2026-03-05T10:05:00Z" }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/office/agents</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/office/agents/cleanup</code>
+  </div>
+  <p>Remove stale/ghost office agents older than a specified number of minutes.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>olderThanMinutes</code></td><td>integer</td><td><code>30</code></td><td>Remove agents older than this</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "removedCount": 2,
+  "removedAgents": ["Ghost1", "Ghost2"]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE "http://localhost:5050/api/office/agents/cleanup?olderThanMinutes=60"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/office/agents/clear-all</code>
+  </div>
+  <p>Force-clear all office agents. Nuclear option for ghost cleanup.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "removedCount": 5,
+  "removedAgents": ["Alice", "Bob", "Charlie", "Ghost1", "Ghost2"]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE http://localhost:5050/api/office/agents/clear-all</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="spawn">Agent Spawning</h2>
+  <!-- ================================================================== -->
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/spawn/agent</code>
+  </div>
+  <p>Spawn a headless AgentProcess with piped stdin/stdout. The agent runs Claude Code in stream-json mode and its conversation is displayed in the Agent Panel.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "agentName": "Agent Alice",
+  "workingDir": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
+  "initialPrompt": "Implement the dark mode feature",
+  "mcpConfigPath": "C:\\Users\\John\\.claude\\mcp-config.json",
+  "spawnerName": "John",
+  "taskDescription": "Add dark mode toggle to the settings panel",
+  "subagentType": "coder"
+}</code></pre>
+  <table>
+    <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Name for the spawned agent</td></tr>
+      <tr><td><code>workingDir</code></td><td>string</td><td>No</td><td>Working directory for the agent</td></tr>
+      <tr><td><code>initialPrompt</code></td><td>string</td><td>No</td><td>Initial prompt to send to the agent</td></tr>
+      <tr><td><code>mcpConfigPath</code></td><td>string</td><td>No</td><td>Path to MCP configuration</td></tr>
+      <tr><td><code>spawnerName</code></td><td>string</td><td>No</td><td>Who is spawning this agent</td></tr>
+      <tr><td><code>taskDescription</code></td><td>string</td><td>No</td><td>Description of the task for the agent</td></tr>
+      <tr><td><code>subagentType</code></td><td>string</td><td>No</td><td>Type of subagent (e.g., <code>coder</code>, <code>reviewer</code>)</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "agentName": "Agent Alice",
+  "processId": 12345,
+  "sessionId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/spawn/agent \
+  -H "Content-Type: application/json" \
+  -d '{"agentName":"Agent Alice","workingDir":"H:\\DevLaptop\\MyProject","initialPrompt":"Fix the bug","spawnerName":"John"}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="agent-panels">Agent Panels</h2>
+  <!-- ================================================================== -->
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/agent-panels/close</code>
+  </div>
+  <p>Close an agent panel by transcript path. Called by the SubagentStop hook when a subagent finishes.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "transcriptPath": "C:\\Users\\John\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "transcriptPath": "C:\\Users\\John\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/agent-panels/close \
+  -H "Content-Type: application/json" \
+  -d '{"transcriptPath":"C:\\Users\\John\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="knowledge">Knowledge Base</h2>
+  <!-- ================================================================== -->
+  <p>Institutional memory system for decisions, patterns, gotchas, and code digests. Endpoints are under <code>/api/knowledge</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/knowledge/search</code>
+  </div>
+  <p>Search knowledge entries by text query, category, project, and tags. Uses FTS5 full-text search.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>query</code></td><td>string</td><td>-</td><td>Search text</td></tr>
+      <tr><td><code>category</code></td><td>string</td><td>-</td><td><code>decision</code>, <code>pattern</code>, <code>gotcha</code>, <code>anti_pattern</code>, <code>debug_insight</code>, <code>preference</code></td></tr>
+      <tr><td><code>projectId</code></td><td>string</td><td>-</td><td>Filter by project</td></tr>
+      <tr><td><code>tags</code></td><td>string</td><td>-</td><td>Comma-separated tags</td></tr>
+      <tr><td><code>limit</code></td><td>integer</td><td><code>20</code></td><td>Max results (max 500)</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "results": [
+    {
+      "id": 1,
+      "projectId": "proj-123",
+      "category": "gotcha",
+      "title": "PowerShell single-quote injection",
+      "content": "Always escape single quotes with Replace(\"'\", \"''\") before interpolating into PowerShell commands",
+      "sourceType": "session",
+      "tags": "security,powershell",
+      "confidence": "confirmed",
+      "createdAt": "2026-02-28T10:00:00Z"
+    }
+  ],
+  "totalCount": 1
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/knowledge/search?query=injection&category=gotcha&limit=10"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/knowledge</code>
+  </div>
+  <p>Create a new knowledge entry.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "title": "Always use parameterized queries",
+  "content": "Never interpolate user input into SQL strings. Use SQLiteParameter for all values.",
+  "category": "pattern",
+  "projectId": "proj-123",
+  "sourceType": "review",
+  "tags": "security,sql,database",
+  "confidence": "confirmed"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "id": 42 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/knowledge \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Use parameterized queries","content":"Never interpolate...","category":"pattern","confidence":"confirmed"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method put">PUT</span> <code>/api/knowledge/{id}</code>
+  </div>
+  <p>Update an existing knowledge entry. Accepts a dictionary of field names to values.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "confidence": "confirmed",
+  "tags": "security,sql,database,critical"
+}</code></pre>
+  <p><strong>Accepted fields:</strong> <code>category</code>, <code>title</code>, <code>content</code>, <code>tags</code>, <code>confidence</code>, <code>superseded_by</code></p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PUT http://localhost:5050/api/knowledge/42 \
+  -H "Content-Type: application/json" \
+  -d '{"confidence":"confirmed","tags":"security,sql"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/knowledge/digest</code>
+  </div>
+  <p>Get the code digest (pre-analyzed summary) for a specific file.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>filePath</code></td><td>string</td><td>Yes</td><td>Absolute path to the source file</td></tr>
+      <tr><td><code>projectId</code></td><td>string</td><td>No</td><td>Project ID</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "id": 1,
+  "projectId": "proj-123",
+  "filePath": "H:\\DevLaptop\\...\\MessageBroker.cs",
+  "fileHash": "abc123def456...",
+  "purpose": "Central hub routing all messages, caching tasks/terminals/profiles",
+  "keyClasses": "[\"MessageBroker\"]",
+  "keyMethods": "[\"SendMessage\",\"RegisterTerminal\",\"CreateTask\"]",
+  "patterns": "ConcurrentDictionary caching, event-driven UI updates",
+  "gotchas": "Thread-safety required for all dictionary access",
+  "dependencies": "[\"TaskDatabase\",\"ActivityService\"]",
+  "lineCount": 4254,
+  "digestModel": "haiku"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/knowledge/digest?filePath=H%3A%5CDevLaptop%5C...%5CMessageBroker.cs"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/knowledge/digest</code>
+  </div>
+  <p>Save or update a code digest for a file.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "projectId": "proj-123",
+  "filePath": "H:\\DevLaptop\\...\\TaskDatabase.cs",
+  "fileHash": "sha256-hash-here",
+  "purpose": "SQLite persistence layer for tasks, profiles, and activity",
+  "keyClasses": "[\"TaskDatabase\"]",
+  "keyMethods": "[\"GetTask\",\"SaveTask\",\"LoadTaskHelpers\"]",
+  "patterns": "SQLite with manual migrations, connection pooling",
+  "gotchas": "Must call EnsureSchema() before any operations",
+  "dependencies": "[\"System.Data.SQLite\"]",
+  "lineCount": 2694,
+  "digestModel": "haiku"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "id": 5 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/knowledge/digest \
+  -H "Content-Type: application/json" \
+  -d '{"projectId":"proj-123","filePath":"...","fileHash":"abc123","purpose":"..."}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/knowledge/digest/stale</code>
+  </div>
+  <p>Check which digests are stale by comparing file hashes. Supply a dictionary of file paths to current hashes.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>projectId</code></td><td>string</td><td>No</td><td>Filter by project</td></tr>
+    </tbody>
+  </table>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "fileHashes": {
+    "H:\\DevLaptop\\...\\MessageBroker.cs": "currenthash123",
+    "H:\\DevLaptop\\...\\TaskDatabase.cs": "currenthash456"
+  }
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "stale": [
+    {
+      "filePath": "H:\\DevLaptop\\...\\MessageBroker.cs",
+      "storedHash": "oldhash789",
+      "currentHash": "currenthash123"
+    }
+  ],
+  "count": 1
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST "http://localhost:5050/api/knowledge/digest/stale?projectId=proj-123" \
+  -H "Content-Type: application/json" \
+  -d '{"fileHashes":{"path1":"hash1","path2":"hash2"}}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="session-lineage">Session Lineage</h2>
+  <!-- ================================================================== -->
+  <p>Import, query, and search Claude Code session transcripts. Supports lineage chaining for tracking agent cycling. Endpoints are under <code>/api/session-lineage</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-lineage/import</code>
+  </div>
+  <p>Import a Claude Code session JSONL file and link it to a kanban task. Extracts messages and indexes them with FTS5 for full-text search.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "sessionFilePath": "C:\\Users\\John\\.claude\\projects\\...\\sessions\\abc123.jsonl",
+  "taskId": "c0ce8037",
+  "agentName": "Alice",
+  "parentSessionId": "prev-session-id",
+  "sessionType": "coding"
+}</code></pre>
+  <table>
+    <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>sessionFilePath</code></td><td>string</td><td>Yes</td><td>Path to JSONL file (must be within <code>~/.claude/projects</code>)</td></tr>
+      <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Kanban task ID</td></tr>
+      <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Agent who ran the session</td></tr>
+      <tr><td><code>parentSessionId</code></td><td>string</td><td>No</td><td>Parent session for lineage chaining</td></tr>
+      <tr><td><code>sessionType</code></td><td>string</td><td>No</td><td>Semantic label: <code>coding</code>, <code>review</code>, <code>testing</code></td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "sessionId": "def456",
+  "messageCount": 127
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/session-lineage/import \
+  -H "Content-Type: application/json" \
+  -d '{"sessionFilePath":"C:\\Users\\John\\.claude\\...\\abc123.jsonl","taskId":"c0ce8037","agentName":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-lineage/task/{taskId}/sessions</code>
+  </div>
+  <p>Get all session lineage records for a task, newest first.</p>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "sessionId": "def456",
+    "parentSessionId": "abc123",
+    "taskId": "c0ce8037",
+    "agentName": "Alice",
+    "sessionType": "coding",
+    "summary": "Implemented database migrations and CRUD endpoints",
+    "startedAt": "2026-03-05T08:00:00Z",
+    "endedAt": "2026-03-05T09:30:00Z"
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/session-lineage/task/c0ce8037/sessions</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-lineage/{sessionId}/chain</code>
+  </div>
+  <p>Get the full lineage chain for a session, ordered root to leaf. Walks <code>parent_session_id</code> links.</p>
+  <h4>Response</h4>
+  <pre><code>[
+  { "sessionId": "abc123", "agentName": "Alice", "sessionType": "coding", ... },
+  { "sessionId": "def456", "agentName": "Alice", "sessionType": "review", "parentSessionId": "abc123", ... }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/session-lineage/def456/chain</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/session-lineage/sync</code>
+  </div>
+  <p>Incrementally sync sessions from a Claude project folder. Skips already-imported sessions.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "claudeProjectPath": "C:\\Users\\John\\.claude\\projects\\H--DevLaptop-...",
+  "agentName": "Alice",
+  "taskId": "c0ce8037"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "imported": 3,
+  "skipped": 12,
+  "failed": 0,
+  "total": 15
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/session-lineage/sync \
+  -H "Content-Type: application/json" \
+  -d '{"claudeProjectPath":"C:\\Users\\John\\.claude\\projects\\...","agentName":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-lineage/latest</code>
+  </div>
+  <p>Get the most recent session for a project. If no cached summary exists, returns the last 10 assistant messages for lazy summary generation.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Filesystem path to the project</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "session": {
+    "sessionId": "def456",
+    "taskId": "c0ce8037",
+    "agentName": "Alice",
+    "sessionType": "coding",
+    "startedAt": "2026-03-05T08:00:00Z"
+  },
+  "summary": "Implemented database migrations and CRUD endpoints for the knowledge base",
+  "recentMessages": null
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLaptop%5C..."</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method put">PUT</span> <code>/api/session-lineage/{sessionId}/summary</code>
+  </div>
+  <p>Save a generated summary for a session.</p>
+  <h4>Request Body</h4>
+  <pre><code>{ "summary": "Implemented the knowledge base with FTS5 search, CRUD endpoints, and code digest system" }</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X PUT http://localhost:5050/api/session-lineage/def456/summary \
+  -H "Content-Type: application/json" \
+  -d '{"summary":"Implemented knowledge base..."}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/session-lineage/search</code>
+  </div>
+  <p>Full-text search across session messages. Uses FTS5 when available, falls back to LIKE.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>taskId</code></td><td>string</td><td>No*</td><td>Filter by task</td></tr>
+      <tr><td><code>query</code></td><td>string</td><td>No*</td><td>Search text</td></tr>
+      <tr><td><code>role</code></td><td>string</td><td>No</td><td><code>user</code> or <code>assistant</code></td></tr>
+      <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Filter by agent</td></tr>
+      <tr><td><code>limit</code></td><td>integer</td><td>No</td><td>Max results (default 50, max 1000)</td></tr>
+    </tbody>
+  </table>
+  <p>* At least one of <code>taskId</code> or <code>query</code> is required.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "results": [
+    {
+      "sessionId": "def456",
+      "messageIndex": 42,
+      "role": "assistant",
+      "content": "I implemented the FTS5 search indexing...",
+      "toolName": null,
+      "timestamp": "2026-03-05T09:15:00Z"
+    }
+  ],
+  "totalCount": 3
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/session-lineage/search?taskId=c0ce8037&query=FTS5&role=assistant&limit=20"</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="projects">Projects</h2>
+  <!-- ================================================================== -->
+  <p>Project context endpoints for agent orientation. Endpoints are under <code>/api/projects</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/projects/{projectId}/context</code>
+  </div>
+  <p>Get the full project context: project record joined with all association tables (agents, MCP servers, specialist agents, paths, prompts, skills) in a single response.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "project": {
+    "id": "proj-123",
+    "name": "MultiTerminal",
+    "description": "Multi-agent coordination system",
+    "path": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
+    "deployPath": "H:\\DevLaptop\\ClarionPowerShell\\Deploy",
+    "buildCommand": "dotnet build",
+    "projectType": "WinForms",
+    "gitRepoUrl": "...",
+    "gitDefaultBranch": "main",
+    "isPinned": true,
+    "teamLead": "John"
+  },
+  "agents": [
+    { "agentName": "Alice", "role": "backend", "preferredModel": "sonnet" }
+  ],
+  "mcpServers": [
+    { "serverName": "multiterminal-mcp", "isEnabled": true }
+  ],
+  "specialistAgents": [
+    { "agentType": "verifier", "isEnabled": true, "customPrompt": null }
+  ],
+  "paths": [
+    { "pathType": "source", "pathValue": "H:\\DevLaptop\\...", "description": "Main source" }
+  ],
+  "prompts": [
+    { "promptType": "system", "promptText": "...", "displayOrder": 0 }
+  ],
+  "skills": [
+    { "skillName": "kanban-task", "isEnabled": true }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/projects/proj-123/context</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/projects/contexts</code>
+  </div>
+  <p>List all project contexts with their full association data.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "count": 3,
+  "contexts": [ ... ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/projects/contexts</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="team">Team</h2>
+  <!-- ================================================================== -->
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/team/roster</code>
+  </div>
+  <p>Get the team roster for a project, merged with profile data. Returns each agent's name, preferred model, instructions, role, and skills.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Absolute path to the project directory</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "projectName": "MultiTerminal",
+  "projectPath": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
+  "agents": [
+    {
+      "name": "Alice",
+      "hasProfile": true,
+      "preferredModel": "sonnet",
+      "agentInstructions": "Backend systems architect specializing in C# and SQLite",
+      "role": "backend",
+      "skills": ["database", "api-design", "c-sharp"],
+      "isOnline": true,
+      "isTeamLead": false
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/team/roster?projectPath=H%3A%5CDevLaptop%5CClarionPowerShell%5CMultiTerminal"</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="debug">Debug</h2>
+  <!-- ================================================================== -->
+  <p>Debug logging for system diagnostics. Endpoints are under <code>/api/debug</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/debug/logs</code>
+  </div>
+  <p>Get debug log entries with filtering and pagination. Ordered by most recent first.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>count</code></td><td>integer</td><td><code>50</code></td><td>Number of entries to return</td></tr>
+      <tr><td><code>offset</code></td><td>integer</td><td><code>0</code></td><td>Skip entries for pagination</td></tr>
+      <tr><td><code>source</code></td><td>string</td><td>-</td><td>Filter by component (e.g., <code>InboxMonitor</code>, <code>MessageBroker</code>)</td></tr>
+      <tr><td><code>level</code></td><td>string</td><td>-</td><td><code>Trace</code>, <code>Info</code>, <code>Warning</code>, <code>Error</code></td></tr>
+      <tr><td><code>search</code></td><td>string</td><td>-</td><td>Text search within messages (case-insensitive)</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "total": 1234,
+  "offset": 0,
+  "count": 2,
+  "entries": [
+    {
+      "timestamp": "10:30:45.123",
+      "source": "InboxMonitor",
+      "level": "Info",
+      "message": "Nudge sent to terminal Alice for task c0ce8037"
+    },
+    {
+      "timestamp": "10:30:44.987",
+      "source": "MessageBroker",
+      "level": "Trace",
+      "message": "Message delivered from Bob to Alice"
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/debug/logs?count=20&source=InboxMonitor&level=Info"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/debug/logs</code>
+  </div>
+  <p>Clear all debug log entries.</p>
+  <h4>Response</h4>
+  <pre><code>{ "message": "Debug logs cleared", "previousCount": 1234 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE http://localhost:5050/api/debug/logs</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/debug/pause</code>
+  </div>
+  <p>Pause debug logging. New entries are silently discarded until resumed.</p>
+  <h4>Response</h4>
+  <pre><code>{ "isPaused": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/debug/pause</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/debug/resume</code>
+  </div>
+  <p>Resume debug logging.</p>
+  <h4>Response</h4>
+  <pre><code>{ "isPaused": false }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/debug/resume</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/debug/status</code>
+  </div>
+  <p>Get debug log status.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "count": 1234,
+  "isPaused": false,
+  "maxCapacity": 10000
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/debug/status</code></pre>
+
+</div>
+</main>
+
+</div>
+
+<script>
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+</script>
+
+</body>
+</html>

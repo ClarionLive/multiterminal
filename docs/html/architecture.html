@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MultiTerminal system architecture — layers, data flow, database schema (25+ tables), MessageBroker events, and key development patterns.">
+  <title>Architecture - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page-wrapper">
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <span class="logo-icon">MT</span>
+      <span class="logo-text">MultiTerminal</span>
+    </div>
+    <span class="version">Documentation</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-section-title">Getting Started</div>
+    <a href="getting-started.html" class="nav-link">Quick Start</a>
+    <div class="nav-section-title">Reference</div>
+    <a href="features.html" class="nav-link">Features</a>
+    <a href="api-reference.html" class="nav-link">REST API</a>
+    <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+    <div class="nav-section-title">Technical</div>
+    <a href="architecture.html" class="nav-link active">Architecture</a>
+    <a href="distribution.html" class="nav-link">Distribution</a>
+    <a href="deployment.html" class="nav-link">Deployment</a>
+    <div class="nav-section-title"></div>
+    <a href="index.html" class="nav-link">&larr; Home</a>
+  </nav>
+</aside>
+
+<main class="main-content">
+<div class="content-container">
+  <h1>Architecture</h1>
+  <p class="lead">MultiTerminal is a WinForms desktop application (C#/.NET) with an integrated REST API, MCP server, and WebView2-based UI panels. This page describes the system layers, data flow, database schema, and key patterns.</p>
+
+  <nav class="toc">
+    <h3>On This Page</h3>
+    <ul>
+      <li><a href="#overview">System Overview</a></li>
+      <li><a href="#critical-files">Critical Files</a></li>
+      <li><a href="#data-flow">Data Flow</a></li>
+      <li><a href="#database-schema">Database Schema</a></li>
+      <li><a href="#events">MessageBroker Events</a></li>
+      <li><a href="#patterns">Key Patterns</a></li>
+      <li><a href="#folder-map">Folder Map</a></li>
+    </ul>
+  </nav>
+
+  <!-- ================================================================== -->
+  <h2 id="overview">System Overview</h2>
+  <!-- ================================================================== -->
+
+  <p>The system is organized into five distinct layers, with the MessageBroker serving as the central hub connecting everything together.</p>
+
+  <div class="architecture-diagram">
+<pre>
++-------------------------------------------------------------+
+|  MainForm.cs (3K LOC) - UI Host &amp; Panel Orchestrator        |
+|  +-------------------+  +-------------------+               |
+|  | TasksPanel/       |  | ChatPanel/        |  7 WebView2   |
+|  | (Kanban board)    |  | (Messaging)       |  panels total |
+|  +-------------------+  +-------------------+               |
+|  +-------------------+  +-------------------+               |
+|  | ActivityPanel/    |  | ProfilePanel/     |               |
+|  | (Activity feed)   |  | (Team profiles)   |               |
+|  +-------------------+  +-------------------+               |
+|  +-------------------+  +-------------------+               |
+|  | InboxPanel/       |  | ProjectPanel/     |               |
+|  | (Notifications)   |  | (Project mgmt)    |               |
+|  +-------------------+  +-------------------+               |
+|  +-------------------+                                      |
+|  | LauncherPanel/    |  + Terminal/ (ConPTY + WebView2)      |
+|  | (Agent launcher)  |  + Docking/ (GridLayoutManager)       |
+|  +-------------------+  + Dialogs/ (7 modal windows)         |
++-------------------------------------------------------------+
+                           |
+                   Events (C# EventHandler)
+                           |
++-------------------------------------------------------------+
+|  REST API (port 5050) - MultiTerminalRestServer.cs          |
+|  +-----------------------+  +----------------------------+  |
+|  | TasksController       |  | MessagingController        |  |
+|  | OfficeController      |  | KnowledgeController        |  |
+|  | SpawnController       |  | SessionLineageController   |  |
+|  | ProjectContextController | TeamController              |  |
+|  | DebugController       |  | ToolsController            |  |
+|  | AgentPanelsController |  |                            |  |
+|  +-----------------------+  +----------------------------+  |
++-------------------------------------------------------------+
+                           |
+                    Method calls
+                           |
++-------------------------------------------------------------+
+|  MessageBroker.cs (4.2K LOC) - CENTRAL HUB                 |
+|                                                             |
+|  Routes messages, manages task/terminal/profile caches      |
+|  (ConcurrentDictionary), delivers webhooks, fires events    |
+|  to UI panels. Everything flows through here.               |
+|                                                             |
+|  Services:                                                  |
+|  - ActivityService    - StaleTaskService                    |
+|  - PoolCoordinator    - SpawnService                        |
+|  - ComplexityDetector - SummaryService                      |
+|  - SessionDiscovery   - HttpWebhookService                  |
++-------------------------------------------------------------+
+                           |
+                    SQLite calls
+                           |
++-------------------------------------------------------------+
+|  Persistence Layer (SQLite)                                 |
+|  +-------------------+  +-------------------+               |
+|  | TaskDatabase.cs   |  | ProjectDatabase.cs|  tasks.db     |
+|  | (2.7K LOC)        |  | + 7 assoc tables  |               |
+|  +-------------------+  +-------------------+               |
+|  +-------------------+  +-------------------+               |
+|  | KnowledgeDatabase |  | SessionLineage-   |  tasks.db     |
+|  | (knowledge + FTS) |  | Service (sessions)|               |
+|  +-------------------+  +-------------------+               |
+|  +-------------------+                                      |
+|  | MessageQueue-     |  message_queue.db                    |
+|  | Database.cs       |  (reliable delivery)                 |
+|  +-------------------+                                      |
++-------------------------------------------------------------+
+                           |
+                    stdio (JSON-RPC)
+                           |
++-------------------------------------------------------------+
+|  MCP Server (Node.js) - multiterminal-mcp/index.js          |
+|                                                             |
+|  Exposes 47 tools to Claude Code agents via MCP protocol.   |
+|  Wraps the REST API - each tool call = one HTTP request.    |
+|  Located: %APPDATA%\multiterminal\mcp\index.js              |
++-------------------------------------------------------------+
+</pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="critical-files">Critical Files</h2>
+  <!-- ================================================================== -->
+
+  <p>These files contain the majority of the system's logic. Read them first when onboarding.</p>
+
+  <table>
+    <thead>
+      <tr><th>File</th><th>LOC</th><th>Role</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>MCPServer/Services/MessageBroker.cs</code></td>
+        <td>~4,254</td>
+        <td><strong>Central hub.</strong> Routes all messages, caches tasks/terminals/profiles in ConcurrentDictionaries, delivers webhooks, fires events. Everything flows through here.</td>
+      </tr>
+      <tr>
+        <td><code>Services/TaskDatabase.cs</code></td>
+        <td>~2,694</td>
+        <td><strong>Persistence.</strong> SQLite CRUD for tasks, helpers, profiles, activity, stale tracking, knowledge entries, code digests, session lineage. All tables defined here.</td>
+      </tr>
+      <tr>
+        <td><code>MainForm.cs</code></td>
+        <td>~3,059</td>
+        <td><strong>UI host.</strong> Creates/docks panels, wires events between panels and MessageBroker, manages terminal lifecycle.</td>
+      </tr>
+      <tr>
+        <td><code>MCPServer/Models/KanbanTask.cs</code></td>
+        <td>~403</td>
+        <td><strong>Core model.</strong> All task properties: status, assignee, checklists, plan, helpers, stale tracking, continuation notes, plus all result types.</td>
+      </tr>
+      <tr>
+        <td><code>Services/ProjectDatabase.cs</code></td>
+        <td>~1,100</td>
+        <td><strong>Project persistence.</strong> SQLite CRUD for projects and all 6 association tables (agents, MCP servers, specialists, paths, prompts, skills).</td>
+      </tr>
+      <tr>
+        <td><code>API/Controllers/TasksController.cs</code></td>
+        <td>~505</td>
+        <td><strong>Tasks REST API.</strong> All task, checklist, inbox, and attachment endpoints. Largest controller.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ================================================================== -->
+  <h2 id="data-flow">Data Flow</h2>
+  <!-- ================================================================== -->
+
+  <p>Here is how a typical operation (e.g., creating a task) flows through the system.</p>
+
+  <h3>Agent Creates a Task</h3>
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. Claude Code Agent</div>
+      <div class="flow-detail">Calls <code>create_task(title="Fix bug", ...)</code> via MCP tool</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. MCP Server (Node.js)</div>
+      <div class="flow-detail">Translates to <code>POST /api/tasks</code> with JSON body</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. TasksController</div>
+      <div class="flow-detail">Validates request, calls <code>_broker.CreateTask(...)</code></div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">4. MessageBroker</div>
+      <div class="flow-detail">Creates <code>KanbanTask</code> object, adds to cache, calls <code>_taskDb.SaveTask(...)</code>, fires <code>TasksUpdated</code> event</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step flow-split">
+      <div class="flow-branch">
+        <div class="flow-label">5a. TaskDatabase</div>
+        <div class="flow-detail">Persists to SQLite <code>tasks</code> table</div>
+      </div>
+      <div class="flow-branch">
+        <div class="flow-label">5b. MainForm (event handler)</div>
+        <div class="flow-detail">Receives <code>TasksUpdated</code> event, refreshes TasksPanel UI</div>
+      </div>
+      <div class="flow-branch">
+        <div class="flow-label">5c. ActivityService</div>
+        <div class="flow-detail">Records activity event to feed</div>
+      </div>
+    </div>
+  </div>
+
+  <h3>Checklist Item Transition</h3>
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. Agent calls <code>update_task_checklist</code></div>
+      <div class="flow-detail"><code>taskId, itemIndex=0, newStatus="testing", notes="Done implementing"</code></div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. MessageBroker.TransitionChecklistItem()</div>
+      <div class="flow-detail">Validates state machine: <code>coding &rarr; testing</code> allowed. Updates item status, appends notes, increments cycle count if cycling.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step flow-split">
+      <div class="flow-branch">
+        <div class="flow-label">3a. TaskDatabase</div>
+        <div class="flow-detail">Saves updated <code>checklist_json</code></div>
+      </div>
+      <div class="flow-branch">
+        <div class="flow-label">3b. Inbox Notification</div>
+        <div class="flow-detail">Creates <code>ready_for_testing</code> inbox message for PM</div>
+      </div>
+      <div class="flow-branch">
+        <div class="flow-label">3c. Escalation Check</div>
+        <div class="flow-detail">If cycleCount >= 3, creates <code>escalation</code> inbox message</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="database-schema">Database Schema</h2>
+  <!-- ================================================================== -->
+
+  <p>All data is stored in SQLite databases. The primary database is <code>tasks.db</code> which holds most tables.</p>
+
+  <h3>tasks.db - Core Tables</h3>
+
+  <div class="schema-group">
+    <h4>tasks</h4>
+    <p>Primary kanban task storage.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>8-char hex GUID</td></tr>
+        <tr><td><code>title</code></td><td>TEXT NOT NULL</td><td>Task title</td></tr>
+        <tr><td><code>description</code></td><td>TEXT</td><td>Task description</td></tr>
+        <tr><td><code>status</code></td><td>TEXT NOT NULL</td><td>todo, in_progress, done, suggestion</td></tr>
+        <tr><td><code>assignee</code></td><td>TEXT</td><td>Claimed agent name</td></tr>
+        <tr><td><code>created_by</code></td><td>TEXT</td><td>Creator name</td></tr>
+        <tr><td><code>created_at</code></td><td>DATETIME</td><td>Creation timestamp</td></tr>
+        <tr><td><code>updated_at</code></td><td>DATETIME</td><td>Last update timestamp</td></tr>
+        <tr><td><code>priority</code></td><td>TEXT</td><td>low, normal, high</td></tr>
+        <tr><td><code>sub_status</code></td><td>TEXT</td><td>active, paused (for in_progress tasks)</td></tr>
+        <tr><td><code>paused_at</code></td><td>DATETIME</td><td>When task was paused</td></tr>
+        <tr><td><code>checklist_json</code></td><td>TEXT</td><td>JSON array of checklist items</td></tr>
+        <tr><td><code>plan</code></td><td>TEXT</td><td>Markdown implementation plan</td></tr>
+        <tr><td><code>implementation_summary</code></td><td>TEXT</td><td>What was built (markdown)</td></tr>
+        <tr><td><code>test_results</code></td><td>TEXT</td><td>Test outcomes (markdown)</td></tr>
+        <tr><td><code>continuation_notes</code></td><td>TEXT</td><td>Session handoff context</td></tr>
+        <tr><td><code>auto_status</code></td><td>INTEGER</td><td>Auto-derive status from checklist</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT</td><td>FK to projects</td></tr>
+        <tr><td><code>flagged_stale_at</code></td><td>DATETIME</td><td>When flagged as stale</td></tr>
+        <tr><td><code>stale_level</code></td><td>INTEGER</td><td>0=fresh, 1=7day, 2=14day</td></tr>
+        <tr><td><code>stale_response</code></td><td>TEXT</td><td>User response to stale notification</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>task_helpers</h4>
+    <p>Helper assignments for collaborative tasks.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Helper record ID</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>References tasks.id</td></tr>
+        <tr><td><code>helper_name</code></td><td>TEXT</td><td>Helper agent name</td></tr>
+        <tr><td><code>added_by</code></td><td>TEXT</td><td>Who added the helper</td></tr>
+        <tr><td><code>added_at</code></td><td>DATETIME</td><td>When added</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>terminal_activity</h4>
+    <p>Current state of each terminal.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminal</code></td><td>TEXT PK</td><td>Terminal name</td></tr>
+        <tr><td><code>status</code></td><td>TEXT</td><td>idle, working, blocked</td></tr>
+        <tr><td><code>activity</code></td><td>TEXT</td><td>Current activity description</td></tr>
+        <tr><td><code>blocked_by</code></td><td>TEXT</td><td>What is blocking (if any)</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT</td><td>Active task ID</td></tr>
+        <tr><td><code>plan_id</code></td><td>TEXT</td><td>Active plan ID</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>activity_feed</h4>
+    <p>High-level workflow events for the manager dashboard.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>timestamp</code></td><td>TEXT</td><td>Event timestamp</td></tr>
+        <tr><td><code>activity_type</code></td><td>TEXT</td><td>Event type</td></tr>
+        <tr><td><code>actor</code></td><td>TEXT</td><td>Who triggered it</td></tr>
+        <tr><td><code>summary</code></td><td>TEXT</td><td>Human-readable summary</td></tr>
+        <tr><td><code>severity</code></td><td>TEXT</td><td>info, warning, error</td></tr>
+        <tr><td><code>details_json</code></td><td>TEXT</td><td>JSON event details</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>task_summaries</h4>
+    <p>Progress snapshots for tracking work history and handoffs.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>References tasks.id</td></tr>
+        <tr><td><code>summary_at</code></td><td>DATETIME</td><td>When summarized</td></tr>
+        <tr><td><code>triggered_by</code></td><td>TEXT</td><td>What triggered the summary</td></tr>
+        <tr><td><code>previous_status</code></td><td>TEXT</td><td>Status before transition</td></tr>
+        <tr><td><code>new_status</code></td><td>TEXT</td><td>Status after transition</td></tr>
+        <tr><td><code>work_completed</code></td><td>TEXT</td><td>What was done</td></tr>
+        <tr><td><code>next_steps</code></td><td>TEXT</td><td>What's next</td></tr>
+        <tr><td><code>blockers</code></td><td>TEXT</td><td>Current blockers</td></tr>
+        <tr><td><code>author</code></td><td>TEXT</td><td>Who wrote it</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>team_member_profiles</h4>
+    <p>Rich identity information for team agents.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Profile ID</td></tr>
+        <tr><td><code>display_name</code></td><td>TEXT</td><td>Display name</td></tr>
+        <tr><td><code>avatar_url</code></td><td>TEXT</td><td>Avatar image URL</td></tr>
+        <tr><td><code>role</code></td><td>TEXT</td><td>Agent role</td></tr>
+        <tr><td><code>bio</code></td><td>TEXT</td><td>Agent bio/description</td></tr>
+        <tr><td><code>skills_json</code></td><td>TEXT</td><td>JSON array of skills</td></tr>
+        <tr><td><code>interests_json</code></td><td>TEXT</td><td>JSON array of interests</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>user_inbox</h4>
+    <p>Inbox notifications for task events.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Message ID</td></tr>
+        <tr><td><code>user_id</code></td><td>TEXT</td><td>Recipient user</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>Related task</td></tr>
+        <tr><td><code>task_title</code></td><td>TEXT</td><td>Task title snapshot</td></tr>
+        <tr><td><code>checklist_item_index</code></td><td>INTEGER</td><td>Related checklist item</td></tr>
+        <tr><td><code>checklist_item_name</code></td><td>TEXT</td><td>Item name snapshot</td></tr>
+        <tr><td><code>message_type</code></td><td>TEXT</td><td>ready_for_testing, escalation, task_complete, helper_request</td></tr>
+        <tr><td><code>summary</code></td><td>TEXT</td><td>Human-readable summary</td></tr>
+        <tr><td><code>created_by</code></td><td>TEXT</td><td>Who triggered it</td></tr>
+        <tr><td><code>read_at</code></td><td>DATETIME</td><td>When read (null if unread)</td></tr>
+        <tr><td><code>reply_text</code></td><td>TEXT</td><td>Reply content</td></tr>
+        <tr><td><code>replied_at</code></td><td>DATETIME</td><td>When replied</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>task_attachments</h4>
+    <p>Image attachments stored as binary blobs.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Attachment ID</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>References tasks.id</td></tr>
+        <tr><td><code>checklist_item_index</code></td><td>INTEGER</td><td>Associated checklist item</td></tr>
+        <tr><td><code>file_name</code></td><td>TEXT</td><td>Original filename</td></tr>
+        <tr><td><code>mime_type</code></td><td>TEXT</td><td>MIME type (image/png, etc.)</td></tr>
+        <tr><td><code>data</code></td><td>BLOB</td><td>Raw binary image data</td></tr>
+        <tr><td><code>added_by</code></td><td>TEXT</td><td>Who added it</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>complexity_decisions</h4>
+    <p>Learnable heuristic for task complexity analysis.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>References tasks.id</td></tr>
+        <tr><td><code>score</code></td><td>INTEGER</td><td>Complexity score (0-100)</td></tr>
+        <tr><td><code>signals_json</code></td><td>TEXT</td><td>Detected complexity signals</td></tr>
+        <tr><td><code>suggested_plan</code></td><td>INTEGER</td><td>Whether a plan was suggested</td></tr>
+        <tr><td><code>user_accepted</code></td><td>INTEGER</td><td>User's decision (for learning)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>tasks.db - Session Lineage Tables</h3>
+
+  <div class="schema-group">
+    <h4>session_lineage</h4>
+    <p>Tracks parent/child relationships between Claude Code sessions.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>session_id</code></td><td>TEXT UNIQUE</td><td>Session identifier</td></tr>
+        <tr><td><code>parent_session_id</code></td><td>TEXT</td><td>Parent for lineage chaining</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>Linked kanban task</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Agent who ran the session</td></tr>
+        <tr><td><code>session_type</code></td><td>TEXT</td><td>coding, review, testing, terminal</td></tr>
+        <tr><td><code>summary</code></td><td>TEXT</td><td>Generated session summary</td></tr>
+        <tr><td><code>session_file_path</code></td><td>TEXT</td><td>Path to JSONL transcript</td></tr>
+        <tr><td><code>started_at</code></td><td>TEXT</td><td>Session start time</td></tr>
+        <tr><td><code>ended_at</code></td><td>TEXT</td><td>Session end time</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>session_messages</h4>
+    <p>Individual messages extracted from session JSONL files.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>session_id</code></td><td>TEXT FK</td><td>References session_lineage.session_id</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT</td><td>Linked task (denormalized)</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Agent name (denormalized)</td></tr>
+        <tr><td><code>message_index</code></td><td>INTEGER</td><td>Position in session</td></tr>
+        <tr><td><code>role</code></td><td>TEXT</td><td>user or assistant</td></tr>
+        <tr><td><code>content</code></td><td>TEXT</td><td>Message content</td></tr>
+        <tr><td><code>tool_name</code></td><td>TEXT</td><td>Tool used (if any)</td></tr>
+        <tr><td><code>timestamp</code></td><td>TEXT</td><td>Message timestamp</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>session_messages_fts</h4>
+    <p>FTS5 virtual table for full-text search across session messages.</p>
+    <p>Columns indexed: <code>content</code>, <code>role</code>, <code>agent_name</code>, <code>tool_name</code>. Content sourced from <code>session_messages</code>.</p>
+  </div>
+
+  <h3>tasks.db - Knowledge Tables</h3>
+
+  <div class="schema-group">
+    <h4>knowledge_entries</h4>
+    <p>Institutional memory: decisions, patterns, gotchas, anti-patterns.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT</td><td>Project scope (null = global)</td></tr>
+        <tr><td><code>category</code></td><td>TEXT</td><td>decision, pattern, gotcha, anti_pattern, debug_insight, preference</td></tr>
+        <tr><td><code>title</code></td><td>TEXT</td><td>Short summary title</td></tr>
+        <tr><td><code>content</code></td><td>TEXT</td><td>Full knowledge content</td></tr>
+        <tr><td><code>source_type</code></td><td>TEXT</td><td>manual, session, debug, review</td></tr>
+        <tr><td><code>source_id</code></td><td>TEXT</td><td>Reference ID (session, task)</td></tr>
+        <tr><td><code>source_agent</code></td><td>TEXT</td><td>Agent who contributed</td></tr>
+        <tr><td><code>tags</code></td><td>TEXT</td><td>Comma-separated tags</td></tr>
+        <tr><td><code>confidence</code></td><td>TEXT</td><td>confirmed, likely, uncertain</td></tr>
+        <tr><td><code>superseded_by</code></td><td>INTEGER</td><td>ID of replacement entry</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>knowledge_entries_fts</h4>
+    <p>FTS5 virtual table for full-text search across knowledge entries.</p>
+    <p>Columns indexed: <code>title</code>, <code>content</code>, <code>tags</code>. Content sourced from <code>knowledge_entries</code>.</p>
+  </div>
+
+  <div class="schema-group">
+    <h4>code_digests</h4>
+    <p>Per-file summaries for fast agent orientation.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT</td><td>Project scope</td></tr>
+        <tr><td><code>file_path</code></td><td>TEXT</td><td>Absolute path to source file</td></tr>
+        <tr><td><code>file_hash</code></td><td>TEXT</td><td>SHA256 for staleness detection</td></tr>
+        <tr><td><code>purpose</code></td><td>TEXT</td><td>One-sentence file description</td></tr>
+        <tr><td><code>key_classes</code></td><td>TEXT</td><td>JSON array of class names</td></tr>
+        <tr><td><code>key_methods</code></td><td>TEXT</td><td>JSON array of method names</td></tr>
+        <tr><td><code>patterns</code></td><td>TEXT</td><td>Notable patterns</td></tr>
+        <tr><td><code>gotchas</code></td><td>TEXT</td><td>Pitfalls and gotchas</td></tr>
+        <tr><td><code>dependencies</code></td><td>TEXT</td><td>JSON array of dependencies</td></tr>
+        <tr><td><code>line_count</code></td><td>INTEGER</td><td>File line count</td></tr>
+        <tr><td><code>digest_model</code></td><td>TEXT</td><td>Model used (default: haiku)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>tasks.db - Project Tables (ProjectDatabase.cs)</h3>
+
+  <div class="schema-group">
+    <h4>projects (extended)</h4>
+    <p>Project registry with full metadata. Enhanced version with additional columns beyond the core record.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Project GUID</td></tr>
+        <tr><td><code>name</code></td><td>TEXT</td><td>Project name</td></tr>
+        <tr><td><code>description</code></td><td>TEXT</td><td>Project description</td></tr>
+        <tr><td><code>path</code></td><td>TEXT</td><td>Source path</td></tr>
+        <tr><td><code>source_path</code></td><td>TEXT</td><td>Source code location</td></tr>
+        <tr><td><code>deploy_path</code></td><td>TEXT</td><td>Deploy output location</td></tr>
+        <tr><td><code>build_output_path</code></td><td>TEXT</td><td>Build output directory</td></tr>
+        <tr><td><code>build_command</code></td><td>TEXT</td><td>Build command</td></tr>
+        <tr><td><code>deploy_command</code></td><td>TEXT</td><td>Deploy command</td></tr>
+        <tr><td><code>launch_command</code></td><td>TEXT</td><td>Launch command</td></tr>
+        <tr><td><code>project_type</code></td><td>TEXT</td><td>Project archetype</td></tr>
+        <tr><td><code>current_version</code></td><td>TEXT</td><td>Current version string</td></tr>
+        <tr><td><code>is_pinned</code></td><td>INTEGER</td><td>Pinned to dashboard</td></tr>
+        <tr><td><code>icon</code></td><td>TEXT</td><td>Icon identifier</td></tr>
+        <tr><td><code>icon_color</code></td><td>TEXT</td><td>Icon color</td></tr>
+        <tr><td><code>team_lead</code></td><td>TEXT</td><td>Team lead name</td></tr>
+        <tr><td><code>git_repo_url</code></td><td>TEXT</td><td>Git repository URL</td></tr>
+        <tr><td><code>git_default_branch</code></td><td>TEXT</td><td>Default git branch</td></tr>
+        <tr><td><code>git_auto_commit</code></td><td>INTEGER</td><td>Auto-commit enabled</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>project_agents</h4>
+    <p>Agents assigned to a project.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT FK</td><td>References projects.id</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Agent name</td></tr>
+        <tr><td><code>role</code></td><td>TEXT</td><td>Agent role</td></tr>
+        <tr><td><code>preferred_model</code></td><td>TEXT</td><td>opus, sonnet, haiku</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>project_mcp_servers</h4>
+    <p>MCP servers configured for a project.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT FK</td><td>References projects.id</td></tr>
+        <tr><td><code>server_name</code></td><td>TEXT</td><td>Server name</td></tr>
+        <tr><td><code>is_enabled</code></td><td>INTEGER</td><td>Enabled flag</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>project_specialist_agents</h4>
+    <p>Specialist agents (devils-advocate, verifier, etc.) for a project.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT FK</td><td>References projects.id</td></tr>
+        <tr><td><code>agent_type</code></td><td>TEXT</td><td>devils-advocate, verifier, etc.</td></tr>
+        <tr><td><code>is_enabled</code></td><td>INTEGER</td><td>Enabled flag</td></tr>
+        <tr><td><code>custom_prompt</code></td><td>TEXT</td><td>Override prompt</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>project_paths</h4>
+    <p>Named filesystem paths for a project.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT FK</td><td>References projects.id</td></tr>
+        <tr><td><code>path_type</code></td><td>TEXT</td><td>source, deploy, build_output, docs</td></tr>
+        <tr><td><code>path_value</code></td><td>TEXT</td><td>Filesystem path</td></tr>
+        <tr><td><code>description</code></td><td>TEXT</td><td>Path description</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>project_prompts</h4>
+    <p>Stored prompts and instructions for a project.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT FK</td><td>References projects.id</td></tr>
+        <tr><td><code>prompt_type</code></td><td>TEXT</td><td>system, user, context, workflow</td></tr>
+        <tr><td><code>prompt_text</code></td><td>TEXT</td><td>Prompt content</td></tr>
+        <tr><td><code>display_order</code></td><td>INTEGER</td><td>Sort order</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>project_skills</h4>
+    <p>Skills enabled for a project.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>project_id</code></td><td>TEXT FK</td><td>References projects.id</td></tr>
+        <tr><td><code>skill_name</code></td><td>TEXT</td><td>Skill name</td></tr>
+        <tr><td><code>is_enabled</code></td><td>INTEGER</td><td>Enabled flag</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>mcp_registry</h4>
+    <p>Three-tier MCP server registry (multiterminal, global, optional).</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>server_name</code></td><td>TEXT PK</td><td>MCP server name</td></tr>
+        <tr><td><code>tier</code></td><td>TEXT</td><td>multiterminal, global, optional</td></tr>
+        <tr><td><code>command</code></td><td>TEXT</td><td>Server command</td></tr>
+        <tr><td><code>args_json</code></td><td>TEXT</td><td>JSON array of arguments</td></tr>
+        <tr><td><code>env_json</code></td><td>TEXT</td><td>JSON object of env vars</td></tr>
+        <tr><td><code>is_enabled</code></td><td>INTEGER</td><td>Enabled by default</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="events">MessageBroker Events</h2>
+  <!-- ================================================================== -->
+
+  <p>The MessageBroker fires C# events that MainForm subscribes to for updating the UI. All events are thread-safe and marshaled to the UI thread.</p>
+
+  <table>
+    <thead>
+      <tr><th>Event</th><th>Payload</th><th>When Fired</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>MessageSent</code></td><td><code>Message</code></td><td>Inter-terminal message delivered</td></tr>
+      <tr><td><code>TerminalRegistered</code></td><td><code>TerminalInfo</code></td><td>New terminal registers</td></tr>
+      <tr><td><code>TerminalDisconnected</code></td><td><code>TerminalInfo</code></td><td>Terminal disconnects</td></tr>
+      <tr><td><code>TasksUpdated</code></td><td><code>List&lt;KanbanTask&gt;</code></td><td>Any task created, updated, or deleted</td></tr>
+      <tr><td><code>TaskClaimed</code></td><td><code>TaskClaimedEventArgs</code></td><td>Task assigned to an agent</td></tr>
+      <tr><td><code>ActivityRecorded</code></td><td><code>ActivityEvent</code></td><td>Activity feed event recorded</td></tr>
+      <tr><td><code>PlanUpdated</code></td><td><code>PlanUpdateEventArgs</code></td><td>Task plan created or modified</td></tr>
+      <tr><td><code>ProjectsUpdated</code></td><td><code>List&lt;Project&gt;</code></td><td>Project list changed</td></tr>
+      <tr><td><code>ProfilesUpdated</code></td><td><code>List&lt;TeamMemberProfile&gt;</code></td><td>Team profiles changed</td></tr>
+      <tr><td><code>HelperSessionUpdated</code></td><td><code>HelperSession</code></td><td>Helper session state changed</td></tr>
+      <tr><td><code>HelperMessageLogged</code></td><td><code>HelperMessage</code></td><td>Helper message logged</td></tr>
+      <tr><td><code>InboxUpdated</code></td><td><code>InboxUpdatedEventArgs</code></td><td>Inbox message created or read</td></tr>
+      <tr><td><code>OfficeAgentSpawned</code></td><td><code>OfficeAgentInfo</code></td><td>Agent walks into office panel</td></tr>
+      <tr><td><code>OfficeAgentDeparted</code></td><td><code>OfficeAgentInfo</code></td><td>Agent leaves office panel</td></tr>
+      <tr><td><code>AgentPanelCloseRequested</code></td><td><code>string</code> (transcript path)</td><td>Subagent finished, close panel</td></tr>
+      <tr><td><code>SessionLineageUpdated</code></td><td><code>string</code> (task ID)</td><td>Session imported or synced</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ================================================================== -->
+  <h2 id="patterns">Key Patterns</h2>
+  <!-- ================================================================== -->
+
+  <h3>Adding a UI Panel</h3>
+  <ol>
+    <li>Create <code>{Name}Panel/{Name}PanelDocument.cs</code> inheriting <code>DockContent</code> (set <code>DockAreas</code>, <code>HideOnClose=true</code>)</li>
+    <li>Create inner control with WebView2 or custom renderer</li>
+    <li>Add <code>Initialize(MessageBroker broker)</code> and <code>ApplyTheme(bool isDark)</code> methods</li>
+    <li>In MainForm: instantiate, call <code>Initialize()</code>, wire events, add toolbar toggle button</li>
+    <li>Follow existing panels (TasksPanel, ActivityPanel) as templates</li>
+  </ol>
+
+  <h3>Adding a Backend Feature</h3>
+  <ol>
+    <li>Add model to <code>MCPServer/Models/</code></li>
+    <li>Add persistence to <code>TaskDatabase.cs</code> (table + CRUD methods + migration)</li>
+    <li>Add routing to <code>MessageBroker.cs</code> (methods + events)</li>
+    <li>Add MCP tool to <code>MCPServer/Tools/</code> (or <code>index.js</code>) if agents need access</li>
+    <li>Add REST endpoint to <code>API/Controllers/</code> if HTTP access needed</li>
+  </ol>
+
+  <h3>Adding an MCP Tool</h3>
+  <ol>
+    <li>Add tool definition to the <code>tools</code> array in <code>%APPDATA%\multiterminal\mcp\index.js</code></li>
+    <li>Add handler in the <code>CallToolRequestSchema</code> switch block in the same file</li>
+    <li>Tool handler calls the REST API which delegates to MessageBroker which delegates to TaskDatabase</li>
+    <li>Return formatted text result for the agent</li>
+  </ol>
+
+  <h3>Adding a REST Endpoint</h3>
+  <ol>
+    <li>Add method to the appropriate controller in <code>API/Controllers/</code></li>
+    <li>Add request model class if needed (same file or separate)</li>
+    <li>Controller calls MessageBroker (for shared logic) or database directly (for reads)</li>
+    <li>Update <code>ToolsController.cs</code> to include the new endpoint in the self-documenting list</li>
+  </ol>
+
+  <h3>Data Storage Patterns</h3>
+  <ul>
+    <li><strong>Checklists:</strong> JSON array in <code>checklist_json</code> column: <code>[{"item":"...","status":"pending|coding|testing|done","notes":[{"text":"...","at":"...","by":"..."}],"assignee":"...","cycleCount":0}]</code></li>
+    <li><strong>Plans:</strong> Markdown text in <code>plan</code> column</li>
+    <li><strong>Continuation notes:</strong> Free text in <code>continuation_notes</code> column (session handoff context)</li>
+    <li><strong>Skills/interests:</strong> JSON arrays in profile columns (<code>skills_json</code>, <code>interests_json</code>)</li>
+    <li><strong>Migrations:</strong> Manual column-check migrations in database constructors (uses <code>PRAGMA table_info</code> + <code>ALTER TABLE ADD COLUMN</code>)</li>
+  </ul>
+
+  <h3>Checklist State Machine</h3>
+  <div class="state-machine">
+<pre>
+                    +----------+
+                    | pending  |
+                    +----+-----+
+                         |
+                    (start work)
+                         |
+                    +----v-----+
+               +--->|  coding  |<---+
+               |    +----+-----+    |
+               |         |         |
+          (fail/fix)  (submit)  (reject)
+               |         |         |
+               |    +----v-----+   |
+               +----| testing  |---+
+                    +----+-----+
+                         |
+                    (approve)
+                         |
+                    +----v-----+
+                    |   done   |
+                    +----------+
+
+  Cycle count increments each coding->testing->coding loop.
+  At 3 cycles, escalation inbox notification is sent to PM.
+</pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="folder-map">Folder Map</h2>
+  <!-- ================================================================== -->
+
+  <table>
+    <thead>
+      <tr><th>Folder</th><th>Purpose</th><th>Key Files</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Services/</code></td><td>Business logic &amp; SQLite persistence</td><td>TaskDatabase, SessionDatabase, ProjectService, ProjectDatabase, ProjectContextService, ProjectJsonMigrationService, TerminalSpawner, SettingsService, KnowledgeDatabase, DebugLogService, TeamWatcherService</td></tr>
+      <tr><td><code>MCPServer/Services/</code></td><td>MCP server services</td><td><strong>MessageBroker</strong>, PoolCoordinator, ActivityService, StaleTaskService, SpawnService, HttpWebhookService, SessionDiscovery, ComplexityDetector, SummaryService</td></tr>
+      <tr><td><code>MCPServer/Models/</code></td><td>Data models (14+ files)</td><td>KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, HelperSession, CodeDigest, KnowledgeEntry, ActivityEvent, TerminalInfo, TaskAttachment, ComplexityStats</td></tr>
+      <tr><td><code>Models/</code></td><td>App-level models (8+ files)</td><td>TerminalSessionInfo, SpawnedTeammate, Project, ProjectAgent, ProjectMcpServer, ProjectSpecialistAgent, ProjectPath, ProjectPromptEntry, ProjectSkill, DebugLogEntry</td></tr>
+      <tr><td><code>API/Controllers/</code></td><td>REST endpoints (11 controllers)</td><td>TasksController, MessagingController, OfficeController, SpawnController, KnowledgeController, SessionLineageController, ProjectContextController, TeamController, DebugController, ToolsController, AgentPanelsController</td></tr>
+      <tr><td><code>TasksPanel/</code></td><td>Kanban board UI</td><td>TasksPanelDocument + TasksPanelControl (WebView2)</td></tr>
+      <tr><td><code>ChatPanel/</code></td><td>Messaging UI</td><td>ChatPanelDocument + ChatPanelControl (WebView2)</td></tr>
+      <tr><td><code>ActivityPanel/</code></td><td>Activity feed UI</td><td>ActivityPanelDocument (WebView2)</td></tr>
+      <tr><td><code>ProfilePanel/</code></td><td>Team profiles UI</td><td>ProfilePanelDocument (WebView2)</td></tr>
+      <tr><td><code>InboxPanel/</code></td><td>Notifications UI</td><td>InboxPanelDocument</td></tr>
+      <tr><td><code>Terminal/</code></td><td>Terminal hosting</td><td>ConPtyTerminal, WebViewTerminalRenderer</td></tr>
+      <tr><td><code>Docking/</code></td><td>Window layout</td><td>GridLayoutManager</td></tr>
+      <tr><td><code>Dialogs/</code></td><td>Modal dialogs (7)</td><td>ProjectManager, Settings, ChatHistory, etc.</td></tr>
+      <tr><td><code>Controls/</code></td><td>Custom UI controls</td><td>TerminalStatusBar (3-row status display)</td></tr>
+      <tr><td><code>docs/</code></td><td>Documentation (this site + architecture docs)</td><td>16+ design specs &amp; workflow guides</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Codebase Statistics</h3>
+  <ul>
+    <li><strong>~80 C# production files</strong>, ~24K lines of code</li>
+    <li><strong>1 primary SQLite database</strong> (tasks.db) with 20+ tables</li>
+    <li><strong>14+ data models</strong>, <strong>47 MCP tools</strong>, <strong>11 REST controllers</strong></li>
+    <li><strong>7 UI panels</strong> (WebView2-based), <strong>7 dialog windows</strong></li>
+    <li>REST API on port 5050, MCP server via Node.js (stdio transport)</li>
+  </ul>
+
+</div>
+</main>
+
+</div>
+
+<script>
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+</script>
+
+</body>
+</html>

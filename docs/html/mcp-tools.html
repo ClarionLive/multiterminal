@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Complete reference for all 47 MCP tools exposed to Claude Code agents by the MultiTerminal MCP server, with parameters, return types, and usage examples.">
+  <title>MCP Tools Reference - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page-wrapper">
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <span class="logo-icon">MT</span>
+      <span class="logo-text">MultiTerminal</span>
+    </div>
+    <span class="version">Documentation</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-section-title">Getting Started</div>
+    <a href="getting-started.html" class="nav-link">Quick Start</a>
+    <div class="nav-section-title">Reference</div>
+    <a href="features.html" class="nav-link">Features</a>
+    <a href="api-reference.html" class="nav-link">REST API</a>
+    <a href="mcp-tools.html" class="nav-link active">MCP Tools</a>
+    <div class="nav-section-title">Technical</div>
+    <a href="architecture.html" class="nav-link">Architecture</a>
+    <a href="distribution.html" class="nav-link">Distribution</a>
+    <a href="deployment.html" class="nav-link">Deployment</a>
+    <div class="nav-section-title"></div>
+    <a href="index.html" class="nav-link">&larr; Home</a>
+  </nav>
+</aside>
+
+<main class="main-content">
+<div class="content-container">
+  <h1>MCP Tools Reference</h1>
+  <p class="lead">Complete reference for all 47 MCP tools exposed to Claude Code agents via the MultiTerminal MCP server. Tools are called as <code>mcp__multiterminal__&lt;tool_name&gt;</code> from Claude Code.</p>
+
+  <div class="callout">
+    <strong>How it works:</strong> The MCP server (<code>%APPDATA%\multiterminal\mcp\index.js</code>) wraps the REST API at <code>http://localhost:5050</code>. Each tool call translates to one or more REST API calls.
+  </div>
+
+  <nav class="toc">
+    <h3>On This Page</h3>
+    <ul>
+      <li><a href="#task-management">Task Management</a> (14 tools)</li>
+      <li><a href="#messaging">Messaging</a> (9 tools)</li>
+      <li><a href="#team">Team &amp; Helpers</a> (3 tools)</li>
+      <li><a href="#projects">Projects</a> (6 tools)</li>
+      <li><a href="#knowledge">Knowledge Base</a> (4 tools)</li>
+      <li><a href="#sessions">Sessions</a> (7 tools)</li>
+      <li><a href="#debug">Debug</a> (5 tools)</li>
+    </ul>
+  </nav>
+
+  <!-- ================================================================== -->
+  <h2 id="task-management">Task Management</h2>
+  <!-- ================================================================== -->
+
+  <!-- list_tasks -->
+  <div class="tool-block" id="list_tasks">
+    <h3>list_tasks</h3>
+    <p>List all kanban tasks from the MultiTerminal board.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>status</code></td><td>string</td><td>No</td><td>Filter by status: <code>all</code>, <code>todo</code>, <code>in_progress</code>, <code>done</code>, <code>suggestion</code>. Default: <code>all</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted text listing all tasks with ID, title, status, assignee, and priority.</p>
+    <h4>Example</h4>
+    <pre><code>list_tasks(status="in_progress")</code></pre>
+  </div>
+
+  <!-- create_task -->
+  <div class="tool-block" id="create_task">
+    <h3>create_task</h3>
+    <p>Create a new kanban task (ticket) on the MultiTerminal board.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>title</code></td><td>string</td><td>Yes</td><td>Task title</td></tr>
+        <tr><td><code>description</code></td><td>string</td><td>Yes</td><td>Task description</td></tr>
+        <tr><td><code>createdBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+        <tr><td><code>status</code></td><td>string</td><td>No</td><td>Initial status: <code>todo</code>, <code>in_progress</code>, <code>done</code>, <code>suggestion</code>. Default: <code>todo</code></td></tr>
+        <tr><td><code>priority</code></td><td>string</td><td>No</td><td>Priority: <code>low</code>, <code>normal</code>, <code>high</code>. Default: <code>normal</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Task ID and confirmation message.</p>
+    <h4>Example</h4>
+    <pre><code>create_task(
+  title="Add dark mode",
+  description="Implement dark/light theme toggle in settings panel",
+  createdBy="Alice",
+  priority="normal"
+)</code></pre>
+  </div>
+
+  <!-- update_task_status -->
+  <div class="tool-block" id="update_task_status">
+    <h3>update_task_status</h3>
+    <p>Update the status of a kanban task.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>status</code></td><td>string</td><td>Yes</td><td>New status: <code>todo</code>, <code>in_progress</code>, <code>done</code>, <code>suggestion</code></td></tr>
+        <tr><td><code>updatedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_task_status(taskId="c0ce8037", status="in_progress", updatedBy="Alice")</code></pre>
+  </div>
+
+  <!-- delete_task -->
+  <div class="tool-block" id="delete_task">
+    <h3>delete_task</h3>
+    <p>Delete a kanban task.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to delete</td></tr>
+        <tr><td><code>deletedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>delete_task(taskId="c0ce8037", deletedBy="Alice")</code></pre>
+  </div>
+
+  <!-- claim_task -->
+  <div class="tool-block" id="claim_task">
+    <h3>claim_task</h3>
+    <p>Claim/assign a kanban task to yourself or another team member.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to claim</td></tr>
+        <tr><td><code>assignee</code></td><td>string</td><td>Yes</td><td>Name of the person claiming the task</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation. May include a complexity suggestion if the task is detected as complex.</p>
+    <h4>Example</h4>
+    <pre><code>claim_task(taskId="c0ce8037", assignee="Alice")</code></pre>
+  </div>
+
+  <!-- set_task_active -->
+  <div class="tool-block" id="set_task_active">
+    <h3>set_task_active</h3>
+    <p>Set a task as the active task, auto-pausing all other active tasks for the same assignee. Enforces the "only one active task" rule.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to set active</td></tr>
+        <tr><td><code>updatedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with list of auto-paused task IDs and titles.</p>
+    <h4>Example</h4>
+    <pre><code>set_task_active(taskId="c0ce8037", updatedBy="Alice")</code></pre>
+  </div>
+
+  <!-- get_task_detail -->
+  <div class="tool-block" id="get_task_detail">
+    <h3>get_task_detail</h3>
+    <p>Get full task detail including checklist with notes history, continuation notes, plan, and summary. Shows checklist progress breakdown (done/coding/testing/pending counts).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted task detail with checklist summary, individual item statuses, notes history, plan, and continuation notes.</p>
+    <h4>Example</h4>
+    <pre><code>get_task_detail(taskId="c0ce8037")</code></pre>
+  </div>
+
+  <!-- update_task_checklist (transition) -->
+  <div class="tool-block" id="update_task_checklist">
+    <h3>update_task_checklist</h3>
+    <p>Transition a checklist item to a new status with mandatory notes. Enforces state machine: <code>pending &rarr; coding &rarr; testing &rarr; done</code> (cycling allowed between <code>coding</code> and <code>testing</code>). Notes required for <code>coding&rarr;testing</code>, <code>testing&rarr;coding</code>, and <code>testing&rarr;done</code> transitions.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>itemIndex</code></td><td>number</td><td>Yes</td><td>Zero-based index of the checklist item</td></tr>
+        <tr><td><code>newStatus</code></td><td>string</td><td>Yes</td><td>New status: <code>coding</code>, <code>testing</code>, or <code>done</code></td></tr>
+        <tr><td><code>notes</code></td><td>string</td><td>Yes</td><td>Transition notes (what was done or what needs fixing)</td></tr>
+        <tr><td><code>updatedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Item name, previous/new status, cycle count, and whether escalation was triggered (at 3 cycles).</p>
+    <h4>Example</h4>
+    <pre><code>update_task_checklist(
+  taskId="c0ce8037",
+  itemIndex=0,
+  newStatus="testing",
+  notes="Implemented database schema and CRUD operations",
+  updatedBy="Alice"
+)</code></pre>
+  </div>
+
+  <!-- update_checklist (replace all) -->
+  <div class="tool-block" id="update_checklist">
+    <h3>update_checklist</h3>
+    <p>Replace all checklist items on a task. Use this to set up or edit the checklist items (not for transitioning status -- use <code>update_task_checklist</code> for that).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>checklistJson</code></td><td>string</td><td>Yes</td><td>JSON array of checklist items</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_checklist(
+  taskId="c0ce8037",
+  checklistJson='[{"item":"Setup database","status":"pending","notes":[]},{"item":"Create API","status":"pending","notes":[]}]'
+)</code></pre>
+  </div>
+
+  <!-- assign_checklist_item -->
+  <div class="tool-block" id="assign_checklist_item">
+    <h3>assign_checklist_item</h3>
+    <p>Assign a checklist item to a specific team agent. Set assignee to null to unassign.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>itemIndex</code></td><td>number</td><td>Yes</td><td>Zero-based index of the checklist item</td></tr>
+        <tr><td><code>assignee</code></td><td>string</td><td>No</td><td>Name of the agent to assign to, or null to unassign</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>assign_checklist_item(taskId="c0ce8037", itemIndex=2, assignee="Bob")</code></pre>
+  </div>
+
+  <!-- update_task_plan -->
+  <div class="tool-block" id="update_task_plan">
+    <h3>update_task_plan</h3>
+    <p>Set or update the implementation plan for a task (markdown formatted).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>plan</code></td><td>string</td><td>Yes</td><td>Implementation plan (markdown)</td></tr>
+        <tr><td><code>updatedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_task_plan(
+  taskId="c0ce8037",
+  plan="## Phase 1\n- Create migrations\n\n## Phase 2\n- Add endpoints",
+  updatedBy="Alice"
+)</code></pre>
+  </div>
+
+  <!-- update_task_summary -->
+  <div class="tool-block" id="update_task_summary">
+    <h3>update_task_summary</h3>
+    <p>Update a task's implementation summary and/or test results (markdown formatted).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>implementationSummary</code></td><td>string</td><td>No</td><td>What was built/changed (markdown). Pass null to leave unchanged.</td></tr>
+        <tr><td><code>testResults</code></td><td>string</td><td>No</td><td>Test outcomes and verification (markdown). Pass null to leave unchanged.</td></tr>
+        <tr><td><code>updatedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_task_summary(
+  taskId="c0ce8037",
+  implementationSummary="Added ThemeService with dark/light toggle",
+  testResults="All 12 unit tests passing",
+  updatedBy="Alice"
+)</code></pre>
+  </div>
+
+  <!-- update_task_continuation -->
+  <div class="tool-block" id="update_task_continuation">
+    <h3>update_task_continuation</h3>
+    <p>Write continuation notes for session handoff. Describes where to pick up: current file, checklist progress, what's next, any blockers.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>continuationNotes</code></td><td>string</td><td>Yes</td><td>Continuation context for next session</td></tr>
+        <tr><td><code>updatedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_task_continuation(
+  taskId="c0ce8037",
+  continuationNotes="Working on item 3 (API validation). Next: add input sanitization for title field.",
+  updatedBy="Alice"
+)</code></pre>
+  </div>
+
+  <!-- get_checklist_item_images -->
+  <div class="tool-block" id="get_checklist_item_images">
+    <h3>get_checklist_item_images</h3>
+    <p>Get images attached to a checklist item. Returns base64-encoded image data that agents can visually analyze for context (e.g., screenshots of bugs, UI mockups, test results).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>itemIndex</code></td><td>number</td><td>Yes</td><td>Zero-based checklist item index</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Array of base64-encoded images with MIME type and filename, or a message if no images are attached.</p>
+    <h4>Example</h4>
+    <pre><code>get_checklist_item_images(taskId="c0ce8037", itemIndex=0)</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="messaging">Messaging</h2>
+  <!-- ================================================================== -->
+
+  <!-- list_terminals -->
+  <div class="tool-block" id="list_terminals">
+    <h3>list_terminals</h3>
+    <p>List all active terminals (teammates) connected to MultiTerminal.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Formatted list of terminals with name, ID prefix, and last active time.</p>
+    <h4>Example</h4>
+    <pre><code>list_terminals()</code></pre>
+  </div>
+
+  <!-- register_terminal -->
+  <div class="tool-block" id="register_terminal">
+    <h3>register_terminal</h3>
+    <p>Register your terminal with MultiTerminal to send/receive messages.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>string</td><td>Yes</td><td>Your terminal name</td></tr>
+        <tr><td><code>docId</code></td><td>string</td><td>Yes</td><td>Unique document ID for this terminal</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Terminal ID for use in subsequent messaging calls.</p>
+    <h4>Example</h4>
+    <pre><code>register_terminal(name="Alice", docId="session-abc123")</code></pre>
+  </div>
+
+  <!-- send_message -->
+  <div class="tool-block" id="send_message">
+    <h3>send_message</h3>
+    <p>Send a message to another terminal.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>fromTerminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID</td></tr>
+        <tr><td><code>to</code></td><td>string</td><td>Yes</td><td>Recipient terminal name</td></tr>
+        <tr><td><code>message</code></td><td>string</td><td>Yes</td><td>Message content</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Delivery confirmation with sender and recipient names.</p>
+    <h4>Example</h4>
+    <pre><code>send_message(fromTerminalId="a1b2c3d4", to="Bob", message="Can you review my PR?")</code></pre>
+  </div>
+
+  <!-- broadcast_message -->
+  <div class="tool-block" id="broadcast_message">
+    <h3>broadcast_message</h3>
+    <p>Broadcast a message to all terminals.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>fromTerminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID</td></tr>
+        <tr><td><code>message</code></td><td>string</td><td>Yes</td><td>Message content</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Delivery confirmation with recipient count.</p>
+    <h4>Example</h4>
+    <pre><code>broadcast_message(fromTerminalId="a1b2c3d4", message="Build is ready for testing!")</code></pre>
+  </div>
+
+  <!-- get_messages -->
+  <div class="tool-block" id="get_messages">
+    <h3>get_messages</h3>
+    <p>Get messages for your terminal. Messages are consumed on read.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted list of messages with sender, content, and timestamp.</p>
+    <h4>Example</h4>
+    <pre><code>get_messages(terminalId="a1b2c3d4")</code></pre>
+  </div>
+
+  <!-- get_inbox -->
+  <div class="tool-block" id="get_inbox">
+    <h3>get_inbox</h3>
+    <p>Get inbox messages for a user. Shows notifications for items ready for testing, escalations, task completions, and helper requests.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>userId</code></td><td>string</td><td>Yes</td><td>User ID to get inbox for (e.g., "John")</td></tr>
+        <tr><td><code>unreadOnly</code></td><td>boolean</td><td>No</td><td>Only show unread messages. Default: <code>false</code></td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Max messages to return. Default: <code>50</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted inbox with message type, summary, task context, and read/reply status.</p>
+    <h4>Example</h4>
+    <pre><code>get_inbox(userId="John", unreadOnly=true)</code></pre>
+  </div>
+
+  <!-- mark_inbox_read -->
+  <div class="tool-block" id="mark_inbox_read">
+    <h3>mark_inbox_read</h3>
+    <p>Mark an inbox message as read, or mark all messages as read for a user.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>messageId</code></td><td>string</td><td>No</td><td>Specific message ID to mark as read</td></tr>
+        <tr><td><code>userId</code></td><td>string</td><td>No</td><td>Mark ALL messages as read for this user</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>mark_inbox_read(messageId="abc12345")
+mark_inbox_read(userId="John")</code></pre>
+  </div>
+
+  <!-- reply_to_inbox -->
+  <div class="tool-block" id="reply_to_inbox">
+    <h3>reply_to_inbox</h3>
+    <p>Reply to an inbox message with notes or feedback.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>messageId</code></td><td>string</td><td>Yes</td><td>Inbox message ID to reply to</td></tr>
+        <tr><td><code>replyText</code></td><td>string</td><td>Yes</td><td>Your reply text</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>reply_to_inbox(messageId="abc12345", replyText="Looks good, marking as done")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="team">Team &amp; Helpers</h2>
+  <!-- ================================================================== -->
+
+  <!-- get_team_roster -->
+  <div class="tool-block" id="get_team_roster">
+    <h3>get_team_roster</h3>
+    <p>Get the team roster for a project with merged profile data (preferred_model, agent_instructions, role, skills). Use this to discover which agents to spawn for a team assembly workflow.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Absolute path to the project directory</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Project name and array of agents with name, model, role, skills, and online status.</p>
+    <h4>Example</h4>
+    <pre><code>get_team_roster(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal")</code></pre>
+  </div>
+
+  <!-- add_helper -->
+  <div class="tool-block" id="add_helper">
+    <h3>add_helper</h3>
+    <p>Add a helper to a kanban task. Helpers assist with the task without being the primary assignee.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to add helper to</td></tr>
+        <tr><td><code>helper</code></td><td>string</td><td>Yes</td><td>Name of the helper to add</td></tr>
+        <tr><td><code>addedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with helper count.</p>
+    <h4>Example</h4>
+    <pre><code>add_helper(taskId="c0ce8037", helper="Bob", addedBy="Alice")</code></pre>
+  </div>
+
+  <!-- remove_helper -->
+  <div class="tool-block" id="remove_helper">
+    <h3>remove_helper</h3>
+    <p>Remove a helper from a kanban task.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to remove helper from</td></tr>
+        <tr><td><code>helperName</code></td><td>string</td><td>Yes</td><td>Name of the helper to remove</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with remaining helper count.</p>
+    <h4>Example</h4>
+    <pre><code>remove_helper(taskId="c0ce8037", helperName="Bob")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="projects">Projects</h2>
+  <!-- ================================================================== -->
+
+  <!-- list_projects -->
+  <div class="tool-block" id="list_projects">
+    <h3>list_projects</h3>
+    <p>List all registered projects with summary info (name, path, type, version, lead).</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Formatted list of projects with key metadata.</p>
+    <h4>Example</h4>
+    <pre><code>list_projects()</code></pre>
+  </div>
+
+  <!-- get_project -->
+  <div class="tool-block" id="get_project">
+    <h3>get_project</h3>
+    <p>Get a project with all associations (agents, MCP servers, specialists, paths, prompts, skills). Returns the full project context.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID (GUID). Use <code>list_projects</code> to find IDs.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Full project context including all 7 association tables.</p>
+    <h4>Example</h4>
+    <pre><code>get_project(projectId="proj-123-456")</code></pre>
+  </div>
+
+  <!-- update_project -->
+  <div class="tool-block" id="update_project">
+    <h3>update_project</h3>
+    <p>Update one or more project fields.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID</td></tr>
+        <tr><td><code>fields</code></td><td>object</td><td>Yes</td><td>Object of field names to values. Accepted keys: <code>deployPath</code>, <code>buildCommand</code>, <code>projectType</code>, <code>description</code>, <code>icon</code>, <code>iconColor</code>, <code>teamLead</code>, <code>gitRepoUrl</code>, <code>gitDefaultBranch</code>, <code>gitAutoCommit</code>, <code>currentVersion</code>, <code>isPinned</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_project(
+  projectId="proj-123",
+  fields={"deployPath": "C:\\Deploy", "buildCommand": "dotnet build"}
+)</code></pre>
+  </div>
+
+  <!-- add_project_agent -->
+  <div class="tool-block" id="add_project_agent">
+    <h3>add_project_agent</h3>
+    <p>Add or update an agent assignment on a project.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Agent name (e.g., "Alice", "Bob")</td></tr>
+        <tr><td><code>role</code></td><td>string</td><td>No</td><td>Agent role (e.g., "backend", "frontend", "fullstack")</td></tr>
+        <tr><td><code>preferredModel</code></td><td>string</td><td>No</td><td>Preferred Claude model: <code>opus</code>, <code>sonnet</code>, <code>haiku</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>add_project_agent(projectId="proj-123", agentName="Alice", role="backend", preferredModel="sonnet")</code></pre>
+  </div>
+
+  <!-- remove_project_agent -->
+  <div class="tool-block" id="remove_project_agent">
+    <h3>remove_project_agent</h3>
+    <p>Remove an agent from a project.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Agent name to remove</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>remove_project_agent(projectId="proj-123", agentName="Alice")</code></pre>
+  </div>
+
+  <!-- add_project_association -->
+  <div class="tool-block" id="add_project_association">
+    <h3>add_project_association</h3>
+    <p>Add an association to a project. Type determines what to add: <code>mcp_server</code>, <code>specialist</code>, <code>path</code>, <code>prompt</code>, or <code>skill</code>. Each type requires different fields.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID</td></tr>
+        <tr><td><code>type</code></td><td>string</td><td>Yes</td><td>Association type: <code>mcp_server</code>, <code>specialist</code>, <code>path</code>, <code>prompt</code>, <code>skill</code></td></tr>
+        <tr><td><code>serverName</code></td><td>string</td><td>*</td><td>(mcp_server) MCP server name</td></tr>
+        <tr><td><code>isEnabled</code></td><td>boolean</td><td>No</td><td>(mcp_server, specialist, skill) Whether enabled. Default: <code>true</code></td></tr>
+        <tr><td><code>agentType</code></td><td>string</td><td>*</td><td>(specialist) Agent type, e.g., "devils-advocate", "verifier"</td></tr>
+        <tr><td><code>customPrompt</code></td><td>string</td><td>No</td><td>(specialist) Optional override prompt</td></tr>
+        <tr><td><code>pathType</code></td><td>string</td><td>*</td><td>(path) Category: source, deploy, build_output, docs, etc.</td></tr>
+        <tr><td><code>pathValue</code></td><td>string</td><td>*</td><td>(path) Filesystem path value</td></tr>
+        <tr><td><code>description</code></td><td>string</td><td>No</td><td>(path) Optional description</td></tr>
+        <tr><td><code>promptType</code></td><td>string</td><td>*</td><td>(prompt) Category: system, user, context, workflow</td></tr>
+        <tr><td><code>promptText</code></td><td>string</td><td>*</td><td>(prompt) Prompt text content</td></tr>
+        <tr><td><code>displayOrder</code></td><td>number</td><td>No</td><td>(prompt) Sort order. Default: <code>0</code></td></tr>
+        <tr><td><code>skillName</code></td><td>string</td><td>*</td><td>(skill) Skill name</td></tr>
+      </tbody>
+    </table>
+    <p>* Required based on the <code>type</code> selected.</p>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>// Add an MCP server
+add_project_association(projectId="proj-123", type="mcp_server", serverName="sqlite-mcp")
+
+// Add a specialist agent
+add_project_association(projectId="proj-123", type="specialist", agentType="verifier")
+
+// Add a path
+add_project_association(projectId="proj-123", type="path", pathType="deploy", pathValue="C:\\Deploy", description="Production deploy folder")
+
+// Add a skill
+add_project_association(projectId="proj-123", type="skill", skillName="kanban-task")</code></pre>
+  </div>
+
+  <!-- remove_project_association -->
+  <div class="tool-block" id="remove_project_association">
+    <h3>remove_project_association</h3>
+    <p>Remove an association from a project. Type determines what to remove. Each type uses a different identifier.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID</td></tr>
+        <tr><td><code>type</code></td><td>string</td><td>Yes</td><td>Association type: <code>mcp_server</code>, <code>specialist</code>, <code>path</code>, <code>prompt</code>, <code>skill</code></td></tr>
+        <tr><td><code>serverName</code></td><td>string</td><td>*</td><td>(mcp_server) Server name to remove</td></tr>
+        <tr><td><code>agentType</code></td><td>string</td><td>*</td><td>(specialist) Agent type to remove</td></tr>
+        <tr><td><code>pathId</code></td><td>number</td><td>*</td><td>(path) Path ID to remove (from get_project response)</td></tr>
+        <tr><td><code>promptId</code></td><td>number</td><td>*</td><td>(prompt) Prompt ID to remove (from get_project response)</td></tr>
+        <tr><td><code>skillName</code></td><td>string</td><td>*</td><td>(skill) Skill name to remove</td></tr>
+      </tbody>
+    </table>
+    <p>* Required based on the <code>type</code> selected.</p>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>remove_project_association(projectId="proj-123", type="mcp_server", serverName="sqlite-mcp")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="knowledge">Knowledge Base</h2>
+  <!-- ================================================================== -->
+
+  <!-- query_knowledge -->
+  <div class="tool-block" id="query_knowledge">
+    <h3>query_knowledge</h3>
+    <p>Search the institutional knowledge base for decisions, patterns, gotchas, and anti-patterns. Uses FTS5 full-text search.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>query</code></td><td>string</td><td>Yes</td><td>Search text</td></tr>
+        <tr><td><code>category</code></td><td>string</td><td>No</td><td>Filter: <code>decision</code>, <code>pattern</code>, <code>gotcha</code>, <code>anti_pattern</code>, <code>debug_insight</code>, <code>preference</code></td></tr>
+        <tr><td><code>projectId</code></td><td>string</td><td>No</td><td>Filter by project ID</td></tr>
+        <tr><td><code>tags</code></td><td>string</td><td>No</td><td>Comma-separated tags to filter by</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Max results. Default: <code>20</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted list of matching knowledge entries with title, content, category, tags, and confidence.</p>
+    <h4>Example</h4>
+    <pre><code>query_knowledge(query="SQL injection", category="gotcha", limit=10)</code></pre>
+  </div>
+
+  <!-- add_knowledge -->
+  <div class="tool-block" id="add_knowledge">
+    <h3>add_knowledge</h3>
+    <p>Add a knowledge entry to institutional memory.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>title</code></td><td>string</td><td>Yes</td><td>Short title summarizing the entry</td></tr>
+        <tr><td><code>content</code></td><td>string</td><td>Yes</td><td>Full content of the knowledge entry</td></tr>
+        <tr><td><code>category</code></td><td>string</td><td>Yes</td><td><code>decision</code>, <code>pattern</code>, <code>gotcha</code>, <code>anti_pattern</code>, <code>debug_insight</code>, <code>preference</code></td></tr>
+        <tr><td><code>projectId</code></td><td>string</td><td>No</td><td>Project ID (null for global)</td></tr>
+        <tr><td><code>sourceType</code></td><td>string</td><td>No</td><td>How discovered: <code>manual</code>, <code>session</code>, <code>debug</code>, <code>review</code>. Default: <code>manual</code></td></tr>
+        <tr><td><code>sourceId</code></td><td>string</td><td>No</td><td>Reference ID of source (session ID, task ID)</td></tr>
+        <tr><td><code>tags</code></td><td>string</td><td>No</td><td>Comma-separated tags</td></tr>
+        <tr><td><code>confidence</code></td><td>string</td><td>No</td><td><code>confirmed</code>, <code>likely</code>, <code>uncertain</code>. Default: <code>confirmed</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with entry ID.</p>
+    <h4>Example</h4>
+    <pre><code>add_knowledge(
+  title="Always escape single quotes in PowerShell",
+  content="Use Replace(\"'\", \"''\") before interpolating values into PowerShell commands to prevent injection.",
+  category="gotcha",
+  tags="security,powershell,injection",
+  confidence="confirmed"
+)</code></pre>
+  </div>
+
+  <!-- get_code_digest -->
+  <div class="tool-block" id="get_code_digest">
+    <h3>get_code_digest</h3>
+    <p>Get pre-analyzed summary of a source file. Returns null if no digest exists or if the digest is stale.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>filePath</code></td><td>string</td><td>Yes</td><td>Absolute path to the source file</td></tr>
+        <tr><td><code>projectId</code></td><td>string</td><td>No</td><td>Project ID</td></tr>
+        <tr><td><code>includeStale</code></td><td>boolean</td><td>No</td><td>Return stale digests too. Default: <code>false</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>File digest with purpose, key classes, key methods, patterns, gotchas, dependencies, and line count.</p>
+    <h4>Example</h4>
+    <pre><code>get_code_digest(filePath="H:\\DevLaptop\\...\\MessageBroker.cs")</code></pre>
+  </div>
+
+  <!-- save_code_digest -->
+  <div class="tool-block" id="save_code_digest">
+    <h3>save_code_digest</h3>
+    <p>Save or update a code digest for a source file.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectId</code></td><td>string</td><td>Yes</td><td>Project ID this file belongs to</td></tr>
+        <tr><td><code>filePath</code></td><td>string</td><td>Yes</td><td>Absolute path to the source file</td></tr>
+        <tr><td><code>fileHash</code></td><td>string</td><td>Yes</td><td>SHA256 hash for staleness detection</td></tr>
+        <tr><td><code>purpose</code></td><td>string</td><td>No</td><td>One-sentence description of what this file does</td></tr>
+        <tr><td><code>keyClasses</code></td><td>string</td><td>No</td><td>JSON array of key class names</td></tr>
+        <tr><td><code>keyMethods</code></td><td>string</td><td>No</td><td>JSON array of key method/function names</td></tr>
+        <tr><td><code>patterns</code></td><td>string</td><td>No</td><td>Notable patterns used</td></tr>
+        <tr><td><code>gotchas</code></td><td>string</td><td>No</td><td>Gotchas and pitfalls</td></tr>
+        <tr><td><code>dependencies</code></td><td>string</td><td>No</td><td>JSON array of key dependencies</td></tr>
+        <tr><td><code>lineCount</code></td><td>number</td><td>No</td><td>Number of lines in the file</td></tr>
+        <tr><td><code>digestModel</code></td><td>string</td><td>No</td><td>Model used to generate digest. Default: <code>haiku</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with digest ID.</p>
+    <h4>Example</h4>
+    <pre><code>save_code_digest(
+  projectId="proj-123",
+  filePath="H:\\DevLaptop\\...\\MessageBroker.cs",
+  fileHash="abc123def456",
+  purpose="Central hub routing all messages between terminals",
+  keyClasses='["MessageBroker"]',
+  keyMethods='["SendMessage","RegisterTerminal","CreateTask"]',
+  lineCount=4254
+)</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="sessions">Sessions</h2>
+  <!-- ================================================================== -->
+
+  <!-- import_session -->
+  <div class="tool-block" id="import_session">
+    <h3>import_session</h3>
+    <p>Import a Claude Code session JSONL transcript file and link it to a kanban task. Extracts all messages, stores them in SQLite with FTS5 full-text search indexing, and creates a lineage record.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>sessionFilePath</code></td><td>string</td><td>Yes</td><td>Absolute path to the Claude Code session JSONL file</td></tr>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Kanban task ID this session belongs to</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Name of the agent who ran this session</td></tr>
+        <tr><td><code>parentSessionId</code></td><td>string</td><td>No</td><td>Parent session ID for chaining agent cycles</td></tr>
+        <tr><td><code>sessionType</code></td><td>string</td><td>No</td><td>Semantic label: <code>coding</code>, <code>review</code>, <code>testing</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Session ID and message count.</p>
+    <h4>Example</h4>
+    <pre><code>import_session(
+  sessionFilePath="C:\\Users\\John\\.claude\\projects\\...\\abc123.jsonl",
+  taskId="c0ce8037",
+  agentName="Alice",
+  sessionType="coding"
+)</code></pre>
+  </div>
+
+  <!-- get_task_sessions -->
+  <div class="tool-block" id="get_task_sessions">
+    <h3>get_task_sessions</h3>
+    <p>Get all imported session lineage records for a kanban task. Returns session metadata including agent, type, timestamps, and parent chain links.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Kanban task ID</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>List of session records with metadata.</p>
+    <h4>Example</h4>
+    <pre><code>get_task_sessions(taskId="c0ce8037")</code></pre>
+  </div>
+
+  <!-- get_session_lineage -->
+  <div class="tool-block" id="get_session_lineage">
+    <h3>get_session_lineage</h3>
+    <p>Get the full lineage chain for a session, ordered from root to leaf. Walks the <code>parent_session_id</code> chain to reconstruct the full history of agent cycling.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>sessionId</code></td><td>string</td><td>Yes</td><td>Session ID to retrieve the lineage chain for</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Ordered chain of session records from root to leaf.</p>
+    <h4>Example</h4>
+    <pre><code>get_session_lineage(sessionId="def456")</code></pre>
+  </div>
+
+  <!-- sync_sessions -->
+  <div class="tool-block" id="sync_sessions">
+    <h3>sync_sessions</h3>
+    <p>Incrementally sync Claude Code session JSONL files from disk to SQLite. Scans a Claude project folder for unimported sessions and imports them. Skips already-imported sessions.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>claudeProjectPath</code></td><td>string</td><td>Yes</td><td>Absolute path to the Claude project folder</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Default agent name. Default: <code>Unknown</code></td></tr>
+        <tr><td><code>taskId</code></td><td>string</td><td>No</td><td>Task ID for unlinked sessions. Default: <code>__unlinked__</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Import summary: imported, skipped, failed, total counts.</p>
+    <h4>Example</h4>
+    <pre><code>sync_sessions(
+  claudeProjectPath="C:\\Users\\John\\.claude\\projects\\H--DevLaptop-...",
+  agentName="Alice",
+  taskId="c0ce8037"
+)</code></pre>
+  </div>
+
+  <!-- search_session_history -->
+  <div class="tool-block" id="search_session_history">
+    <h3>search_session_history</h3>
+    <p>Full-text search across imported session messages. Uses SQLite FTS5 when available, falls back to LIKE search.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>No*</td><td>Kanban task ID to search within</td></tr>
+        <tr><td><code>query</code></td><td>string</td><td>No*</td><td>Search text to find</td></tr>
+        <tr><td><code>role</code></td><td>string</td><td>No</td><td>Filter: <code>user</code> or <code>assistant</code></td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Filter by agent name</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Max results. Default: <code>50</code></td></tr>
+      </tbody>
+    </table>
+    <p>* At least one of <code>taskId</code> or <code>query</code> required.</p>
+    <h4>Returns</h4>
+    <p>Matching session messages with context.</p>
+    <h4>Example</h4>
+    <pre><code>search_session_history(taskId="c0ce8037", query="FTS5", role="assistant")</code></pre>
+  </div>
+
+  <!-- get_latest_session -->
+  <div class="tool-block" id="get_latest_session">
+    <h3>get_latest_session</h3>
+    <p>Get the most recent session for a project, including cached summary and recent messages if no summary exists. Use at session start to get context from the previous session.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Filesystem path to the project</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Session metadata, cached summary, and optionally recent messages for lazy summary generation.</p>
+    <h4>Example</h4>
+    <pre><code>get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal")</code></pre>
+  </div>
+
+  <!-- update_session_summary -->
+  <div class="tool-block" id="update_session_summary">
+    <h3>update_session_summary</h3>
+    <p>Save a generated summary for a session. Called after an agent generates a recap of a previous session's work.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>sessionId</code></td><td>string</td><td>Yes</td><td>Session ID to update</td></tr>
+        <tr><td><code>summary</code></td><td>string</td><td>Yes</td><td>Generated summary text</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>update_session_summary(
+  sessionId="def456",
+  summary="Implemented knowledge base with FTS5 search and code digest system"
+)</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="debug">Debug</h2>
+  <!-- ================================================================== -->
+
+  <!-- debug_logs -->
+  <div class="tool-block" id="debug_logs">
+    <h3>debug_logs</h3>
+    <p>Read debug log entries from MultiTerminal with filtering. Use to check system behavior, trace message delivery, monitor services.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>count</code></td><td>number</td><td>No</td><td>Number of entries. Default: <code>50</code>, max: <code>500</code></td></tr>
+        <tr><td><code>offset</code></td><td>number</td><td>No</td><td>Skip entries for pagination. Default: <code>0</code></td></tr>
+        <tr><td><code>source</code></td><td>string</td><td>No</td><td>Filter by component (e.g., "InboxMonitor", "MessageBroker")</td></tr>
+        <tr><td><code>level</code></td><td>string</td><td>No</td><td>Filter: <code>Trace</code>, <code>Info</code>, <code>Warning</code>, <code>Error</code></td></tr>
+        <tr><td><code>search</code></td><td>string</td><td>No</td><td>Text search within messages (case-insensitive)</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted log entries with timestamp, source, level, and message.</p>
+    <h4>Example</h4>
+    <pre><code>debug_logs(count=20, source="InboxMonitor", level="Info")</code></pre>
+  </div>
+
+  <!-- debug_clear -->
+  <div class="tool-block" id="debug_clear">
+    <h3>debug_clear</h3>
+    <p>Clear all debug log entries.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Confirmation with previous entry count.</p>
+    <h4>Example</h4>
+    <pre><code>debug_clear()</code></pre>
+  </div>
+
+  <!-- debug_pause -->
+  <div class="tool-block" id="debug_pause">
+    <h3>debug_pause</h3>
+    <p>Pause debug logging. New entries will be silently discarded until resumed.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Confirmation of paused state.</p>
+    <h4>Example</h4>
+    <pre><code>debug_pause()</code></pre>
+  </div>
+
+  <!-- debug_resume -->
+  <div class="tool-block" id="debug_resume">
+    <h3>debug_resume</h3>
+    <p>Resume debug logging after a pause.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Confirmation of resumed state.</p>
+    <h4>Example</h4>
+    <pre><code>debug_resume()</code></pre>
+  </div>
+
+  <!-- debug_status -->
+  <div class="tool-block" id="debug_status">
+    <h3>debug_status</h3>
+    <p>Get debug log status: entry count, paused state, max capacity.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Status object with count, isPaused, and maxCapacity.</p>
+    <h4>Example</h4>
+    <pre><code>debug_status()</code></pre>
+  </div>
+
+</div>
+</main>
+
+</div>
+
+<script>
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+}
+(function() {
+  const saved = localStorage.getItem('theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+</script>
+
+</body>
+</html>

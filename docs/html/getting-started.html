@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Getting started with MultiTerminal - installation, first launch, and key concepts">
+  <title>Getting Started - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Hamburger (mobile) -->
+<button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+
+<!-- Sidebar overlay (mobile) -->
+<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+<div class="page-wrapper">
+
+  <!-- Sidebar Navigation -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-icon">MT</span>
+        MultiTerminal
+      </div>
+      <div class="tagline">Documentation</div>
+    </div>
+    <nav>
+      <div class="nav-section-title">Getting Started</div>
+      <a href="getting-started.html" class="nav-link active">Getting Started</a>
+
+      <div class="nav-section-title">Reference</div>
+      <a href="features.html" class="nav-link">Features</a>
+      <a href="api-reference.html" class="nav-link">REST API</a>
+      <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+
+      <div class="nav-section-title">Technical</div>
+      <a href="architecture.html" class="nav-link">Architecture</a>
+      <a href="distribution.html" class="nav-link">Distribution</a>
+      <a href="deployment.html" class="nav-link">Deployment</a>
+
+      <div class="nav-section-title"></div>
+      <a href="index.html" class="nav-link">Home</a>
+    </nav>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="content-container">
+
+      <h1>Getting Started</h1>
+      <p>This guide walks you through system requirements, installation, your first launch, and the key concepts you need to understand MultiTerminal.</p>
+
+      <!-- System Requirements -->
+      <h2>System Requirements</h2>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Requirement</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Operating System</td>
+              <td>Windows 10 or Windows 11 (x64)</td>
+            </tr>
+            <tr>
+              <td>Runtime</td>
+              <td>.NET 8 (bundled with the application)</td>
+            </tr>
+            <tr>
+              <td>WebView2 Runtime</td>
+              <td>Microsoft Edge WebView2 Runtime (usually pre-installed on Windows 10/11)</td>
+            </tr>
+            <tr>
+              <td>Disk Space</td>
+              <td>~400 MB</td>
+            </tr>
+            <tr>
+              <td>Claude Code</td>
+              <td>Required for agent features. Install via <code>npm install -g @anthropic-ai/claude-code</code></td>
+            </tr>
+            <tr>
+              <td>Node.js</td>
+              <td>Required for the MCP server (v18+ recommended)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tip">
+        <p>If WebView2 is not installed, download it from <code>https://developer.microsoft.com/en-us/microsoft-edge/webview2/</code>.</p>
+      </div>
+
+      <!-- Installation -->
+      <h2>Installation</h2>
+      <ol>
+        <li><strong>Download</strong> the latest MultiTerminal release archive.</li>
+        <li><strong>Extract</strong> the archive to a folder of your choice (e.g., <code>C:\MultiTerminal</code>).</li>
+        <li><strong>Run</strong> <code>MultiTerminal.exe</code> to launch the application.</li>
+      </ol>
+
+      <div class="note">
+        <p>No installer is required. MultiTerminal is a portable application &mdash; just extract and run. Configuration is stored in <code>%APPDATA%\MultiTerminal</code>.</p>
+      </div>
+
+      <!-- First Launch -->
+      <h2>First Launch</h2>
+
+      <p>When you first launch MultiTerminal, you will see the main window with several dockable panels:</p>
+
+      <h3>1. Terminal Panel</h3>
+      <p>The central area hosts terminal tabs. Each tab is a full terminal emulator (ConPTY-based) where you can run Claude Code sessions or any shell command. Click the <strong>+</strong> button or use the Launcher panel to create a new terminal.</p>
+
+      <h3>2. Kanban Board</h3>
+      <p>The Tasks panel shows your kanban board with columns for <span class="badge badge-info">To Do</span>, <span class="badge badge-warning">In Progress</span>, <span class="badge badge-success">Done</span>, and more. Tasks are persisted in SQLite and shared across all terminals.</p>
+
+      <h3>3. Chat Panel</h3>
+      <p>Send messages between terminals. When multiple Claude Code agents are running, they can communicate through this panel.</p>
+
+      <h3>4. Other Panels</h3>
+      <p>Use the toolbar buttons to toggle additional panels:</p>
+      <ul>
+        <li><strong>Activity</strong> &mdash; Real-time feed of task changes, messages, and agent events</li>
+        <li><strong>Inbox</strong> &mdash; Personal notifications for task assignments and mentions</li>
+        <li><strong>Profiles</strong> &mdash; Team member avatars, specialties, and availability</li>
+        <li><strong>Projects</strong> &mdash; Project registry with paths, agents, and MCP servers</li>
+        <li><strong>Launcher</strong> &mdash; Quick-launch terminals with pre-configured settings</li>
+        <li><strong>Agents</strong> &mdash; Monitor and manage spawned team agents</li>
+      </ul>
+
+      <!-- Key Concepts -->
+      <h2>Key Concepts</h2>
+
+      <h3>Terminals</h3>
+      <p>Each terminal tab hosts a ConPTY-based shell rendered via WebView2. Terminals can register with the MultiTerminal system to gain an identity (name) for messaging and task management. A registered terminal appears in the team roster and can send/receive messages.</p>
+
+      <h3>Kanban Board</h3>
+      <p>The built-in task tracker uses a kanban workflow: <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>review</code> &rarr; <code>done</code>. Tasks support checklists (with per-item status tracking), plans, continuation notes, and helper assignments. All data is stored in SQLite (<code>tasks.db</code>).</p>
+
+      <h3>Messaging</h3>
+      <p>The MessageBroker routes messages between terminals. Messages can be direct (one-to-one) or broadcast (one-to-all). Claude Code agents use MCP tools to send and receive messages, enabling multi-agent collaboration.</p>
+
+      <h3>Projects</h3>
+      <p>Projects are registered in SQLite with associated paths, agents, MCP servers, prompts, and skills. The project context API (<code>GET /api/projects/{id}/context</code>) provides a complete snapshot for agent consumption.</p>
+
+      <h3>Agents</h3>
+      <p>MultiTerminal can spawn Claude Code agent teammates using the native agent teams feature. Agents are visible in the Agent panel, where you can monitor their transcript output in real time. Agents coordinate through the messaging system and work on kanban tasks.</p>
+
+      <h3>Knowledge Base</h3>
+      <p>The institutional memory system stores code digests, session history, and knowledge entries in SQLite. Agents can query the knowledge base for context about the codebase, past decisions, and established patterns.</p>
+
+      <!-- Next Steps -->
+      <h2>Next Steps</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <a href="features.html">
+            <h3>Explore Features</h3>
+            <p>Deep dive into all panels, workflows, and capabilities.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="api-reference.html">
+            <h3>REST API Reference</h3>
+            <p>Learn the HTTP endpoints for programmatic access.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="mcp-tools.html">
+            <h3>MCP Tools Guide</h3>
+            <p>See the full list of tools available to Claude Code agents.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="architecture.html">
+            <h3>Architecture Overview</h3>
+            <p>Understand the system layers and data flow.</p>
+          </a>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <p>MultiTerminal &copy; 2026. See <code>THIRD-PARTY-NOTICES.md</code> for license information.</p>
+      </footer>
+
+    </div>
+  </main>
+
+</div>
+
+<!-- Theme Toggle -->
+<button class="theme-toggle" aria-label="Toggle theme" onclick="toggleTheme()">&#9790;</button>
+
+<script>
+/* Theme toggle */
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme') || 'dark';
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('mt-docs-theme', next);
+}
+
+/* Restore saved theme */
+(function() {
+  var saved = localStorage.getItem('mt-docs-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+/* Mobile sidebar toggle */
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.querySelector('.sidebar-overlay').classList.toggle('visible');
+}
+</script>
+
+</body>
+</html>

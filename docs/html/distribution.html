@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MultiTerminal Distribution - Complete file audit and package contents">
+  <title>Distribution - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <div class="nav-section-title">Reference</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="distribution.html" class="nav-link active">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Distribution Package</h1>
+        <p class="lead">Complete audit of all files included in the MultiTerminal distribution package.</p>
+
+        <!-- Overview -->
+        <div class="card">
+          <h3>Package Overview</h3>
+          <table>
+            <tbody>
+              <tr><td><strong>Total Package Size</strong></td><td>~385 MB</td></tr>
+              <tr><td><strong>Total File Count</strong></td><td>~1,262 files</td></tr>
+              <tr><td><strong>Runtime</strong></td><td>Self-contained .NET 8 (Windows x64)</td></tr>
+              <tr><td><strong>Architecture</strong></td><td>x64 only</td></tr>
+              <tr><td><strong>Target OS</strong></td><td>Windows 10/11</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- System Requirements -->
+        <div class="card">
+          <h3>System Requirements</h3>
+          <ul>
+            <li><strong>OS:</strong> Windows 10 (version 1809+) or Windows 11, x64</li>
+            <li><strong>WebView2 Runtime:</strong> Required (pre-installed on Windows 11; download for Windows 10)</li>
+            <li><strong>Node.js 18+:</strong> Required for MCP server functionality</li>
+            <li><strong>Claude Code CLI:</strong> Required for terminal agent sessions</li>
+            <li><strong>Disk Space:</strong> ~400 MB for application + runtime data</li>
+            <li><strong>RAM:</strong> 4 GB minimum, 8 GB recommended (WebView2 panels use Chromium)</li>
+          </ul>
+        </div>
+
+        <!-- Category 1: Core Application -->
+        <h2 id="core-application">1. Core Application</h2>
+        <p>The main executable and its direct dependencies.</p>
+        <table>
+          <thead>
+            <tr><th>File</th><th>Purpose</th><th>Required</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>MultiTerminal.exe</code></td><td>Main executable (self-contained .NET 8 host)</td><td>Yes</td></tr>
+            <tr><td><code>MultiTerminal.dll</code></td><td>Application assembly (all C# code)</td><td>Yes</td></tr>
+            <tr><td><code>MultiTerminal.deps.json</code></td><td>Dependency graph for .NET runtime</td><td>Yes</td></tr>
+            <tr><td><code>MultiTerminal.runtimeconfig.json</code></td><td>Runtime configuration (framework version, GC settings)</td><td>Yes</td></tr>
+            <tr><td><code>MultiTerminal.dll.config</code></td><td>Application configuration (app settings)</td><td>Yes</td></tr>
+            <tr><td><code>WeifenLuo.WinFormsUI.Docking.dll</code></td><td>DockPanelSuite - docking window framework</td><td>Yes</td></tr>
+            <tr><td><code>WeifenLuo.WinFormsUI.Docking.ThemeVS2015.dll</code></td><td>VS2015 dark/light theme for DockPanelSuite</td><td>Yes</td></tr>
+            <tr><td><code>System.Data.SQLite.dll</code></td><td>SQLite managed wrapper</td><td>Yes</td></tr>
+            <tr><td><code>SQLite.Interop.dll</code></td><td>SQLite native interop library</td><td>Yes</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Category 2: .NET Runtime -->
+        <h2 id="dotnet-runtime">2. .NET Runtime (384 DLLs)</h2>
+        <p>The self-contained deployment includes the entire .NET 8 runtime. This eliminates the need for users to install .NET separately.</p>
+
+        <table>
+          <thead>
+            <tr><th>Namespace Group</th><th>Count</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>System.*</code></td>
+              <td>~190</td>
+              <td>Core .NET Base Class Library: collections, IO, networking, security, threading, XML, LINQ, reflection, serialization</td>
+            </tr>
+            <tr>
+              <td><code>Microsoft.AspNetCore.*</code></td>
+              <td>~86</td>
+              <td>ASP.NET Core web framework: HTTP server (Kestrel), MVC, routing, authentication, CORS, SignalR connections, diagnostics</td>
+            </tr>
+            <tr>
+              <td><code>Microsoft.Extensions.*</code></td>
+              <td>~46</td>
+              <td>Dependency injection, configuration, logging, hosting, caching, HTTP client factory, options pattern</td>
+            </tr>
+            <tr>
+              <td><code>Microsoft.*</code> (other)</td>
+              <td>~12</td>
+              <td>CSharp runtime, WinForms designer, Visual Basic compatibility, JSInterop, diagnostics</td>
+            </tr>
+            <tr>
+              <td>Runtime infrastructure</td>
+              <td>~50</td>
+              <td><code>coreclr.dll</code>, <code>clrjit.dll</code>, <code>hostfxr.dll</code>, <code>hostpolicy.dll</code>, <code>mscorlib.dll</code>, GC, ETW, DAC, native helpers</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <details>
+          <summary>Key runtime infrastructure files</summary>
+          <table>
+            <thead><tr><th>File</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td><code>coreclr.dll</code></td><td>Core CLR execution engine</td></tr>
+              <tr><td><code>clrjit.dll</code></td><td>JIT compiler</td></tr>
+              <tr><td><code>clrgc.dll</code></td><td>Garbage collector</td></tr>
+              <tr><td><code>hostfxr.dll</code></td><td>Host framework resolver</td></tr>
+              <tr><td><code>hostpolicy.dll</code></td><td>Host policy (assembly loading)</td></tr>
+              <tr><td><code>mscorlib.dll</code></td><td>Core library facade</td></tr>
+              <tr><td><code>netstandard.dll</code></td><td>.NET Standard compatibility shim</td></tr>
+              <tr><td><code>System.Private.CoreLib.dll</code></td><td>Core type system implementation</td></tr>
+              <tr><td><code>createdump.exe</code></td><td>Crash dump utility</td></tr>
+              <tr><td><code>mscordaccore.dll</code></td><td>Data access component (debugging)</td></tr>
+              <tr><td><code>mscordbi.dll</code></td><td>Debug interface</td></tr>
+            </tbody>
+          </table>
+        </details>
+
+        <!-- Category 3: WebView2 -->
+        <h2 id="webview2">3. WebView2 Runtime</h2>
+        <p>WebView2 provides the Chromium-based rendering engine for all HTML panels. The WebView2 <em>Runtime</em> must be installed on the system; these DLLs are the .NET bindings.</p>
+
+        <table>
+          <thead>
+            <tr><th>File</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>Microsoft.Web.WebView2.Core.dll</code></td><td>Core WebView2 .NET bindings</td></tr>
+            <tr><td><code>Microsoft.Web.WebView2.Core.xml</code></td><td>XML documentation for Core</td></tr>
+            <tr><td><code>Microsoft.Web.WebView2.WinForms.dll</code></td><td>WinForms integration control</td></tr>
+            <tr><td><code>Microsoft.Web.WebView2.WinForms.xml</code></td><td>XML documentation for WinForms</td></tr>
+            <tr><td><code>Microsoft.Web.WebView2.Wpf.dll</code></td><td>WPF integration control (used by settings dialog)</td></tr>
+            <tr><td><code>Microsoft.Web.WebView2.Wpf.xml</code></td><td>XML documentation for WPF</td></tr>
+            <tr><td><code>WebView2Loader.dll</code></td><td>Native loader - finds and initializes WebView2 Runtime</td></tr>
+          </tbody>
+        </table>
+
+        <div class="card">
+          <h3>WebView2 Runtime Note</h3>
+          <p>The WebView2 <strong>Runtime</strong> (Evergreen) must be installed separately on the target machine. Windows 11 includes it by default. For Windows 10, download from <strong>Microsoft's WebView2 download page</strong>. The DLLs above are only the .NET wrapper; the actual Chromium engine (~150 MB) lives in the system WebView2 Runtime installation.</p>
+        </div>
+
+        <!-- Category 4: HTML Panels -->
+        <h2 id="html-panels">4. HTML Panels (13 files)</h2>
+        <p>Each UI panel is rendered via WebView2 using a self-contained HTML file with embedded CSS and JavaScript.</p>
+
+        <table>
+          <thead>
+            <tr><th>File</th><th>Panel</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>ActivityPanel/panel.html</code></td><td>Activity Panel</td><td>Real-time activity feed showing tool usage, builds, and agent events</td></tr>
+            <tr><td><code>AgentPanel/agent-panel.html</code></td><td>Agent Panel</td><td>Observe spawned Claude Code team agents and their transcript activity</td></tr>
+            <tr><td><code>ChatPanel/chat-panel.html</code></td><td>Chat Panel</td><td>Inter-terminal messaging UI for point-to-point and broadcast chat</td></tr>
+            <tr><td><code>Controls/TaskHudPanel/task-hud.html</code></td><td>Task HUD</td><td>Heads-up display overlay showing current task and checklist status</td></tr>
+            <tr><td><code>Controls/TerminalStatusBar/statusbar.html</code></td><td>Terminal Status Bar</td><td>3-row status bar: folder path, model/git info, context usage meter</td></tr>
+            <tr><td><code>InboxPanel/inbox-panel.html</code></td><td>Inbox Panel</td><td>Notification center for task updates, messages, and checklist transitions</td></tr>
+            <tr><td><code>OfficePanel/panel.html</code></td><td>Office Panel</td><td>Team office view showing terminal status and agent presence</td></tr>
+            <tr><td><code>ProfilePanel/panel.html</code></td><td>Profile Panel</td><td>Team member profiles with specialties, availability, and avatars</td></tr>
+            <tr><td><code>ProjectPanel/panel.html</code></td><td>Project Panel</td><td>Project management: registration, agent assignment, MCP config, paths</td></tr>
+            <tr><td><code>StartScreen/start-screen.html</code></td><td>Start Screen</td><td>Welcome screen with project list and quick-launch options</td></tr>
+            <tr><td><code>TaskLifecycleBoard/lifecycle-board.html</code></td><td>Task Lifecycle Board</td><td>Detailed task lifecycle view with checklist progression</td></tr>
+            <tr><td><code>TasksPanel/tasks-panel.html</code></td><td>Tasks Panel (Kanban)</td><td>Kanban board with columns: To Do, In Progress, Done</td></tr>
+            <tr><td><code>Terminal/terminal.html</code></td><td>Terminal</td><td>ConPty terminal emulator rendered in WebView2</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Category 5: Localization -->
+        <h2 id="localization">5. Localization (13 Languages)</h2>
+        <p>Satellite assemblies for .NET runtime localization. Each folder contains translated resource DLLs for framework error messages and system strings.</p>
+
+        <table>
+          <thead>
+            <tr><th>Folder</th><th>Language</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>cs/</code></td><td>Czech</td></tr>
+            <tr><td><code>de/</code></td><td>German</td></tr>
+            <tr><td><code>es/</code></td><td>Spanish</td></tr>
+            <tr><td><code>fr/</code></td><td>French</td></tr>
+            <tr><td><code>it/</code></td><td>Italian</td></tr>
+            <tr><td><code>ja/</code></td><td>Japanese</td></tr>
+            <tr><td><code>ko/</code></td><td>Korean</td></tr>
+            <tr><td><code>pl/</code></td><td>Polish</td></tr>
+            <tr><td><code>pt-BR/</code></td><td>Portuguese (Brazil)</td></tr>
+            <tr><td><code>ru/</code></td><td>Russian</td></tr>
+            <tr><td><code>tr/</code></td><td>Turkish</td></tr>
+            <tr><td><code>zh-Hans/</code></td><td>Chinese (Simplified)</td></tr>
+            <tr><td><code>zh-Hant/</code></td><td>Chinese (Traditional)</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Category 6: Database Files -->
+        <h2 id="databases">6. Database Files</h2>
+        <p>Databases are created at runtime in the user's AppData directory. They are <strong>not</strong> included in the distribution package.</p>
+
+        <table>
+          <thead>
+            <tr><th>Database</th><th>Location</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>tasks.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\tasks.db</code></td>
+              <td>Main database: kanban tasks, team profiles, activity feed, inbox, terminal registrations, helper sessions, projects, agents, MCP config</td>
+            </tr>
+            <tr>
+              <td><code>sessions.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\sessions.db</code></td>
+              <td>Session persistence: terminal identities, Claude Code session IDs, session metadata</td>
+            </tr>
+            <tr>
+              <td><code>knowledge.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\knowledge.db</code></td>
+              <td>Institutional memory: knowledge entries (6 categories), code digests, full-text search index</td>
+            </tr>
+            <tr>
+              <td><code>message_queue.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\message_queue.db</code></td>
+              <td>Reliable message delivery: queued messages with retry tracking and expiry</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="card">
+          <h3>Database Notes</h3>
+          <ul>
+            <li>All databases are SQLite and created automatically on first run</li>
+            <li>Schema migrations run automatically when new columns or tables are needed</li>
+            <li>To start fresh, delete the database files; the application will recreate them</li>
+            <li>To migrate to a new machine, copy the <code>%APPDATA%\MultiTerminal\</code> folder</li>
+          </ul>
+        </div>
+
+        <!-- Category 7: Configuration Files -->
+        <h2 id="configuration">7. Configuration Files</h2>
+
+        <table>
+          <thead>
+            <tr><th>File</th><th>Purpose</th><th>Editable</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>MultiTerminal.runtimeconfig.json</code></td>
+              <td>Specifies .NET 8 framework version and runtime options (GC mode, thread pool)</td>
+              <td>Advanced only</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal.deps.json</code></td>
+              <td>Dependency manifest used by the .NET host to locate assemblies</td>
+              <td>No (auto-generated)</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal.dll.config</code></td>
+              <td>Application configuration file (connection strings, app settings)</td>
+              <td>Yes</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Category 8: Claude Integration -->
+        <h2 id="claude-integration">8. Claude Integration</h2>
+        <p>The <code>.claude/</code> folder in the project root configures Claude Code behavior for agents working in this project.</p>
+
+        <table>
+          <thead>
+            <tr><th>Path</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>.claude/CLAUDE.md</code></td><td>Project instructions loaded into every agent's context at startup (~16 KB). Contains architecture reference, patterns, task-specific file guides.</td></tr>
+            <tr><td><code>.claude/project.json</code></td><td>Project identity (ID, name, timestamps). Used by MultiTerminal to track the project.</td></tr>
+            <tr><td><code>.claude/settings.json</code></td><td>Project-level Claude Code settings</td></tr>
+            <tr><td><code>.claude/settings.local.json</code></td><td>Local permission presets for MCP tools and commands (not committed to git)</td></tr>
+            <tr><td><code>.claude/agents/</code></td><td>Specialist agent definitions (7 files): debugger, devils-advocate, security-auditor, session-distiller, session-summarizer, test-designer, verifier</td></tr>
+            <tr><td><code>.claude/hooks/</code></td><td>Claude Code hooks for activity tracking and context injection</td></tr>
+            <tr><td><code>.claude/skills/</code></td><td>Custom skill definitions (slash commands like /kanban-task, /new-project)</td></tr>
+            <tr><td><code>.claude/rules/</code></td><td>Additional behavioral rules for agents</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Category 9: Third-Party Licenses -->
+        <h2 id="licenses">9. Third-Party Licenses</h2>
+        <p><code>THIRD-PARTY-NOTICES.md</code> in the repository root documents all third-party dependencies and their licenses. Key dependencies:</p>
+
+        <table>
+          <thead>
+            <tr><th>Library</th><th>License</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>DockPanelSuite 3.1.0</td><td>MIT</td><td>Dockable window framework (VS-style panels)</td></tr>
+            <tr><td>Microsoft.Web.WebView2</td><td>BSD-style</td><td>Chromium-based embedded browser control</td></tr>
+            <tr><td>System.Data.SQLite</td><td>Public Domain</td><td>SQLite database engine for .NET</td></tr>
+            <tr><td>.NET 8 Runtime</td><td>MIT</td><td>Self-contained runtime</td></tr>
+            <tr><td>ASP.NET Core</td><td>MIT</td><td>Web framework for REST API</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Critical Files -->
+        <h2 id="critical-files">Critical Files Checklist</h2>
+        <p>These files <strong>must</strong> exist in the deployment directory or the application will not launch:</p>
+
+        <div class="card">
+          <h3>Launch-Critical Files</h3>
+          <ul>
+            <li><code>MultiTerminal.exe</code> - Entry point</li>
+            <li><code>MultiTerminal.dll</code> - Application code</li>
+            <li><code>MultiTerminal.runtimeconfig.json</code> - Runtime bootstrap</li>
+            <li><code>MultiTerminal.deps.json</code> - Assembly resolution</li>
+            <li><code>coreclr.dll</code> - CLR execution engine</li>
+            <li><code>clrjit.dll</code> - JIT compiler</li>
+            <li><code>hostfxr.dll</code> - Framework host resolver</li>
+            <li><code>hostpolicy.dll</code> - Assembly load policy</li>
+            <li><code>System.Private.CoreLib.dll</code> - Core type system</li>
+            <li><code>WebView2Loader.dll</code> - WebView2 native loader</li>
+            <li><code>Microsoft.Web.WebView2.Core.dll</code> - WebView2 bindings</li>
+            <li><code>Microsoft.Web.WebView2.WinForms.dll</code> - WinForms WebView2 control</li>
+            <li><code>System.Data.SQLite.dll</code> - Database engine</li>
+            <li><code>SQLite.Interop.dll</code> - Native SQLite</li>
+            <li><code>WeifenLuo.WinFormsUI.Docking.dll</code> - Panel docking</li>
+          </ul>
+        </div>
+
+        <!-- Optional Files -->
+        <h2 id="optional-files">Optional Files (Size Reduction)</h2>
+        <p>These can be excluded to reduce package size if the related functionality is not needed:</p>
+
+        <table>
+          <thead>
+            <tr><th>Category</th><th>Approx. Size</th><th>Impact of Removal</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Localization folders (13 languages)</td>
+              <td>~15 MB</td>
+              <td>Framework error messages display in English only</td>
+            </tr>
+            <tr>
+              <td><code>publish/</code> subfolder</td>
+              <td>Variable</td>
+              <td>Duplicate build output; can be removed if not using as staging area</td>
+            </tr>
+            <tr>
+              <td>XML documentation files (<code>*.xml</code>)</td>
+              <td>~5 MB</td>
+              <td>No IntelliSense for WebView2 APIs (development only)</td>
+            </tr>
+            <tr>
+              <td>Debug symbols (<code>*.pdb</code>)</td>
+              <td>~2 MB</td>
+              <td>No stack traces with line numbers in crash reports</td>
+            </tr>
+            <tr>
+              <td><code>Microsoft.Web.WebView2.Wpf.dll</code></td>
+              <td>~100 KB</td>
+              <td>WPF-based settings dialog will not work (WinForms dialogs unaffected)</td>
+            </tr>
+            <tr>
+              <td><code>createdump.exe</code>, <code>mscordaccore*.dll</code>, <code>mscordbi.dll</code></td>
+              <td>~15 MB</td>
+              <td>No crash dump generation or post-mortem debugging</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Additional Directories -->
+        <h2 id="directories">Directory Structure</h2>
+        <p>Top-level layout of the Deploy folder:</p>
+
+        <pre><code>Deploy/
++-- MultiTerminal.exe            (main executable)
++-- MultiTerminal.dll            (application assembly)
++-- *.dll                        (384 runtime + framework DLLs)
++-- *.json, *.config             (configuration files)
++-- ActivityPanel/               (activity feed HTML)
++-- AgentPanel/                  (agent observation HTML)
++-- ChatPanel/                   (messaging HTML)
++-- Controls/
+|   +-- TaskHudPanel/            (task HUD overlay HTML)
+|   +-- TerminalStatusBar/       (status bar HTML)
++-- InboxPanel/                  (notifications HTML)
++-- OfficePanel/                 (team office HTML)
++-- ProfilePanel/                (team profiles HTML)
++-- ProjectPanel/                (project management HTML)
++-- StartScreen/                 (welcome screen HTML)
++-- TaskLifecycleBoard/          (task lifecycle HTML)
++-- TasksPanel/                  (kanban board HTML)
++-- Terminal/                    (terminal emulator HTML)
++-- runtimes/                    (native runtime libraries)
++-- cs/, de/, es/, fr/, ...      (13 localization folders)
++-- publish/                     (staging build output)</code></pre>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
+</body>
+</html>
