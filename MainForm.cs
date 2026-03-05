@@ -14,6 +14,7 @@ using MultiTerminal.Dialogs;
 using MultiTerminal.Docking;
 using MultiTerminal.API;
 using MultiTerminal.MCPServer.Models;
+using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Models;
 using MultiTerminal.Panels;
 using MultiTerminal.Services;
@@ -72,6 +73,7 @@ namespace MultiTerminal
         private OfficePanel.OfficePanelDocument _officePanel;
         private ToolStripButton _officePanelButton;
         private ToolStripButton _agentPanelButton;
+        private ToolStripButton _hudButton;
         private readonly Dictionary<string, AgentProcess> _agentProcessMap = new();
         private readonly Dictionary<string, AgentPanelDocument> _agentPanelMap = new();
         private readonly Dictionary<string, WeifenLuo.WinFormsUI.Docking.DockPane> _spawnerAgentPanes = new();
@@ -393,6 +395,9 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 16: Setting OnMessageDelivery");
                 _mcpServer.Broker.OnMessageDelivery = OnMcpMessageDelivery;
 
+                // Browser tab support - route tab requests to correct terminal
+                _mcpServer.Broker.BrowserTabRequested += OnBrowserTabRequested;
+
                 // Wire up spawn callback for programmatic terminal spawning
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 17: Checking SpawnService");
                 if (_mcpServer.SpawnService == null)
@@ -580,6 +585,58 @@ namespace MultiTerminal
                     Log($"Stack: {ex.StackTrace}");
                 }
             });
+        }
+
+        private void OnBrowserTabRequested(object sender, BrowserTabEventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(() => OnBrowserTabRequested(sender, e));
+                return;
+            }
+
+            // Resolve terminal ID/name to a TerminalDocument
+            var terminal = _mcpServer.Broker.GetTerminal(e.TerminalId);
+            if (terminal == null)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] BrowserTabRequested: terminal not found: {e.TerminalId}");
+                return;
+            }
+
+            TerminalDocument targetDoc = null;
+            lock (_terminalDocMapLock)
+            {
+                _terminalDocMap.TryGetValue(terminal.Id, out targetDoc);
+            }
+
+            // Fallback: search by DocId or name
+            if (targetDoc == null)
+            {
+                targetDoc = _dockPanel.Documents
+                    .OfType<TerminalDocument>()
+                    .FirstOrDefault(t =>
+                        t.DocId == terminal.DocId ||
+                        (t.CustomTitle?.Equals(terminal.Name, StringComparison.OrdinalIgnoreCase) ?? false));
+            }
+
+            if (targetDoc == null)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] BrowserTabRequested: no TerminalDocument found for {e.TerminalId}");
+                return;
+            }
+
+            switch (e.Action)
+            {
+                case "open":
+                    targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
+                    break;
+                case "update":
+                    targetDoc.SetBrowserContent(e.TabId, e.Title, e.Url, e.HtmlContent);
+                    break;
+                case "close":
+                    targetDoc.RemoveBrowserTab(e.TabId);
+                    break;
+            }
         }
 
         private void OnMcpTerminalRegistered(object sender, TerminalInfo e)
@@ -1171,6 +1228,16 @@ namespace MultiTerminal
             };
             _debugPanelButton.Click += (s, e) => ToggleDebugPanel();
 
+            // HUD toggle button
+            _hudButton = new ToolStripButton
+            {
+                Text = "HUD",
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                ForeColor = Color.White,
+                ToolTipText = "Show/Hide Task HUD on Active Terminal"
+            };
+            _hudButton.Click += (s, e) => ToggleHud();
+
             // Recent Folders dropdown
             _recentFoldersDropdown = new ToolStripDropDownButton
             {
@@ -1240,6 +1307,7 @@ namespace MultiTerminal
             _toolStrip.Items.Add(_officePanelButton);
             _toolStrip.Items.Add(_agentPanelButton);
             _toolStrip.Items.Add(_debugPanelButton);
+            _toolStrip.Items.Add(_hudButton);
             _toolStrip.Items.Add(_recentFoldersDropdown);
             _toolStrip.Items.Add(new ToolStripSeparator());
             _toolStrip.Items.Add(_gridDropdown);
@@ -2772,21 +2840,34 @@ namespace MultiTerminal
                 }
             }
 
-            // Stop MCP server - fire and forget to avoid blocking UI thread
-            // The server will stop asynchronously; if it takes too long, the process exit will clean up
-            if (_mcpServer != null)
+            // Stop all agent processes before closing terminals
+            lock (_agentProcessMap)
             {
-                _ = Task.Run(async () =>
+                foreach (var kvp in _agentProcessMap)
                 {
                     try
                     {
-                        await _mcpServer.StopAsync();
+                        kvp.Value.Dispose();
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop MCP server: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to dispose agent process {kvp.Key}: {ex.Message}");
                     }
-                });
+                }
+                _agentProcessMap.Clear();
+            }
+
+            // Stop MCP server synchronously with timeout to ensure Kestrel threads are cleaned up
+            if (_mcpServer != null)
+            {
+                try
+                {
+                    _mcpServer.StopAsync().Wait(TimeSpan.FromSeconds(3));
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop MCP server: {ex.Message}");
+                }
             }
 
             // Close all terminals
@@ -4118,6 +4199,13 @@ namespace MultiTerminal
             }
         }
 
+        private void ToggleHud()
+        {
+            var doc = _lastActiveTerminal ?? _dockPanel.ActiveDocument as TerminalDocument;
+            doc?.ToggleHud();
+        }
+
+
         /// <summary>
         private void RefreshProjectPanel([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
         {
@@ -4710,6 +4798,8 @@ namespace MultiTerminal
                 _sessionDatabase?.Dispose();
                 _sharedProjectDatabase?.Dispose();
                 _debugLogService?.Dispose();
+                _mcpServer?.Dispose();
+                _mcpServer = null;
                 _dockPanel?.Dispose();
                 _toolStrip?.Dispose();
             }

@@ -28,7 +28,7 @@ namespace MultiTerminal.Docking
         private TerminalControl _terminal;
         private TerminalStatusBarRenderer _statusBar;
         private Splitter _statusBarSplitter;
-        private TaskHudRenderer _taskHud;
+        private HudTabContainer _hudTabContainer;
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
         private EmbeddedAgentPanel _embeddedAgentPanel;
@@ -229,22 +229,23 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void UpdateTaskHudTerminalName()
         {
-            if (_taskHud == null || string.IsNullOrEmpty(_customTitle)) return;
+            var taskHud = _hudTabContainer?.TaskHud;
+            if (taskHud == null || string.IsNullOrEmpty(_customTitle)) return;
 
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.UpdateTaskHudTerminalName] customTitle='{_customTitle}' IsBrokerInitialized={_taskHud.IsBrokerInitialized} brokerSet={_messageBroker != null}");
+            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.UpdateTaskHudTerminalName] customTitle='{_customTitle}' IsBrokerInitialized={taskHud.IsBrokerInitialized} brokerSet={_messageBroker != null}");
 
-            if (!_taskHud.IsBrokerInitialized && _messageBroker != null)
+            if (!taskHud.IsBrokerInitialized && _messageBroker != null)
             {
                 // Broker is set on TerminalDocument but HUD has not been initialized yet.
                 // This is the common late-name scenario: SetMessageBroker() was called first
                 // (CustomTitle was null then), and now CustomTitle has arrived.
-                _taskHud.Initialize(_messageBroker, _customTitle);
+                taskHud.Initialize(_messageBroker, _customTitle);
             }
             else
             {
                 // Either HUD is already initialized (update the name), or broker not yet set
                 // (SetTerminalName will queue the name for when Initialize is called later).
-                _taskHud.SetTerminalName(_customTitle);
+                taskHud.SetTerminalName(_customTitle);
             }
         }
 
@@ -285,6 +286,11 @@ namespace MultiTerminal.Docking
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
+            _statusBar.HudToggleRequested += (s, e) =>
+            {
+                ToggleHud();
+                _statusBar.SetHudToggleState(IsHudVisible);
+            };
 
             // Create terminal control
             _terminal = new TerminalControl
@@ -337,14 +343,20 @@ namespace MultiTerminal.Docking
             _embeddedAgentPanel = new EmbeddedAgentPanel();
 
             // Create task HUD (shows active task checklist, hidden until task found)
-            _taskHud = new TaskHudRenderer
+            var taskHudRenderer = new TaskHudRenderer
             {
                 Visible = false,
                 Dock = DockStyle.Fill
             };
 
+            // Wrap TaskHudRenderer in HudTabContainer (supports browser tabs alongside HUD)
+            _hudTabContainer = new HudTabContainer(taskHudRenderer)
+            {
+                Dock = DockStyle.Fill
+            };
+
             // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
-            _taskHud.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
+            taskHudRenderer.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
 
             // Create SplitContainer: terminal (top, 75%) | task HUD (bottom, 25%)
             // Task HUD only spans terminal width, not the agent panel
@@ -361,7 +373,7 @@ namespace MultiTerminal.Docking
             };
 
             _terminalHudSplitter.Panel1.Controls.Add(_terminal);
-            _terminalHudSplitter.Panel2.Controls.Add(_taskHud);
+            _terminalHudSplitter.Panel2.Controls.Add(_hudTabContainer);
 
             // Hide Panel2 (task HUD) until a task is active
             _terminalHudSplitter.Panel2Collapsed = true;
@@ -370,7 +382,7 @@ namespace MultiTerminal.Docking
             // This avoids the WinForms deadlock where VisibleChanged won't fire on a
             // control inside a collapsed panel (parent invisible → child VisibleChanged
             // never fires → panel never uncollapses).
-            _taskHud.HudVisibilityRequested += (s, show) =>
+            _hudTabContainer.VisibilityRequested += (s, show) =>
             {
                 // Capture the ratio BEFORE uncollapsing. WinForms fires async
                 // SplitterMoved events after Panel2Collapsed changes, which would
@@ -381,6 +393,9 @@ namespace MultiTerminal.Docking
                 // BeginInvoke so no stray SplitterMoved can corrupt the ratio.
                 _suppressSplitterEvents = true;
                 _terminalHudSplitter.Panel2Collapsed = !show;
+
+                // Sync the status bar HUD toggle to match auto-show/hide
+                _statusBar?.SetHudToggleState(show);
 
                 if (show && _terminalHudSplitter.Height > 0 && IsHandleCreated)
                 {
@@ -767,7 +782,7 @@ namespace MultiTerminal.Docking
             _currentTheme = theme;
             _terminal.SetTheme(theme);
             _statusBar?.SetTheme(theme.IsDark);
-            _taskHud?.ApplyTheme(theme.IsDark);
+            _hudTabContainer?.ApplyTheme(theme.IsDark);
             _embeddedAgentPanel?.ApplyTheme(theme.IsDark);
             _startScreen?.ApplyTheme(theme.IsDark);
 
@@ -815,7 +830,31 @@ namespace MultiTerminal.Docking
         /// </summary>
         public void ApplyTaskHudZoom(double zoom)
         {
-            _taskHud?.SetZoomFactor(zoom);
+            _hudTabContainer?.SetZoomFactor(zoom);
+        }
+
+        /// <summary>
+        /// Adds a browser tab to the HUD tab container.
+        /// </summary>
+        public BrowserTabPage AddBrowserTab(string tabId, string title, string url = null, string htmlContent = null, bool? isDark = null)
+        {
+            return _hudTabContainer?.AddBrowserTab(tabId, title, url, htmlContent);
+        }
+
+        /// <summary>
+        /// Removes a browser tab from the HUD tab container.
+        /// </summary>
+        public void RemoveBrowserTab(string tabId)
+        {
+            _hudTabContainer?.RemoveBrowserTab(tabId);
+        }
+
+        /// <summary>
+        /// Updates content of an existing browser tab.
+        /// </summary>
+        public void SetBrowserContent(string tabId, string title, string url = null, string htmlContent = null)
+        {
+            _hudTabContainer?.SetBrowserContent(tabId, title, url, htmlContent);
         }
 
         /// <summary>
@@ -862,6 +901,44 @@ namespace MultiTerminal.Docking
 
         /// <summary>Fired when user drags the agent panel splitter. Arg is the new ratio.</summary>
         public event EventHandler<double> AgentSplitRatioChanged;
+
+        /// <summary>Whether the Task HUD panel is currently visible.</summary>
+        public bool IsHudVisible => _terminalHudSplitter != null && !_terminalHudSplitter.Panel2Collapsed;
+
+        /// <summary>
+        /// Manually toggles the Task HUD panel visibility.
+        /// When showing, restores the saved splitter ratio.
+        /// </summary>
+        public void ToggleHud()
+        {
+            if (_terminalHudSplitter == null) return;
+
+            bool show = _terminalHudSplitter.Panel2Collapsed; // collapsed → show it
+            double ratioToApply = _hudSplitRatio;
+
+            _suppressSplitterEvents = true;
+            _terminalHudSplitter.Panel2Collapsed = !show;
+
+            if (show && _terminalHudSplitter.Height > 0 && IsHandleCreated)
+            {
+                BeginInvoke((Action)(() =>
+                {
+                    try
+                    {
+                        int distance = (int)(_terminalHudSplitter.Height * ratioToApply);
+                        if (distance > _terminalHudSplitter.Panel1MinSize)
+                            _terminalHudSplitter.SplitterDistance = distance;
+                        _hudSplitRatio = ratioToApply;
+                    }
+                    catch { }
+                    finally { _suppressSplitterEvents = false; }
+                }));
+            }
+            else
+            {
+                _suppressSplitterEvents = false;
+            }
+        }
 
         /// <summary>Fired when user drags the HUD splitter. Arg is the new ratio.</summary>
         public event EventHandler<double> HudSplitRatioChanged;
@@ -1279,7 +1356,7 @@ namespace MultiTerminal.Docking
         {
             _debugLogService = debugLogService;
             _statusBar?.SetDebugLogService(debugLogService);
-            _taskHud?.SetDebugLogService(debugLogService);
+            _hudTabContainer?.TaskHud?.SetDebugLogService(debugLogService);
         }
 
         /// <summary>
@@ -1299,14 +1376,15 @@ namespace MultiTerminal.Docking
             // If CustomTitle is already set, initialize fully.
             // If not, still call Initialize so HUD can pick up any _pendingTerminalName
             // set by an earlier SetTerminalName() call (e.g. OnLaunchAsIdentityRequested path).
+            var taskHud = _hudTabContainer?.TaskHud;
             if (!string.IsNullOrEmpty(CustomTitle))
             {
-                _taskHud?.Initialize(broker, CustomTitle);
+                taskHud?.Initialize(broker, CustomTitle);
             }
-            else if (_taskHud?.HasPendingTerminalName == true)
+            else if (taskHud?.HasPendingTerminalName == true)
             {
                 // Name arrived before broker via SetTerminalName — initialize now
-                _taskHud.Initialize(broker, null);
+                taskHud.Initialize(broker, null);
             }
 
             // Update status bar if terminal name is already set
@@ -1523,10 +1601,10 @@ namespace MultiTerminal.Docking
                     _terminalHudSplitter.SplitterMoved -= OnHudSplitterMoved;
                 }
 
-                if (_taskHud != null)
+                if (_hudTabContainer != null)
                 {
-                    _taskHud.Dispose();
-                    _taskHud = null;
+                    _hudTabContainer.Dispose();
+                    _hudTabContainer = null;
                 }
 
                 if (_statusBarSplitter != null)

@@ -212,6 +212,12 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<string> SessionLineageUpdated;
 
         /// <summary>
+        /// Raised when an agent requests a browser tab action (open, update, close).
+        /// MainForm subscribes to route the request to the correct TerminalDocument.
+        /// </summary>
+        public event EventHandler<BrowserTabEventArgs> BrowserTabRequested;
+
+        /// <summary>
         /// Knowledge database for institutional memory — knowledge entries and code digests.
         /// Set via DI after broker is created (shares tasks.db via TaskDatabase).
         /// </summary>
@@ -4605,6 +4611,75 @@ namespace MultiTerminal.MCPServer.Services
 
         #endregion
 
+        #region Browser Tabs
+
+        /// <summary>
+        /// Open a new browser tab in a terminal's HUD area.
+        /// </summary>
+        public (bool success, string tabId, string error) OpenBrowserTab(string terminalId, string title, string url, string htmlContent)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, null, $"Terminal not found: {terminalId}");
+
+            var tabId = Guid.NewGuid().ToString("N").Substring(0, 8);
+
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "open",
+                TerminalId = terminalId,
+                TabId = tabId,
+                Title = title,
+                Url = url,
+                HtmlContent = htmlContent
+            });
+
+            return (true, tabId, null);
+        }
+
+        /// <summary>
+        /// Update an existing browser tab's content or URL.
+        /// </summary>
+        public (bool success, string error) SetBrowserContent(string terminalId, string tabId, string title, string url, string htmlContent)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, $"Terminal not found: {terminalId}");
+
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "update",
+                TerminalId = terminalId,
+                TabId = tabId,
+                Title = title,
+                Url = url,
+                HtmlContent = htmlContent
+            });
+
+            return (true, null);
+        }
+
+        /// <summary>
+        /// Close a browser tab in a terminal's HUD area.
+        /// </summary>
+        public (bool success, string error) CloseBrowserTab(string terminalId, string tabId)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, $"Terminal not found: {terminalId}");
+
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "close",
+                TerminalId = terminalId,
+                TabId = tabId
+            });
+
+            return (true, null);
+        }
+
+        #endregion
+
         #region Task Attachments
 
         /// <summary>
@@ -4858,6 +4933,19 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         #endregion
+    }
+
+    /// <summary>
+    /// Event args for browser tab requests (open, update, close).
+    /// </summary>
+    public class BrowserTabEventArgs : EventArgs
+    {
+        public string Action { get; set; }
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+        public string Title { get; set; }
+        public string Url { get; set; }
+        public string HtmlContent { get; set; }
     }
 
     /// <summary>
