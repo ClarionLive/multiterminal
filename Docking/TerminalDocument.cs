@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -13,6 +14,7 @@ using MultiTerminal.Dialogs;
 using MultiTerminal.Terminal;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.MCPServer.Models;
+using MultiTerminal.TasksPanel;
 using MultiTerminal.Services;
 using MultiTerminal.StartScreen;
 using WeifenLuo.WinFormsUI.Docking;
@@ -32,6 +34,7 @@ namespace MultiTerminal.Docking
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
         private EmbeddedAgentPanel _embeddedAgentPanel;
+        private System.Windows.Forms.Timer _agentPanelSanityTimer;
         private MessageBroker _messageBroker;
         private DebugLogService _debugLogService;
         private static int _instanceCount = 0;
@@ -101,6 +104,11 @@ namespace MultiTerminal.Docking
         /// Event fired when Claude Code is detected running in this terminal.
         /// </summary>
         public event EventHandler ClaudeCodeDetected;
+
+        /// <summary>
+        /// Event fired when a kanban task card is dropped onto this terminal.
+        /// </summary>
+        public event EventHandler<TaskDroppedEventArgs> TaskDropped;
 
         /// <summary>
         /// Event fired when user requests to launch a new terminal with a specific identity.
@@ -375,8 +383,8 @@ namespace MultiTerminal.Docking
             _terminalHudSplitter.Panel1.Controls.Add(_terminal);
             _terminalHudSplitter.Panel2.Controls.Add(_hudTabContainer);
 
-            // Hide Panel2 (task HUD) until a task is active
-            _terminalHudSplitter.Panel2Collapsed = true;
+            // Show Panel2 (task HUD) by default
+            _terminalHudSplitter.Panel2Collapsed = false;
 
             // Handle HUD show/hide requests by controlling Panel2Collapsed directly.
             // This avoids the WinForms deadlock where VisibleChanged won't fire on a
@@ -388,11 +396,13 @@ namespace MultiTerminal.Docking
                 // SplitterMoved events after Panel2Collapsed changes, which would
                 // overwrite _hudSplitRatio with a bogus default value.
                 double ratioToApply = _hudSplitRatio;
+                System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}, initialApplied={_initialHudSplitApplied}");
 
                 // Keep events suppressed from uncollapse through the deferred
                 // BeginInvoke so no stray SplitterMoved can corrupt the ratio.
                 _suppressSplitterEvents = true;
                 _terminalHudSplitter.Panel2Collapsed = !show;
+                System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested: after Panel2Collapsed={!show}, suppress still={_suppressSplitterEvents}");
 
                 // Sync the status bar HUD toggle to match auto-show/hide
                 _statusBar?.SetHudToggleState(show);
@@ -403,28 +413,42 @@ namespace MultiTerminal.Docking
                     // layout pass. Events stay suppressed until the callback runs.
                     BeginInvoke((Action)(() =>
                     {
+                        System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested BeginInvoke: suppress={_suppressSplitterEvents}, ratioToApply={ratioToApply:F4}, currentRatio={_hudSplitRatio:F4}, height={_terminalHudSplitter.Height}, dist={_terminalHudSplitter.SplitterDistance}");
                         try
                         {
+                            int maxDistance = _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize;
                             int distance = (int)(_terminalHudSplitter.Height * ratioToApply);
+                            // Clamp to respect Panel2MinSize
+                            if (distance > maxDistance)
+                                distance = maxDistance;
                             if (distance > _terminalHudSplitter.Panel1MinSize)
                                 _terminalHudSplitter.SplitterDistance = distance;
                             // Restore in case stray events slipped through
                             _hudSplitRatio = ratioToApply;
+                            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested BeginInvoke DONE: distance={distance}, maxDist={maxDistance}, clearing suppress");
                         }
                         catch { /* bounds during layout */ }
-                        finally { _suppressSplitterEvents = false; }
+                        finally
+                        {
+                            _suppressSplitterEvents = false;
+
+                            // Hook SplitterMoved AFTER the ratio is applied and suppress is cleared.
+                            // Must be inside BeginInvoke so the layout pass is complete and
+                            // no spurious SplitterMoved events can fire with bogus distances.
+                            if (!_initialHudSplitApplied)
+                            {
+                                _initialHudSplitApplied = true;
+                                _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
+                            }
+                        }
                     }));
                 }
                 else
                 {
+                    System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested hide path: clearing suppress");
                     _suppressSplitterEvents = false;
                 }
             };
-
-            // Set the saved split ratio once the splitter has a valid height.
-            // SplitterMoved is hooked AFTER the initial ratio is applied (in OnHudSplitterSizeChanged)
-            // to prevent WinForms layout events from overwriting the saved ratio during init.
-            _terminalHudSplitter.SizeChanged += OnHudSplitterSizeChanged;
 
             // Create SplitContainer: terminal+hud (left, 75%) | agent panel (right, 25%)
             // Panel2MinSize is set in OnSplitterSizeChanged once the control has a valid width,
@@ -449,20 +473,24 @@ namespace MultiTerminal.Docking
 
             _embeddedAgentPanel.VisibilityRequested += (s, show) =>
             {
-                // Suppress splitter events during collapse/uncollapse to prevent
-                // WinForms' internal SplitterDistance adjustment from overwriting
-                // _agentSplitRatio and saving a wrong value to settings.
+                // INVARIANT: Panel2 must be collapsed when AgentSlotCount == 0.
+                // Always verify slot count — don't trust the 'show' parameter alone,
+                // because event races can fire show=true after slots were removed.
+                int slotCount = _embeddedAgentPanel.AgentSlotCount;
+                bool shouldShow = show && slotCount > 0;
+
+                bool alreadyCollapsed = _terminalAgentSplitter.Panel2Collapsed;
+                if (shouldShow && !alreadyCollapsed) return; // already showing
+                if (!shouldShow && alreadyCollapsed) return;  // already hidden
+
                 try
                 {
                     _suppressSplitterEvents = true;
-                    _terminalAgentSplitter.Panel2Collapsed = !show;
+                    _terminalAgentSplitter.Panel2Collapsed = !shouldShow;
                 }
                 finally { _suppressSplitterEvents = false; }
 
-                // Defer ratio application until after WinForms finishes its layout pass.
-                // Setting SplitterDistance immediately after uncollapsing is unreliable
-                // because WinForms resets it during its own layout processing.
-                if (show && _terminalAgentSplitter.Width > 0 && IsHandleCreated)
+                if (shouldShow && _terminalAgentSplitter.Width > 0 && IsHandleCreated)
                 {
                     BeginInvoke((Action)(() =>
                     {
@@ -480,12 +508,27 @@ namespace MultiTerminal.Docking
                         finally { _suppressSplitterEvents = false; }
                     }));
                 }
+
+                // Deferred safety check: verify collapsed state is still correct after
+                // WinForms finishes its layout pass. Catches races where another event
+                // toggles visibility between now and the next message pump cycle.
+                if (IsHandleCreated)
+                {
+                    BeginInvoke((Action)(() => EnforceAgentPanelInvariant()));
+                }
             };
 
             // Set the saved split ratio once the splitter has a valid width.
             // SplitterMoved is hooked AFTER the initial ratio is applied (in OnSplitterSizeChanged)
             // to prevent WinForms layout events from overwriting the saved ratio during init.
             _terminalAgentSplitter.SizeChanged += OnSplitterSizeChanged;
+
+            // Periodic sanity check: enforce Panel2 collapsed state matches actual slot count.
+            // This is the backstop that makes all event races harmless — even if every
+            // event handler misses, this timer catches stale panels within 2 seconds.
+            _agentPanelSanityTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+            _agentPanelSanityTimer.Tick += (s, e) => EnforceAgentPanelInvariant();
+            _agentPanelSanityTimer.Start();
 
             // Splitter handle between status bar and terminal area
             _statusBarSplitter = new Splitter
@@ -523,6 +566,17 @@ namespace MultiTerminal.Docking
             CloseButtonVisible = true;
             ShowHint = DockState.Document;
 
+            // Enable drag-and-drop from kanban board onto this terminal.
+            // Only set AllowDrop on the TerminalDocument itself — NOT on child
+            // controls. WebView2 surfaces (terminal, HUD) intercept WinForms
+            // drag events and break rendering. The OLE DoDragDrop initiated by
+            // TasksPanelControl will bubble up to this top-level handler.
+            AllowDrop = true;
+            DragEnter += OnTaskDragEnter;
+            DragOver += OnTaskDragOver;
+            DragLeave += OnTaskDragLeave;
+            DragDrop += OnTaskDragDrop;
+
             // Initialize tab header context menu
             InitializeTabContextMenu();
 
@@ -541,6 +595,7 @@ namespace MultiTerminal.Docking
             if (_initialSplitApplied) return;
             if (_terminalAgentSplitter.Width <= 0) return;
 
+            bool prevSuppress = _suppressSplitterEvents;
             try
             {
                 _suppressSplitterEvents = true;
@@ -562,35 +617,36 @@ namespace MultiTerminal.Docking
             {
                 // Ignore if splitter distance is out of bounds during layout
             }
-            finally { _suppressSplitterEvents = false; }
+            finally { _suppressSplitterEvents = prevSuppress; }
         }
 
-        /// <summary>
-        /// Sets the saved splitter ratio for terminal vs task HUD.
-        /// </summary>
-        private void OnHudSplitterSizeChanged(object sender, EventArgs e)
-        {
-            if (_initialHudSplitApplied) return;
-            if (_terminalHudSplitter.Height <= 0) return;
+        // OnHudSplitterSizeChanged removed — SplitterMoved is now hooked
+        // in VisibilityRequested on first HUD show, preventing spurious
+        // saves during startup layout when Panel2 is collapsed.
 
-            try
+        /// <summary>
+        /// Enforces the invariant: Panel2 collapsed iff AgentSlotCount == 0.
+        /// Called from deferred checks and the periodic sanity timer.
+        /// Safe to call at any time — idempotent and suppresses splitter events.
+        /// </summary>
+        private void EnforceAgentPanelInvariant()
+        {
+            if (_isDisposing || _terminalAgentSplitter == null || _embeddedAgentPanel == null) return;
+
+            bool shouldBeCollapsed = _embeddedAgentPanel.AgentSlotCount == 0;
+            bool isCollapsed = _terminalAgentSplitter.Panel2Collapsed;
+
+            if (shouldBeCollapsed != isCollapsed)
             {
-                _suppressSplitterEvents = true;
-                int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
-                if (distance > _terminalHudSplitter.Panel1MinSize &&
-                    distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
+                bool prevSuppress = _suppressSplitterEvents;
+                try
                 {
-                    _terminalHudSplitter.SplitterDistance = distance;
-                    _initialHudSplitApplied = true;
-                    // Now safe to listen for user-initiated splitter drags
-                    _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
+                    _suppressSplitterEvents = true;
+                    _terminalAgentSplitter.Panel2Collapsed = shouldBeCollapsed;
                 }
+                catch { }
+                finally { _suppressSplitterEvents = prevSuppress; }
             }
-            catch
-            {
-                // Ignore if splitter distance is out of bounds during layout
-            }
-            finally { _suppressSplitterEvents = false; }
         }
 
         /// <summary>
@@ -611,10 +667,12 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnHudSplitterMoved(object sender, SplitterEventArgs e)
         {
+            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] OnHudSplitterMoved: suppress={_suppressSplitterEvents}, collapsed={_terminalHudSplitter?.Panel2Collapsed}, height={_terminalHudSplitter?.Height}, dist={_terminalHudSplitter?.SplitterDistance}, caller={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name}");
             if (_suppressSplitterEvents || _isDisposing) return;
             if (_terminalHudSplitter == null || _terminalHudSplitter.Panel2Collapsed) return;
             if (_terminalHudSplitter.Height <= 0) return;
             double ratio = (double)_terminalHudSplitter.SplitterDistance / _terminalHudSplitter.Height;
+            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] OnHudSplitterMoved SAVING ratio={ratio:F4} (dist={_terminalHudSplitter.SplitterDistance}, height={_terminalHudSplitter.Height})");
             _hudSplitRatio = ratio;
             HudSplitRatioChanged?.Invoke(this, ratio);
         }
@@ -740,7 +798,8 @@ namespace MultiTerminal.Docking
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
+        /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
         {
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -766,7 +825,7 @@ namespace MultiTerminal.Docking
             }
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _terminal.Start returned");
 
             // Update status bar after terminal starts
@@ -858,12 +917,40 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Gets a browser tab by ID, or null if not found.
+        /// </summary>
+        public BrowserTabPage GetBrowserTab(string tabId)
+        {
+            return _hudTabContainer?.GetBrowserTab(tabId);
+        }
+
+        /// <summary>
+        /// Force-collapse the agent panel. Called by MainForm when it knows all slots
+        /// have been removed but the event-driven collapse didn't fire.
+        /// </summary>
+        public void ForceCollapseAgentPanel()
+        {
+            if (_isDisposing || _terminalAgentSplitter == null) return;
+            if (_terminalAgentSplitter.Panel2Collapsed) return; // already collapsed
+            bool prevSuppress = _suppressSplitterEvents;
+            try
+            {
+                _suppressSplitterEvents = true;
+                _terminalAgentSplitter.Panel2Collapsed = true;
+            }
+            catch { }
+            finally { _suppressSplitterEvents = prevSuppress; }
+        }
+
+        /// <summary>
         /// Sets the agent panel split ratio and applies it immediately if the splitter is visible.
         /// </summary>
         public void ApplyAgentSplitRatio(double ratio)
         {
             _agentSplitRatio = ratio;
+            if (_isDisposing || _terminalAgentSplitter == null) return;
             if (_terminalAgentSplitter.Panel2Collapsed || _terminalAgentSplitter.Width <= 0) return;
+            bool prevSuppress = _suppressSplitterEvents;
             try
             {
                 _suppressSplitterEvents = true;
@@ -875,7 +962,7 @@ namespace MultiTerminal.Docking
                 }
             }
             catch { }
-            finally { _suppressSplitterEvents = false; }
+            finally { _suppressSplitterEvents = prevSuppress; }
         }
 
         /// <summary>
@@ -884,11 +971,18 @@ namespace MultiTerminal.Docking
         public void ApplyHudSplitRatio(double ratio)
         {
             _hudSplitRatio = ratio;
+            if (_isDisposing || _terminalHudSplitter == null) return;
+            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] ApplyHudSplitRatio: ratio={ratio:F4}, collapsed={_terminalHudSplitter.Panel2Collapsed}, height={_terminalHudSplitter.Height}");
             if (_terminalHudSplitter.Panel2Collapsed || _terminalHudSplitter.Height <= 0) return;
+            bool prevSuppress = _suppressSplitterEvents;
             try
             {
                 _suppressSplitterEvents = true;
+                int maxDistance = _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize;
                 int distance = (int)(_terminalHudSplitter.Height * ratio);
+                // Clamp to respect Panel2MinSize
+                if (distance > maxDistance)
+                    distance = maxDistance;
                 if (distance > _terminalHudSplitter.Panel1MinSize &&
                     distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
                 {
@@ -896,7 +990,7 @@ namespace MultiTerminal.Docking
                 }
             }
             catch { }
-            finally { _suppressSplitterEvents = false; }
+            finally { _suppressSplitterEvents = prevSuppress; }
         }
 
         /// <summary>Fired when user drags the agent panel splitter. Arg is the new ratio.</summary>
@@ -904,6 +998,15 @@ namespace MultiTerminal.Docking
 
         /// <summary>Whether the Task HUD panel is currently visible.</summary>
         public bool IsHudVisible => _terminalHudSplitter != null && !_terminalHudSplitter.Panel2Collapsed;
+
+        /// <summary>
+        /// Permanently suppresses splitter events to prevent bogus ratio saves during shutdown.
+        /// </summary>
+        public void FreezeLayout()
+        {
+            _suppressSplitterEvents = true;
+            _isDisposing = true;
+        }
 
         /// <summary>
         /// Manually toggles the Task HUD panel visibility.
@@ -915,6 +1018,7 @@ namespace MultiTerminal.Docking
 
             bool show = _terminalHudSplitter.Panel2Collapsed; // collapsed → show it
             double ratioToApply = _hudSplitRatio;
+            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] ToggleHud: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}");
 
             _suppressSplitterEvents = true;
             _terminalHudSplitter.Panel2Collapsed = !show;
@@ -925,7 +1029,11 @@ namespace MultiTerminal.Docking
                 {
                     try
                     {
+                        int maxDistance = _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize;
                         int distance = (int)(_terminalHudSplitter.Height * ratioToApply);
+                        // Clamp to respect Panel2MinSize
+                        if (distance > maxDistance)
+                            distance = maxDistance;
                         if (distance > _terminalHudSplitter.Panel1MinSize)
                             _terminalHudSplitter.SplitterDistance = distance;
                         _hudSplitRatio = ratioToApply;
@@ -1568,6 +1676,91 @@ namespace MultiTerminal.Docking
             }
         }
 
+        // --- Drag-and-drop from kanban board ---
+
+        private Color? _originalBackColor;
+
+        private bool TryParseTaskDragData(IDataObject data, out string taskId, out string title)
+        {
+            // Primary: use side-channel from TasksPanelControl (WebView2 postMessage)
+            // WebView2 doesn't reliably pass HTML5 dataTransfer to WinForms OLE drag-drop
+            if (TasksPanelControl.TryGetPendingDragData(out taskId, out title))
+                return true;
+
+            // Fallback: try OLE data (in case it works on some WebView2 versions)
+            taskId = null;
+            title = null;
+            if (!data.GetDataPresent(DataFormats.Text)) return false;
+
+            var text = data.GetData(DataFormats.Text) as string;
+            if (string.IsNullOrEmpty(text)) return false;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("source", out var src) && src.GetString() == "multiterminal-kanban")
+                {
+                    taskId = root.GetProperty("taskId").GetString();
+                    title = root.TryGetProperty("title", out var t) ? t.GetString() : "";
+                    return !string.IsNullOrEmpty(taskId);
+                }
+            }
+            catch { /* not JSON or wrong shape — not a kanban drag */ }
+
+            return false;
+        }
+
+        private void OnTaskDragEnter(object sender, DragEventArgs e)
+        {
+            if (TryParseTaskDragData(e.Data, out _, out _))
+            {
+                e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
+                ShowDropHighlight();
+            }
+            else
+            {
+                e.Effect = DragDropEffects.None;
+            }
+        }
+
+        private void OnTaskDragOver(object sender, DragEventArgs e)
+        {
+            e.Effect = TryParseTaskDragData(e.Data, out _, out _)
+                ? DragDropEffects.Move | DragDropEffects.Copy
+                : DragDropEffects.None;
+        }
+
+        private void OnTaskDragLeave(object sender, EventArgs e)
+        {
+            HideDropHighlight();
+        }
+
+        private void OnTaskDragDrop(object sender, DragEventArgs e)
+        {
+            HideDropHighlight();
+
+            if (TryParseTaskDragData(e.Data, out var taskId, out var title))
+            {
+                TasksPanelControl.ClearPendingDragData();
+                TaskDropped?.Invoke(this, new TaskDroppedEventArgs(taskId, title));
+            }
+        }
+
+        private void ShowDropHighlight()
+        {
+            if (_originalBackColor.HasValue) return; // already highlighted
+            _originalBackColor = BackColor;
+            BackColor = Color.FromArgb(40, 74, 144, 217); // subtle blue tint
+        }
+
+        private void HideDropHighlight()
+        {
+            if (!_originalBackColor.HasValue) return;
+            BackColor = _originalBackColor.Value;
+            _originalBackColor = null;
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
@@ -1575,6 +1768,12 @@ namespace MultiTerminal.Docking
                 // Prevent stray splitter events from saving bogus ratios during teardown
                 _isDisposing = true;
                 _suppressSplitterEvents = true;
+
+                // Unregister terminal from broker so the team leader name is released
+                if (_messageBroker != null && !string.IsNullOrEmpty(_docId))
+                {
+                    _messageBroker.UnregisterTerminal(_docId);
+                }
 
                 StopStatusLinePolling();
 
@@ -1597,7 +1796,6 @@ namespace MultiTerminal.Docking
                 // to prevent WinForms layout changes from firing save events
                 if (_terminalHudSplitter != null)
                 {
-                    _terminalHudSplitter.SizeChanged -= OnHudSplitterSizeChanged;
                     _terminalHudSplitter.SplitterMoved -= OnHudSplitterMoved;
                 }
 
@@ -1618,6 +1816,13 @@ namespace MultiTerminal.Docking
                 {
                     _statusBar.Dispose();
                     _statusBar = null;
+                }
+
+                if (_agentPanelSanityTimer != null)
+                {
+                    _agentPanelSanityTimer.Stop();
+                    _agentPanelSanityTimer.Dispose();
+                    _agentPanelSanityTimer = null;
                 }
 
                 if (_embeddedAgentPanel != null)
@@ -1689,6 +1894,20 @@ namespace MultiTerminal.Docking
         public DirectoryChangedEventArgs(string directory)
         {
             Directory = directory;
+        }
+    }
+
+    /// <summary>
+    /// Event args for a kanban task dropped onto a terminal.
+    /// </summary>
+    public class TaskDroppedEventArgs : EventArgs
+    {
+        public string TaskId { get; }
+        public string Title { get; }
+        public TaskDroppedEventArgs(string taskId, string title)
+        {
+            TaskId = taskId;
+            Title = title;
         }
     }
 }
