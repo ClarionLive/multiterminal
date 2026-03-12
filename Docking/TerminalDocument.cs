@@ -30,6 +30,8 @@ namespace MultiTerminal.Docking
         private TerminalControl _terminal;
         private TerminalStatusBarRenderer _statusBar;
         private Splitter _statusBarSplitter;
+        private Panel _dropZone;
+        private Label _dropZoneLabel;
         private HudTabContainer _hudTabContainer;
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
@@ -542,8 +544,41 @@ namespace MultiTerminal.Docking
             };
             _statusBarSplitter.SplitterMoved += OnStatusBarSplitterMoved;
 
-            // Layout order: _terminalAgentSplitter (Fill) | _statusBarSplitter (Top) | _statusBar (Top)
+            // Drop zone: native WinForms panel below the status bar for reliable
+            // kanban drag-and-drop. WebView2 surfaces intercept WinForms drag events,
+            // so we use a dedicated native panel instead of document-level AllowDrop.
+            _dropZoneLabel = new Label
+            {
+                Text = "\u2193 Drop task here",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 9f, FontStyle.Regular),
+                ForeColor = Color.FromArgb(140, 140, 160),
+                BackColor = Color.Transparent,
+                Cursor = Cursors.Default
+            };
+            _dropZone = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 26,
+                BackColor = Color.FromArgb(35, 35, 50),
+                Padding = new Padding(0),
+                AllowDrop = true
+            };
+            _dropZone.Controls.Add(_dropZoneLabel);
+            _dropZoneLabel.AllowDrop = true;
+            _dropZoneLabel.DragEnter += OnTaskDragEnter;
+            _dropZoneLabel.DragOver += OnTaskDragOver;
+            _dropZoneLabel.DragLeave += OnTaskDragLeave;
+            _dropZoneLabel.DragDrop += OnTaskDragDrop;
+            _dropZone.DragEnter += OnTaskDragEnter;
+            _dropZone.DragOver += OnTaskDragOver;
+            _dropZone.DragLeave += OnTaskDragLeave;
+            _dropZone.DragDrop += OnTaskDragDrop;
+
+            // Layout order: _terminalAgentSplitter (Fill) | _dropZone (Top) | _statusBarSplitter (Top) | _statusBar (Top)
             Controls.Add(_terminalAgentSplitter);
+            Controls.Add(_dropZone);
             Controls.Add(_statusBarSplitter);
             Controls.Add(_statusBar);
 
@@ -565,17 +600,6 @@ namespace MultiTerminal.Docking
             CloseButton = true;
             CloseButtonVisible = true;
             ShowHint = DockState.Document;
-
-            // Enable drag-and-drop from kanban board onto this terminal.
-            // Only set AllowDrop on the TerminalDocument itself — NOT on child
-            // controls. WebView2 surfaces (terminal, HUD) intercept WinForms
-            // drag events and break rendering. The OLE DoDragDrop initiated by
-            // TasksPanelControl will bubble up to this top-level handler.
-            AllowDrop = true;
-            DragEnter += OnTaskDragEnter;
-            DragOver += OnTaskDragOver;
-            DragLeave += OnTaskDragLeave;
-            DragDrop += OnTaskDragDrop;
 
             // Initialize tab header context menu
             InitializeTabContextMenu();
@@ -844,6 +868,17 @@ namespace MultiTerminal.Docking
             _hudTabContainer?.ApplyTheme(theme.IsDark);
             _embeddedAgentPanel?.ApplyTheme(theme.IsDark);
             _startScreen?.ApplyTheme(theme.IsDark);
+
+            // Theme the drop zone
+            if (_dropZone != null)
+            {
+                _dropZone.BackColor = theme.IsDark
+                    ? Color.FromArgb(35, 35, 50)
+                    : Color.FromArgb(235, 235, 245);
+                _dropZoneLabel.ForeColor = theme.IsDark
+                    ? Color.FromArgb(140, 140, 160)
+                    : Color.FromArgb(120, 120, 140);
+            }
 
             // Theme the splitter handle
             if (_terminalAgentSplitter != null)
@@ -1750,14 +1785,18 @@ namespace MultiTerminal.Docking
         private void ShowDropHighlight()
         {
             if (_originalBackColor.HasValue) return; // already highlighted
-            _originalBackColor = BackColor;
-            BackColor = Color.FromArgb(40, 74, 144, 217); // subtle blue tint
+            _originalBackColor = _dropZone.BackColor;
+            _dropZone.BackColor = Color.FromArgb(30, 80, 160);
+            _dropZoneLabel.ForeColor = Color.White;
+            _dropZoneLabel.Text = "\u2193 Drop to assign task";
         }
 
         private void HideDropHighlight()
         {
             if (!_originalBackColor.HasValue) return;
-            BackColor = _originalBackColor.Value;
+            _dropZone.BackColor = _originalBackColor.Value;
+            _dropZoneLabel.ForeColor = Color.FromArgb(140, 140, 160);
+            _dropZoneLabel.Text = "\u2193 Drop task here";
             _originalBackColor = null;
         }
 
@@ -1803,6 +1842,13 @@ namespace MultiTerminal.Docking
                 {
                     _hudTabContainer.Dispose();
                     _hudTabContainer = null;
+                }
+
+                if (_dropZone != null)
+                {
+                    _dropZone.Dispose();
+                    _dropZone = null;
+                    _dropZoneLabel = null;
                 }
 
                 if (_statusBarSplitter != null)
