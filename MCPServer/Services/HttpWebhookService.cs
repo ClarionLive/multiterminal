@@ -71,7 +71,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 _cancellationTokenSource.Cancel();
                 _listener.Stop();
-                _listenerTask?.Wait(TimeSpan.FromSeconds(5));
+                _listenerTask?.Wait(TimeSpan.FromSeconds(2));
                 System.Diagnostics.Trace.WriteLine("[HttpWebhookService] Stopped");
             }
         }

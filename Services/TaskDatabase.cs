@@ -8,7 +8,7 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// SQLite database service for persisting Kanban tasks.
-    /// Database is stored at %APPDATA%\multiterminal\tasks.db
+    /// Database is stored at %APPDATA%\multiterminal\multiterminal.db
     /// </summary>
     public class TaskDatabase : IDisposable
     {
@@ -29,7 +29,7 @@ namespace MultiTerminal.Services
 
             string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string folder = Path.Combine(appData, "multiterminal");
-            return Path.Combine(folder, "tasks.db");
+            return Path.Combine(folder, "multiterminal.db");
         }
 
         /// <summary>
@@ -45,7 +45,7 @@ namespace MultiTerminal.Services
                 Directory.CreateDirectory(folder);
             }
 
-            _databasePath = Path.Combine(folder, "tasks.db");
+            _databasePath = Path.Combine(folder, "multiterminal.db");
             InitializeDatabase();
         }
 
@@ -82,6 +82,7 @@ namespace MultiTerminal.Services
             MigrateAddOnlineStatusToProfiles();
             MigrateAddContinuationNotesToTasks();
             MigrateAddAutoStatusToTasks();
+            MigrateAddReviewNotesToTasks();
             MigrateAddUserInbox();
             MigrateAddProjectIdsToProfiles();
             MigrateAddTaskAttachments();
@@ -89,6 +90,15 @@ namespace MultiTerminal.Services
             MigrateAddTeamLeadToProfiles();
             MigrateAddSessionLineage();
             MigrateAddKnowledgeBase();
+            MigrateAddTaskRelationships();
+            MigrateAddTaskFileLinks();
+            MigrateAddOwnerProfile();
+            MigrateAddAgentInvocations();
+            MigrateAddTaskReports();
+            MigrateAddNotificationEvents();
+
+            // Seed default agent profiles on first run
+            SeedDefaultProfiles();
 
             // Check FTS5 support after all tables are created
             _fts5Available = CheckFts5Available();
@@ -258,6 +268,15 @@ namespace MultiTerminal.Services
                 CREATE INDEX IF NOT EXISTS idx_session_messages_task ON session_messages(task_id);
                 CREATE INDEX IF NOT EXISTS idx_session_messages_role ON session_messages(role);
 
+                -- Session agent map: written by session-status-hook to record which agent owns each session
+                CREATE TABLE IF NOT EXISTS session_agent_map (
+                    session_id TEXT PRIMARY KEY,
+                    agent_name TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    ended_at TEXT
+                );
+
                 -- Knowledge entries: institutional memory facts, decisions, and patterns
                 CREATE TABLE IF NOT EXISTS knowledge_entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -300,6 +319,46 @@ namespace MultiTerminal.Services
 
                 CREATE INDEX IF NOT EXISTS idx_digests_project ON code_digests(project_id);
                 CREATE INDEX IF NOT EXISTS idx_digests_hash ON code_digests(file_hash);
+
+                -- Chat messages: inter-terminal MCP communication history
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT UNIQUE NOT NULL,
+                    from_terminal TEXT NOT NULL,
+                    to_terminal TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    is_broadcast INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_terminals ON chat_messages(from_terminal, to_terminal);
+
+                CREATE TABLE IF NOT EXISTS task_relationships (
+                    id TEXT PRIMARY KEY,
+                    source_task_id TEXT NOT NULL,
+                    target_task_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    created_by TEXT,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(source_task_id, target_task_id, type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_rel_source ON task_relationships(source_task_id);
+                CREATE INDEX IF NOT EXISTS idx_task_rel_target ON task_relationships(target_task_id);
+
+                CREATE TABLE IF NOT EXISTS task_file_links (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    description TEXT,
+                    line_start INTEGER,
+                    line_end INTEGER,
+                    added_by TEXT,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(task_id, file_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_file_links(task_id);
             ";
 
             using var command = new SQLiteCommand(schema, _connection);
@@ -949,6 +1008,34 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Migration: Add review_notes column for inline code review comments from the diff viewer.
+        /// </summary>
+        private void MigrateAddReviewNotesToTasks()
+        {
+            bool hasReviewNotes = false;
+            using (var pragmaCmd = new SQLiteCommand("PRAGMA table_info(tasks)", _connection))
+            using (var reader = pragmaCmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    var columnName = reader.GetString(1);
+                    if (columnName.Equals("review_notes", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasReviewNotes = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasReviewNotes)
+            {
+                const string sql = "ALTER TABLE tasks ADD COLUMN review_notes TEXT";
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
         /// Load all tasks from the database, including helpers.
         /// </summary>
         public List<KanbanTask> LoadAllTasks()
@@ -956,7 +1043,7 @@ namespace MultiTerminal.Services
             var tasks = new List<KanbanTask>();
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
                 FROM tasks
                 ORDER BY created_at ASC
             ";
@@ -981,7 +1068,7 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Helper method to read a KanbanTask from a data reader.
-        /// Expects columns: id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+        /// Expects columns: id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
         /// </summary>
         private static KanbanTask ReadTaskFromReader(SQLiteDataReader reader)
         {
@@ -1008,7 +1095,8 @@ namespace MultiTerminal.Services
                 TestResults = reader.IsDBNull(19) ? null : reader.GetString(19),
                 ImplementationChecklistJson = reader.IsDBNull(20) ? "[]" : reader.GetString(20),
                 ContinuationNotes = reader.IsDBNull(21) ? null : reader.GetString(21),
-                AutoStatus = !reader.IsDBNull(22) && reader.GetInt32(22) != 0
+                AutoStatus = !reader.IsDBNull(22) && reader.GetInt32(22) != 0,
+                ReviewNotes = reader.IsDBNull(23) ? null : reader.GetString(23)
             };
         }
 
@@ -1018,8 +1106,8 @@ namespace MultiTerminal.Services
         public void SaveTask(KanbanTask task)
         {
             const string sql = @"
-                INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status)
-                VALUES (@id, @title, @description, @status, @assignee, @createdBy, @createdAt, @updatedAt, @projectId, @subStatus, @pausedAt, @flaggedStaleAt, @staleLevel, @staleNotifiedAt, @staleResponse, @priority, @checklistJson, @plan, @implementationSummary, @testResults, @implementationChecklistJson, @continuationNotes, @autoStatus)
+                INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes)
+                VALUES (@id, @title, @description, @status, @assignee, @createdBy, @createdAt, @updatedAt, @projectId, @subStatus, @pausedAt, @flaggedStaleAt, @staleLevel, @staleNotifiedAt, @staleResponse, @priority, @checklistJson, @plan, @implementationSummary, @testResults, @implementationChecklistJson, @continuationNotes, @autoStatus, @reviewNotes)
                 ON CONFLICT(id) DO UPDATE SET
                     title = @title,
                     description = @description,
@@ -1040,6 +1128,7 @@ namespace MultiTerminal.Services
                     implementation_checklist_json = @implementationChecklistJson,
                     continuation_notes = @continuationNotes,
                     auto_status = @autoStatus,
+                    review_notes = @reviewNotes,
                     updated_at = @updatedAt
             ";
 
@@ -1067,6 +1156,7 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@implementationChecklistJson", task.ImplementationChecklistJson ?? "[]");
             command.Parameters.AddWithValue("@continuationNotes", (object)task.ContinuationNotes ?? DBNull.Value);
             command.Parameters.AddWithValue("@autoStatus", task.AutoStatus ? 1 : 0);
+            command.Parameters.AddWithValue("@reviewNotes", (object)task.ReviewNotes ?? DBNull.Value);
 
             command.ExecuteNonQuery();
         }
@@ -1076,12 +1166,152 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteTask(string taskId)
         {
+            // Cascade-delete any relationships and file links involving this task
+            DeleteRelationshipsForTask(taskId);
+            DeleteFileLinksForTask(taskId);
+
             const string sql = "DELETE FROM tasks WHERE id = @id";
 
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@id", taskId);
             command.ExecuteNonQuery();
         }
+
+        #region Task Relationships
+
+        public void AddRelationship(string id, string sourceTaskId, string targetTaskId, string type, string createdBy)
+        {
+            const string sql = @"
+                INSERT OR IGNORE INTO task_relationships (id, source_task_id, target_task_id, type, created_by, created_at)
+                VALUES (@id, @sourceTaskId, @targetTaskId, @type, @createdBy, @createdAt)
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.Parameters.AddWithValue("@sourceTaskId", sourceTaskId);
+            cmd.Parameters.AddWithValue("@targetTaskId", targetTaskId);
+            cmd.Parameters.AddWithValue("@type", type);
+            cmd.Parameters.AddWithValue("@createdBy", createdBy ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
+
+        public void RemoveRelationshipsBetween(string taskId1, string taskId2)
+        {
+            const string sql = @"
+                DELETE FROM task_relationships
+                WHERE (source_task_id = @id1 AND target_task_id = @id2)
+                   OR (source_task_id = @id2 AND target_task_id = @id1)
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id1", taskId1);
+            cmd.Parameters.AddWithValue("@id2", taskId2);
+            cmd.ExecuteNonQuery();
+        }
+
+        public List<MCPServer.Models.TaskRelationship> GetRelationshipsForTask(string taskId)
+        {
+            const string sql = @"
+                SELECT id, source_task_id, target_task_id, type, created_by, created_at
+                FROM task_relationships
+                WHERE source_task_id = @taskId OR target_task_id = @taskId
+                ORDER BY created_at
+            ";
+            var results = new List<MCPServer.Models.TaskRelationship>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new MCPServer.Models.TaskRelationship
+                {
+                    Id = reader.GetString(0),
+                    SourceTaskId = reader.GetString(1),
+                    TargetTaskId = reader.GetString(2),
+                    Type = reader.GetString(3),
+                    CreatedBy = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    CreatedAt = DateTime.Parse(reader.GetString(5))
+                });
+            }
+            return results;
+        }
+
+        public void DeleteRelationshipsForTask(string taskId)
+        {
+            const string sql = "DELETE FROM task_relationships WHERE source_task_id = @taskId OR target_task_id = @taskId";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.ExecuteNonQuery();
+        }
+
+        #endregion
+
+        #region Task File Links
+
+        public void AddFileLink(string id, string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy)
+        {
+            const string sql = @"
+                INSERT OR IGNORE INTO task_file_links (id, task_id, file_path, description, line_start, line_end, added_by, created_at)
+                VALUES (@id, @taskId, @filePath, @description, @lineStart, @lineEnd, @addedBy, @createdAt)
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@filePath", filePath);
+            cmd.Parameters.AddWithValue("@description", description ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@lineStart", lineStart.HasValue ? (object)lineStart.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@lineEnd", lineEnd.HasValue ? (object)lineEnd.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@addedBy", addedBy ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
+
+        public void RemoveFileLink(string taskId, string filePath)
+        {
+            const string sql = "DELETE FROM task_file_links WHERE task_id = @taskId AND file_path = @filePath";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@filePath", filePath);
+            cmd.ExecuteNonQuery();
+        }
+
+        public List<MCPServer.Models.TaskFileLink> GetFileLinksForTask(string taskId)
+        {
+            const string sql = @"
+                SELECT id, task_id, file_path, description, line_start, line_end, added_by, created_at
+                FROM task_file_links
+                WHERE task_id = @taskId
+                ORDER BY created_at
+            ";
+            var results = new List<MCPServer.Models.TaskFileLink>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new MCPServer.Models.TaskFileLink
+                {
+                    Id = reader.GetString(0),
+                    TaskId = reader.GetString(1),
+                    FilePath = reader.GetString(2),
+                    Description = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    LineStart = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4),
+                    LineEnd = reader.IsDBNull(5) ? (int?)null : reader.GetInt32(5),
+                    AddedBy = reader.IsDBNull(6) ? null : reader.GetString(6),
+                    CreatedAt = DateTime.Parse(reader.GetString(7))
+                });
+            }
+            return results;
+        }
+
+        public void DeleteFileLinksForTask(string taskId)
+        {
+            const string sql = "DELETE FROM task_file_links WHERE task_id = @taskId";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.ExecuteNonQuery();
+        }
+
+        #endregion
 
         /// <summary>
         /// Update a task's title and description.
@@ -1847,13 +2077,40 @@ namespace MultiTerminal.Services
         public KanbanTask GetTask(string taskId)
         {
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
                 FROM tasks
                 WHERE id = @taskId
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = command.ExecuteReader();
+
+            if (reader.Read())
+            {
+                return ReadTaskFromReader(reader);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Get the active in-progress task for a specific agent.
+        /// Returns null if no active task found.
+        /// </summary>
+        public KanbanTask GetActiveTaskForAgent(string agentName)
+        {
+            const string sql = @"
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                FROM tasks
+                WHERE assignee = @agentName
+                  AND status = 'in_progress'
+                  AND sub_status = 'active'
+                LIMIT 1
+            ";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@agentName", agentName);
             using var reader = command.ExecuteReader();
 
             if (reader.Read())
@@ -1878,7 +2135,7 @@ namespace MultiTerminal.Services
             var sevenDaysAgo = DateTime.UtcNow.AddDays(-7);
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
                 FROM tasks
                 WHERE sub_status = 'paused'
                   AND paused_at < @sevenDaysAgo
@@ -1908,7 +2165,7 @@ namespace MultiTerminal.Services
             var fourteenDaysAgo = DateTime.UtcNow.AddDays(-14);
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
                 FROM tasks
                 WHERE sub_status = 'paused'
                   AND paused_at < @fourteenDaysAgo
@@ -2236,6 +2493,108 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@isTeamLead", profile.IsTeamLead ? 1 : 0);
 
             command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Seed default agent profiles if the profiles table is empty.
+        /// Only runs on first launch — existing profiles are never overwritten.
+        /// </summary>
+        private void SeedDefaultProfiles()
+        {
+            const string countSql = "SELECT COUNT(*) FROM team_member_profiles";
+            using var countCmd = new SQLiteCommand(countSql, _connection);
+            var count = Convert.ToInt64(countCmd.ExecuteScalar());
+            if (count > 0) return;
+
+            var now = DateTime.UtcNow;
+            var defaults = new[]
+            {
+                new TeamMemberProfile
+                {
+                    Id = "Alice",
+                    DisplayName = "Alice",
+                    Role = "Backend Engineer",
+                    Bio = "Specializes in services, databases, APIs, and server-side logic. Methodical and thorough.",
+                    SkillsJson = "[\"C#\",\".NET\",\"SQL\",\"REST APIs\",\"SQLite\",\"Entity Framework\",\"Performance Optimization\"]",
+                    InterestsJson = "[\"Clean Architecture\",\"Database Design\",\"Testing\"]",
+                    PreferredModel = "sonnet",
+                    IsTeamLead = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                },
+                new TeamMemberProfile
+                {
+                    Id = "Bob",
+                    DisplayName = "Bob",
+                    Role = "Frontend Engineer",
+                    Bio = "Focuses on UI, user experience, HTML/CSS/JS panels, and WebView2 integration. Creative and detail-oriented.",
+                    SkillsJson = "[\"HTML\",\"CSS\",\"JavaScript\",\"WebView2\",\"WinForms\",\"WPF\",\"UI/UX Design\"]",
+                    InterestsJson = "[\"Responsive Design\",\"Accessibility\",\"Animation\"]",
+                    PreferredModel = "sonnet",
+                    IsTeamLead = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                },
+                new TeamMemberProfile
+                {
+                    Id = "Charlie",
+                    DisplayName = "Charlie",
+                    Role = "DevOps Engineer",
+                    Bio = "Handles builds, deployments, CI/CD, installers, hooks, and infrastructure. Practical and systematic.",
+                    SkillsJson = "[\"PowerShell\",\"Bash\",\"Git\",\"CI/CD\",\"Inno Setup\",\"Node.js\",\"Docker\"]",
+                    InterestsJson = "[\"Automation\",\"Monitoring\",\"Reliability\"]",
+                    PreferredModel = "sonnet",
+                    IsTeamLead = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                },
+                new TeamMemberProfile
+                {
+                    Id = "Diana",
+                    DisplayName = "Diana",
+                    Role = "Software Architect",
+                    Bio = "Designs system architecture, data models, integration patterns, and cross-cutting concerns. Strategic thinker.",
+                    SkillsJson = "[\"System Design\",\"Design Patterns\",\"C#\",\"Data Modeling\",\"API Design\",\"Refactoring\"]",
+                    InterestsJson = "[\"Scalability\",\"Code Quality\",\"Domain-Driven Design\"]",
+                    PreferredModel = "sonnet",
+                    IsTeamLead = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                },
+                new TeamMemberProfile
+                {
+                    Id = "Eve",
+                    DisplayName = "Eve",
+                    Role = "QA Engineer",
+                    Bio = "Designs test strategies, writes test cases, validates edge cases, and ensures quality. Meticulous and skeptical.",
+                    SkillsJson = "[\"Test Design\",\"Integration Testing\",\"Edge Cases\",\"Regression Testing\",\"Bug Triage\",\"Acceptance Criteria\"]",
+                    InterestsJson = "[\"Quality Assurance\",\"Test Automation\",\"Exploratory Testing\"]",
+                    PreferredModel = "sonnet",
+                    IsTeamLead = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                },
+                new TeamMemberProfile
+                {
+                    Id = "Frank",
+                    DisplayName = "Frank",
+                    Role = "Technical Writer",
+                    Bio = "Creates documentation, API references, user guides, and architectural decision records. Clear and concise communicator.",
+                    SkillsJson = "[\"Technical Writing\",\"Markdown\",\"API Documentation\",\"Architecture Docs\",\"User Guides\",\"Diagrams\"]",
+                    InterestsJson = "[\"Developer Experience\",\"Knowledge Management\",\"Onboarding\"]",
+                    PreferredModel = "sonnet",
+                    IsTeamLead = true,
+                    CreatedAt = now,
+                    UpdatedAt = now
+                }
+            };
+
+            foreach (var profile in defaults)
+            {
+                SaveProfile(profile);
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[TaskDatabase] Seeded {defaults.Length} default agent profiles");
         }
 
         /// <summary>
@@ -3186,6 +3545,36 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Looks up the agent name for a session from the session_agent_map table.
+        /// Returns null if no mapping exists.
+        /// </summary>
+        public string GetSessionAgentName(string sessionId)
+        {
+            const string sql = "SELECT agent_name FROM session_agent_map WHERE session_id = @sessionId";
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            var result = command.ExecuteScalar();
+            return result as string;
+        }
+
+        /// <summary>
+        /// Returns the set of session IDs that are currently marked as active
+        /// in the session_agent_map table (is_active = 1).
+        /// </summary>
+        public HashSet<string> GetActiveSessionIds()
+        {
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            const string sql = "SELECT session_id FROM session_agent_map WHERE is_active = 1";
+            using var command = new SQLiteCommand(sql, _connection);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                ids.Add(reader.GetString(0));
+            }
+            return ids;
+        }
+
+        /// <summary>
         /// Gets all session lineage records linked to a task, ordered newest first.
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByTask(string taskId)
@@ -3454,25 +3843,70 @@ namespace MultiTerminal.Services
         /// the given folder prefix. Ordered by ended_at DESC, then created_at DESC.
         /// Returns null if no matching record is found.
         /// </summary>
-        public SessionLineageRecord GetMostRecentSessionByFolder(string claudeProjectFolder)
+        public SessionLineageRecord GetMostRecentSessionByFolder(string claudeProjectFolder, string agentName = null)
         {
             // Normalize: ensure trailing separator so we don't match sibling folders sharing a prefix
+            string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+
+            string sql = @"
+                SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
+                       summary, session_file_path, started_at, ended_at, created_at
+                FROM session_lineage
+                WHERE session_file_path LIKE @folder || '%'
+                  AND session_type != 'subagent'";
+
+            if (!string.IsNullOrEmpty(agentName))
+                sql += " AND agent_name = @agentName";
+
+            sql += @"
+                ORDER BY ended_at DESC, created_at DESC
+                LIMIT 1";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@folder", folderPrefix);
+            if (!string.IsNullOrEmpty(agentName))
+                command.Parameters.AddWithValue("@agentName", agentName);
+            using var reader = command.ExecuteReader();
+
+            return reader.Read() ? ReadSessionLineageFromReader(reader) : null;
+        }
+
+        /// <summary>
+        /// Returns sessions that have no summary, excluding subagent sessions.
+        /// Ordered by ended_at DESC (most recent first). Limited to a configurable count.
+        /// </summary>
+        public List<SessionLineageRecord> GetUnsummarizedSessions(string claudeProjectFolder, int limit = 10)
+        {
+            var results = new List<SessionLineageRecord>();
+
             string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
 
             const string sql = @"
                 SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
                        summary, session_file_path, started_at, ended_at, created_at
                 FROM session_lineage
-                WHERE session_file_path LIKE @folder || '%'
+                WHERE (summary IS NULL OR summary = '')
+                  AND session_type != 'subagent'
+                  AND session_file_path LIKE @folder || '%'
+                  AND COALESCE(ended_at, started_at, created_at) >= @cutoff
                 ORDER BY ended_at DESC, created_at DESC
-                LIMIT 1
+                LIMIT @limit
             ";
+
+            var cutoff = DateTime.UtcNow.AddDays(-14).ToString("O");
 
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@folder", folderPrefix);
-            using var reader = command.ExecuteReader();
+            command.Parameters.AddWithValue("@cutoff", cutoff);
+            command.Parameters.AddWithValue("@limit", limit);
 
-            return reader.Read() ? ReadSessionLineageFromReader(reader) : null;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionLineageFromReader(reader));
+            }
+
+            return results;
         }
 
         /// <summary>
@@ -3517,6 +3951,32 @@ namespace MultiTerminal.Services
                 results.Add(ReadSessionMessageFromReader(reader));
             }
 
+            return results;
+        }
+
+        /// <summary>
+        /// Returns all messages for a given session_id, ordered by message_index ASC.
+        /// </summary>
+        public List<SessionMessageRecord> GetSessionMessagesBySessionId(string sessionId, int limit = 500)
+        {
+            var results = new List<SessionMessageRecord>();
+
+            const string sql = @"
+                SELECT id, session_id, task_id, agent_name, message_index,
+                       role, content, tool_name, timestamp
+                FROM session_messages
+                WHERE session_id = @sessionId
+                ORDER BY message_index ASC
+                LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@sessionId", sessionId);
+            cmd.Parameters.AddWithValue("@limit", limit);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionMessageFromReader(reader));
+            }
             return results;
         }
 
@@ -3628,11 +4088,497 @@ namespace MultiTerminal.Services
             }
         }
 
+        private void MigrateAddTaskRelationships()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='task_relationships'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS task_relationships (
+                    id TEXT PRIMARY KEY,
+                    source_task_id TEXT NOT NULL,
+                    target_task_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    created_by TEXT,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(source_task_id, target_task_id, type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_rel_source ON task_relationships(source_task_id);
+                CREATE INDEX IF NOT EXISTS idx_task_rel_target ON task_relationships(target_task_id);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        private void MigrateAddTaskFileLinks()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='task_file_links'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS task_file_links (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    description TEXT,
+                    line_start INTEGER,
+                    line_end INTEGER,
+                    added_by TEXT,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(task_id, file_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_file_links(task_id);
+            ";
+            using var createFileLinksCmd = new SQLiteCommand(createSql, _connection);
+            createFileLinksCmd.ExecuteNonQuery();
+        }
+
+        private void MigrateAddOwnerProfile()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='owner_profile'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS owner_profile (
+                    id TEXT PRIMARY KEY DEFAULT 'owner',
+                    full_name TEXT,
+                    email TEXT,
+                    github_username TEXT,
+                    has_github_token INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+                );
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        private void MigrateAddAgentInvocations()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_invocations'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS agent_invocations (
+                    id TEXT PRIMARY KEY,
+                    agent_name TEXT NOT NULL,
+                    task_id TEXT,
+                    invoked_by TEXT,
+                    model_used TEXT,
+                    verdict TEXT,
+                    score INTEGER,
+                    findings_count INTEGER DEFAULT 0,
+                    duration_ms INTEGER,
+                    invoked_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    completed_at DATETIME,
+                    report_summary TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_inv_name ON agent_invocations(agent_name);
+                CREATE INDEX IF NOT EXISTS idx_agent_inv_task ON agent_invocations(task_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_inv_date ON agent_invocations(invoked_at);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        private void MigrateAddTaskReports()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='task_reports'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS task_reports (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    invocation_id TEXT,
+                    agent_name TEXT NOT NULL,
+                    report_type TEXT NOT NULL DEFAULT 'html',
+                    report_content TEXT NOT NULL,
+                    verdict TEXT,
+                    score INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    created_by TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_reports_task ON task_reports(task_id);
+                CREATE INDEX IF NOT EXISTS idx_task_reports_agent ON task_reports(agent_name);
+            ";
+            using var createCmd2 = new SQLiteCommand(createSql, _connection);
+            createCmd2.ExecuteNonQuery();
+        }
+
+        private void MigrateAddNotificationEvents()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='notification_events'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS notification_events (
+                    id TEXT PRIMARY KEY,
+                    notification_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    message TEXT,
+                    session_id TEXT,
+                    agent_name TEXT,
+                    cwd TEXT,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    read_at DATETIME
+                );
+                CREATE INDEX IF NOT EXISTS idx_notif_type ON notification_events(notification_type);
+                CREATE INDEX IF NOT EXISTS idx_notif_created ON notification_events(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_notif_agent ON notification_events(agent_name);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        #region Notification Events
+
+        public string SaveNotificationEvent(string notificationType, string title, string message,
+            string sessionId, string agentName, string cwd)
+        {
+            string id = Guid.NewGuid().ToString("N").Substring(0, 8);
+            const string sql = @"
+                INSERT INTO notification_events (id, notification_type, title, message, session_id, agent_name, cwd, created_at)
+                VALUES (@id, @type, @title, @message, @sessionId, @agentName, @cwd, datetime('now'))";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.Parameters.AddWithValue("@type", notificationType);
+            cmd.Parameters.AddWithValue("@title", title);
+            cmd.Parameters.AddWithValue("@message", (object)message ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@sessionId", (object)sessionId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@agentName", (object)agentName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@cwd", (object)cwd ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+            return id;
+        }
+
+        public List<Dictionary<string, object>> GetNotificationEvents(int limit = 50, bool unreadOnly = false)
+        {
+            string sql = unreadOnly
+                ? "SELECT * FROM notification_events WHERE read_at IS NULL ORDER BY created_at DESC LIMIT @limit"
+                : "SELECT * FROM notification_events ORDER BY created_at DESC LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            var results = new List<Dictionary<string, object>>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var row = new Dictionary<string, object>();
+                for (int i = 0; i < reader.FieldCount; i++)
+                {
+                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                }
+                results.Add(row);
+            }
+            return results;
+        }
+
+        public void MarkNotificationRead(string id)
+        {
+            const string sql = "UPDATE notification_events SET read_at = datetime('now') WHERE id = @id";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.ExecuteNonQuery();
+        }
+
+        public int GetUnreadNotificationCount()
+        {
+            const string sql = "SELECT COUNT(*) FROM notification_events WHERE read_at IS NULL";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
+
+        #endregion
+
+        #region Agent Invocations
+
+        public void SaveAgentInvocation(string id, string agentName, string taskId, string invokedBy,
+            string modelUsed, string verdict, int? score, int findingsCount, long? durationMs,
+            DateTime invokedAt, DateTime? completedAt, string reportSummary)
+        {
+            const string sql = @"
+                INSERT INTO agent_invocations (id, agent_name, task_id, invoked_by, model_used, verdict, score, findings_count, duration_ms, invoked_at, completed_at, report_summary)
+                VALUES (@id, @agentName, @taskId, @invokedBy, @modelUsed, @verdict, @score, @findingsCount, @durationMs, @invokedAt, @completedAt, @reportSummary)
+                ON CONFLICT(id) DO UPDATE SET
+                    verdict = @verdict,
+                    score = @score,
+                    findings_count = @findingsCount,
+                    duration_ms = @durationMs,
+                    completed_at = @completedAt,
+                    report_summary = @reportSummary";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.Parameters.AddWithValue("@agentName", agentName);
+            cmd.Parameters.AddWithValue("@taskId", (object)taskId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@invokedBy", (object)invokedBy ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@modelUsed", (object)modelUsed ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@verdict", (object)verdict ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@score", score.HasValue ? (object)score.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@findingsCount", findingsCount);
+            cmd.Parameters.AddWithValue("@durationMs", durationMs.HasValue ? (object)durationMs.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@invokedAt", invokedAt.ToString("o"));
+            cmd.Parameters.AddWithValue("@completedAt", completedAt.HasValue ? (object)completedAt.Value.ToString("o") : DBNull.Value);
+            cmd.Parameters.AddWithValue("@reportSummary", (object)reportSummary ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        public List<Dictionary<string, object>> GetAgentInvocations(string agentName = null, string taskId = null, int limit = 50)
+        {
+            var results = new List<Dictionary<string, object>>();
+            var conditions = new List<string>();
+            if (!string.IsNullOrEmpty(agentName))
+                conditions.Add("agent_name = @agentName");
+            if (!string.IsNullOrEmpty(taskId))
+                conditions.Add("task_id = @taskId");
+
+            var where = conditions.Count > 0 ? "WHERE " + string.Join(" AND ", conditions) : "";
+            var sql = $"SELECT * FROM agent_invocations {where} ORDER BY invoked_at DESC LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            if (!string.IsNullOrEmpty(agentName))
+                cmd.Parameters.AddWithValue("@agentName", agentName);
+            if (!string.IsNullOrEmpty(taskId))
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var row = new Dictionary<string, object>();
+                for (int i = 0; i < reader.FieldCount; i++)
+                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                results.Add(row);
+            }
+            return results;
+        }
+
+        public List<Dictionary<string, object>> GetAgentStats()
+        {
+            var results = new List<Dictionary<string, object>>();
+            const string sql = @"
+                SELECT
+                    agent_name,
+                    COUNT(*) as total_invocations,
+                    COUNT(CASE WHEN verdict IN ('PASS', 'PROCEED', 'SHIP IT') THEN 1 END) as pass_count,
+                    COUNT(CASE WHEN verdict IN ('FAIL', 'BLOCK', 'REWORK', 'RETHINK') THEN 1 END) as fail_count,
+                    COUNT(CASE WHEN verdict IN ('PASS WITH NOTES', 'PASS WITH WARNINGS', 'REVISE', 'FIX AND RE-RUN') THEN 1 END) as warn_count,
+                    ROUND(AVG(score), 1) as avg_score,
+                    SUM(findings_count) as total_findings,
+                    ROUND(AVG(duration_ms), 0) as avg_duration_ms,
+                    MAX(invoked_at) as last_invoked
+                FROM agent_invocations
+                GROUP BY agent_name
+                ORDER BY total_invocations DESC";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var row = new Dictionary<string, object>();
+                for (int i = 0; i < reader.FieldCount; i++)
+                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                results.Add(row);
+            }
+            return results;
+        }
+
+        #endregion
+
+        #region Task Reports
+
+        /// <summary>
+        /// Saves an agent report linked to a task.
+        /// </summary>
+        public void SaveTaskReport(string id, string taskId, string invocationId, string agentName,
+            string reportType, string reportContent, string verdict, int? score, string createdBy)
+        {
+            const string sql = @"
+                INSERT INTO task_reports (id, task_id, invocation_id, agent_name, report_type, report_content, verdict, score, created_by)
+                VALUES (@id, @taskId, @invocationId, @agentName, @reportType, @reportContent, @verdict, @score, @createdBy)
+                ON CONFLICT(id) DO UPDATE SET
+                    report_content = @reportContent,
+                    verdict = @verdict,
+                    score = @score";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@invocationId", (object)invocationId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@agentName", agentName);
+            cmd.Parameters.AddWithValue("@reportType", reportType ?? "html");
+            cmd.Parameters.AddWithValue("@reportContent", reportContent);
+            cmd.Parameters.AddWithValue("@verdict", (object)verdict ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@score", score.HasValue ? (object)score.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@createdBy", (object)createdBy ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns reports for a given task, newest first.
+        /// </summary>
+        public List<Dictionary<string, object>> GetTaskReports(string taskId, string agentName = null, int limit = 50)
+        {
+            var results = new List<Dictionary<string, object>>();
+            var conditions = new List<string> { "task_id = @taskId" };
+            if (!string.IsNullOrEmpty(agentName))
+                conditions.Add("agent_name = @agentName");
+
+            var where = "WHERE " + string.Join(" AND ", conditions);
+            var sql = $"SELECT id, task_id, invocation_id, agent_name, report_type, verdict, score, created_at, created_by FROM task_reports {where} ORDER BY created_at DESC LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            if (!string.IsNullOrEmpty(agentName))
+                cmd.Parameters.AddWithValue("@agentName", agentName);
+            cmd.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var row = new Dictionary<string, object>();
+                for (int i = 0; i < reader.FieldCount; i++)
+                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                results.Add(row);
+            }
+            return results;
+        }
+
+        /// <summary>
+        /// Returns the full report content for a specific report ID.
+        /// </summary>
+        public Dictionary<string, object> GetTaskReport(string reportId)
+        {
+            const string sql = "SELECT * FROM task_reports WHERE id = @id";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", reportId);
+
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                var row = new Dictionary<string, object>();
+                for (int i = 0; i < reader.FieldCount; i++)
+                    row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                return row;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Returns the count of reports for a given task.
+        /// </summary>
+        public int GetTaskReportCount(string taskId)
+        {
+            const string sql = "SELECT COUNT(*) FROM task_reports WHERE task_id = @taskId";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            return Convert.ToInt32(cmd.ExecuteScalar());
+        }
+
+        #endregion
+
         /// <summary>
         /// Exposes the shared SQLite connection so that KnowledgeDatabase can share the
         /// same connection without opening a second WAL handle on the same file.
         /// </summary>
         internal SQLiteConnection Connection => _connection;
+
+        #endregion
+
+        #region Chat Messages
+
+        /// <summary>
+        /// Saves an inter-terminal chat message.
+        /// </summary>
+        public void SaveChatMessage(string messageId, string fromTerminal, string toTerminal, string content, DateTime timestamp, bool isBroadcast)
+        {
+            const string sql = @"
+                INSERT OR IGNORE INTO chat_messages (message_id, from_terminal, to_terminal, content, timestamp, is_broadcast)
+                VALUES (@messageId, @from, @to, @content, @timestamp, @isBroadcast)";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@messageId", messageId);
+            cmd.Parameters.AddWithValue("@from", fromTerminal);
+            cmd.Parameters.AddWithValue("@to", toTerminal);
+            cmd.Parameters.AddWithValue("@content", content);
+            cmd.Parameters.AddWithValue("@timestamp", timestamp.ToString("o"));
+            cmd.Parameters.AddWithValue("@isBroadcast", isBroadcast ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns chat messages, newest first.
+        /// </summary>
+        public List<ChatMessageRecord> GetChatMessages(int limit = 1000)
+        {
+            var results = new List<ChatMessageRecord>();
+            string sql = "SELECT message_id, from_terminal, to_terminal, content, timestamp, is_broadcast FROM chat_messages ORDER BY timestamp DESC LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@limit", limit);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new ChatMessageRecord
+                {
+                    MessageId = reader.GetString(0),
+                    FromTerminal = reader.GetString(1),
+                    ToTerminal = reader.GetString(2),
+                    Content = reader.GetString(3),
+                    Timestamp = DateTime.TryParse(reader.GetString(4), null, System.Globalization.DateTimeStyles.RoundtripKind, out var ts) ? ts : DateTime.MinValue,
+                    IsBroadcast = reader.GetInt32(5) != 0
+                });
+            }
+            return results;
+        }
+
+        #endregion
+
+        #region Project Session Queries
+
+        /// <summary>
+        /// Returns sessions whose file path starts with the given Claude project folder prefix.
+        /// Used by ProjectPanel to show sessions for a specific project.
+        /// </summary>
+        public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
+        {
+            var results = new List<SessionLineageRecord>();
+            string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+
+            const string sql = @"
+                SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
+                       summary, session_file_path, started_at, ended_at, created_at
+                FROM session_lineage
+                WHERE session_file_path LIKE @prefix
+                  AND session_type = 'terminal'
+                ORDER BY started_at DESC
+                LIMIT @limit";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@prefix", folderPrefix + "%");
+            cmd.Parameters.AddWithValue("@limit", limit);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(ReadSessionLineageFromReader(reader));
+            }
+            return results;
+        }
 
         #endregion
 
@@ -3645,5 +4591,31 @@ namespace MultiTerminal.Services
                 _isDisposed = true;
             }
         }
+    }
+
+    /// <summary>
+    /// Represents an inter-terminal chat message record from the database.
+    /// </summary>
+    public class ChatMessageRecord
+    {
+        public string MessageId { get; set; }
+        public string FromTerminal { get; set; }
+        public string ToTerminal { get; set; }
+        public string Content { get; set; }
+        public DateTime Timestamp { get; set; }
+        public bool IsBroadcast { get; set; }
+    }
+
+    /// <summary>
+    /// Represents a message search result with session context.
+    /// </summary>
+    public class MessageSearchResult
+    {
+        public string SessionId { get; set; }
+        public string SessionSummary { get; set; }
+        public long MessageId { get; set; }
+        public string Role { get; set; }
+        public string ContentSnippet { get; set; }
+        public DateTime Timestamp { get; set; }
     }
 }

@@ -144,6 +144,61 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Raised when a pipeline agent report is saved for a task.
+        /// Payload contains taskId and reportId so the UI can refresh badges.
+        /// </summary>
+        public event EventHandler<ReportSavedEventArgs> ReportSaved;
+
+        /// <summary>
+        /// Notify subscribers that a new agent report was saved for a task.
+        /// Called from TaskReportsController after SaveTaskReport().
+        /// </summary>
+        public void NotifyReportSaved(string taskId, string reportId, string agentName, string verdict)
+        {
+            ReportSaved?.Invoke(this, new ReportSavedEventArgs
+            {
+                TaskId = taskId,
+                ReportId = reportId,
+                AgentName = agentName,
+                Verdict = verdict
+            });
+        }
+
+        /// <summary>
+        /// Raised when a Claude Code Notification hook delivers a runtime notification.
+        /// Payload is a dictionary with: id, notification_type, title, message, agent_name, session_id, cwd, created_at.
+        /// </summary>
+        public event EventHandler<Dictionary<string, object>> NotificationReceived;
+
+        /// <summary>
+        /// Record and broadcast a Claude Code runtime notification.
+        /// Called from NotificationsController when the Notification hook POSTs.
+        /// </summary>
+        public string RecordNotification(string notificationType, string title, string message,
+            string sessionId, string agentName, string cwd)
+        {
+            if (TaskDb == null)
+            {
+                DebugLogService?.Warning("MessageBroker", "RecordNotification called before TaskDb initialized — notification not persisted");
+                return null;
+            }
+            string id = TaskDb.SaveNotificationEvent(notificationType, title, message, sessionId, agentName, cwd);
+            var payload = new Dictionary<string, object>
+            {
+                ["id"] = id,
+                ["notification_type"] = notificationType,
+                ["title"] = title,
+                ["message"] = message,
+                ["agent_name"] = agentName,
+                ["session_id"] = sessionId,
+                ["cwd"] = cwd,
+                ["created_at"] = DateTime.UtcNow.ToString("o")
+            };
+            NotificationReceived?.Invoke(this, payload);
+            return id;
+        }
+
+        /// <summary>
         /// Callback for push delivery to terminal UI.
         /// Parameters: messageId, recipientId, senderName, messageContent
         /// Returns: Task<bool> indicating whether delivery actually completed successfully
@@ -219,7 +274,7 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Knowledge database for institutional memory — knowledge entries and code digests.
-        /// Set via DI after broker is created (shares tasks.db via TaskDatabase).
+        /// Set via DI after broker is created (shares multiterminal.db via TaskDatabase).
         /// </summary>
         public MultiTerminal.Services.KnowledgeDatabase KnowledgeDb { get; set; }
 
@@ -392,7 +447,7 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Register a terminal with the broker.
         /// </summary>
-        public RegisterResult RegisterTerminal(string name, string docId = null)
+        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false)
         {
             var id = Guid.NewGuid().ToString("N").Substring(0, 8);
 
@@ -408,6 +463,17 @@ namespace MultiTerminal.MCPServer.Services
 
             if (existingByDocId != null && !existingByDocId.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
             {
+                // Only allow rename if the existing terminal is "Unassigned" (placeholder → real name).
+                // If a real terminal already owns this docId, reject the hijack — the new registrant
+                // likely inherited the env var from a parent process (e.g., Clarion IDE addin).
+                if (!existingByDocId.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
+                    docId = null; // Clear the stolen docId so it falls through to fresh registration below
+                    existingByDocId = null;
+                }
+                else
+                {
                 // Terminal is renaming (e.g., "Unassigned" → "Bob")
                 string oldName = existingByDocId.Name;
                 string newName = name;
@@ -450,6 +516,7 @@ namespace MultiTerminal.MCPServer.Services
                                 Id = newName,
                                 DisplayName = newName,
                                 IsOnline = true, // Online because registration is happening
+                                IsTeamLead = isTeamLead,
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
@@ -476,6 +543,7 @@ namespace MultiTerminal.MCPServer.Services
                     Success = true,
                     TerminalId = existingByDocId.Id
                 };
+                } // end else (Unassigned rename)
             }
 
             // Check if name already exists
@@ -509,12 +577,19 @@ namespace MultiTerminal.MCPServer.Services
                                 Id = name,
                                 DisplayName = name,
                                 IsOnline = false,  // Start offline, will be set online below
+                                IsTeamLead = isTeamLead,
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
                             _profiles.TryAdd(name, newProfile);
                             _taskDb.SaveProfile(newProfile);
                             System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-created profile for terminal: {name}");
+                        }
+                        else if (isTeamLead)
+                        {
+                            // Update existing profile's IsTeamLead flag
+                            _profiles[name].IsTeamLead = true;
+                            _taskDb.SaveProfile(_profiles[name]);
                         }
 
                         // Set profile online now that terminal is registering
@@ -566,12 +641,19 @@ namespace MultiTerminal.MCPServer.Services
                                 Id = name,
                                 DisplayName = name,
                                 IsOnline = false,  // Start offline, will be set online below
+                                IsTeamLead = isTeamLead,
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
                             _profiles.TryAdd(name, newProfile);
                             _taskDb.SaveProfile(newProfile);
                             System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-created profile for terminal: {name}");
+                        }
+                        else if (isTeamLead)
+                        {
+                            // Update existing profile's IsTeamLead flag
+                            _profiles[name].IsTeamLead = true;
+                            _taskDb.SaveProfile(_profiles[name]);
                         }
 
                         // Set profile online now that terminal is registering
@@ -659,7 +741,15 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void UnregisterTerminal(string terminalId)
         {
-            if (_terminals.TryGetValue(terminalId, out var terminal))
+            // Look up by dictionary key first, then fall back to DocId
+            if (!_terminals.TryGetValue(terminalId, out var terminal))
+            {
+                terminal = _terminals.Values.FirstOrDefault(t =>
+                    !string.IsNullOrEmpty(t.DocId) &&
+                    t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (terminal != null)
             {
                 terminal.IsConnected = false;
                 TerminalDisconnected?.Invoke(this, terminal);
@@ -750,9 +840,9 @@ namespace MultiTerminal.MCPServer.Services
         /// Send a message to a specific terminal.
         /// Messages are persisted to SQLite first for reliable delivery.
         /// </summary>
-        public async Task<SendResult> SendMessage(string fromTerminalId, string toTerminalIdOrName, string content)
+        public async Task<SendResult> SendMessage(string fromTerminalId, string toTerminalIdOrName, string content, string priority = null)
         {
-            LogTrace($"SendMessage ENTRY: from={fromTerminalId}, to={toTerminalIdOrName}, content={content.Substring(0, Math.Min(50, content.Length))}...");
+            LogTrace($"SendMessage ENTRY: from={fromTerminalId}, to={toTerminalIdOrName}, priority={priority ?? "normal"}, content={content.Substring(0, Math.Min(50, content.Length))}...");
 
             var fromTerminal = GetTerminal(fromTerminalId);
             if (fromTerminal == null)
@@ -774,11 +864,14 @@ namespace MultiTerminal.MCPServer.Services
                 };
             }
 
+            // Normalize priority
+            var effectivePriority = priority ?? MultiTerminal.Services.MessageQueueDatabase.MessagePriority.Normal;
+
             // Persist to SQLite first for reliable delivery
             long queuedMessageId = 0;
             try
             {
-                queuedMessageId = _messageQueueDb.EnqueueMessage(fromTerminal.Name, toTerminal.Name, content);
+                queuedMessageId = _messageQueueDb.EnqueueMessage(fromTerminal.Name, toTerminal.Name, content, "message", null, null, null, null, effectivePriority);
                 System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Persisted message {queuedMessageId} to SQLite queue (from={fromTerminal.Name}, to={toTerminal.Name})");
             }
             catch (Exception ex)
@@ -792,7 +885,8 @@ namespace MultiTerminal.MCPServer.Services
                 Id = queuedMessageId > 0 ? queuedMessageId.ToString() : Guid.NewGuid().ToString("N"),
                 From = fromTerminal.Name,
                 To = toTerminal.Name,
-                Content = content
+                Content = content,
+                Priority = effectivePriority
             };
 
             // Log message ID for debugging (searchable format)
@@ -1885,6 +1979,18 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
+            // Sort by priority (critical first) then by timestamp within each tier
+            if (messages.Count > 1)
+            {
+                messages.Sort((a, b) =>
+                {
+                    int aPri = MultiTerminal.Services.MessageQueueDatabase.MessagePriority.ToSortOrder(a.Priority);
+                    int bPri = MultiTerminal.Services.MessageQueueDatabase.MessagePriority.ToSortOrder(b.Priority);
+                    if (aPri != bPri) return bPri.CompareTo(aPri); // higher priority first
+                    return a.Timestamp.CompareTo(b.Timestamp); // older first within same priority
+                });
+            }
+
             return messages;
         }
 
@@ -1922,9 +2028,28 @@ namespace MultiTerminal.MCPServer.Services
         #region Kanban Task Methods
 
         /// <summary>
+        /// Get a task by ID from the in-memory cache.
+        /// </summary>
+        public KanbanTask GetTask(string taskId)
+        {
+            return _tasks.TryGetValue(taskId, out var task) ? task : null;
+        }
+
+        /// <summary>
+        /// Save a task object to database and broadcast update.
+        /// Use when you've modified a task's properties directly.
+        /// </summary>
+        public void SaveTask(KanbanTask task)
+        {
+            try { _taskDb.SaveTask(task); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save task: {ex.Message}"); }
+            BroadcastTaskUpdate();
+        }
+
+        /// <summary>
         /// Create a new task on the Kanban board.
         /// </summary>
-        public CreateTaskResult CreateTask(string title, string description, string createdBy, string status = "todo", string priority = "normal")
+        public CreateTaskResult CreateTask(string title, string description, string createdBy, string status = "todo", string priority = "normal", string projectId = null)
         {
             var validStatuses = new[] { "todo", "in_progress", "done", "suggestion" };
             if (!validStatuses.Contains(status))
@@ -1941,7 +2066,8 @@ namespace MultiTerminal.MCPServer.Services
                 Description = description,
                 CreatedBy = createdBy,
                 Status = status,
-                Priority = priority
+                Priority = priority,
+                ProjectId = string.IsNullOrEmpty(projectId) ? null : projectId
             };
 
             if (_tasks.TryAdd(task.Id, task))
@@ -3065,6 +3191,149 @@ namespace MultiTerminal.MCPServer.Services
             return new DeleteTaskResult { Success = true };
         }
 
+        // =============================================
+        // Task Relationships
+        // =============================================
+
+        public AddRelationshipResult AddRelationship(string sourceTaskId, string targetTaskId, string type, string createdBy)
+        {
+            // Validate type
+            var validTypes = new[] { "blocks", "depends_on", "related_to" };
+            if (!validTypes.Contains(type))
+                return new AddRelationshipResult { Success = false, Error = $"Invalid relationship type: {type}. Must be: blocks, depends_on, related_to" };
+
+            // Validate both tasks exist
+            if (!_tasks.ContainsKey(sourceTaskId))
+                return new AddRelationshipResult { Success = false, Error = $"Source task not found: {sourceTaskId}" };
+            if (!_tasks.ContainsKey(targetTaskId))
+                return new AddRelationshipResult { Success = false, Error = $"Target task not found: {targetTaskId}" };
+
+            // Prevent self-reference
+            if (sourceTaskId == targetTaskId)
+                return new AddRelationshipResult { Success = false, Error = "Cannot create relationship to self" };
+
+            try
+            {
+                // Add the forward relationship
+                var forwardId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                _taskDb.AddRelationship(forwardId, sourceTaskId, targetTaskId, type, createdBy);
+
+                // Auto-create inverse
+                var inverseType = type switch
+                {
+                    "blocks" => "depends_on",
+                    "depends_on" => "blocks",
+                    "related_to" => "related_to",
+                    _ => type
+                };
+                var inverseId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                _taskDb.AddRelationship(inverseId, targetTaskId, sourceTaskId, inverseType, createdBy);
+
+                return new AddRelationshipResult { Success = true };
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] AddRelationship failed: {ex.Message}");
+                return new AddRelationshipResult { Success = false, Error = ex.Message };
+            }
+        }
+
+        public RemoveRelationshipResult RemoveRelationship(string sourceTaskId, string targetTaskId)
+        {
+            if (!_tasks.ContainsKey(sourceTaskId))
+                return new RemoveRelationshipResult { Success = false, Error = $"Source task not found: {sourceTaskId}" };
+
+            try
+            {
+                _taskDb.RemoveRelationshipsBetween(sourceTaskId, targetTaskId);
+                return new RemoveRelationshipResult { Success = true };
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] RemoveRelationship failed: {ex.Message}");
+                return new RemoveRelationshipResult { Success = false, Error = ex.Message };
+            }
+        }
+
+        public GetRelationshipsResult GetRelationships(string taskId)
+        {
+            if (!_tasks.ContainsKey(taskId))
+                return new GetRelationshipsResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            try
+            {
+                // Get relationships where this task is the source (our perspective)
+                var allRels = _taskDb.GetRelationshipsForTask(taskId);
+                var ourRels = allRels.Where(r => r.SourceTaskId == taskId).ToList();
+                return new GetRelationshipsResult { Success = true, Relationships = ourRels };
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetRelationships failed: {ex.Message}");
+                return new GetRelationshipsResult { Success = false, Error = ex.Message };
+            }
+        }
+
+        // =============================================
+        // Task File Links
+        // =============================================
+
+        public LinkFileResult LinkFile(string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy)
+        {
+            if (!_tasks.ContainsKey(taskId))
+                return new LinkFileResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            if (string.IsNullOrWhiteSpace(filePath))
+                return new LinkFileResult { Success = false, Error = "File path is required" };
+
+            try
+            {
+                var id = Guid.NewGuid().ToString("N").Substring(0, 8);
+                _taskDb.AddFileLink(id, taskId, filePath, description, lineStart, lineEnd, addedBy);
+                var files = _taskDb.GetFileLinksForTask(taskId);
+                return new LinkFileResult { Success = true, FileCount = files.Count };
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] LinkFile failed: {ex.Message}");
+                return new LinkFileResult { Success = false, Error = ex.Message };
+            }
+        }
+
+        public UnlinkFileResult UnlinkFile(string taskId, string filePath)
+        {
+            if (!_tasks.ContainsKey(taskId))
+                return new UnlinkFileResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            try
+            {
+                _taskDb.RemoveFileLink(taskId, filePath);
+                return new UnlinkFileResult { Success = true };
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] UnlinkFile failed: {ex.Message}");
+                return new UnlinkFileResult { Success = false, Error = ex.Message };
+            }
+        }
+
+        public GetTaskFilesResult GetTaskFiles(string taskId)
+        {
+            if (!_tasks.ContainsKey(taskId))
+                return new GetTaskFilesResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            try
+            {
+                var files = _taskDb.GetFileLinksForTask(taskId);
+                return new GetTaskFilesResult { Success = true, Files = files };
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetTaskFiles failed: {ex.Message}");
+                return new GetTaskFilesResult { Success = false, Error = ex.Message };
+            }
+        }
+
         /// <summary>
         /// Get all tasks.
         /// </summary>
@@ -3086,6 +3355,26 @@ namespace MultiTerminal.MCPServer.Services
                 .Where(t => t.ProjectId == projectId)
                 .OrderBy(t => t.CreatedAt)
                 .ToList();
+        }
+
+        /// <summary>
+        /// Get the active in-progress task for a specific agent.
+        /// Checks in-memory cache first, falls back to database.
+        /// </summary>
+        public KanbanTask GetMyActiveTask(string agentName)
+        {
+            if (string.IsNullOrEmpty(agentName))
+                return null;
+
+            // Check in-memory cache first
+            var activeTask = _tasks.Values
+                .FirstOrDefault(t =>
+                    t.Assignee != null &&
+                    t.Assignee.Equals(agentName, StringComparison.OrdinalIgnoreCase) &&
+                    t.Status == "in_progress" &&
+                    t.SubStatus == "active");
+
+            return activeTask ?? _taskDb.GetActiveTaskForAgent(agentName);
         }
 
         /// <summary>
@@ -4678,6 +4967,187 @@ namespace MultiTerminal.MCPServer.Services
             return (true, null);
         }
 
+        /// <summary>
+        /// Execute a JavaScript snippet in a browser tab and return the result.
+        /// </summary>
+        public async Task<(bool success, string result, string error)> ExecuteBrowserScript(string terminalId, string tabId, string script)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, null, $"Terminal not found: {terminalId}");
+
+            var tcs = new TaskCompletionSource<string>();
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "execute_script",
+                TerminalId = terminalId,
+                TabId = tabId,
+                Script = script,
+                ResultTcs = tcs
+            });
+
+            try
+            {
+                var result = await tcs.Task.ConfigureAwait(false);
+                return (true, result, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Get captured console logs from a browser tab.
+        /// </summary>
+        public async Task<(bool success, string result, string error)> GetBrowserConsoleLogs(string terminalId, string tabId, int? limit)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, null, $"Terminal not found: {terminalId}");
+
+            var tcs = new TaskCompletionSource<string>();
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "get_console_logs",
+                TerminalId = terminalId,
+                TabId = tabId,
+                Limit = limit,
+                ResultTcs = tcs
+            });
+
+            try
+            {
+                var result = await tcs.Task.ConfigureAwait(false);
+                return (true, result, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Get content of a DOM element in a browser tab.
+        /// </summary>
+        public async Task<(bool success, string result, string error)> GetBrowserElementContent(string terminalId, string tabId, string selector, string property)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, null, $"Terminal not found: {terminalId}");
+
+            var tcs = new TaskCompletionSource<string>();
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "get_element_content",
+                TerminalId = terminalId,
+                TabId = tabId,
+                Selector = selector,
+                Property = property ?? "textContent",
+                ResultTcs = tcs
+            });
+
+            try
+            {
+                var result = await tcs.Task.ConfigureAwait(false);
+                return (true, result, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Capture a PNG screenshot of a browser tab's content.
+        /// </summary>
+        public async Task<(bool success, string result, string error)> CaptureBrowserScreenshot(string terminalId, string tabId)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, null, $"Terminal not found: {terminalId}");
+
+            var tcs = new TaskCompletionSource<string>();
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "capture_screenshot",
+                TerminalId = terminalId,
+                TabId = tabId,
+                ResultTcs = tcs
+            });
+
+            try
+            {
+                var result = await tcs.Task.ConfigureAwait(false);
+                return (true, result, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Post a JSON message to a browser tab's page.
+        /// The page receives it via window.chrome.webview.addEventListener('message', ...).
+        /// </summary>
+        public async Task<(bool success, string error)> PostBrowserMessage(string terminalId, string tabId, string jsonData)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, $"Terminal not found: {terminalId}");
+
+            var tcs = new TaskCompletionSource<string>();
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "post_message",
+                TerminalId = terminalId,
+                TabId = tabId,
+                MessageData = jsonData,
+                ResultTcs = tcs
+            });
+
+            try
+            {
+                await tcs.Task.ConfigureAwait(false);
+                return (true, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Get messages sent from a browser tab's page via window.chrome.webview.postMessage().
+        /// </summary>
+        public async Task<(bool success, string result, string error)> GetBrowserMessages(string terminalId, string tabId, int? limit)
+        {
+            var terminal = GetTerminal(terminalId);
+            if (terminal == null)
+                return (false, null, $"Terminal not found: {terminalId}");
+
+            var tcs = new TaskCompletionSource<string>();
+            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            {
+                Action = "get_messages",
+                TerminalId = terminalId,
+                TabId = tabId,
+                Limit = limit,
+                ResultTcs = tcs
+            });
+
+            try
+            {
+                var result = await tcs.Task.ConfigureAwait(false);
+                return (true, result, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, null, ex.Message);
+            }
+        }
+
         #endregion
 
         #region Task Attachments
@@ -4940,12 +5410,28 @@ namespace MultiTerminal.MCPServer.Services
     /// </summary>
     public class BrowserTabEventArgs : EventArgs
     {
-        public string Action { get; set; }
+        public string Action { get; set; }  // "open", "update", "close", "execute_script", "get_console_logs", "get_element_content", "post_message", "get_messages", "capture_screenshot"
         public string TerminalId { get; set; }
         public string TabId { get; set; }
         public string Title { get; set; }
         public string Url { get; set; }
         public string HtmlContent { get; set; }
+
+        // For execute_script
+        public string Script { get; set; }
+
+        // For get_element_content
+        public string Selector { get; set; }
+        public string Property { get; set; }  // textContent, innerHTML, outerHTML, value
+
+        // For get_console_logs / get_messages
+        public int? Limit { get; set; }
+
+        // For post_message
+        public string MessageData { get; set; }
+
+        // For async results — the controller waits for the UI thread result
+        public TaskCompletionSource<string> ResultTcs { get; set; }
     }
 
     /// <summary>
@@ -4978,6 +5464,17 @@ namespace MultiTerminal.MCPServer.Services
         public string TaskId { get; set; }
         public string TaskTitle { get; set; }
         public string ClaimedBy { get; set; }
+    }
+
+    /// <summary>
+    /// Event args for report saved notifications.
+    /// </summary>
+    public class ReportSavedEventArgs : EventArgs
+    {
+        public string TaskId { get; set; }
+        public string ReportId { get; set; }
+        public string AgentName { get; set; }
+        public string Verdict { get; set; }
     }
 
     /// <summary>

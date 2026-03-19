@@ -20,12 +20,14 @@
       <nav class="sidebar-nav">
         <div class="nav-section-title">Getting Started</div>
         <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
         <div class="nav-section-title">Reference</div>
         <a href="features.html" class="nav-link">Features</a>
         <a href="api-reference.html" class="nav-link">REST API</a>
         <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
         <div class="nav-section-title">Technical</div>
         <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
         <a href="distribution.html" class="nav-link">Distribution</a>
         <a href="deployment.html" class="nav-link active">Deployment</a>
         <div class="nav-section-title"></div>
@@ -49,7 +51,7 @@
             <tbody>
               <tr><td>.NET 8 SDK</td><td>8.0+</td><td>Build and run the application (self-contained deployment includes runtime)</td></tr>
               <tr><td>WebView2 Runtime</td><td>Evergreen</td><td>Chromium rendering for all HTML panels (pre-installed on Windows 11)</td></tr>
-              <tr><td>Node.js</td><td>18+</td><td>MCP server execution and session history server</td></tr>
+              <tr><td>Node.js</td><td>18+</td><td>MCP server execution (<code>%APPDATA%\multiterminal\mcp\index.js</code>)</td></tr>
               <tr><td>Claude Code CLI</td><td>Latest</td><td>Terminal agent sessions (installed via <code>npm install -g @anthropic-ai/claude-code</code>)</td></tr>
             </tbody>
           </table>
@@ -199,18 +201,19 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
           <thead><tr><th>Database</th><th>Path</th><th>Contents</th></tr></thead>
           <tbody>
             <tr>
-              <td><code>tasks.db</code></td>
-              <td><code>%APPDATA%\MultiTerminal\tasks.db</code></td>
+              <td><code>multiterminal.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\multiterminal.db</code></td>
               <td>
                 Kanban tasks, checklists, plans, helpers, continuation notes, stale tracking.
                 Team profiles, activity feed, inbox notifications, terminal registrations.
                 Projects, agents, MCP config, specialist agents, paths, prompts, skills.
+                Session lineage, session messages, session-agent maps, task reports.
               </td>
             </tr>
             <tr>
-              <td><code>sessions.db</code></td>
+              <td><code>sessions.db</code> (legacy)</td>
               <td><code>%APPDATA%\MultiTerminal\sessions.db</code></td>
-              <td>Terminal session persistence: identities, Claude Code session IDs, working directories, timestamps.</td>
+              <td>Legacy session persistence. Session lineage, session messages, and session-agent maps are now stored in <code>multiterminal.db</code> via TaskDatabase.cs.</td>
             </tr>
             <tr>
               <td><code>knowledge.db</code></td>
@@ -271,9 +274,9 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
               <td>Core task management, messaging, project context</td>
             </tr>
             <tr>
-              <td>mcp-session-history</td>
-              <td>stdio (Node.js)</td>
-              <td>Session history search and embeddings</td>
+              <td>mcp-gateway</td>
+              <td>stdio (McpGateway.exe)</td>
+              <td>MCP Gateway aggregating multiple MCP servers (Everything Search, MSSQL, SQLite, Windows Build Runner, etc.)</td>
             </tr>
             <tr>
               <td>sqlite</td>
@@ -320,7 +323,8 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
 +-- project.json           (project identity and metadata)
 +-- settings.json          (Claude Code settings)
 +-- settings.local.json    (local permissions - not in git)
-+-- agents/                (specialist agent definitions)
++-- agents/                (specialist agent definitions - 8 files)
+|   +-- code-reviewer.md
 |   +-- debugger.md
 |   +-- devils-advocate.md
 |   +-- security-auditor.md
@@ -328,26 +332,61 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
 |   +-- session-summarizer.md
 |   +-- test-designer.md
 |   +-- verifier.md
-+-- hooks/                 (event hooks for activity tracking)
++-- hooks/                 (event hooks - 9 files)
+|   +-- active-context-hook.js
+|   +-- inbox-check-hook.js
+|   +-- notification-hook.js
+|   +-- pipeline-trigger-hook.js
+|   +-- project-context-hook.js
+|   +-- safety-hook.js
+|   +-- session-status-hook.js
+|   +-- subagent-office-hook.js
+|   +-- task-to-agent-hook.js
 +-- skills/                (custom slash commands)
 +-- rules/                 (additional behavioral rules)
 +-- messages/              (inter-session message store)
 +-- research/              (research artifacts)</code></pre>
 
-        <h3>Hooks</h3>
+        <h3>Hooks (9 files)</h3>
         <p>Claude Code hooks integrate terminal activity with MultiTerminal's services:</p>
         <table>
-          <thead><tr><th>Hook</th><th>Event</th><th>Purpose</th></tr></thead>
+          <thead><tr><th>Hook</th><th>Purpose</th></tr></thead>
           <tbody>
             <tr>
-              <td><code>activity-hook.js</code></td>
-              <td>PreToolUse, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop</td>
-              <td>Records tool usage, builds, and agent events to the activity feed</td>
+              <td><code>session-status-hook.js</code></td>
+              <td>Injects active context (task, checklist, build status) at session start</td>
             </tr>
             <tr>
-              <td><code>pool-context.js</code></td>
-              <td>SessionStart</td>
-              <td>Injects active plan, task assignments, and pool activity at session start</td>
+              <td><code>active-context-hook.js</code></td>
+              <td>Auto-writes ACTIVE-CONTEXT.md after builds, checklist updates, and status changes</td>
+            </tr>
+            <tr>
+              <td><code>project-context-hook.js</code></td>
+              <td>Injects project context via MULTITERMINAL_PROJECT_ID at session start</td>
+            </tr>
+            <tr>
+              <td><code>inbox-check-hook.js</code></td>
+              <td>Monitors inbox and injects [cm] nudge when messages arrive</td>
+            </tr>
+            <tr>
+              <td><code>task-to-agent-hook.js</code></td>
+              <td>Routes task assignments to the correct agent/team</td>
+            </tr>
+            <tr>
+              <td><code>subagent-office-hook.js</code></td>
+              <td>Manages subagent lifecycle and office panel presence</td>
+            </tr>
+            <tr>
+              <td><code>safety-hook.js</code></td>
+              <td>Safety guardrails for destructive operations</td>
+            </tr>
+            <tr>
+              <td><code>pipeline-trigger-hook.js</code></td>
+              <td>Triggers CI/CD pipeline actions on specific events</td>
+            </tr>
+            <tr>
+              <td><code>notification-hook.js</code></td>
+              <td>Sends desktop notifications for important events</td>
             </tr>
           </tbody>
         </table>
@@ -360,6 +399,11 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
               <td><code>MULTITERMINAL_DOC_ID</code></td>
               <td>Terminal launch</td>
               <td>Unique document ID for terminal registration</td>
+            </tr>
+            <tr>
+              <td><code>MULTITERMINAL_NAME</code></td>
+              <td>Terminal launch</td>
+              <td>Display name for the terminal identity (used in messaging and team roster)</td>
             </tr>
             <tr>
               <td><code>MULTITERMINAL_PROJECT_ID</code></td>
@@ -377,37 +421,58 @@ H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe</code></pre>
         <!-- Installation Steps -->
         <h2 id="installation">Fresh Installation</h2>
 
-        <h3>Step 1: Deploy Application Files</h3>
+        <h3>Option A: Inno Setup Installer (Recommended)</h3>
+        <p>The Inno Setup installer is the recommended installation method. It handles file placement, MCP server registration, and post-install configuration automatically:</p>
+        <ol>
+          <li>Run <code>MultiTerminal-Setup.exe</code></li>
+          <li>Follow the installer prompts to choose an installation directory</li>
+          <li>The post-install script (<code>post-install.js</code>) registers MCP servers and creates configuration files</li>
+          <li>Launch MultiTerminal from the Start Menu or desktop shortcut</li>
+        </ol>
+        <p>See <a href="distribution.html#installer">Distribution &mdash; Installer</a> for details on the installer scripts.</p>
+
+        <h3>Option B: Manual (Portable) Installation</h3>
+
+        <h4>Step 1: Deploy Application Files</h4>
         <pre><code># Create installation directory
 New-Item -ItemType Directory -Path "C:\Applications\MultiTerminal" -Force
 
 # Copy all files from the build output (or existing Deploy folder)
 Copy-Item -Path "path\to\publish\*" -Destination "C:\Applications\MultiTerminal\" -Recurse -Force</code></pre>
 
-        <h3>Step 2: Install MCP Session History (Optional)</h3>
-        <pre><code>cd "C:\Applications\MultiTerminal\mcp-session-history"
+        <h4>Step 2: Install MCP Server Dependencies</h4>
+        <p>The MCP server is located at <code>%APPDATA%\multiterminal\mcp\index.js</code> and requires Node.js dependencies:</p>
+        <pre><code>cd "$env:APPDATA\multiterminal\mcp"
 npm install</code></pre>
 
-        <h3>Step 3: Deploy Claude Code Hooks</h3>
-        <pre><code># Create hooks directory
-New-Item -ItemType Directory -Path "$env:USERPROFILE\.claude\hooks" -Force
+        <h4>Step 3: Deploy Claude Code Hooks</h4>
+        <p>Copy the 9 hook files from <code>.claude/hooks/</code> to your project or global hooks directory:</p>
+        <pre><code># Hook files: inbox-check-hook.js, project-context-hook.js, safety-hook.js,
+# subagent-office-hook.js, task-to-agent-hook.js, session-status-hook.js,
+# pipeline-trigger-hook.js, active-context-hook.js, notification-hook.js</code></pre>
+        <p>Edit hook files to update hard-coded paths to your installation directory.</p>
 
-# Copy hook files
-Copy-Item "activity-hook.js" "$env:USERPROFILE\.claude\hooks\"
-Copy-Item "pool-context.js"  "$env:USERPROFILE\.claude\hooks\"</code></pre>
-        <p>Edit both hook files to update hard-coded paths to your installation directory.</p>
-
-        <h3>Step 4: Configure Claude Code Hooks</h3>
+        <h4>Step 4: Configure Claude Code Hooks</h4>
         <p>Create <code>~/.claude/hooks.json</code> with the hook event bindings. See <a href="getting-started.html">Quick Start</a> for the complete hooks.json template.</p>
 
-        <h3>Step 5: Register MCP Servers</h3>
-        <p>Create or edit <code>~/.claude/mcp_servers.json</code> to register the multiterminal and session-history servers.</p>
+        <h4>Step 5: Register MCP Servers</h4>
+        <p>Create or edit <code>~/.claude/mcp_servers.json</code> to register the multiterminal MCP server. If using the MCP Gateway, also register <code>mcp-gateway</code> (McpGateway.exe):</p>
+        <pre><code>{
+  "mcpServers": {
+    "multiterminal": {
+      "url": "http://localhost:5050/mcp"
+    },
+    "mcp-gateway": {
+      "command": "path/to/McpGateway.exe"
+    }
+  }
+}</code></pre>
 
-        <h3>Step 6: Create Data Directory</h3>
+        <h4>Step 6: Create Data Directory</h4>
         <pre><code>New-Item -ItemType Directory -Path "$env:APPDATA\MultiTerminal" -Force</code></pre>
         <p>The application will create database files automatically on first run.</p>
 
-        <h3>Step 7: Launch</h3>
+        <h4>Step 7: Launch</h4>
         <pre><code>C:\Applications\MultiTerminal\MultiTerminal.exe</code></pre>
 
         <!-- Verification -->
@@ -461,7 +526,7 @@ Copy-Item "pool-context.js"  "$env:USERPROFILE\.claude\hooks\"</code></pre>
             <tr>
               <td><code>better-sqlite3</code> module not found</td>
               <td>Node modules not installed for session history</td>
-              <td>Run <code>npm install</code> in the <code>mcp-session-history</code> directory</td>
+              <td>Run <code>npm install</code> in the <code>%APPDATA%\multiterminal\mcp</code> directory</td>
             </tr>
             <tr>
               <td>Hooks not executing</td>

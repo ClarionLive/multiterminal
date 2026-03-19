@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
@@ -115,7 +116,7 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// Get debug log status (count, paused state, capacity).
+        /// Get debug log status (count, paused state, capacity, current log file).
         /// </summary>
         [HttpGet("status")]
         public IActionResult GetStatus()
@@ -127,7 +128,66 @@ namespace MultiTerminal.API.Controllers
             {
                 count = DebugLog.Count,
                 isPaused = DebugLog.IsPaused,
-                maxCapacity = 10000
+                maxCapacity = 10000,
+                logFile = DebugLog.LogFilePath,
+                logDirectory = DebugLogService.LogDirectory
+            });
+        }
+
+        /// <summary>
+        /// List all available log files, most recent first.
+        /// </summary>
+        [HttpGet("files")]
+        public IActionResult ListLogFiles()
+        {
+            var files = DebugLogService.ListLogFiles();
+            return Ok(new
+            {
+                directory = DebugLogService.LogDirectory,
+                currentFile = DebugLog?.LogFilePath,
+                files = files.Select(f => new
+                {
+                    path = f,
+                    name = Path.GetFileName(f),
+                    size = new FileInfo(f).Length,
+                    isCurrent = string.Equals(f, DebugLog?.LogFilePath, StringComparison.OrdinalIgnoreCase)
+                }).ToList()
+            });
+        }
+
+        /// <summary>
+        /// Read a previous log file by filename. Defaults to previous session (index 1).
+        /// Query params: ?file=debug-2026-03-08_17-01-42.log&lines=200&search=AgentPanel
+        /// </summary>
+        [HttpGet("files/{fileName}")]
+        public IActionResult ReadLogFile(
+            string fileName,
+            [FromQuery] int lines = 200,
+            [FromQuery] string search = null)
+        {
+            string filePath = Path.Combine(DebugLogService.LogDirectory, fileName);
+
+            // Prevent path traversal
+            if (!Path.GetFullPath(filePath).StartsWith(DebugLogService.LogDirectory, StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { error = "Invalid file name" });
+
+            if (!System.IO.File.Exists(filePath))
+                return NotFound(new { error = $"Log file not found: {fileName}" });
+
+            var logLines = DebugLogService.ReadLogFile(filePath, lines > 0 ? lines : 0);
+
+            if (!string.IsNullOrEmpty(search))
+            {
+                logLines = logLines
+                    .Where(l => l.Contains(search, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+            }
+
+            return Ok(new
+            {
+                file = fileName,
+                totalLines = logLines.Count,
+                entries = logLines
             });
         }
     }

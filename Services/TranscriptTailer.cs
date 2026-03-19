@@ -39,6 +39,11 @@ namespace MultiTerminal.Services
         private DateTime _lastSentUserTime;
 
         /// <summary>
+        /// The agent name this tailer was created for.
+        /// </summary>
+        public string AgentName => _agentName;
+
+        /// <summary>
         /// Timestamp of the last message sent via SendMessageAsync (from Agent Panel UI).
         /// Used by TeamWatcherService to attribute wake-up transcript files to the correct agent.
         /// </summary>
@@ -107,6 +112,23 @@ namespace MultiTerminal.Services
             }
 
             return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Check if this tailer is tracking a specific transcript file path.
+        /// </summary>
+        public bool HasTranscriptFile(string transcriptPath)
+        {
+            if (string.IsNullOrEmpty(transcriptPath)) return false;
+            lock (_trackedFilesLock)
+            {
+                foreach (var tf in _trackedFiles)
+                {
+                    if (string.Equals(tf.Path, transcriptPath, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>

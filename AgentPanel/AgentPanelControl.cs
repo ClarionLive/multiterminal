@@ -53,6 +53,11 @@ namespace MultiTerminal.AgentPanel
         public event EventHandler CloseRequested;
 
         /// <summary>
+        /// Fired when the attached agent process exits. Carries the exit code.
+        /// </summary>
+        public event EventHandler<int> AgentExited;
+
+        /// <summary>
         /// Raised when the WebView2 zoom factor changes (e.g. Ctrl+wheel).
         /// </summary>
         public event EventHandler<double> ZoomChanged;
@@ -314,6 +319,8 @@ namespace MultiTerminal.AgentPanel
 
             string status = exitCode == 0 ? "completed" : "error";
             PostMessage(JsonSerializer.Serialize(new { type = "status_update", status }));
+
+            AgentExited?.Invoke(this, exitCode);
         }
 
         /// <summary>

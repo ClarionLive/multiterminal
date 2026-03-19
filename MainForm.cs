@@ -54,8 +54,8 @@ namespace MultiTerminal
         private MCPServer.Services.HttpWebhookService _webhookService;
         private ChatPanelDocument _chatPanel;
         private SessionIndexingService _sessionIndexingService;
-        private SessionSyncService _sessionSyncService;
-        private SessionDatabase _sessionDatabase;
+        private TaskDatabase _chatTaskDatabase; // Used for chat message persistence
+        private OwnerProfileService _ownerProfileService;
         private readonly Dictionary<string, TerminalDocument> _terminalDocMap = new();
         private ToolStripButton _chatPanelButton;
         private ToolStripButton _chatHistoryButton;
@@ -75,17 +75,23 @@ namespace MultiTerminal
         private ToolStripButton _agentPanelButton;
         private ToolStripButton _hudButton;
         private readonly Dictionary<string, AgentProcess> _agentProcessMap = new();
-        private readonly Dictionary<string, AgentPanelDocument> _agentPanelMap = new();
-        private readonly Dictionary<string, WeifenLuo.WinFormsUI.Docking.DockPane> _spawnerAgentPanes = new();
         private readonly Dictionary<string, (AgentPanelControl Control, Panel Slot, TerminalDocument Terminal)> _embeddedAgentMap = new();
         private TeamWatcherService _teamWatcher;
         private InboxMonitorService _inboxMonitor;
+        private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
+        private ToolStripButton _filePreviewPanelButton;
+
+        // Companion process manager — auto-launches external services on startup
+        private Services.CompanionProcessManager _companionManager;
 
         // Shared project database for start screen — created once, disposed with form
         private Services.ProjectDatabase _sharedProjectDatabase;
 
         // MCP config service — generates .mcp.json for projects from the registry
         private Services.McpConfigService _mcpConfigService;
+
+        // Gateway integration service — syncs MCP servers to the gateway's SQLite DB
+        private Services.GatewayIntegrationService _gatewayService;
 
         // Anti-reentrance: throttle nudges per terminal (5-second cooldown)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastNudgeTime = new();
@@ -97,6 +103,9 @@ namespace MultiTerminal
         private readonly object _injectionLock = new object();
         private readonly object _terminalDocMapLock = new object();
 
+        // Reverse map: agent name → terminal document (populated on terminal registration)
+        private readonly Dictionary<string, TerminalDocument> _agentNameToTerminalDoc = new(StringComparer.OrdinalIgnoreCase);
+
         // Message deduplication cache - tracks recently delivered message IDs to prevent duplicates
         private readonly Dictionary<string, DateTime> _deliveredMessageCache = new Dictionary<string, DateTime>();
         private readonly object _deduplicationLock = new object();
@@ -105,9 +114,6 @@ namespace MultiTerminal
         // For session restore with XML layout
         private int _terminalRestoreIndex = 0;
         private List<TerminalSessionInfo> _pendingTerminalSessions;
-
-        // Background timer for periodic session sync and indexing
-        private System.Windows.Forms.Timer _sessionSyncTimer;
 
         // Timer for polling pending message queue (retry delivery)
         private System.Windows.Forms.Timer _messageQueueTimer;
@@ -133,6 +139,11 @@ namespace MultiTerminal
             InitializeMcpServerAndChatPanel();
             System.Diagnostics.Trace.WriteLine("[MainForm] InitializeMcpServerAndChatPanel completed");
 
+            // Launch companion processes (ClaudeRemote, Caddy, etc.) in background
+            // Uses the shared instance from the REST server so the API controller sees tracked PIDs
+            _companionManager = _mcpServer.CompanionProcessManager;
+            _ = System.Threading.Tasks.Task.Run(() => _companionManager.StartAll());
+
             // Defer RestoreSession to after the form is shown to avoid blocking the constructor
             // This prevents WebView2 initialization from blocking the UI thread during startup
             System.Diagnostics.Trace.WriteLine("[MainForm] Deferring RestoreSession until form is shown...");
@@ -140,6 +151,7 @@ namespace MultiTerminal
             this.Shown += (s, e) =>
             {
                 System.Diagnostics.Trace.WriteLine("[MainForm] ===== SHOWN EVENT FIRED =====");
+                ShowOwnerProfileDialogIfNeeded();
                 RestoreSession();
             };
         }
@@ -204,11 +216,10 @@ namespace MultiTerminal
             _projectService.RegistryChangedExternally += OnRegistryChangedExternally;
             System.Diagnostics.Trace.WriteLine("[MainForm] Creating SessionIndexingService...");
             _sessionIndexingService = new SessionIndexingService();
-            System.Diagnostics.Trace.WriteLine("[MainForm] Creating SessionSyncService...");
-            _sessionSyncService = new SessionSyncService();
-            System.Diagnostics.Trace.WriteLine("[MainForm] Creating SessionDatabase...");
-            _sessionDatabase = new SessionDatabase(); // Uses centralized path in APPDATA
-            System.Diagnostics.Trace.WriteLine("[MainForm] SessionDatabase created successfully");
+            System.Diagnostics.Trace.WriteLine("[MainForm] Creating TaskDatabase for chat persistence...");
+            _chatTaskDatabase = new TaskDatabase();
+            _ownerProfileService = new OwnerProfileService(_chatTaskDatabase.Connection);
+            System.Diagnostics.Trace.WriteLine("[MainForm] TaskDatabase created successfully");
 
             // Shared project database for the start screen (one connection, shared across all terminals)
             _sharedProjectDatabase = new Services.ProjectDatabase();
@@ -216,7 +227,7 @@ namespace MultiTerminal
             // Initialize project panel (combines project info and prompts)
             _projectPanel = new ProjectPanelDocument();
             _projectPanel.SetServices(_projectService, _promptService);
-            _projectPanel.SetSessionDatabase(_sessionDatabase); // Inject shared database to prevent duplicate creation
+            // SessionLineageService is injected later in InitializeMcpServerAndChatPanel once TaskDatabase is available
             _projectPanel.SetProjectDatabase(_sharedProjectDatabase); // Share single connection used by the rest of the app
             _projectPanel.SetTheme(_currentTheme);
 
@@ -236,18 +247,23 @@ namespace MultiTerminal
 
             // MCP config events
             _projectPanel.McpJsonWriteRequested += OnMcpJsonWriteRequested;
-            _projectPanel.McpRegistrySaveRequested += OnMcpRegistrySaveRequested;
-            _projectPanel.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
-            _projectPanel.ImportMcpJsonRequested += OnImportMcpJsonRequested;
-            _projectPanel.RegenerateAllMcpConfigsRequested += OnRegenerateAllMcpConfigsRequested;
+
+            // File preview — route file explorer clicks to the separate preview panel
+            _projectPanel.FilePreviewRequested += OnFilePreviewRequested;
 
             // Create debug log service (available immediately)
             _debugLogService = new DebugLogService();
 
-            // Initialize McpConfigService — used by OnMcpJsonWriteRequested and OnImportMcpJsonRequested
+            // Initialize McpConfigService — used by OnMcpJsonWriteRequested
             // Pass debug log callback so CLI errors are visible in the debug panel
             _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase,
                 (source, msg) => _debugLogService?.Info(source, msg));
+
+            // Initialize GatewayIntegrationService and wire it to McpConfigService and ProjectPanel
+            _gatewayService = new Services.GatewayIntegrationService(
+                (source, msg) => _debugLogService?.Info(source, msg));
+            _mcpConfigService.GatewayService = _gatewayService;
+            _projectPanel.SetGatewayService(_gatewayService);
 
             // Create panel instances early so they can be restored from layout
             // They will be initialized with MCP broker later in InitializeMcpServerAndChatPanel
@@ -259,6 +275,8 @@ namespace MultiTerminal
             _officePanel = new OfficePanel.OfficePanelDocument();
             _debugPanel = new DebugPanel();
             _debugPanel.Initialize(_debugLogService);
+            _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
+            _filePreviewPanel.DebugLogService = _debugLogService;
 
         }
 
@@ -297,48 +315,52 @@ namespace MultiTerminal
                 // Wire up SessionLineageService — uses the broker's shared TaskDatabase
                 _mcpServer.Broker.SessionLineageService = new Services.SessionLineageService(_mcpServer.Broker.TaskDb);
 
-                // Wire up KnowledgeDatabase — institutional memory (shares tasks.db via TaskDatabase)
+                // Inject SessionLineageService into ProjectPanel (replaces old SessionDatabase dependency)
+                _projectPanel.SetSessionLineageService(_mcpServer.Broker.SessionLineageService);
+
+                // Wire up KnowledgeDatabase — institutional memory (shares multiterminal.db via TaskDatabase)
                 _mcpServer.Broker.KnowledgeDb = new Services.KnowledgeDatabase(_mcpServer.Broker.TaskDb);
 
+                // DISABLED FOR DISTRIBUTION — re-enable after debugging auto-sync feature
                 // Auto-sync Claude Code sessions on startup (background, non-blocking)
                 // Scans all registered projects from SQLite, not just CWD
-                var lineageService = _mcpServer.Broker.SessionLineageService;
-                var debugLog = _debugLogService;
-                var projectDb = _sharedProjectDatabase;
-                System.Threading.Tasks.Task.Run(() =>
-                {
-                    try
-                    {
-                        var projects = projectDb?.GetAllProjects();
-                        if (projects == null || projects.Count == 0)
-                            return;
-
-                        int totalImported = 0, totalSkipped = 0, totalFailed = 0;
-
-                        foreach (var project in projects)
-                        {
-                            if (string.IsNullOrEmpty(project.Path))
-                                continue;
-
-                            string claudeFolder = Services.SessionLineageService.GetClaudeProjectFolder(project.Path);
-                            if (claudeFolder == null)
-                                continue;
-
-                            debugLog?.Info("MainForm", $"Session sync [{project.Name}]: scanning {claudeFolder}");
-                            var result = lineageService.SyncNewSessions(claudeFolder);
-                            totalImported += result.Imported;
-                            totalSkipped += result.Skipped;
-                            totalFailed += result.Failed;
-                            debugLog?.Info("MainForm", $"Session sync [{project.Name}]: {result.Imported} imported, {result.Skipped} skipped, {result.Failed} failed");
-                        }
-
-                        debugLog?.Info("MainForm", $"Session sync totals: {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
-                    }
-                    catch (Exception ex)
-                    {
-                        debugLog?.Error("MainForm", $"Session sync error: {ex.Message}");
-                    }
-                });
+                // var lineageService = _mcpServer.Broker.SessionLineageService;
+                // var debugLog = _debugLogService;
+                // var projectDb = _sharedProjectDatabase;
+                // System.Threading.Tasks.Task.Run(() =>
+                // {
+                //     try
+                //     {
+                //         var projects = projectDb?.GetAllProjects();
+                //         if (projects == null || projects.Count == 0)
+                //             return;
+                //
+                //         int totalImported = 0, totalSkipped = 0, totalFailed = 0;
+                //
+                //         foreach (var project in projects)
+                //         {
+                //             if (string.IsNullOrEmpty(project.Path))
+                //                 continue;
+                //
+                //             string claudeFolder = Services.SessionLineageService.GetClaudeProjectFolder(project.Path);
+                //             if (claudeFolder == null)
+                //                 continue;
+                //
+                //             debugLog?.Info("MainForm", $"Session sync [{project.Name}]: scanning {claudeFolder}");
+                //             var result = lineageService.SyncNewSessions(claudeFolder);
+                //             totalImported += result.Imported;
+                //             totalSkipped += result.Skipped;
+                //             totalFailed += result.Failed;
+                //             debugLog?.Info("MainForm", $"Session sync [{project.Name}]: {result.Imported} imported, {result.Skipped} skipped, {result.Failed} failed");
+                //         }
+                //
+                //         debugLog?.Info("MainForm", $"Session sync totals: {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
+                //     }
+                //     catch (Exception ex)
+                //     {
+                //         debugLog?.Error("MainForm", $"Session sync error: {ex.Message}");
+                //     }
+                // });
 
                 // Note: Profiles are set to offline in MessageBroker constructor before loading
 
@@ -432,6 +454,24 @@ namespace MultiTerminal
                     try
                     {
                         await _mcpServer.StartAsync();
+
+                        // Wire terminal stream resolver: resolves any terminal identifier
+                        // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
+                        _mcpServer.TerminalStreamService?.SetTerminalResolver(idOrNameOrDocId =>
+                        {
+                            // Use MessageBroker to resolve flexible identifiers to a terminal info
+                            var termInfo = _mcpServer.Broker.GetTerminal(idOrNameOrDocId);
+                            if (termInfo == null) return null;
+
+                            // Look up the TerminalDocument by the terminal's registered ID
+                            lock (_terminalDocMapLock)
+                            {
+                                if (_terminalDocMap.TryGetValue(termInfo.Id, out var doc))
+                                    return doc.Terminal?.ConPty;
+                            }
+                            return null;
+                        });
+
                         Invoke(new Action(() =>
                         {
                             _chatPanel?.UpdateConnectionStatus(true);
@@ -559,25 +599,16 @@ namespace MultiTerminal
                 try
                 {
                     Log($"START: From={message.From}, To={message.To}, Id={message.Id}");
-                    var dbPath = Services.SessionDatabase.GetCentralizedDatabasePath();
-                    Log($"DB path: {dbPath}");
-                    Log($"DB exists: {System.IO.File.Exists(dbPath)}");
 
-                    // Use default constructor - uses centralized database path
-                    // NOT the project constructor which treats arg as project folder!
-                    using (var db = new Services.SessionDatabase())
-                    {
-                        Log("SessionDatabase opened, calling SaveChatMessage...");
-                        db.SaveChatMessage(
-                            message.Id,
-                            message.From,
-                            message.To,
-                            message.Content,
-                            message.Timestamp,
-                            message.IsBroadcast
-                        );
-                        Log($"SUCCESS - saved message {message.Id}");
-                    }
+                    _chatTaskDatabase.SaveChatMessage(
+                        message.Id,
+                        message.From,
+                        message.To,
+                        message.Content,
+                        message.Timestamp,
+                        message.IsBroadcast
+                    );
+                    Log($"SUCCESS - saved message {message.Id}");
                 }
                 catch (Exception ex)
                 {
@@ -628,7 +659,25 @@ namespace MultiTerminal
             switch (e.Action)
             {
                 case "open":
-                    targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
+                    var newTab = targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
+                    if (newTab != null)
+                    {
+                        // Wire browser page messages to the inbox nudge pipeline so
+                        // the agent gets a [cm] notification when the page posts a message.
+                        var termName = terminal.Name;
+                        var tabTitle = e.Title ?? e.TabId;
+                        newTab.WebMessageReceived += (_, msg) =>
+                        {
+                            var content = $"[Browser Tab \"{tabTitle}\"] Page message: {msg.Data}";
+                            InboxFileWriter.WriteMessage(
+                                termName,
+                                Guid.NewGuid().ToString("N").Substring(0, 8),
+                                $"Browser:{tabTitle}",
+                                content);
+                            _debugLogService?.Info("MainForm",
+                                $"Browser message from tab '{tabTitle}' written to {termName} inbox");
+                        };
+                    }
                     break;
                 case "update":
                     targetDoc.SetBrowserContent(e.TabId, e.Title, e.Url, e.HtmlContent);
@@ -636,7 +685,149 @@ namespace MultiTerminal
                 case "close":
                     targetDoc.RemoveBrowserTab(e.TabId);
                     break;
+                case "execute_script":
+                    _ = HandleExecuteScriptAsync(targetDoc, e);
+                    break;
+                case "get_console_logs":
+                    _ = HandleGetConsoleLogsAsync(targetDoc, e);
+                    break;
+                case "get_element_content":
+                    _ = HandleGetElementContentAsync(targetDoc, e);
+                    break;
+                case "capture_screenshot":
+                    _ = HandleCaptureScreenshotAsync(targetDoc, e);
+                    break;
+                case "post_message":
+                    _ = HandlePostMessageAsync(targetDoc, e);
+                    break;
+                case "get_messages":
+                    _ = HandleGetMessagesAsync(targetDoc, e);
+                    break;
             }
+        }
+
+        private async Task HandleExecuteScriptAsync(TerminalDocument doc, BrowserTabEventArgs e)
+        {
+            try
+            {
+                var tab = doc.GetBrowserTab(e.TabId);
+                if (tab == null)
+                {
+                    e.ResultTcs?.TrySetResult("{\"error\": \"Tab not found\"}");
+                    return;
+                }
+                var result = await tab.ExecuteScriptAsync(e.Script);
+                e.ResultTcs?.TrySetResult(result);
+            }
+            catch (Exception ex)
+            {
+                e.ResultTcs?.TrySetException(ex);
+            }
+        }
+
+        private async Task HandleGetConsoleLogsAsync(TerminalDocument doc, BrowserTabEventArgs e)
+        {
+            try
+            {
+                var tab = doc.GetBrowserTab(e.TabId);
+                if (tab == null)
+                {
+                    e.ResultTcs?.TrySetResult("[]");
+                    return;
+                }
+                var logs = await tab.GetConsoleLogsAsync(e.Limit);
+                var json = System.Text.Json.JsonSerializer.Serialize(logs);
+                e.ResultTcs?.TrySetResult(json);
+            }
+            catch (Exception ex)
+            {
+                e.ResultTcs?.TrySetException(ex);
+            }
+        }
+
+        private async Task HandleGetElementContentAsync(TerminalDocument doc, BrowserTabEventArgs e)
+        {
+            try
+            {
+                var tab = doc.GetBrowserTab(e.TabId);
+                if (tab == null)
+                {
+                    e.ResultTcs?.TrySetResult("{\"error\": \"Tab not found\"}");
+                    return;
+                }
+                var result = await tab.GetElementContentAsync(e.Selector, e.Property);
+                e.ResultTcs?.TrySetResult(result);
+            }
+            catch (Exception ex)
+            {
+                e.ResultTcs?.TrySetException(ex);
+            }
+        }
+
+        private async Task HandleCaptureScreenshotAsync(TerminalDocument doc, BrowserTabEventArgs e)
+        {
+            try
+            {
+                var tab = doc.GetBrowserTab(e.TabId);
+                if (tab == null)
+                {
+                    e.ResultTcs?.TrySetResult(null);
+                    return;
+                }
+                var pngBytes = await tab.CaptureScreenshotAsync();
+                if (pngBytes == null || pngBytes.Length == 0)
+                {
+                    e.ResultTcs?.TrySetResult(null);
+                    return;
+                }
+                var base64 = Convert.ToBase64String(pngBytes);
+                e.ResultTcs?.TrySetResult(base64);
+            }
+            catch (Exception ex)
+            {
+                e.ResultTcs?.TrySetException(ex);
+            }
+        }
+
+        private Task HandlePostMessageAsync(TerminalDocument doc, BrowserTabEventArgs e)
+        {
+            try
+            {
+                var tab = doc.GetBrowserTab(e.TabId);
+                if (tab == null)
+                {
+                    e.ResultTcs?.TrySetResult("{\"error\": \"Tab not found\"}");
+                    return Task.CompletedTask;
+                }
+                tab.PostMessageToPage(e.MessageData);
+                e.ResultTcs?.TrySetResult("{\"success\": true}");
+            }
+            catch (Exception ex)
+            {
+                e.ResultTcs?.TrySetException(ex);
+            }
+            return Task.CompletedTask;
+        }
+
+        private Task HandleGetMessagesAsync(TerminalDocument doc, BrowserTabEventArgs e)
+        {
+            try
+            {
+                var tab = doc.GetBrowserTab(e.TabId);
+                if (tab == null)
+                {
+                    e.ResultTcs?.TrySetResult("[]");
+                    return Task.CompletedTask;
+                }
+                var messages = tab.GetReceivedMessages(e.Limit);
+                var json = System.Text.Json.JsonSerializer.Serialize(messages);
+                e.ResultTcs?.TrySetResult(json);
+            }
+            catch (Exception ex)
+            {
+                e.ResultTcs?.TrySetException(ex);
+            }
+            return Task.CompletedTask;
         }
 
         private void OnMcpTerminalRegistered(object sender, TerminalInfo e)
@@ -672,14 +863,23 @@ namespace MultiTerminal
                         t.TabText.Equals(e.Name, StringComparison.OrdinalIgnoreCase));
             }
 
-            // Last resort fallback
-            targetDoc ??= _lastActiveTerminal;
+            // Last resort fallback — only if the last active terminal is still "Unassigned"
+            // (avoids external processes like ClarionIDE hijacking a named terminal's tab)
+            if (targetDoc == null && _lastActiveTerminal != null &&
+                (string.IsNullOrEmpty(_lastActiveTerminal.CustomTitle) ||
+                 _lastActiveTerminal.CustomTitle.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)))
+            {
+                targetDoc = _lastActiveTerminal;
+            }
 
             if (targetDoc != null)
             {
                 lock (_terminalDocMapLock)
                 {
                     _terminalDocMap[e.Id] = targetDoc;
+                    // Maintain reverse lookup: agent name → terminal document
+                    if (!string.IsNullOrEmpty(e.Name))
+                        _agentNameToTerminalDoc[e.Name] = targetDoc;
                 }
 
                 // CRITICAL: Must update UI controls on the UI thread!
@@ -892,32 +1092,6 @@ namespace MultiTerminal
                     }
 
                     // Embedded agents are cleaned up via the Stopped handler in CreateAgentPanel.
-                    // Dock-based panels: update status and optionally auto-close.
-                    if (_agentPanelMap.TryGetValue(agentTerminalId, out var panel) && !panel.IsDisposed)
-                    {
-                        try
-                        {
-                            if (InvokeRequired)
-                                BeginInvoke(new Action(() => panel.Text = $"Agent: {agentName} (done)"));
-                            else
-                                panel.Text = $"Agent: {agentName} (done)";
-                        }
-                        catch (ObjectDisposedException) { }
-
-                        // Auto-close if setting is enabled
-                        string closeMode = _settings?.GetAgentPanelCloseMode() ?? "ManualClose";
-                        if (closeMode == "AutoClose")
-                        {
-                            try
-                            {
-                                if (InvokeRequired)
-                                    BeginInvoke(new Action(() => { if (!panel.IsDisposed) panel.Close(); }));
-                                else
-                                    panel.Close();
-                            }
-                            catch (ObjectDisposedException) { }
-                        }
-                    }
 
                     _debugLogService.Info("MainForm", $"AgentProcess {agentName} exited with code {exitCode}");
                 };
@@ -1266,6 +1440,16 @@ namespace MultiTerminal
             _gridDropdown.DropDownItems.Add(new ToolStripSeparator());
             AddDropdownItem("Reset to Tabs", () => _gridManager.ResetToTabs());
 
+            // File preview panel toggle button
+            _filePreviewPanelButton = new ToolStripButton
+            {
+                Text = "Preview",
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                ForeColor = Color.White,
+                ToolTipText = "Toggle File Preview Panel"
+            };
+            _filePreviewPanelButton.Click += (s, e) => ToggleFilePreviewPanel();
+
             // Theme toggle button (icon-based)
             _themeButton = new ToolStripButton
             {
@@ -1284,6 +1468,27 @@ namespace MultiTerminal
                 ToolTipText = "Settings"
             };
             _settingsButton.Click += (s, e) => ShowSettingsDialog();
+
+            // Documentation button (book icon)
+            var docsButton = new ToolStripButton
+            {
+                Text = "\uD83D\uDCD6", // Open book symbol
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                ForeColor = Color.White,
+                ToolTipText = "Documentation"
+            };
+            docsButton.Click += (s, e) =>
+            {
+                var docsPath = System.IO.Path.Combine(Application.StartupPath, "docs", "html", "index.html");
+                if (System.IO.File.Exists(docsPath))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = docsPath,
+                        UseShellExecute = true
+                    });
+                }
+            };
 
             // About button (info icon)
             _aboutButton = new ToolStripButton
@@ -1305,14 +1510,14 @@ namespace MultiTerminal
             _toolStrip.Items.Add(_profilePanelButton);
             _toolStrip.Items.Add(_inboxPanelButton);
             _toolStrip.Items.Add(_officePanelButton);
-            _toolStrip.Items.Add(_agentPanelButton);
             _toolStrip.Items.Add(_debugPanelButton);
-            _toolStrip.Items.Add(_hudButton);
+            _toolStrip.Items.Add(_filePreviewPanelButton);
             _toolStrip.Items.Add(_recentFoldersDropdown);
             _toolStrip.Items.Add(new ToolStripSeparator());
             _toolStrip.Items.Add(_gridDropdown);
             _toolStrip.Items.Add(new ToolStripSeparator());
             _toolStrip.Items.Add(_themeButton);
+            _toolStrip.Items.Add(docsButton);
             _toolStrip.Items.Add(_settingsButton);
             _toolStrip.Items.Add(_aboutButton);
 
@@ -1329,9 +1534,51 @@ namespace MultiTerminal
             _gridDropdown.DropDownItems.Add(item);
         }
 
+        private void ShowOwnerProfileDialogIfNeeded()
+        {
+            if (_ownerProfileService.IsConfigured()) return;
+
+            ShowOwnerProfileDialog();
+        }
+
+        /// <summary>
+        /// Shows the owner profile dialog. Called on first run or from Settings.
+        /// </summary>
+        private void ShowOwnerProfileDialog()
+        {
+            var dialog = new Dialogs.OwnerProfileDialog();
+            new WindowInteropHelper(dialog) { Owner = this.Handle };
+
+            // Pre-populate if profile exists (editing)
+            var existing = _ownerProfileService.GetProfile();
+            if (existing != null)
+            {
+                dialog.LoadExisting(existing.FullName, existing.Email,
+                    existing.GitHubUsername, existing.HasGitHubToken);
+            }
+
+            if (dialog.ShowDialog() == true)
+            {
+                var profile = existing ?? new Models.OwnerProfile();
+                profile.FullName = dialog.FullName;
+                profile.Email = dialog.Email;
+                profile.GitHubUsername = string.IsNullOrWhiteSpace(dialog.GitHubUsername)
+                    ? null : dialog.GitHubUsername;
+
+                _ownerProfileService.SaveProfile(profile);
+
+                // Save token if provided (and not the placeholder)
+                var token = dialog.GitHubToken;
+                if (!string.IsNullOrEmpty(token) && token != "placeholder-existing")
+                {
+                    _ownerProfileService.SaveGitHubToken(token);
+                }
+            }
+        }
+
         private void ShowSettingsDialog()
         {
-            var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark);
+            var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark, _ownerProfileService);
             new WindowInteropHelper(dialog) { Owner = this.Handle };
             if (dialog.ShowDialog() == true)
             {
@@ -1349,8 +1596,7 @@ namespace MultiTerminal
 
         private void ShowChatHistoryDialog()
         {
-            using (var db = new Services.SessionDatabase())
-            using (var dialog = new Dialogs.ChatHistoryDialog(db, _currentTheme))
+            using (var dialog = new Dialogs.ChatHistoryDialog(_chatTaskDatabase, _currentTheme))
             {
                 dialog.ShowDialog(this);
             }
@@ -1550,20 +1796,6 @@ namespace MultiTerminal
             // Update office panel theme
             _officePanel?.ApplyTheme(_currentTheme.IsDark);
 
-            // Update all agent panel themes (snapshot to avoid collection-modified crash)
-            foreach (var panel in _agentPanelMap.Values.ToList())
-            {
-                try
-                {
-                    if (!panel.IsDisposed)
-                        panel.ApplyTheme(_currentTheme.IsDark);
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Agent panel theme error: {ex.Message}");
-                }
-            }
-
             // Update embedded agent control themes
             foreach (var info in _embeddedAgentMap.Values.ToList())
             {
@@ -1574,11 +1806,11 @@ namespace MultiTerminal
             // Update all open lifecycle board windows
             TaskLifecycleBoardForm.ApplyThemeToAll(_currentTheme.IsDark);
 
-            // Update project toggle button color
+            // Update panel toggle button colors
             if (_projectPanelButton != null)
-            {
                 _projectPanelButton.ForeColor = textColor;
-            }
+            if (_filePreviewPanelButton != null)
+                _filePreviewPanelButton.ForeColor = textColor;
         }
 
         private void ToggleTheme()
@@ -1596,7 +1828,7 @@ namespace MultiTerminal
             "Quinn", "Ruby", "Sam", "Tara", "Uma", "Vera", "Wade", "Xena", "Yuri", "Zara"
         };
 
-        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
+        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
         {
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -1625,6 +1857,7 @@ namespace MultiTerminal
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
             doc.ProjectFileChanged += OnProjectFileChanged;
             doc.ClaudeCodeDetected += OnClaudeCodeDetected;
+            doc.TaskDropped += OnTaskDroppedOnTerminal;
 
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -1716,7 +1949,7 @@ namespace MultiTerminal
                         System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Team lead naming applied: '{identityName}'");
                     }
 
-                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName);
+                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead);
                     System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] PreRegisterTerminalWithName returned: '{terminalName}'");
                 }
                 else if (hasLaunchParams)
@@ -1737,8 +1970,8 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead})...");
-                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead}, gatewayProfile='{gatewayProfile ?? "null"}')...");
+                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
                 System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
             }
             else
@@ -1777,6 +2010,7 @@ namespace MultiTerminal
             doc.SetProjectDatabase(_sharedProjectDatabase);
             doc.ProjectLaunched += OnStartScreenProjectLaunched;
             doc.StartScreenOpenPowerShellRequested += OnStartScreenOpenPowerShell;
+            doc.StartScreenJustClaudeRequested += OnStartScreenJustClaude;
             doc.StartScreenNewProjectRequested += OnStartScreenNewProject;
         }
 
@@ -1841,26 +2075,24 @@ namespace MultiTerminal
                         }
                     }
 
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
                 }
 
-                // Write project .mcp.json synchronously (fast file I/O, needed before launch)
-                try { _mcpConfigService?.WriteMcpJsonToProject(project.Id, launchDir); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config write failed: {ex.Message}"); }
-
-                // Sync global MCP servers in background (slow subprocess calls, not needed before launch)
-                if (_mcpConfigService != null)
+                // Sync MCP configs: gateway-aware path if available, else standard path
+                string gatewayProfile = null;
+                try
                 {
-                    var mcp = _mcpConfigService;
-                    System.Threading.Tasks.Task.Run(() =>
+                    if (_mcpConfigService != null)
                     {
-                        try { mcp.SyncGlobalMcpServers(); }
-                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] Background MCP sync failed: {ex.Message}"); }
-                    });
+                        _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
+                        if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                            gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                    }
                 }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
 
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
-                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead);
+                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile);
 
                 // Apply current font size
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
@@ -1913,6 +2145,46 @@ namespace MultiTerminal
         }
 
         /// <summary>
+        /// Handles "Just Claude" from the start screen: launches Claude Code with MT config flags
+        /// but no project context and no skills — just a plain Claude session for quick tasks.
+        /// </summary>
+        private void OnStartScreenJustClaude(object sender, EventArgs e)
+        {
+            if (sender is not TerminalDocument doc) return;
+
+            try
+            {
+                string terminalName = null;
+                if (_mcpServer?.Broker != null)
+                {
+                    terminalName = "Unassigned";
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                }
+
+                // Use LaunchCommandBuilder to get MT config flags (--add-dir, --mcp-config, etc.)
+                var launch = Services.LaunchCommandBuilder.BuildClaudeCommand(null);
+
+                // Use configurable default working directory from Settings, fallback to user profile
+                string workingDir = _settings?.GetDefaultWorkingDirectory() ?? launch.WorkingDirectory;
+
+                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand);
+
+                float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
+                doc.SetFontSize(terminalFontSize);
+
+                doc.Activate();
+                doc.FocusTerminal();
+                _lastActiveTerminal = doc;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenJustClaude error: {ex.Message}");
+                doc.ShowStartScreen();
+                MessageBox.Show($"Failed to launch Claude: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        /// <summary>
         /// Handles "New Project" from the start screen.
         /// Opens the WPF NewProjectWpfDialog, saves a minimal project record,
         /// then launches a terminal in the project folder with /new-project auto-injected.
@@ -1951,7 +2223,7 @@ namespace MultiTerminal
                 if (_mcpServer?.Broker != null)
                 {
                     terminalName = isTeamLead ? project.TeamLead : "Unassigned";
-                    _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId);
+                    _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead);
                 }
 
                 // Wire one-shot ClaudeCodeDetected handler to inject /new-project
@@ -1974,25 +2246,23 @@ namespace MultiTerminal
                 };
                 sourceDoc.ClaudeCodeDetected += newProjectHandler;
 
-                // Write project .mcp.json synchronously (fast file I/O, needed before launch)
-                try { _mcpConfigService?.WriteMcpJsonToProject(project.Id, launchDir); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config write failed: {ex.Message}"); }
-
-                // Sync global MCP servers in background (slow subprocess calls, not needed before launch)
-                if (_mcpConfigService != null)
+                // Sync MCP configs: gateway-aware path if available, else standard path
+                string gatewayProfile2 = null;
+                try
                 {
-                    var mcp = _mcpConfigService;
-                    System.Threading.Tasks.Task.Run(() =>
+                    if (_mcpConfigService != null)
                     {
-                        try { mcp.SyncGlobalMcpServers(); }
-                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] Background MCP sync failed: {ex.Message}"); }
-                    });
+                        _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
+                        if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                            gatewayProfile2 = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                    }
                 }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
 
                 // Start terminal in project folder
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir}");
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
-                    projectId: project.Id, isTeamLead: isTeamLead);
+                    projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 sourceDoc.SetFontSize(terminalFontSize);
@@ -2111,12 +2381,12 @@ namespace MultiTerminal
         /// Pre-registers a terminal with a specific identity name.
         /// Used by AddNewTerminalWithIdentity for "Launch as..." feature.
         /// </summary>
-        private string PreRegisterTerminalWithName(string docId, string identityName)
+        private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false)
         {
             try
             {
                 // Register with the specific identity name
-                var result = _mcpServer.Broker.RegisterTerminal(identityName, docId);
+                var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead);
                 if (result.Success)
                 {
                     return identityName;
@@ -2155,6 +2425,7 @@ namespace MultiTerminal
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
             doc.ProjectFileChanged += OnProjectFileChanged;
             doc.ClaudeCodeDetected += OnClaudeCodeDetected;
+            doc.TaskDropped += OnTaskDroppedOnTerminal;
 
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -2226,6 +2497,7 @@ namespace MultiTerminal
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
             doc.ProjectFileChanged += OnProjectFileChanged;
             doc.ClaudeCodeDetected += OnClaudeCodeDetected;
+            doc.TaskDropped += OnTaskDroppedOnTerminal;
 
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -2582,6 +2854,46 @@ namespace MultiTerminal
             }
         }
 
+        private async void OnTaskDroppedOnTerminal(object sender, TaskDroppedEventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnTaskDroppedOnTerminal(sender, e)));
+                return;
+            }
+
+            var doc = sender as TerminalDocument;
+            if (doc == null) return;
+
+            string agentName = doc.CustomTitle ?? doc.TabText ?? "Terminal";
+            _debugLogService?.Info("MainForm", $"Task '{e.Title}' (ID: {e.TaskId}) dropped on terminal '{agentName}'");
+
+            // Auto-claim the task for this terminal's agent
+            var broker = _mcpServer?.Broker;
+            if (broker != null)
+            {
+                var result = broker.ClaimTask(e.TaskId, agentName);
+                if (result.Success)
+                {
+                    _debugLogService?.Info("MainForm", $"Task {e.TaskId} auto-claimed by {agentName}");
+                }
+                else
+                {
+                    _debugLogService?.Warning("MainForm", $"Failed to claim task {e.TaskId}: {result.Error}");
+                }
+            }
+
+            // Type a prompt into the terminal so the agent starts working on the task
+            string prompt = $"Pick up kanban task \"{e.Title}\" (ID: {e.TaskId}). Claim it and start working on it using /kanban-task.";
+
+            // Try JS-based injection first, fall back to TypeInput
+            bool injected = await doc.InjectInputAsync(prompt);
+            if (!injected)
+            {
+                doc.TypeInput(prompt);
+            }
+        }
+
         private void OnRecentFoldersDropDownOpening(object sender, EventArgs e)
         {
             _recentFoldersDropdown.DropDownItems.Clear();
@@ -2658,6 +2970,7 @@ namespace MultiTerminal
                 doc.DirectoryChanged += OnTerminalDirectoryChanged;
                 doc.ProjectFileChanged += OnProjectFileChanged;
                 doc.ClaudeCodeDetected += OnClaudeCodeDetected;
+            doc.TaskDropped += OnTaskDroppedOnTerminal;
 
                 // Wire up "Launch as..." context menu support
                 doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -2665,7 +2978,10 @@ namespace MultiTerminal
                 WireStartScreenEvents(doc);
 
                 doc.Show(_dockPanel, DockState.Document);
-                doc.StartTerminal(_settings?.GetLastDirectory());
+
+                // Pre-register with MessageBroker so the terminal is routable immediately
+                var terminalName = PreRegisterTerminal(doc.DocId);
+                doc.StartTerminal(_settings?.GetLastDirectory(), terminalName);
                 doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
                 docs.Add(doc);
             }
@@ -2776,6 +3092,11 @@ namespace MultiTerminal
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            // Freeze all terminal splitter layouts FIRST to prevent bogus ratio saves
+            // during the shutdown resize/layout cascade
+            foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>())
+                doc.FreezeLayout();
+
             // Batch all settings changes to avoid multiple disk writes
             _settings.BeginBatch();
 
@@ -2806,6 +3127,7 @@ namespace MultiTerminal
             SavePanelState("InboxPanel", _inboxPanel);
             SavePanelState("OfficePanel", _officePanel);
             SavePanelState("DebugPanel", _debugPanel);
+            SavePanelState("FilePreviewPanel", _filePreviewPanel);
 
             // Save session before closing
             SaveSession();
@@ -2857,6 +3179,16 @@ namespace MultiTerminal
                 _agentProcessMap.Clear();
             }
 
+            // Stop companion processes that have StopOnExit=true
+            try
+            {
+                _companionManager?.StopAll();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop companion processes: {ex.Message}");
+            }
+
             // Stop MCP server synchronously with timeout to ensure Kestrel threads are cleaned up
             if (_mcpServer != null)
             {
@@ -2874,6 +3206,52 @@ namespace MultiTerminal
             foreach (var doc in _gridManager.GetTerminalDocuments())
             {
                 doc.Terminal?.Stop();
+            }
+
+            // Explicitly dispose all WebView2 panels to prevent zombie processes.
+            // WebView2 can hang during implicit dispose if it has pending navigation or JS,
+            // which blocks the entire process from exiting and requires a reboot.
+            DisposePanel(_projectPanel);
+            DisposePanel(_chatPanel);
+            DisposePanel(_tasksPanel);
+            DisposePanel(_activityPanel);
+            DisposePanel(_profilePanel);
+            DisposePanel(_inboxPanel);
+            DisposePanel(_officePanel);
+            DisposePanel(_debugPanel);
+            DisposePanel(_filePreviewPanel);
+
+            // Dispose embedded agent panels
+            lock (_embeddedAgentMap)
+            {
+                foreach (var kvp in _embeddedAgentMap)
+                {
+                    try { kvp.Value.Control?.Dispose(); } catch { }
+                }
+            }
+
+            // Dispose all terminal documents (each has a WebView2 renderer)
+            foreach (var doc in _gridManager.GetTerminalDocuments())
+            {
+                try { doc.Dispose(); } catch { }
+            }
+
+            // Failsafe: force-exit after a short delay if something is still hanging.
+            // This prevents the zombie process scenario that requires a reboot.
+            Task.Run(async () =>
+            {
+                await Task.Delay(5000);
+                Environment.Exit(0);
+            });
+        }
+
+        private void DisposePanel(DockContent panel)
+        {
+            if (panel == null || panel.IsDisposed) return;
+            try { panel.Dispose(); }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to dispose panel: {ex.Message}");
             }
         }
 
@@ -2948,6 +3326,8 @@ namespace MultiTerminal
             if (RestoreSinglePanel("OfficePanel", _officePanel, DockState.DockRight))
                 _officePanel.ApplyTheme(isDark);
             RestoreSinglePanel("DebugPanel", _debugPanel, DockState.DockBottom);
+            if (RestoreSinglePanel("FilePreviewPanel", _filePreviewPanel, DockState.DockBottom))
+                _filePreviewPanel.ApplyTheme(isDark);
         }
 
         private void ApplyThemesToPanels()
@@ -2970,6 +3350,8 @@ namespace MultiTerminal
                 _inboxPanel.ApplyTheme(isDark);
             if (_officePanel != null && !_officePanel.IsDisposed && _officePanel.Visible)
                 _officePanel.ApplyTheme(isDark);
+            if (_filePreviewPanel != null && !_filePreviewPanel.IsDisposed && _filePreviewPanel.Visible)
+                _filePreviewPanel.ApplyTheme(isDark);
         }
 
         private bool RestoreSinglePanel(string panelKey, DockContent panel, DockState defaultDock)
@@ -3098,39 +3480,23 @@ namespace MultiTerminal
             LoadingComplete?.Invoke(this, EventArgs.Empty);
             System.Diagnostics.Trace.WriteLine("[RestoreSession] LoadingComplete event invoked");
 
-            // Sync and index all sessions in background for search functionality
+            // Index sessions for vector search (session sync is handled by
+            // SessionLineageService in InitializeMcpServerAndChatPanel — the old
+            // SessionSyncService.SyncProject relied on sessions-index.json which
+            // Claude Code stopped writing after Feb 2026)
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    // Get the current project path
-                    string projectPath = _lastActiveTerminal?.GetWorkingDirectory()
-                        ?? _settings?.GetLastDirectory()
-                        ?? Directory.GetCurrentDirectory();
-
-                    // First sync sessions from Claude's folder
-                    if (_sessionSyncService != null && _sessionDatabase != null)
-                    {
-                        int syncedCount = _sessionSyncService.SyncProject(projectPath, _sessionDatabase);
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Initial sync: {syncedCount} sessions from Claude storage");
-                    }
-
-                    // Then index for vector search
                     await _sessionIndexingService.IndexAllSessionsAsync();
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Initial session sync/index error: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[MainForm] Session indexing error: {ex.Message}");
                 }
             });
 
-            // Start periodic session sync timer (every 5 minutes)
-            _sessionSyncTimer = new System.Windows.Forms.Timer();
-            _sessionSyncTimer.Interval = 5 * 60 * 1000; // 5 minutes
-            _sessionSyncTimer.Tick += OnSessionSyncTimerTick;
-            _sessionSyncTimer.Start();
-            System.Diagnostics.Debug.WriteLine("[MainForm] Session sync timer started (5 minute interval)");
-
+            // DISABLED FOR DISTRIBUTION — re-enable after debugging auto-sync feature
             // Start message queue polling timer (every 2 seconds)
             _messageQueueTimer = new System.Windows.Forms.Timer();
             _messageQueueTimer.Interval = 2000; // 2 seconds
@@ -3140,7 +3506,7 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Periodic session sync handler - imports new sessions and indexes them.
+        /// Periodic session sync handler - imports new sessions to SessionLineageService (multiterminal.db).
         /// </summary>
         private void OnSessionSyncTimerTick(object sender, EventArgs e)
         {
@@ -3151,34 +3517,52 @@ namespace MultiTerminal
                 return;
             }
 
+            var lineageService = _mcpServer?.Broker?.SessionLineageService;
+            if (lineageService == null)
+            {
+                System.Diagnostics.Debug.WriteLine("[MainForm] Session sync skipped - SessionLineageService not available");
+                return;
+            }
+
             System.Diagnostics.Debug.WriteLine("[MainForm] Session sync timer triggered - starting background sync");
 
-            // Get the current project path from active terminal or settings
-            string projectPath = _lastActiveTerminal?.GetWorkingDirectory()
-                ?? _settings?.GetLastDirectory()
-                ?? Directory.GetCurrentDirectory();
+            var debugLog = _debugLogService;
+            var projectDb = _sharedProjectDatabase;
 
-            // Run sync and indexing in background
-            _ = Task.Run(async () =>
+            // Run sync in background — same logic as startup, syncs all registered projects
+            _ = Task.Run(() =>
             {
                 try
                 {
-                    // STEP 1: Sync sessions from Claude's folder into the database
-                    if (_sessionSyncService != null && _sessionDatabase != null)
+                    var projects = projectDb?.GetAllProjects();
+                    if (projects == null || projects.Count == 0)
+                        return;
+
+                    int totalImported = 0, totalSkipped = 0, totalFailed = 0;
+
+                    foreach (var project in projects)
                     {
-                        int syncedCount = _sessionSyncService.SyncProject(projectPath, _sessionDatabase);
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Synced {syncedCount} sessions from Claude storage");
+                        if (string.IsNullOrEmpty(project.Path))
+                            continue;
+
+                        string claudeFolder = Services.SessionLineageService.GetClaudeProjectFolder(project.Path);
+                        if (claudeFolder == null)
+                            continue;
+
+                        var result = lineageService.SyncNewSessions(claudeFolder);
+                        totalImported += result.Imported;
+                        totalSkipped += result.Skipped;
+                        totalFailed += result.Failed;
                     }
 
-                    // STEP 2: Index sessions (generate vector embeddings)
-                    await _sessionIndexingService.IndexProjectSessionsAsync(projectPath);
-
-                    // STEP 3: Index chat messages
-                    await _sessionIndexingService.IndexChatMessagesAsync();
+                    if (totalImported > 0)
+                        debugLog?.Info("MainForm", $"Session sync (periodic): {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
+                    else
+                        System.Diagnostics.Debug.WriteLine($"[MainForm] Session sync (periodic): no new sessions ({totalSkipped} already imported)");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Session sync error: {ex.Message}");
+                    debugLog?.Error("MainForm", $"Session sync error: {ex.Message}");
                 }
             });
         }
@@ -3335,6 +3719,16 @@ namespace MultiTerminal
                 return _debugPanel;
             }
 
+            if (persistString == "FilePreviewPanel")
+            {
+                if (_filePreviewPanel == null || _filePreviewPanel.IsDisposed)
+                {
+                    _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
+                    _filePreviewPanel.DebugLogService = _debugLogService;
+                }
+                return _filePreviewPanel;
+            }
+
             return null;
         }
 
@@ -3356,6 +3750,7 @@ namespace MultiTerminal
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
             doc.ProjectFileChanged += OnProjectFileChanged;
             doc.ClaudeCodeDetected += OnClaudeCodeDetected;
+            doc.TaskDropped += OnTaskDroppedOnTerminal;
 
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -3404,6 +3799,48 @@ namespace MultiTerminal
                 _projectPanel.Show(_dockPanel, GetSavedDockState("ProjectPanel", DockState.DockLeft));
                 RefreshProjectPanel();
             }
+        }
+
+        private void ToggleFilePreviewPanel()
+        {
+            if (_filePreviewPanel == null || _filePreviewPanel.IsDisposed)
+            {
+                _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
+                _filePreviewPanel.DebugLogService = _debugLogService;
+                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
+                return;
+            }
+
+            if (_filePreviewPanel.Visible)
+            {
+                _filePreviewPanel.Hide();
+            }
+            else
+            {
+                _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
+                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+            }
+        }
+
+        private void OnFilePreviewRequested(object sender, string filePath)
+        {
+            // Ensure the preview panel is visible
+            if (_filePreviewPanel == null || _filePreviewPanel.IsDisposed)
+            {
+                _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
+                _filePreviewPanel.DebugLogService = _debugLogService;
+                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
+            }
+            else if (!_filePreviewPanel.Visible)
+            {
+                _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
+                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+            }
+
+            _debugLogService?.Info("FilePreview", $"OnFilePreviewRequested: {filePath}");
+            _filePreviewPanel.PreviewFile(filePath);
         }
 
         private void ToggleChatPanel()
@@ -3489,242 +3926,155 @@ namespace MultiTerminal
 
         private void ToggleAgentPanel()
         {
-            // Clean up disposed panels
-            var disposed = new List<string>();
-            foreach (var kvp in _agentPanelMap)
+            // Agent panels are always embedded in terminals.
+            // Toggle visibility of all EmbeddedAgentPanels across terminals.
+            if (_embeddedAgentMap.Count == 0) return;
+
+            // Get unique terminals that have embedded agents
+            var terminals = new HashSet<TerminalDocument>();
+            foreach (var info in _embeddedAgentMap.Values)
             {
-                if (kvp.Value.IsDisposed)
-                    disposed.Add(kvp.Key);
+                if (info.Terminal?.EmbeddedAgentPanel != null)
+                    terminals.Add(info.Terminal);
             }
-            foreach (var key in disposed)
-                _agentPanelMap.Remove(key);
 
-            // If there are active agent panels, toggle their visibility
-            if (_agentPanelMap.Count > 0)
+            foreach (var terminal in terminals)
             {
-                // Check if any are visible
-                bool anyVisible = false;
-                foreach (var panel in _agentPanelMap.Values)
-                {
-                    if (panel.Visible)
-                    {
-                        anyVisible = true;
-                        break;
-                    }
-                }
-
-                foreach (var panel in _agentPanelMap.Values)
-                {
-                    if (anyVisible)
-                    {
-                        panel.Hide();
-                    }
-                    else
-                    {
-                        panel.Show(_dockPanel, DockState.DockRight);
-                        panel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                    }
-                }
+                terminal.EmbeddedAgentPanel.Visible = !terminal.EmbeddedAgentPanel.Visible;
             }
         }
 
         /// <summary>
-        /// Create a new AgentPanelDocument for a specific agent and dock it.
+        /// Create an embedded agent panel for a specific AgentProcess.
         /// </summary>
-        private AgentPanelDocument CreateAgentPanel(AgentProcess agent, string agentName, string agentTerminalId, string spawnerName = null, string taskDescription = null, string subagentType = null, bool isTeamAgent = false)
+        private void CreateAgentPanel(AgentProcess agent, string agentName, string agentTerminalId, string spawnerName = null, string taskDescription = null, string subagentType = null, bool isTeamAgent = false)
         {
-            return CreateAgentPanel((IAgentMessageSource)agent, agentName, agentTerminalId, spawnerName, taskDescription, subagentType, isTeamAgent);
+            CreateAgentPanel((IAgentMessageSource)agent, agentName, agentTerminalId, spawnerName, taskDescription, subagentType, isTeamAgent);
         }
 
         /// <summary>
-        /// Create a new AgentPanelDocument for any IAgentMessageSource and dock it.
+        /// Create an embedded agent panel for any IAgentMessageSource.
         /// Used by both AgentProcess (piped I/O) and TranscriptTailer (native team watching).
-        /// Prefers embedding in the spawner terminal's EmbeddedAgentPanel when available.
-        /// Falls back to DockPane-based docking when spawner not found (e.g., team agents).
+        /// Always embeds in a terminal's EmbeddedAgentPanel (spawner → last active → first available).
         /// </summary>
-        private AgentPanelDocument CreateAgentPanel(IAgentMessageSource source, string agentName, string panelKey, string spawnerName = null, string taskDescription = null, string subagentType = null, bool isTeamAgent = false)
+        private void CreateAgentPanel(IAgentMessageSource source, string agentName, string panelKey, string spawnerName = null, string taskDescription = null, string subagentType = null, bool isTeamAgent = false)
         {
             string layout = _settings?.GetAgentPanelLayout() ?? "SplitRight";
 
             // DoNotShow - skip panel creation entirely
             if (layout == "DoNotShow")
-                return null;
+                return;
 
-            // Try to embed in spawner terminal's EmbeddedAgentPanel
+            // Always embed in a terminal's EmbeddedAgentPanel.
+            // Priority: exact name lookup → Text/TabText scan → last active → first available.
+            TerminalDocument targetTerminal = null;
+
             if (!string.IsNullOrEmpty(spawnerName))
             {
-                TerminalDocument spawnerTerminal = null;
-                _debugLogService?.Info("CreateAgentPanel", $"Looking for spawner '{spawnerName}' in _terminalDocMap ({_terminalDocMap.Count} entries)");
+                _debugLogService?.Info("CreateAgentPanel", $"Looking for spawner '{spawnerName}' in _agentNameToTerminalDoc ({_agentNameToTerminalDoc.Count} entries)");
                 lock (_terminalDocMapLock)
                 {
-                    foreach (var kvp in _terminalDocMap)
+                    // Primary: exact agent name → terminal lookup (populated at registration)
+                    if (_agentNameToTerminalDoc.TryGetValue(spawnerName, out var namedTerminal))
                     {
-                        if (kvp.Value.Text?.Contains(spawnerName) == true || kvp.Value.TabText?.Contains(spawnerName) == true)
+                        targetTerminal = namedTerminal;
+                        _debugLogService?.Info("CreateAgentPanel", $"  MATCH FOUND via name map: spawner='{spawnerName}'");
+                    }
+
+                    // Fuzzy match: "Agent Alice" → "Alice", or "Alice" → "Agent Alice"
+                    // The hook may record "Alice" but register_terminal uses "Agent Alice" or vice versa
+                    if (targetTerminal == null)
+                    {
+                        foreach (var kvp in _agentNameToTerminalDoc)
                         {
-                            spawnerTerminal = kvp.Value;
-                            _debugLogService?.Info("CreateAgentPanel", $"  MATCH FOUND: spawner='{kvp.Key}'");
-                            break;
+                            if (kvp.Key.Contains(spawnerName, StringComparison.OrdinalIgnoreCase) ||
+                                spawnerName.Contains(kvp.Key, StringComparison.OrdinalIgnoreCase))
+                            {
+                                targetTerminal = kvp.Value;
+                                _debugLogService?.Info("CreateAgentPanel", $"  MATCH FOUND via fuzzy name: '{kvp.Key}' ~ '{spawnerName}'");
+                                break;
+                            }
+                        }
+                    }
+
+                    // Fallback: scan terminal titles (handles unregistered or renamed terminals)
+                    if (targetTerminal == null)
+                    {
+                        foreach (var kvp in _terminalDocMap)
+                        {
+                            if (kvp.Value.Text?.Contains(spawnerName, StringComparison.OrdinalIgnoreCase) == true ||
+                                kvp.Value.TabText?.Contains(spawnerName, StringComparison.OrdinalIgnoreCase) == true)
+                            {
+                                targetTerminal = kvp.Value;
+                                _debugLogService?.Info("CreateAgentPanel", $"  MATCH FOUND via title scan: spawner='{kvp.Key}'");
+                                break;
+                            }
                         }
                     }
                 }
+            }
 
-                if (spawnerTerminal?.EmbeddedAgentPanel != null)
+            // Fallback for NON-team agents only: try last active terminal, then first available.
+            // Team agents MUST route to their spawner's terminal — wrong terminal causes
+            // jittering and stale panels. Better to skip the panel than show it on the wrong terminal.
+            if (!isTeamAgent)
+            {
+                if (targetTerminal?.EmbeddedAgentPanel == null && _lastActiveTerminal?.EmbeddedAgentPanel != null)
                 {
-                    _debugLogService?.Info("CreateAgentPanel", $"Embedding agent '{agentName}' in spawner '{spawnerName}' EmbeddedAgentPanel");
+                    targetTerminal = _lastActiveTerminal;
+                    _debugLogService?.Info("CreateAgentPanel", $"FALLBACK: Using last active terminal for non-team agent '{agentName}'");
+                }
 
-                    var slot = spawnerTerminal.EmbeddedAgentPanel.AddAgentSlot(agentName);
-                    var control = new AgentPanelControl { Dock = DockStyle.Fill };
-                    slot.Controls.Add(control);
-                    control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
-                    control.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-
-                    // Apply global agent panel zoom and propagate changes to all panels
-                    double agentZoom = _settings?.GetAgentPanelZoom() ?? 1.0;
-                    control.SetZoomFactor(agentZoom);
-                    control.ZoomChanged += (s, zoom) => OnEmbeddedAgentPanelZoomChanged(zoom);
-
-                    _embeddedAgentMap[panelKey] = (control, slot, spawnerTerminal);
-
-                    // Manual close via the X button inside the agent panel WebView
-                    control.CloseRequested += (s, e) =>
+                if (targetTerminal?.EmbeddedAgentPanel == null)
+                {
+                    lock (_terminalDocMapLock)
                     {
-                        async void HandleEmbeddedCloseRequested()
+                        foreach (var kvp in _terminalDocMap)
                         {
-                            // If agent is still running, prompt user before closing
-                            if (control.HasActiveAgent)
+                            if (kvp.Value.EmbeddedAgentPanel != null)
                             {
-                                var result = MessageBox.Show(
-                                    this,
-                                    "An agent is still running in this panel.\n\nTerminate the agent process?",
-                                    "Close Agent Panel",
-                                    MessageBoxButtons.YesNoCancel,
-                                    MessageBoxIcon.Question);
-
-                                if (result == DialogResult.Cancel) return;
-                                if (result == DialogResult.Yes)
-                                    await control.StopAgentAsync();
-                            }
-
-                            if (_embeddedAgentMap.Remove(panelKey, out var info))
-                            {
-                                info.Control?.DetachAgent();
-                                info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                                info.Control?.Dispose();
+                                targetTerminal = kvp.Value;
+                                _debugLogService?.Info("CreateAgentPanel", $"Using first available terminal '{kvp.Key}' as fallback for '{agentName}'");
+                                break;
                             }
                         }
-
-                        try
-                        {
-                            if (InvokeRequired)
-                                BeginInvoke(new Action(HandleEmbeddedCloseRequested));
-                            else
-                                HandleEmbeddedCloseRequested();
-                        }
-                        catch (ObjectDisposedException) { }
-                    };
-
-                    // Auto-remove slot when agent completes (non-team agents only).
-                    // Team agent panels stay visible so the user can review the conversation
-                    // or send follow-up messages, even after the agent goes idle/stops.
-                    source.Stopped += (s, exitCode) =>
-                    {
-                        void HandleEmbeddedStopped()
-                        {
-                            if (isTeamAgent) return; // Team agent panels persist until manually closed
-
-                            if (_embeddedAgentMap.Remove(panelKey, out var info))
-                            {
-                                info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
-                                info.Control?.Dispose();
-                            }
-                        }
-
-                        try
-                        {
-                            if (InvokeRequired)
-                                BeginInvoke(new Action(HandleEmbeddedStopped));
-                            else
-                                HandleEmbeddedStopped();
-                        }
-                        catch (ObjectDisposedException) { }
-                    };
-
-                    return null; // No DockContent panel created
-                }
-                else
-                {
-                    _debugLogService?.Info("CreateAgentPanel", $"No spawner terminal found for '{spawnerName}' - falling back to dock pane");
+                    }
                 }
             }
-            else
+            else if (targetTerminal?.EmbeddedAgentPanel == null)
             {
-                _debugLogService?.Info("CreateAgentPanel", "spawnerName is null/empty - using dock pane");
+                _debugLogService?.Warning("CreateAgentPanel", $"Team agent '{agentName}' spawner '{spawnerName ?? "null"}' not found in any terminal — skipping panel to avoid misrouting");
+                return;
             }
 
-            // Fallback: create a DockContent-based agent panel (for team agents, or when spawner not found)
-            var panel = new AgentPanelDocument();
-            panel.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
-            panel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-
-            // Try to dock relative to last active terminal
-            var fallbackPane = _lastActiveTerminal?.Pane;
-            if (fallbackPane != null && !fallbackPane.IsDisposed)
+            if (targetTerminal?.EmbeddedAgentPanel == null)
             {
-                var fallbackDocId = "_fallback_";
-                switch (layout)
-                {
-                    case "SplitBelow":
-                        if (_spawnerAgentPanes.TryGetValue(fallbackDocId, out var existingFallbackBottom) && !existingFallbackBottom.IsDisposed)
-                        {
-                            panel.Show(existingFallbackBottom, WeifenLuo.WinFormsUI.Docking.DockAlignment.Right, 0.5);
-                        }
-                        else
-                        {
-                            panel.Show(fallbackPane, WeifenLuo.WinFormsUI.Docking.DockAlignment.Bottom, 0.5);
-                            _spawnerAgentPanes[fallbackDocId] = panel.Pane;
-                        }
-                        break;
-                    case "TabbedRight":
-                        if (_spawnerAgentPanes.TryGetValue(fallbackDocId, out var existingFallbackTabbed) && !existingFallbackTabbed.IsDisposed)
-                        {
-                            panel.Show(existingFallbackTabbed, null);
-                        }
-                        else
-                        {
-                            panel.Show(fallbackPane, WeifenLuo.WinFormsUI.Docking.DockAlignment.Right, 0.5);
-                            _spawnerAgentPanes[fallbackDocId] = panel.Pane;
-                        }
-                        break;
-                    default: // SplitRight
-                        if (_spawnerAgentPanes.TryGetValue(fallbackDocId, out var existingFallbackRight) && !existingFallbackRight.IsDisposed)
-                        {
-                            panel.Show(existingFallbackRight, WeifenLuo.WinFormsUI.Docking.DockAlignment.Bottom, 0.5);
-                        }
-                        else
-                        {
-                            panel.Show(fallbackPane, WeifenLuo.WinFormsUI.Docking.DockAlignment.Right, 0.5);
-                            _spawnerAgentPanes[fallbackDocId] = panel.Pane;
-                        }
-                        break;
-                }
-            }
-            else
-            {
-                // Ultimate fallback: respect layout setting for global docking
-                panel.Show(_dockPanel, layout == "SplitBelow" ? DockState.DockBottom : DockState.DockRight);
+                _debugLogService?.Error("CreateAgentPanel", $"No terminal with EmbeddedAgentPanel found for '{agentName}' - cannot create panel");
+                return;
             }
 
-            _agentPanelMap[panelKey] = panel;
+            _debugLogService?.Info("CreateAgentPanel", $"Embedding agent '{agentName}' in terminal '{targetTerminal.TabText}'");
+
+            var slot = targetTerminal.EmbeddedAgentPanel.AddAgentSlot(agentName);
+            var control = new AgentPanelControl { Dock = DockStyle.Fill };
+            slot.Controls.Add(control);
+            control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
+            control.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+
+            // Apply global agent panel zoom and propagate changes to all panels
+            double agentZoom = _settings?.GetAgentPanelZoom() ?? 1.0;
+            control.SetZoomFactor(agentZoom);
+            control.ZoomChanged += (s, zoom) => OnEmbeddedAgentPanelZoomChanged(zoom);
+
+            _embeddedAgentMap[panelKey] = (control, slot, targetTerminal);
 
             // Manual close via the X button inside the agent panel WebView
-            panel.CloseRequested += (s, e) =>
+            control.CloseRequested += (s, e) =>
             {
-                async void HandleDockCloseRequested()
+                async void HandleEmbeddedCloseRequested()
                 {
-                    if (panel.IsDisposed) return;
-
                     // If agent is still running, prompt user before closing
-                    if (panel.HasActiveAgent)
+                    if (control.HasActiveAgent)
                     {
                         var result = MessageBox.Show(
                             this,
@@ -3735,67 +4085,56 @@ namespace MultiTerminal
 
                         if (result == DialogResult.Cancel) return;
                         if (result == DialogResult.Yes)
-                            await panel.StopAgentAsync();
+                            await control.StopAgentAsync();
                     }
 
-                    panel.DetachAgent();
-                    panel.HideOnClose = false;
-                    panel.Close();
+                    if (_embeddedAgentMap.Remove(panelKey, out var info))
+                    {
+                        info.Control?.DetachAgent();
+                        info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
+                        info.Control?.Dispose();
+                        if (info.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
+                            info.Terminal.ForceCollapseAgentPanel();
+                    }
                 }
 
                 try
                 {
                     if (InvokeRequired)
-                        BeginInvoke(new Action(HandleDockCloseRequested));
+                        BeginInvoke(new Action(HandleEmbeddedCloseRequested));
                     else
-                        HandleDockCloseRequested();
+                        HandleEmbeddedCloseRequested();
                 }
                 catch (ObjectDisposedException) { }
             };
 
-            // Clean up panel map and spawner pane cache when panel is closed
-            panel.FormClosed += (s, e) =>
+            // Auto-remove slot when agent completes.
+            // Panel is removed for all agents (team and non-team) once the process exits.
+            source.Stopped += (s, exitCode) =>
             {
-                _agentPanelMap.Remove(panelKey);
-                _spawnerAgentPanes.Remove("_fallback_");
+                void HandleEmbeddedStopped()
+                {
+                    if (_embeddedAgentMap.Remove(panelKey, out var info))
+                    {
+                        info.Control?.DetachAgent();
+                        info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
+                        info.Control?.Dispose();
+                        // Force-collapse if no remaining slots
+                        if (info.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
+                            info.Terminal.ForceCollapseAgentPanel();
+                    }
+                }
+
+                try
+                {
+                    if (InvokeRequired)
+                        BeginInvoke(new Action(HandleEmbeddedStopped));
+                    else
+                        HandleEmbeddedStopped();
+                }
+                catch (ObjectDisposedException) { }
             };
 
-            // For TranscriptTailer sources: handle tab rename + auto-close on agent completion.
-            // (AgentProcess has its own ProcessExited handler for this; TranscriptTailer detects
-            // completion via a "result" JSONL entry and fires Stopped.)
-            if (source is TranscriptTailer)
-            {
-                source.Stopped += (s, exitCode) =>
-                {
-                    void HandleStopped()
-                    {
-                        if (panel.IsDisposed) return;
-                        panel.Text = $"Agent: {agentName} (done)";
-
-                        // Team agent panels never auto-close — they stay visible so the user
-                        // can review what the agent did or send follow-up messages.
-                        if (isTeamAgent) return;
-
-                        // Non-team subagents (Explore, general-purpose, etc.) always auto-close
-                        // since they're fire-and-forget. Otherwise respect user setting.
-                        bool isSubagent = panelKey.StartsWith("subagent:");
-                        string closeMode = _settings?.GetAgentPanelCloseMode() ?? "ManualClose";
-                        if ((isSubagent || closeMode == "AutoClose") && !panel.IsDisposed)
-                            panel.Close();
-                    }
-
-                    try
-                    {
-                        if (InvokeRequired)
-                            BeginInvoke(new Action(HandleStopped));
-                        else
-                            HandleStopped();
-                    }
-                    catch (ObjectDisposedException) { }
-                };
-            }
-
-            return panel;
         }
 
         /// <summary>
@@ -3816,36 +4155,62 @@ namespace MultiTerminal
 
                 _teamWatcher.TeammateDiscovered += (s, e) =>
                 {
-                    _debugLogService?.Info("MainForm", $"Native teammate discovered: {e.MemberName} in team {e.TeamName}, spawner: {e.SpawnerName ?? "(unknown)"}");
+                    // Resolve spawner: if hook didn't provide it, try matching the team lead's
+                    // cwd against registered terminal working directories.
+                    string resolvedSpawner = e.SpawnerName;
+                    if (string.IsNullOrEmpty(resolvedSpawner) && !string.IsNullOrEmpty(e.LeadCwd))
+                    {
+                        lock (_terminalDocMapLock)
+                        {
+                            foreach (var kvp in _terminalDocMap)
+                            {
+                                string termCwd = kvp.Value.GetWorkingDirectory();
+                                if (!string.IsNullOrEmpty(termCwd) &&
+                                    termCwd.Equals(e.LeadCwd, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    resolvedSpawner = kvp.Value.TabText ?? kvp.Key;
+                                    _debugLogService?.Info("MainForm", $"Resolved spawner for team '{e.TeamName}' via cwd match: '{resolvedSpawner}' (cwd={e.LeadCwd})");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    _debugLogService?.Info("MainForm", $"Native teammate discovered: {e.MemberName} in team {e.TeamName}, spawner: {resolvedSpawner ?? "(unknown)"}");
 
                     string panelKey = $"team:{e.TeamName}:{e.MemberName}";
 
+                    void DoCreate()
+                    {
+                        if (!_embeddedAgentMap.ContainsKey(panelKey))
+                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                    }
+
+                    // Use BeginInvoke (async) instead of Invoke (sync) to prevent deadlocks
+                    // when multiple terminals discover team agents concurrently.
                     if (InvokeRequired)
                     {
-                        Invoke(new Action(() =>
-                        {
-                            if (!_agentPanelMap.ContainsKey(panelKey) && !_embeddedAgentMap.ContainsKey(panelKey))
-                                CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, e.SpawnerName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
-                        }));
+                        try { BeginInvoke(new Action(DoCreate)); }
+                        catch (ObjectDisposedException) { }
                     }
                     else
                     {
-                        if (!_agentPanelMap.ContainsKey(panelKey) && !_embeddedAgentMap.ContainsKey(panelKey))
-                            CreateAgentPanel(e.Tailer, $"{e.MemberName} ({e.TeamName})", panelKey, e.SpawnerName, e.TaskDescription, e.SubagentType, isTeamAgent: true);
+                        DoCreate();
                     }
                 };
 
-                _teamWatcher.TeamRemoved += (s, teamName) =>
+                _teamWatcher.TeamRemoved += (s, e) =>
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Native team removed: {teamName}");
+                    System.Diagnostics.Debug.WriteLine($"[MainForm] Native team removed: {e.TeamName} (members: {string.Join(", ", e.MemberNames)})");
 
                     if (InvokeRequired)
                     {
-                        Invoke(new Action(() => CleanupTeamPanels(teamName)));
+                        try { BeginInvoke(new Action(() => CleanupTeamPanels(e.TeamName, e.MemberNames, e.TranscriptPaths))); }
+                        catch (ObjectDisposedException) { }
                     }
                     else
                     {
-                        CleanupTeamPanels(teamName);
+                        CleanupTeamPanels(e.TeamName, e.MemberNames, e.TranscriptPaths);
                     }
                 };
 
@@ -3856,46 +4221,61 @@ namespace MultiTerminal
 
                     void CloseAgentPanel()
                     {
-                        // Close floating panel
-                        if (_agentPanelMap.Remove(panelKey, out var panel) && !panel.IsDisposed)
-                        {
-                            panel.DetachAgent();
-                            panel.HideOnClose = false;
-                            panel.Close();
-                        }
-
-                        // Close embedded panel
                         if (_embeddedAgentMap.Remove(panelKey, out var embedded))
                         {
+                            embedded.Control?.DetachAgent();
+                            if (embedded.Control != null)
+                                _ = embedded.Control.StopAgentAsync();
                             embedded.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(embedded.Slot);
                             embedded.Control?.Dispose();
+                            // Force-collapse if no remaining slots
+                            if (embedded.Terminal?.EmbeddedAgentPanel?.AgentSlotCount == 0)
+                                embedded.Terminal.ForceCollapseAgentPanel();
                         }
                     }
 
                     if (InvokeRequired)
-                        Invoke(new Action(CloseAgentPanel));
+                    {
+                        try { BeginInvoke(new Action(CloseAgentPanel)); }
+                        catch (ObjectDisposedException) { }
+                    }
                     else
                         CloseAgentPanel();
                 };
 
                 _teamWatcher.SubagentDiscovered += (s, e) =>
                 {
-                    _debugLogService?.Info("MainForm", $"Non-team subagent discovered: {e.MemberName}, spawner: {e.SpawnerName ?? "(unknown)"}, desc: \"{e.TaskDescription ?? ""}\"");
+                    // Resolve spawner from session_agent_map when hook tracking missed it
+                    string resolvedSpawner = e.SpawnerName;
+                    if (string.IsNullOrEmpty(resolvedSpawner) && !string.IsNullOrEmpty(e.ParentSessionId))
+                    {
+                        try
+                        {
+                            resolvedSpawner = _mcpServer?.Broker?.TaskDb?.GetSessionAgentName(e.ParentSessionId);
+                            if (!string.IsNullOrEmpty(resolvedSpawner))
+                                _debugLogService?.Info("MainForm", $"Resolved spawner from session_agent_map: session={e.ParentSessionId} → {resolvedSpawner}");
+                        }
+                        catch { /* best effort */ }
+                    }
+
+                    _debugLogService?.Info("MainForm", $"Non-team subagent discovered: {e.MemberName}, spawner: {resolvedSpawner ?? "(unknown)"}, desc: \"{e.TaskDescription ?? ""}\"");
 
                     string panelKey = $"subagent:{e.MemberName}";
 
+                    void DoCreate()
+                    {
+                        if (!_embeddedAgentMap.ContainsKey(panelKey))
+                            CreateAgentPanel(e.Tailer, e.MemberName, panelKey, resolvedSpawner, e.TaskDescription, e.SubagentType);
+                    }
+
                     if (InvokeRequired)
                     {
-                        Invoke(new Action(() =>
-                        {
-                            if (!_agentPanelMap.ContainsKey(panelKey) && !_embeddedAgentMap.ContainsKey(panelKey))
-                                CreateAgentPanel(e.Tailer, e.MemberName, panelKey, e.SpawnerName, e.TaskDescription, e.SubagentType);
-                        }));
+                        try { BeginInvoke(new Action(DoCreate)); }
+                        catch (ObjectDisposedException) { }
                     }
                     else
                     {
-                        if (!_agentPanelMap.ContainsKey(panelKey) && !_embeddedAgentMap.ContainsKey(panelKey))
-                            CreateAgentPanel(e.Tailer, e.MemberName, panelKey, e.SpawnerName, e.TaskDescription, e.SubagentType);
+                        DoCreate();
                     }
                 };
 
@@ -3922,6 +4302,9 @@ namespace MultiTerminal
                         if (msgType == "message" && !string.IsNullOrEmpty(content))
                         {
                             _mcpServer?.Broker?.RecordTeamMessage(e.MemberName, recipient, content, e.TeamName);
+                            // Native team agents deliver messages via Claude Code's built-in
+                            // SendMessage/teammate-message channel. No inbox bridging needed —
+                            // writing to InboxFileWriter caused duplicate delivery.
                         }
                     }
                     catch (Exception ex)
@@ -4027,7 +4410,7 @@ namespace MultiTerminal
                 // approach had timing issues where Enter could fail to fire.
                 _debugLogService?.Info("MainForm", $"Nudging terminal {terminalName} (char-by-char, 15ms)");
 
-                targetTerminal.TypeInput("[cm]", "cr", 15);
+                targetTerminal.TypeInput("[cm]", "cr", 20);
 
                 _debugLogService?.Info("MainForm", $"Nudge fired on {terminalName}");
             }
@@ -4038,30 +4421,86 @@ namespace MultiTerminal
         }
 
 
-        private void CleanupTeamPanels(string teamName)
+        private void CleanupTeamPanels(string teamName, List<string> memberNames = null, List<string> transcriptPaths = null)
         {
             string prefix = $"team:{teamName}:";
 
-            // Close and remove floating panels
-            var teamKeys = _agentPanelMap.Keys.Where(k => k.StartsWith(prefix)).ToList();
-            foreach (var key in teamKeys)
+            // Close and remove team-keyed embedded panels
+            var embeddedKeys = _embeddedAgentMap.Keys.Where(k => k.StartsWith(prefix)).ToList();
+
+            // Also remove orphan panels that match the team's agent names.
+            // Uses fuzzy matching (contains) to handle name variants like "Agent Alice" vs "Alice".
+            if (memberNames != null)
             {
-                if (_agentPanelMap.Remove(key, out var panel) && !panel.IsDisposed)
+                foreach (var name in memberNames)
                 {
-                    panel.DetachAgent();
-                    panel.HideOnClose = false;
-                    panel.Close();
+                    // Exact match
+                    string orphanKey = $"subagent:{name}";
+                    if (_embeddedAgentMap.ContainsKey(orphanKey) && !embeddedKeys.Contains(orphanKey))
+                        embeddedKeys.Add(orphanKey);
+
+                    // Fuzzy match: orphan keyed as "subagent:Agent Alice" when member is "Alice" (or vice versa)
+                    foreach (var key in _embeddedAgentMap.Keys)
+                    {
+                        if (!key.StartsWith("subagent:") || embeddedKeys.Contains(key)) continue;
+                        var orphanName = key.Substring("subagent:".Length);
+                        if (orphanName.Contains(name, StringComparison.OrdinalIgnoreCase) ||
+                            name.Contains(orphanName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            embeddedKeys.Add(key);
+                        }
+                    }
                 }
             }
 
-            // Close and remove embedded panels
-            var embeddedKeys = _embeddedAgentMap.Keys.Where(k => k.StartsWith(prefix)).ToList();
+            // Match orphan panels by transcript path stored in the agent's slot tag
+            if (transcriptPaths != null)
+            {
+                foreach (var kvp in _embeddedAgentMap)
+                {
+                    if (embeddedKeys.Contains(kvp.Key)) continue;
+                    if (kvp.Value.Control?.AttachedAgent is TranscriptTailer tailer)
+                    {
+                        // Check if any of the tailer's transcript files match a team transcript
+                        foreach (var tp in transcriptPaths)
+                        {
+                            if (tailer.HasTranscriptFile(tp))
+                            {
+                                embeddedKeys.Add(kvp.Key);
+                                _debugLogService?.Info("CleanupTeamPanels", $"Matched orphan panel '{kvp.Key}' by transcript path");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Track which terminals had slots removed so we can force-collapse if empty
+            var affectedTerminals = new HashSet<TerminalDocument>();
+
             foreach (var key in embeddedKeys)
             {
                 if (_embeddedAgentMap.Remove(key, out var info))
                 {
+                    if (info.Terminal != null)
+                        affectedTerminals.Add(info.Terminal);
+                    // Detach before stopping to prevent the Stopped event from
+                    // trying to remove an already-removed key (race condition)
+                    info.Control?.DetachAgent();
+                    if (info.Control != null)
+                        _ = info.Control.StopAgentAsync();
                     info.Terminal?.EmbeddedAgentPanel?.RemoveAgentSlot(info.Slot);
                     info.Control?.Dispose();
+                }
+            }
+
+            // Force-collapse any affected terminal's agent panel if it has no remaining slots.
+            // This is the direct fix — don't rely on VisibilityRequested event chain.
+            foreach (var terminal in affectedTerminals)
+            {
+                if (terminal.EmbeddedAgentPanel?.AgentSlotCount == 0)
+                {
+                    terminal.ForceCollapseAgentPanel();
                 }
             }
         }
@@ -4279,76 +4718,6 @@ namespace MultiTerminal
             }
         }
 
-        private void OnRegenerateAllMcpConfigsRequested(object sender, EventArgs e)
-        {
-            _debugLogService?.Info("McpConfig", "Regenerate ALL requested");
-            if (_mcpConfigService == null)
-            {
-                _debugLogService?.Warning("McpConfig", "McpConfigService is null — cannot regenerate");
-                _projectPanel?.NotifyMcpRegenResult(false, error: "MCP config service not available");
-                return;
-            }
-            try
-            {
-                var (globalCount, projectCount) = _mcpConfigService.RegenerateAllMcpConfigs();
-                _debugLogService?.Info("McpConfig", $"Regenerated: {globalCount} global (CLI), {projectCount} project(s)");
-                _projectPanel?.NotifyMcpRegenResult(true, globalCount, projectCount);
-            }
-            catch (Exception ex)
-            {
-                _debugLogService?.Error("McpConfig", $"Regeneration failed: {ex.Message}\n{ex.StackTrace}");
-                System.Diagnostics.Debug.WriteLine($"[MainForm] OnRegenerateAllMcpConfigsRequested error: {ex.Message}");
-                _projectPanel?.NotifyMcpRegenResult(false, error: ex.Message);
-            }
-        }
-
-        private void OnMcpRegistrySaveRequested(object sender, string itemJson)
-        {
-            // ProjectPanelDocument already handled the DB save and sent result back to JS.
-            // MainForm hook is here in case we need to refresh other UI (e.g. availableMcpServers cache).
-            // For now, nothing additional needed.
-        }
-
-        private void OnMcpRegistryDeleteRequested(object sender, string serverName)
-        {
-            // ProjectPanelDocument already handled the DB delete and sent result back to JS.
-        }
-
-        private void OnImportMcpJsonRequested(object sender, string filePath)
-        {
-            if (_mcpConfigService == null)
-            {
-                _projectPanel?.NotifyMcpImportResult(false, 0, "MCP config service not available");
-                return;
-            }
-
-            // If filePath is empty, open a file dialog so the user can pick the file
-            string path = filePath;
-            if (string.IsNullOrEmpty(path))
-            {
-                using var dlg = new OpenFileDialog
-                {
-                    Title = "Import MCP Servers from .mcp.json",
-                    Filter = "MCP Config|*.mcp.json;*.json|All files|*.*",
-                    CheckFileExists = true
-                };
-                if (dlg.ShowDialog() != DialogResult.OK)
-                    return;
-                path = dlg.FileName;
-            }
-
-            try
-            {
-                int count = _mcpConfigService.ImportFromMcpJsonFile(path);
-                _projectPanel?.NotifyMcpImportResult(true, count);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] OnImportMcpJsonRequested error: {ex.Message}");
-                _projectPanel?.NotifyMcpImportResult(false, 0, ex.Message);
-            }
-        }
-
         private void OnProjectLaunchRequested(object sender, ProjectSelectedEventArgs e)
         {
             if (e.Project == null) return;
@@ -4385,7 +4754,11 @@ namespace MultiTerminal
                     string sourcePath = (!string.IsNullOrEmpty(rawSourcePath) && Path.IsPathRooted(rawSourcePath) && !rawSourcePath.StartsWith("\\\\") && Directory.Exists(rawSourcePath))
                         ? rawSourcePath
                         : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                    AddNewTerminal(sourcePath, projectId: e.Project.Id);
+                    // Resolve gateway profile for per-project MCP server filtering
+                    string projGatewayProfile = null;
+                    if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                        projGatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(e.Project.Name);
+                    AddNewTerminal(sourcePath, projectId: e.Project.Id, gatewayProfile: projGatewayProfile);
                     targetTerminal = _lastActiveTerminal; // AddNewTerminal sets this
                     break;
                 }
@@ -4562,6 +4935,7 @@ namespace MultiTerminal
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
             doc.ProjectFileChanged += OnProjectFileChanged;
             doc.ClaudeCodeDetected += OnClaudeCodeDetected;
+            doc.TaskDropped += OnTaskDroppedOnTerminal;
 
             // Wire up "Launch as..." context menu support
             doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -4571,8 +4945,11 @@ namespace MultiTerminal
             // Show as tab
             doc.Show(_dockPanel, DockState.Document);
 
+            // Pre-register with MessageBroker so the terminal is routable immediately
+            var terminalName = PreRegisterTerminal(doc.DocId);
+
             // Start the terminal
-            doc.StartTerminal(_settings?.GetLastDirectory());
+            doc.StartTerminal(_settings?.GetLastDirectory(), terminalName);
 
             // Apply font size and saved split ratios
             float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
@@ -4679,8 +5056,7 @@ namespace MultiTerminal
             }
 
             // Try to find HTML export from Claude's storage
-            var syncService = new SessionSyncService();
-            var claudePath = syncService.GetClaudeProjectPath(projectPath);
+            var claudePath = SessionLineageService.GetClaudeProjectFolder(projectPath);
 
             if (!string.IsNullOrEmpty(claudePath))
             {
@@ -4790,13 +5166,12 @@ namespace MultiTerminal
             {
                 _messageQueueTimer?.Stop();
                 _messageQueueTimer?.Dispose();
-                _sessionSyncTimer?.Stop();
-                _sessionSyncTimer?.Dispose();
                 _teamWatcher?.Dispose();
                 _inboxMonitor?.Dispose();
                 _sessionIndexingService?.Dispose();
-                _sessionDatabase?.Dispose();
+                _chatTaskDatabase?.Dispose();
                 _sharedProjectDatabase?.Dispose();
+                _gatewayService?.Dispose();
                 _debugLogService?.Dispose();
                 _mcpServer?.Dispose();
                 _mcpServer = null;

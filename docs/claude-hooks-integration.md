@@ -87,10 +87,23 @@ MultiTerminal has a **production-ready hooks system** deployed via `Install-Mult
 
 #### Current Hooks
 
-**1. activity-hook.js**
+**1. session-status-hook.js** (`.claude/hooks/`)
+- **Listens to:** `SessionStart`, `SessionEnd`
+- **Purpose:** Manages terminal online/offline status AND session→agent mapping
+- **Integration:** Writes to `multiterminal.db` → `team_member_profiles` (online status) + `session_agent_map` (session ownership)
+- **Features:**
+  - Maps each session ID to the terminal agent name (e.g. "Alice") via `session_agent_map` table
+  - Marks sessions active on start (`is_active=1`), inactive on end (`is_active=0`)
+  - Injects kanban/plan context into startup prompt
+  - Fetches and displays the agent's own last session recap (filtered by `agentName`)
+  - Auto-triggers `/project-management` skill on startup
+  - Handles spawned agents differently (minimal context injection)
+- **Session Sync Role:** The `session_agent_map` table is the bridge between Claude Code sessions and MultiTerminal agent names. Without it, auto-sync would import all sessions as "Unknown" agent.
+
+**2. activity-hook.js**
 - **Listens to:** `ToolUse`, `SubagentStart`, `SubagentStop`
 - **Purpose:** Records activity to the Activity Feed
-- **Integration:** Writes to `tasks.db` → Activity Panel displays events
+- **Integration:** Writes to `multiterminal.db` → Activity Panel displays events
 - **Features:**
   - Build detection (dotnet, npm, cargo, go, etc.)
   - Test execution tracking
@@ -136,7 +149,7 @@ Located in: `~/.claude/hooks/hooks.json`
 **Flow:**
 1. Hook fires (e.g., `SubagentStop`)
 2. `activity-hook.js` processes event
-3. Writes to SQLite (`tasks.db` → `activity_feed` table)
+3. Writes to SQLite (`multiterminal.db` → `activity_feed` table)
 4. `ActivityService.cs` reads from database
 5. `MessageBroker.ActivityRecorded` event fires
 6. UI (`ActivityPanel`) updates in real-time
@@ -170,7 +183,7 @@ Located in: `~/.claude/hooks/hooks.json`
 // idle-detection-hook.js
 // Listens to: Notification (matcher: idle_prompt)
 const Database = require('better-sqlite3');
-const db = new Database(process.env.APPDATA + '/multiterminal/tasks.db');
+const db = new Database(process.env.APPDATA + '/multiterminal/multiterminal.db');
 
 function onIdleDetected() {
   const terminalName = process.env.MULTITERMINAL_NAME;
@@ -230,7 +243,7 @@ function onSubagentStop(hookData) {
   const terminalName = process.env.MULTITERMINAL_NAME;
 
   // Check if this subagent was working on a task
-  const db = new Database(process.env.APPDATA + '/multiterminal/tasks.db');
+  const db = new Database(process.env.APPDATA + '/multiterminal/multiterminal.db');
   const currentTask = db.prepare(`
     SELECT id FROM kanban_tasks
     WHERE assigned_to = ? AND status = 'in_progress'

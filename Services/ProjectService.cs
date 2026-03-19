@@ -18,7 +18,7 @@ namespace MultiTerminal.Services
 
     /// <summary>
     /// Service for managing projects backed by SQLite (ProjectDatabase).
-    /// Project records are stored in the projects table (same tasks.db as TaskDatabase).
+    /// Project records are stored in the projects table (same multiterminal.db as TaskDatabase).
     ///
     /// Also maintains portable .claude/project.json files in each project folder for
     /// backward compatibility and migration support.
@@ -780,9 +780,18 @@ namespace MultiTerminal.Services
                 if (pos >= json.Length || json[pos] == ']')
                     break;
 
-                string value = ParseJsonString(json, ref pos);
-                if (value != null)
-                    items.Add(value);
+                // If the element is not a string (e.g. an object or array), skip it
+                // to avoid an infinite loop where ParseJsonString returns null without advancing pos.
+                if (json[pos] != '"' && json[pos] != 'n') // not a string or null literal
+                {
+                    SkipJsonValue(json, ref pos);
+                }
+                else
+                {
+                    string value = ParseJsonString(json, ref pos);
+                    if (value != null)
+                        items.Add(value);
+                }
 
                 SkipWhitespace(json, ref pos);
                 if (pos < json.Length && json[pos] == ',')

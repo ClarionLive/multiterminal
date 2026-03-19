@@ -27,6 +27,8 @@ namespace MultiTerminal.API
         private System.Threading.Timer _staleAgentTimer;
         private StaleTaskService _staleService;
         private SpawnService _spawnService;
+        private TerminalStreamService _terminalStreamService;
+        private CompanionProcessManager _companionProcessManager;
 
         /// <summary>
         /// The message broker for routing messages between terminals.
@@ -42,6 +44,17 @@ namespace MultiTerminal.API
         /// The pool coordinator for multi-instance state management.
         /// </summary>
         public PoolCoordinator PoolCoordinator => _poolCoordinator;
+
+        /// <summary>
+        /// The terminal stream service for WebSocket terminal I/O.
+        /// Available after StartAsync() completes.
+        /// </summary>
+        public TerminalStreamService TerminalStreamService => _terminalStreamService;
+
+        /// <summary>
+        /// The companion process manager for auto-starting external services.
+        /// </summary>
+        public CompanionProcessManager CompanionProcessManager => _companionProcessManager;
 
         /// <summary>
         /// The port the server is running on.
@@ -79,6 +92,7 @@ namespace MultiTerminal.API
             _broker = new MessageBroker();
             _poolCoordinator = new PoolCoordinator();
             _spawnService = new SpawnService();
+            _companionProcessManager = new CompanionProcessManager();
         }
 
         /// <summary>
@@ -111,7 +125,8 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(_broker);
                 builder.Services.AddSingleton(_poolCoordinator);
                 builder.Services.AddSingleton(_spawnService);
-                builder.Services.AddSingleton<SessionDatabase>();
+                builder.Services.AddSingleton<TerminalStreamService>();
+                // SessionDatabase removed — sessions now stored in multiterminal.db via SessionLineageService
                 builder.Services.AddSingleton<PlanDatabase>();
                 builder.Services.AddSingleton<TaskDatabase>();
                 builder.Services.AddSingleton<ActivityService>();
@@ -126,6 +141,12 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectContextService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectJsonMigrationService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.McpConfigService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.GatewayIntegrationService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.RipgrepService>();
+                builder.Services.AddSingleton(_companionProcessManager);
+                builder.Services.AddSingleton(sp =>
+                    new MultiTerminal.Services.OwnerProfileService(
+                        sp.GetRequiredService<TaskDatabase>().Connection));
 
                 // Add controllers for REST API (DebugController gets DebugLogService from MessageBroker directly)
                 builder.Services.AddControllers()
@@ -143,6 +164,9 @@ namespace MultiTerminal.API
                 });
 
                 var app = builder.Build();
+
+                // Enable WebSockets for terminal streaming
+                app.UseWebSockets();
 
                 // Enable CORS
                 app.UseCors();
@@ -226,31 +250,13 @@ namespace MultiTerminal.API
                     }
                 };
 
-                // Wire up LEARNED message persistence
-                var poolCoordinator = app.Services.GetRequiredService<PoolCoordinator>();
-                var sessionDb = app.Services.GetRequiredService<SessionDatabase>();
-
-                poolCoordinator.LearnedMessageRecorded += (sender, args) =>
-                {
-                    try
-                    {
-                        sessionDb.SaveLearnedMessage(
-                            args.MessageId,
-                            args.Instance,
-                            args.Topic,
-                            args.Summary,
-                            args.Tags,
-                            args.Timestamp);
-                        System.Diagnostics.Debug.WriteLine($"[Memory] Persisted LEARNED: {args.Topic}");
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[Memory] Failed to persist: {ex.Message}");
-                    }
-                };
+                // LEARNED message persistence now handled by knowledge_entries in multiterminal.db
 
                 // Get stale service for timer
                 _staleService = app.Services.GetRequiredService<StaleTaskService>();
+
+                // Expose TerminalStreamService for MainForm wiring
+                _terminalStreamService = app.Services.GetRequiredService<TerminalStreamService>();
 
                 // Start periodic stale task checker (runs every hour)
                 // Note: Startup check removed to avoid blocking first API request
@@ -271,24 +277,7 @@ namespace MultiTerminal.API
                 );
                 System.Diagnostics.Debug.WriteLine("[API] Stale office agent timer started (5-minute checks)");
 
-                // Seed MCP registry from MT's .claude/mcp.json (idempotent — skips if already done)
-                var mcpConfigService = app.Services.GetRequiredService<MultiTerminal.Services.McpConfigService>();
-                string mtPath = MultiTerminal.Services.LaunchCommandBuilder.GetMtSourcePath();
-                mcpConfigService.SeedRegistryFromMtMcpJson(mtPath);
-
-                // Seed MCP registry from user's ~/.claude.json (user-scoped servers → global tier)
-                mcpConfigService.SeedRegistryFromUserConfig();
-
-                // Sync global-tier MCP servers to Claude Code user scope via CLI
-                // so they're available in all Claude Code sessions
-                try
-                {
-                    mcpConfigService.SyncGlobalMcpServers();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[API] Failed to sync global MCP servers on startup: {ex.Message}");
-                }
+                // MCP registry seeding/sync removed — gateway is now source of truth for server selection.
 
                 // Map REST API endpoints
                 app.MapControllers();

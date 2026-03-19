@@ -2,10 +2,10 @@
   "id": "5d7853b8-c695-4684-8f32-dfad644b0669",
   "name": "MultiTerminal",
   "description": "Multi-agent coordination system for Claude Code",
-  "changeLog": null,
+  "changeLog": "## v0.1.1 - 2026-03-19\n- Documentation overhaul: bring all docs up to date with current codebase [Task #27f30fa8]\n\n## v0.1.1 - 2026-03-19\n- Pipeline report badges not updating on kanban task card [Task #c0194cb7]\n\n## v0.1.1 - 2026-03-19\n- Notification Hook: Route Claude Code notifications to MultiTerminal + ClaudeRemote [Task #4d66ba61]\n\n## v0.1.1 - 2026-03-16\n- Project pane enhancements [Task #98239830]\n\n## v0.1.1 - 2026-03-16\n- Auto-register terminals with MessageBroker on launch [Task #64c78dac]\n\n",
   "currentVersion": "0.1.0",
   "createdAt": "2026-01-31T15:59:46.6389469-08:00",
-  "lastOpenedAt": "2026-03-02T10:40:33.5266968-08:00",
+  "lastOpenedAt": "2026-03-19T12:59:54.2514190-07:00",
   "isPinned": false,
   "prompts": [
   ],

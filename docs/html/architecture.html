@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="MultiTerminal system architecture — layers, data flow, database schema (25+ tables), MessageBroker events, and key development patterns.">
+  <meta name="description" content="MultiTerminal system architecture — layers, data flow, database schema (30+ tables), MessageBroker events, and key development patterns.">
   <title>Architecture - MultiTerminal Documentation</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -21,12 +21,14 @@
   <nav class="sidebar-nav">
     <div class="nav-section-title">Getting Started</div>
     <a href="getting-started.html" class="nav-link">Quick Start</a>
+    <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
     <div class="nav-section-title">Reference</div>
     <a href="features.html" class="nav-link">Features</a>
     <a href="api-reference.html" class="nav-link">REST API</a>
     <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
     <div class="nav-section-title">Technical</div>
     <a href="architecture.html" class="nav-link active">Architecture</a>
+    <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
     <a href="distribution.html" class="nav-link">Distribution</a>
     <a href="deployment.html" class="nav-link">Deployment</a>
     <div class="nav-section-title"></div>
@@ -61,9 +63,9 @@
   <div class="architecture-diagram">
 <pre>
 +-------------------------------------------------------------+
-|  MainForm.cs (3K LOC) - UI Host &amp; Panel Orchestrator        |
+|  MainForm.cs (5.2K LOC) - UI Host &amp; Panel Orchestrator      |
 |  +-------------------+  +-------------------+               |
-|  | TasksPanel/       |  | ChatPanel/        |  7 WebView2   |
+|  | TasksPanel/       |  | ChatPanel/        |  11 WebView2  |
 |  | (Kanban board)    |  | (Messaging)       |  panels total |
 |  +-------------------+  +-------------------+               |
 |  +-------------------+  +-------------------+               |
@@ -74,10 +76,18 @@
 |  | InboxPanel/       |  | ProjectPanel/     |               |
 |  | (Notifications)   |  | (Project mgmt)    |               |
 |  +-------------------+  +-------------------+               |
+|  +-------------------+  +-------------------+               |
+|  | LauncherPanel/    |  | OfficePanel/      |               |
+|  | (Agent launcher)  |  | (Agent presence)  |               |
+|  +-------------------+  +-------------------+               |
+|  +-------------------+  +-------------------+               |
+|  | AgentPanel/       |  | DebugPanel/       |               |
+|  | (Subagent viewer) |  | (Debug logs)      |               |
+|  +-------------------+  +-------------------+               |
 |  +-------------------+                                      |
-|  | LauncherPanel/    |  + Terminal/ (ConPTY + WebView2)      |
-|  | (Agent launcher)  |  + Docking/ (GridLayoutManager)       |
-|  +-------------------+  + Dialogs/ (7 modal windows)         |
+|  | FilePreviewPanel/ |  + Terminal/ (ConPTY + WebView2)      |
+|  | (File previews)   |  + Docking/ (GridLayoutManager)       |
+|  +-------------------+  + Dialogs/ (11 modal windows)        |
 +-------------------------------------------------------------+
                            |
                    Events (C# EventHandler)
@@ -90,14 +100,19 @@
 |  | SpawnController       |  | SessionLineageController   |  |
 |  | ProjectContextController | TeamController              |  |
 |  | DebugController       |  | ToolsController            |  |
-|  | AgentPanelsController |  |                            |  |
+|  | AgentPanelsController |  | AgentStatsController       |  |
+|  | BrowserTabsController |  | CompanionController        |  |
+|  | GatewayController     |  | NotificationsController    |  |
+|  | OwnerProfileController|  | TaskReportsController      |  |
+|  | TerminalStreamController| XamlPreviewController       |  |
+|  | RipgrepController     |  |                            |  |
 |  +-----------------------+  +----------------------------+  |
 +-------------------------------------------------------------+
                            |
                     Method calls
                            |
 +-------------------------------------------------------------+
-|  MessageBroker.cs (4.2K LOC) - CENTRAL HUB                 |
+|  MessageBroker.cs (5.5K LOC) - CENTRAL HUB                 |
 |                                                             |
 |  Routes messages, manages task/terminal/profile caches      |
 |  (ConcurrentDictionary), delivers webhooks, fires events    |
@@ -115,11 +130,11 @@
 +-------------------------------------------------------------+
 |  Persistence Layer (SQLite)                                 |
 |  +-------------------+  +-------------------+               |
-|  | TaskDatabase.cs   |  | ProjectDatabase.cs|  tasks.db     |
-|  | (2.7K LOC)        |  | + 7 assoc tables  |               |
+|  | TaskDatabase.cs   |  | ProjectDatabase.cs|  multiterminal.db     |
+|  | (4.6K LOC)        |  | + 7 assoc tables  |               |
 |  +-------------------+  +-------------------+               |
 |  +-------------------+  +-------------------+               |
-|  | KnowledgeDatabase |  | SessionLineage-   |  tasks.db     |
+|  | KnowledgeDatabase |  | SessionLineage-   |  multiterminal.db     |
 |  | (knowledge + FTS) |  | Service (sessions)|               |
 |  +-------------------+  +-------------------+               |
 |  +-------------------+                                      |
@@ -133,7 +148,7 @@
 +-------------------------------------------------------------+
 |  MCP Server (Node.js) - multiterminal-mcp/index.js          |
 |                                                             |
-|  Exposes 47 tools to Claude Code agents via MCP protocol.   |
+|  Exposes 80 tools to Claude Code agents via MCP protocol.   |
 |  Wraps the REST API - each tool call = one HTTP request.    |
 |  Located: %APPDATA%\multiterminal\mcp\index.js              |
 +-------------------------------------------------------------+
@@ -153,17 +168,17 @@
     <tbody>
       <tr>
         <td><code>MCPServer/Services/MessageBroker.cs</code></td>
-        <td>~4,254</td>
-        <td><strong>Central hub.</strong> Routes all messages, caches tasks/terminals/profiles in ConcurrentDictionaries, delivers webhooks, fires events. Everything flows through here.</td>
+        <td>~5,512</td>
+        <td><strong>Central hub.</strong> Routes all messages, caches tasks/terminals/profiles in ConcurrentDictionaries, delivers webhooks, fires 19 events. Everything flows through here.</td>
       </tr>
       <tr>
         <td><code>Services/TaskDatabase.cs</code></td>
-        <td>~2,694</td>
-        <td><strong>Persistence.</strong> SQLite CRUD for tasks, helpers, profiles, activity, stale tracking, knowledge entries, code digests, session lineage. All tables defined here.</td>
+        <td>~4,621</td>
+        <td><strong>Persistence.</strong> SQLite CRUD for 21+ tables: tasks, sessions, knowledge, reports, profiles, activity, attachments, and more.</td>
       </tr>
       <tr>
         <td><code>MainForm.cs</code></td>
-        <td>~3,059</td>
+        <td>~5,162</td>
         <td><strong>UI host.</strong> Creates/docks panels, wires events between panels and MessageBroker, manages terminal lifecycle.</td>
       </tr>
       <tr>
@@ -256,13 +271,116 @@
     </div>
   </div>
 
+  <h3>Session Sync Pipeline (End-to-End)</h3>
+  <p>Every Claude Code session is automatically tracked and imported into the session database, preserving which agent ran it and providing session continuity across restarts.</p>
+
+  <h4>Phase 1: Session Start (Hook)</h4>
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. Claude Code starts a session</div>
+      <div class="flow-detail">Creates JSONL file: <code>~/.claude/projects/{folder}/{session-id}.jsonl</code></div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. <code>session-status-hook.js</code> (SessionStart)</div>
+      <div class="flow-detail">Reads <code>MULTITERMINAL_NAME</code> env var + <code>hookData.session_id</code>. Writes <code>(session_id, agent_name, is_active=1)</code> to <code>session_agent_map</code> table.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. Profile marked online</div>
+      <div class="flow-detail">Same hook upserts <code>team_member_profiles</code> with <code>is_online=1</code>.</div>
+    </div>
+  </div>
+
+  <h4>Phase 2: Session End (Hook)</h4>
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. Claude Code session ends</div>
+      <div class="flow-detail">JSONL file is complete. <code>session-status-hook.js</code> fires with <code>SessionEnd</code>.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. <code>session-status-hook.js</code> (SessionEnd)</div>
+      <div class="flow-detail">Updates <code>session_agent_map</code>: sets <code>is_active=0</code>, writes <code>ended_at</code> timestamp.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. Profile marked offline</div>
+      <div class="flow-detail">Calls <code>POST /api/messaging/disconnect</code> (or direct DB fallback).</div>
+    </div>
+  </div>
+
+  <h4>Phase 3: Auto-Sync on Startup</h4>
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. MultiTerminal launches</div>
+      <div class="flow-detail"><code>MainForm.InitializeMcpServerAndChatPanel()</code> fires background <code>Task.Run</code>.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. Iterate registered projects</div>
+      <div class="flow-detail">Reads all projects from <code>ProjectDatabase</code>. For each, resolves Claude project folder path.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. <code>SessionLineageService.SyncNewSessions()</code></div>
+      <div class="flow-detail">Scans <code>*.jsonl</code> files. Skips already-imported sessions (<code>GetImportedSessionIds</code>). <strong>Skips active sessions</strong> (<code>GetActiveSessionIds</code> from <code>session_agent_map</code> where <code>is_active=1</code>).</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">4. Resolve agent name</div>
+      <div class="flow-detail">For each new session, looks up <code>session_agent_map</code> for the real agent name (e.g. "Alice"). Falls back to "Unknown" only if no mapping exists.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">5. Import to <code>session_lineage</code> + <code>session_messages</code></div>
+      <div class="flow-detail">Parses JSONL, extracts user/assistant messages, persists with correct agent name.</div>
+    </div>
+  </div>
+
+  <h4>Phase 4: Session Recap at Terminal Start</h4>
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. <code>session-status-hook.js</code> (SessionStart)</div>
+      <div class="flow-detail">Calls <code>GET /api/session-lineage/latest?projectPath=...&amp;agentName={terminalName}</code></div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. <code>SessionLineageController</code></div>
+      <div class="flow-detail">Passes <code>agentName</code> filter to <code>SessionLineageService.GetMostRecentSessionForProject()</code></div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. Returns <strong>this agent's</strong> last session</div>
+      <div class="flow-detail">SQL filters by <code>agent_name = @agentName</code>. Returns cached summary or recent messages for lazy generation.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">4. Agent sees its own recap</div>
+      <div class="flow-detail">Hook injects session summary into startup context. Agent can continue where it left off.</div>
+    </div>
+  </div>
+
+  <h4>Key Files</h4>
+  <table>
+    <thead><tr><th>File</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>.claude/hooks/session-status-hook.js</code></td><td>Writes session&rarr;agent mapping on start/end, injects recap</td></tr>
+      <tr><td><code>Services/SessionLineageService.cs</code></td><td>Sync logic, JSONL parsing, queries</td></tr>
+      <tr><td><code>Services/SessionSyncService.cs</code></td><td>Path conversion, JSONL message parsing</td></tr>
+      <tr><td><code>Services/TaskDatabase.cs</code></td><td>All session tables + CRUD + FTS5</td></tr>
+      <tr><td><code>API/Controllers/SessionLineageController.cs</code></td><td>REST endpoints for session lineage</td></tr>
+      <tr><td><code>MainForm.cs</code> (startup block)</td><td>Triggers auto-sync on app launch</td></tr>
+    </tbody>
+  </table>
+
   <!-- ================================================================== -->
   <h2 id="database-schema">Database Schema</h2>
   <!-- ================================================================== -->
 
-  <p>All data is stored in SQLite databases. The primary database is <code>tasks.db</code> which holds most tables.</p>
+  <p>All data is stored in SQLite databases. The primary database is <code>multiterminal.db</code> which holds most tables.</p>
 
-  <h3>tasks.db - Core Tables</h3>
+  <h3>multiterminal.db - Core Tables</h3>
 
   <div class="schema-group">
     <h4>tasks</h4>
@@ -435,7 +553,134 @@
     </table>
   </div>
 
-  <h3>tasks.db - Session Lineage Tables</h3>
+  <div class="schema-group">
+    <h4>task_relationships</h4>
+    <p>Blocking and dependency relationships between tasks.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>source_task_id</code></td><td>TEXT FK</td><td>Source task</td></tr>
+        <tr><td><code>target_task_id</code></td><td>TEXT FK</td><td>Target task</td></tr>
+        <tr><td><code>type</code></td><td>TEXT</td><td>blocks, depends_on, related_to</td></tr>
+        <tr><td><code>created_by</code></td><td>TEXT</td><td>Who created the relationship</td></tr>
+        <tr><td><code>created_at</code></td><td>DATETIME</td><td>Creation timestamp</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>task_file_links</h4>
+    <p>Files linked to tasks for code review and context.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>References tasks.id</td></tr>
+        <tr><td><code>file_path</code></td><td>TEXT</td><td>Absolute file path</td></tr>
+        <tr><td><code>description</code></td><td>TEXT</td><td>Why this file is relevant</td></tr>
+        <tr><td><code>line_start</code></td><td>INTEGER</td><td>Start line number (optional)</td></tr>
+        <tr><td><code>line_end</code></td><td>INTEGER</td><td>End line number (optional)</td></tr>
+        <tr><td><code>added_by</code></td><td>TEXT</td><td>Who linked it</td></tr>
+        <tr><td><code>added_at</code></td><td>DATETIME</td><td>When linked</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>task_reports</h4>
+    <p>Persisted agent reports (HTML/markdown) linked to tasks.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Report ID</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>References tasks.id</td></tr>
+        <tr><td><code>invocation_id</code></td><td>TEXT</td><td>Links to agent_invocations</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Agent that generated the report</td></tr>
+        <tr><td><code>report_type</code></td><td>TEXT</td><td>html or markdown</td></tr>
+        <tr><td><code>report_content</code></td><td>TEXT</td><td>Full report content</td></tr>
+        <tr><td><code>verdict</code></td><td>TEXT</td><td>PASS, FAIL, PASS WITH NOTES</td></tr>
+        <tr><td><code>score</code></td><td>INTEGER</td><td>Numeric score 0-100</td></tr>
+        <tr><td><code>created_at</code></td><td>DATETIME</td><td>Creation timestamp</td></tr>
+        <tr><td><code>created_by</code></td><td>TEXT</td><td>Who saved the report</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>agent_invocations</h4>
+    <p>Tracks specialist agent invocations with performance metrics.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Invocation ID</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Agent name (verifier, code-reviewer, etc.)</td></tr>
+        <tr><td><code>task_id</code></td><td>TEXT FK</td><td>Related task</td></tr>
+        <tr><td><code>invoked_by</code></td><td>TEXT</td><td>Who triggered the invocation</td></tr>
+        <tr><td><code>model_used</code></td><td>TEXT</td><td>Claude model used</td></tr>
+        <tr><td><code>verdict</code></td><td>TEXT</td><td>Result verdict</td></tr>
+        <tr><td><code>score</code></td><td>INTEGER</td><td>Numeric score</td></tr>
+        <tr><td><code>findings_count</code></td><td>INTEGER</td><td>Number of findings</td></tr>
+        <tr><td><code>duration_ms</code></td><td>INTEGER</td><td>Execution time in ms</td></tr>
+        <tr><td><code>invoked_at</code></td><td>DATETIME</td><td>When invoked</td></tr>
+        <tr><td><code>completed_at</code></td><td>DATETIME</td><td>When completed</td></tr>
+        <tr><td><code>report_summary</code></td><td>TEXT</td><td>Brief summary of findings</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>notification_events</h4>
+    <p>Runtime notifications from Claude Code hooks (push to phone via ClaudeRemote).</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>TEXT PK</td><td>Notification ID</td></tr>
+        <tr><td><code>notification_type</code></td><td>TEXT</td><td>Type of notification</td></tr>
+        <tr><td><code>title</code></td><td>TEXT</td><td>Notification title</td></tr>
+        <tr><td><code>message</code></td><td>TEXT</td><td>Notification message</td></tr>
+        <tr><td><code>session_id</code></td><td>TEXT</td><td>Claude Code session</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Agent that triggered it</td></tr>
+        <tr><td><code>cwd</code></td><td>TEXT</td><td>Working directory</td></tr>
+        <tr><td><code>read_at</code></td><td>DATETIME</td><td>When read (null if unread)</td></tr>
+        <tr><td><code>created_at</code></td><td>DATETIME</td><td>Creation timestamp</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>owner_profile</h4>
+    <p>Owner identity: git user.name, email, GitHub username, and encrypted token.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Singleton (always 1)</td></tr>
+        <tr><td><code>full_name</code></td><td>TEXT</td><td>Git user.name</td></tr>
+        <tr><td><code>email</code></td><td>TEXT</td><td>Git user.email</td></tr>
+        <tr><td><code>github_username</code></td><td>TEXT</td><td>GitHub username</td></tr>
+        <tr><td><code>github_token_encrypted</code></td><td>TEXT</td><td>Encrypted GitHub PAT</td></tr>
+        <tr><td><code>created_at</code></td><td>DATETIME</td><td>When created</td></tr>
+        <tr><td><code>updated_at</code></td><td>DATETIME</td><td>Last updated</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="schema-group">
+    <h4>chat_messages</h4>
+    <p>Persistent inter-terminal chat messages (survives restarts).</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment</td></tr>
+        <tr><td><code>from_name</code></td><td>TEXT</td><td>Sender name</td></tr>
+        <tr><td><code>to_name</code></td><td>TEXT</td><td>Recipient name (null for broadcast)</td></tr>
+        <tr><td><code>message</code></td><td>TEXT</td><td>Message content</td></tr>
+        <tr><td><code>timestamp</code></td><td>DATETIME</td><td>When sent</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>multiterminal.db - Session Lineage Tables</h3>
 
   <div class="schema-group">
     <h4>session_lineage</h4>
@@ -482,7 +727,22 @@
     <p>Columns indexed: <code>content</code>, <code>role</code>, <code>agent_name</code>, <code>tool_name</code>. Content sourced from <code>session_messages</code>.</p>
   </div>
 
-  <h3>tasks.db - Knowledge Tables</h3>
+  <div class="schema-group">
+    <h4>session_agent_map</h4>
+    <p>Maps session IDs to agent names. Written by <code>session-status-hook.js</code> on SessionStart/SessionEnd. Used during auto-sync to resolve agent names and skip active sessions.</p>
+    <table class="schema-table">
+      <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>session_id</code></td><td>TEXT PK</td><td>Claude Code session GUID</td></tr>
+        <tr><td><code>agent_name</code></td><td>TEXT</td><td>Terminal agent name (e.g. "Alice")</td></tr>
+        <tr><td><code>is_active</code></td><td>INTEGER</td><td>1 = session in progress, 0 = ended</td></tr>
+        <tr><td><code>started_at</code></td><td>TEXT</td><td>When the session started</td></tr>
+        <tr><td><code>ended_at</code></td><td>TEXT</td><td>When the session ended (null if active)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>multiterminal.db - Knowledge Tables</h3>
 
   <div class="schema-group">
     <h4>knowledge_entries</h4>
@@ -533,7 +793,7 @@
     </table>
   </div>
 
-  <h3>tasks.db - Project Tables (ProjectDatabase.cs)</h3>
+  <h3>multiterminal.db - Project Tables (ProjectDatabase.cs)</h3>
 
   <div class="schema-group">
     <h4>projects (extended)</h4>
@@ -694,6 +954,9 @@
       <tr><td><code>OfficeAgentSpawned</code></td><td><code>OfficeAgentInfo</code></td><td>Agent walks into office panel</td></tr>
       <tr><td><code>OfficeAgentDeparted</code></td><td><code>OfficeAgentInfo</code></td><td>Agent leaves office panel</td></tr>
       <tr><td><code>AgentPanelCloseRequested</code></td><td><code>string</code> (transcript path)</td><td>Subagent finished, close panel</td></tr>
+      <tr><td><code>ReportSaved</code></td><td><code>ReportSavedEventArgs</code></td><td>Agent pipeline report saved for a task</td></tr>
+      <tr><td><code>NotificationReceived</code></td><td><code>NotificationEventArgs</code></td><td>Push notification received from hooks</td></tr>
+      <tr><td><code>BrowserTabRequested</code></td><td><code>BrowserTabEventArgs</code></td><td>Agent requested a browser tab in HUD</td></tr>
       <tr><td><code>SessionLineageUpdated</code></td><td><code>string</code> (task ID)</td><td>Session imported or synced</td></tr>
     </tbody>
   </table>
@@ -784,19 +1047,21 @@
       <tr><th>Folder</th><th>Purpose</th><th>Key Files</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>Services/</code></td><td>Business logic &amp; SQLite persistence</td><td>TaskDatabase, SessionDatabase, ProjectService, ProjectDatabase, ProjectContextService, ProjectJsonMigrationService, TerminalSpawner, SettingsService, KnowledgeDatabase, DebugLogService, TeamWatcherService</td></tr>
+      <tr><td><code>Services/</code></td><td>Business logic &amp; SQLite persistence</td><td>TaskDatabase, ProjectService, ProjectDatabase, ProjectContextService, ProjectJsonMigrationService, TerminalSpawner, SettingsService, KnowledgeDatabase, DebugLogService, TeamWatcherService, CompanionProcessManager, GatewayIntegrationService, OwnerProfileService, RipgrepService, TerminalStreamService</td></tr>
       <tr><td><code>MCPServer/Services/</code></td><td>MCP server services</td><td><strong>MessageBroker</strong>, PoolCoordinator, ActivityService, StaleTaskService, SpawnService, HttpWebhookService, SessionDiscovery, ComplexityDetector, SummaryService</td></tr>
       <tr><td><code>MCPServer/Models/</code></td><td>Data models (14+ files)</td><td>KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, HelperSession, CodeDigest, KnowledgeEntry, ActivityEvent, TerminalInfo, TaskAttachment, ComplexityStats</td></tr>
       <tr><td><code>Models/</code></td><td>App-level models (8+ files)</td><td>TerminalSessionInfo, SpawnedTeammate, Project, ProjectAgent, ProjectMcpServer, ProjectSpecialistAgent, ProjectPath, ProjectPromptEntry, ProjectSkill, DebugLogEntry</td></tr>
-      <tr><td><code>API/Controllers/</code></td><td>REST endpoints (11 controllers)</td><td>TasksController, MessagingController, OfficeController, SpawnController, KnowledgeController, SessionLineageController, ProjectContextController, TeamController, DebugController, ToolsController, AgentPanelsController</td></tr>
+      <tr><td><code>API/Controllers/</code></td><td>REST endpoints (21 controllers)</td><td>TasksController, MessagingController, OfficeController, SpawnController, KnowledgeController, SessionLineageController, ProjectContextController, TeamController, DebugController, ToolsController, AgentPanelsController, AgentStatsController, BrowserTabsController, CompanionController, GatewayController, NotificationsController, OwnerProfileController, TaskReportsController, TerminalStreamController, XamlPreviewController, RipgrepController</td></tr>
       <tr><td><code>TasksPanel/</code></td><td>Kanban board UI</td><td>TasksPanelDocument + TasksPanelControl (WebView2)</td></tr>
       <tr><td><code>ChatPanel/</code></td><td>Messaging UI</td><td>ChatPanelDocument + ChatPanelControl (WebView2)</td></tr>
       <tr><td><code>ActivityPanel/</code></td><td>Activity feed UI</td><td>ActivityPanelDocument (WebView2)</td></tr>
       <tr><td><code>ProfilePanel/</code></td><td>Team profiles UI</td><td>ProfilePanelDocument (WebView2)</td></tr>
       <tr><td><code>InboxPanel/</code></td><td>Notifications UI</td><td>InboxPanelDocument</td></tr>
+      <tr><td><code>AgentPanel/</code></td><td>Subagent viewer</td><td>AgentPanelControl (WebView2 transcript viewer)</td></tr>
+      <tr><td><code>FilePreviewPanel/</code></td><td>File preview</td><td>FilePreviewPanelDocument (file content preview)</td></tr>
       <tr><td><code>Terminal/</code></td><td>Terminal hosting</td><td>ConPtyTerminal, WebViewTerminalRenderer</td></tr>
       <tr><td><code>Docking/</code></td><td>Window layout</td><td>GridLayoutManager</td></tr>
-      <tr><td><code>Dialogs/</code></td><td>Modal dialogs (7)</td><td>ProjectManager, Settings, ChatHistory, etc.</td></tr>
+      <tr><td><code>Dialogs/</code></td><td>Modal dialogs (11)</td><td>ProjectManager, Settings, ChatHistory, OwnerProfile, NewProject, etc.</td></tr>
       <tr><td><code>Controls/</code></td><td>Custom UI controls</td><td>TerminalStatusBar (3-row status display)</td></tr>
       <tr><td><code>docs/</code></td><td>Documentation (this site + architecture docs)</td><td>16+ design specs &amp; workflow guides</td></tr>
     </tbody>
@@ -804,10 +1069,10 @@
 
   <h3>Codebase Statistics</h3>
   <ul>
-    <li><strong>~80 C# production files</strong>, ~24K lines of code</li>
-    <li><strong>1 primary SQLite database</strong> (tasks.db) with 20+ tables</li>
-    <li><strong>14+ data models</strong>, <strong>47 MCP tools</strong>, <strong>11 REST controllers</strong></li>
-    <li><strong>7 UI panels</strong> (WebView2-based), <strong>7 dialog windows</strong></li>
+    <li><strong>~150 C# production files</strong>, ~30K+ lines of code</li>
+    <li><strong>1 primary SQLite database</strong> (multiterminal.db) with 30+ tables</li>
+    <li><strong>14+ data models</strong>, <strong>80 MCP tools</strong>, <strong>21 REST controllers</strong></li>
+    <li><strong>11 UI panels</strong> (WebView2-based), <strong>11 dialog windows</strong></li>
     <li>REST API on port 5050, MCP server via Node.js (stdio transport)</li>
   </ul>
 

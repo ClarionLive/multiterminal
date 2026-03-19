@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Complete reference for all 47 MCP tools exposed to Claude Code agents by the MultiTerminal MCP server, with parameters, return types, and usage examples.">
+  <meta name="description" content="Complete reference for all 80 MCP tools exposed to Claude Code agents by the MultiTerminal MCP server, with parameters, return types, and usage examples.">
   <title>MCP Tools Reference - MultiTerminal Documentation</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -21,12 +21,14 @@
   <nav class="sidebar-nav">
     <div class="nav-section-title">Getting Started</div>
     <a href="getting-started.html" class="nav-link">Quick Start</a>
+    <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
     <div class="nav-section-title">Reference</div>
     <a href="features.html" class="nav-link">Features</a>
     <a href="api-reference.html" class="nav-link">REST API</a>
     <a href="mcp-tools.html" class="nav-link active">MCP Tools</a>
     <div class="nav-section-title">Technical</div>
     <a href="architecture.html" class="nav-link">Architecture</a>
+    <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
     <a href="distribution.html" class="nav-link">Distribution</a>
     <a href="deployment.html" class="nav-link">Deployment</a>
     <div class="nav-section-title"></div>
@@ -37,7 +39,7 @@
 <main class="main-content">
 <div class="content-container">
   <h1>MCP Tools Reference</h1>
-  <p class="lead">Complete reference for all 47 MCP tools exposed to Claude Code agents via the MultiTerminal MCP server. Tools are called as <code>mcp__multiterminal__&lt;tool_name&gt;</code> from Claude Code.</p>
+  <p class="lead">Complete reference for all 80 MCP tools exposed to Claude Code agents via the MultiTerminal MCP server. Tools are called as <code>mcp__multiterminal__&lt;tool_name&gt;</code> from Claude Code.</p>
 
   <div class="callout">
     <strong>How it works:</strong> The MCP server (<code>%APPDATA%\multiterminal\mcp\index.js</code>) wraps the REST API at <code>http://localhost:5050</code>. Each tool call translates to one or more REST API calls.
@@ -46,13 +48,20 @@
   <nav class="toc">
     <h3>On This Page</h3>
     <ul>
-      <li><a href="#task-management">Task Management</a> (14 tools)</li>
+      <li><a href="#task-management">Task Management</a> (16 tools)</li>
+      <li><a href="#task-relationships">Task Relationships</a> (3 tools)</li>
+      <li><a href="#task-files">Task File Links</a> (3 tools)</li>
+      <li><a href="#task-reports">Task Reports</a> (2 tools)</li>
       <li><a href="#messaging">Messaging</a> (9 tools)</li>
-      <li><a href="#team">Team &amp; Helpers</a> (3 tools)</li>
+      <li><a href="#team">Team &amp; Helpers</a> (4 tools)</li>
       <li><a href="#projects">Projects</a> (6 tools)</li>
       <li><a href="#knowledge">Knowledge Base</a> (4 tools)</li>
-      <li><a href="#sessions">Sessions</a> (7 tools)</li>
-      <li><a href="#debug">Debug</a> (5 tools)</li>
+      <li><a href="#sessions">Sessions</a> (8 tools)</li>
+      <li><a href="#browser">Browser Tabs</a> (11 tools)</li>
+      <li><a href="#build">Build &amp; Run</a> (5 tools)</li>
+      <li><a href="#xaml-tools">XAML</a> (1 tool)</li>
+      <li><a href="#debug">Debug</a> (6 tools)</li>
+      <li><a href="#search">Code Search</a> (2 tools)</li>
     </ul>
   </nav>
 
@@ -349,6 +358,220 @@
     <pre><code>get_checklist_item_images(taskId="c0ce8037", itemIndex=0)</code></pre>
   </div>
 
+  <!-- get_my_active_task -->
+  <div class="tool-block" id="get_my_active_task">
+    <h3>get_my_active_task</h3>
+    <p>Get YOUR active in-progress task (filtered by your agent name). Returns full task detail with checklist summary. Use this instead of <code>list_tasks</code> when you just need your current active task.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Your terminal/agent name (from MULTITERMINAL_NAME env var)</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Full task detail with checklist summary, or a message if no active task exists.</p>
+    <h4>Example</h4>
+    <pre><code>get_my_active_task(agentName="Alice")</code></pre>
+  </div>
+
+  <!-- get_my_pickable_tasks -->
+  <div class="tool-block" id="get_my_pickable_tasks">
+    <h3>get_my_pickable_tasks</h3>
+    <p>Get tasks you can work on: your assigned in-progress tasks + unassigned todo tasks available to claim. Returns a compact formatted list. Use this instead of <code>list_tasks</code> when browsing for work.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Your terminal/agent name (from MULTITERMINAL_NAME env var)</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Compact list of pickable tasks with ID, title, status, priority, and your relationship to each (assigned, helper, or available).</p>
+    <h4>Example</h4>
+    <pre><code>get_my_pickable_tasks(agentName="Alice")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="task-relationships">Task Relationships</h2>
+  <!-- ================================================================== -->
+
+  <!-- add_task_relationship -->
+  <div class="tool-block" id="add_task_relationship">
+    <h3>add_task_relationship</h3>
+    <p>Add a blocking/dependency relationship between two tasks. Types: <code>blocks</code> (A blocks B), <code>depends_on</code> (A depends on B), <code>related_to</code> (informational). Automatically creates the inverse relationship.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>sourceTaskId</code></td><td>string</td><td>Yes</td><td>Source task ID (the task you're adding a relationship FROM)</td></tr>
+        <tr><td><code>targetTaskId</code></td><td>string</td><td>Yes</td><td>Target task ID (the task you're adding a relationship TO)</td></tr>
+        <tr><td><code>type</code></td><td>string</td><td>Yes</td><td>Relationship type: <code>blocks</code>, <code>depends_on</code>, <code>related_to</code></td></tr>
+        <tr><td><code>createdBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>add_task_relationship(sourceTaskId="c0ce8037", targetTaskId="d4e5f6a7", type="blocks", createdBy="Alice")</code></pre>
+  </div>
+
+  <!-- remove_task_relationship -->
+  <div class="tool-block" id="remove_task_relationship">
+    <h3>remove_task_relationship</h3>
+    <p>Remove a relationship between two tasks (removes both directions).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>sourceTaskId</code></td><td>string</td><td>Yes</td><td>One of the two related task IDs</td></tr>
+        <tr><td><code>targetTaskId</code></td><td>string</td><td>Yes</td><td>The other related task ID</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>remove_task_relationship(sourceTaskId="c0ce8037", targetTaskId="d4e5f6a7")</code></pre>
+  </div>
+
+  <!-- get_task_relationships -->
+  <div class="tool-block" id="get_task_relationships">
+    <h3>get_task_relationships</h3>
+    <p>Get all relationships for a task (blocks, depends_on, related_to).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to get relationships for</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>List of relationships with source/target task IDs, type, and creator.</p>
+    <h4>Example</h4>
+    <pre><code>get_task_relationships(taskId="c0ce8037")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="task-files">Task File Links</h2>
+  <!-- ================================================================== -->
+
+  <!-- link_task_file -->
+  <div class="tool-block" id="link_task_file">
+    <h3>link_task_file</h3>
+    <p>Link a file to a task so agents know which files are relevant. Supports optional line ranges and descriptions.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID to link file to</td></tr>
+        <tr><td><code>filePath</code></td><td>string</td><td>Yes</td><td>Absolute file path</td></tr>
+        <tr><td><code>addedBy</code></td><td>string</td><td>Yes</td><td>Your name</td></tr>
+        <tr><td><code>description</code></td><td>string</td><td>No</td><td>Why this file is relevant</td></tr>
+        <tr><td><code>lineStart</code></td><td>number</td><td>No</td><td>Start line number</td></tr>
+        <tr><td><code>lineEnd</code></td><td>number</td><td>No</td><td>End line number</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with file count.</p>
+    <h4>Example</h4>
+    <pre><code>link_task_file(
+  taskId="c0ce8037",
+  filePath="H:\\DevLaptop\\...\\TaskDatabase.cs",
+  addedBy="Alice",
+  description="Core persistence layer being modified",
+  lineStart=100,
+  lineEnd=250
+)</code></pre>
+  </div>
+
+  <!-- unlink_task_file -->
+  <div class="tool-block" id="unlink_task_file">
+    <h3>unlink_task_file</h3>
+    <p>Remove a file link from a task.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>filePath</code></td><td>string</td><td>Yes</td><td>File path to unlink</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation.</p>
+    <h4>Example</h4>
+    <pre><code>unlink_task_file(taskId="c0ce8037", filePath="H:\\DevLaptop\\...\\TaskDatabase.cs")</code></pre>
+  </div>
+
+  <!-- get_task_files -->
+  <div class="tool-block" id="get_task_files">
+    <h3>get_task_files</h3>
+    <p>Get all files linked to a task.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>List of linked files with paths, descriptions, line ranges, and who linked them.</p>
+    <h4>Example</h4>
+    <pre><code>get_task_files(taskId="c0ce8037")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="task-reports">Task Reports</h2>
+  <!-- ================================================================== -->
+
+  <!-- save_task_report -->
+  <div class="tool-block" id="save_task_report">
+    <h3>save_task_report</h3>
+    <p>Save an agent report (HTML/markdown) linked to a kanban task. Use after generating a specialist agent report (verifier, code-reviewer, security-auditor) to persist it for future reference.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Kanban task ID this report belongs to</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>Yes</td><td>Agent that generated the report (e.g. verifier, code-reviewer)</td></tr>
+        <tr><td><code>reportContent</code></td><td>string</td><td>Yes</td><td>Full report content (HTML or markdown)</td></tr>
+        <tr><td><code>reportType</code></td><td>string</td><td>No</td><td>Report format: <code>html</code> or <code>markdown</code>. Default: <code>html</code></td></tr>
+        <tr><td><code>verdict</code></td><td>string</td><td>No</td><td>Report verdict (e.g. PASS, FAIL, PASS WITH NOTES)</td></tr>
+        <tr><td><code>score</code></td><td>number</td><td>No</td><td>Numeric score 0-100</td></tr>
+        <tr><td><code>invocationId</code></td><td>string</td><td>No</td><td>Agent invocation ID (links to agent_invocations table)</td></tr>
+        <tr><td><code>createdBy</code></td><td>string</td><td>No</td><td>Who saved the report</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with report ID.</p>
+    <h4>Example</h4>
+    <pre><code>save_task_report(
+  taskId="c0ce8037",
+  agentName="verifier",
+  reportContent="&lt;h1&gt;Verification Report&lt;/h1&gt;&lt;p&gt;All checks passed.&lt;/p&gt;",
+  verdict="PASS",
+  score=95
+)</code></pre>
+  </div>
+
+  <!-- get_task_reports -->
+  <div class="tool-block" id="get_task_reports">
+    <h3>get_task_reports</h3>
+    <p>List reports saved for a kanban task. Returns metadata (no content) -- use the reportId with the REST API to fetch full content.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Kanban task ID</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Filter by agent name</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Max reports to return. Default: <code>50</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>List of report metadata with IDs, agent names, verdicts, scores, and timestamps.</p>
+    <h4>Example</h4>
+    <pre><code>get_task_reports(taskId="c0ce8037", agentName="verifier")</code></pre>
+  </div>
+
   <!-- ================================================================== -->
   <h2 id="messaging">Messaging</h2>
   <!-- ================================================================== -->
@@ -549,6 +772,18 @@ mark_inbox_read(userId="John")</code></pre>
     <p>Success confirmation with remaining helper count.</p>
     <h4>Example</h4>
     <pre><code>remove_helper(taskId="c0ce8037", helperName="Bob")</code></pre>
+  </div>
+
+  <!-- get_owner_profile -->
+  <div class="tool-block" id="get_owner_profile">
+    <h3>get_owner_profile</h3>
+    <p>Get the owner's profile (git identity, GitHub username, token status). Use when you need git user.name/email for commits or GitHub username for repo operations.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>Owner profile with fullName, email, gitHubUsername, hasGitHubToken, and timestamps.</p>
+    <h4>Example</h4>
+    <pre><code>get_owner_profile()</code></pre>
   </div>
 
   <!-- ================================================================== -->
@@ -934,12 +1169,17 @@ add_project_association(projectId="proj-123", type="skill", skillName="kanban-ta
       <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Filesystem path to the project</td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Filter by agent name (e.g. "Alice"). Returns the most recent session for this specific agent.</td></tr>
       </tbody>
     </table>
     <h4>Returns</h4>
     <p>Session metadata, cached summary, and optionally recent messages for lazy summary generation.</p>
     <h4>Example</h4>
-    <pre><code>get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal")</code></pre>
+    <pre><code>// Get latest session across all agents
+get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal")
+
+// Get latest session for a specific agent
+get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal", agentName="Alice")</code></pre>
   </div>
 
   <!-- update_session_summary -->
@@ -960,6 +1200,410 @@ add_project_association(projectId="proj-123", type="skill", skillName="kanban-ta
     <pre><code>update_session_summary(
   sessionId="def456",
   summary="Implemented knowledge base with FTS5 search and code digest system"
+)</code></pre>
+  </div>
+
+  <!-- get_unsummarized_sessions -->
+  <div class="tool-block" id="get_unsummarized_sessions">
+    <h3>get_unsummarized_sessions</h3>
+    <p>Get sessions that have no cached summary for a project. Used at session start to batch-generate missing summaries.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Filesystem path to the project</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Max sessions to return. Default: <code>10</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>List of sessions without summaries, with session IDs, agent names, and timestamps.</p>
+    <h4>Example</h4>
+    <pre><code>get_unsummarized_sessions(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal", limit=5)</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="browser">Browser Tabs</h2>
+  <!-- ================================================================== -->
+
+  <p>Per-terminal tabbed browser (WebView2) in the HUD area. Agents can open tabs with URLs or raw HTML, execute JavaScript, read DOM elements, exchange messages bidirectionally with the page, and capture screenshots. Enables interactive dashboards, live previews, mini-apps, and visual debugging.</p>
+
+  <!-- open_browser_tab -->
+  <div class="tool-block" id="open_browser_tab">
+    <h3>open_browser_tab</h3>
+    <p>Open a new browser tab in your terminal's HUD area. Provide either a URL to navigate to, or raw HTML content to display.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name (from register_terminal)</td></tr>
+        <tr><td><code>title</code></td><td>string</td><td>Yes</td><td>Tab title displayed in the tab strip</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>No</td><td>URL to navigate to (optional if content provided)</td></tr>
+        <tr><td><code>content</code></td><td>string</td><td>No</td><td>Raw HTML content to display (optional if url provided)</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Tab ID string used to reference this tab in subsequent calls.</p>
+    <h4>Example</h4>
+    <pre><code>// Open a tab with raw HTML
+open_browser_tab(terminalId="Alice", title="Dashboard", content="&lt;h1&gt;Hello&lt;/h1&gt;")
+
+// Open a tab with a URL
+open_browser_tab(terminalId="Alice", title="Docs", url="file:///H:/docs/index.html")</code></pre>
+  </div>
+
+  <!-- set_browser_content -->
+  <div class="tool-block" id="set_browser_content">
+    <h3>set_browser_content</h3>
+    <p>Update an existing browser tab's content, URL, or title.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>No</td><td>New URL to navigate to</td></tr>
+        <tr><td><code>content</code></td><td>string</td><td>No</td><td>New HTML content to display</td></tr>
+        <tr><td><code>title</code></td><td>string</td><td>No</td><td>New tab title</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Confirmation message.</p>
+    <h4>Example</h4>
+    <pre><code>set_browser_content(terminalId="Alice", tabId="abc123", content="&lt;h1&gt;Updated&lt;/h1&gt;")</code></pre>
+  </div>
+
+  <!-- close_browser_tab -->
+  <div class="tool-block" id="close_browser_tab">
+    <h3>close_browser_tab</h3>
+    <p>Close a browser tab in your terminal.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID to close</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Confirmation message.</p>
+    <h4>Example</h4>
+    <pre><code>close_browser_tab(terminalId="Alice", tabId="abc123")</code></pre>
+  </div>
+
+  <!-- execute_browser_script -->
+  <div class="tool-block" id="execute_browser_script">
+    <h3>execute_browser_script</h3>
+    <p>Execute JavaScript in a browser tab and return the result. Use this to interact with page content, click buttons, read values, modify the DOM, or run any client-side code.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>script</code></td><td>string</td><td>Yes</td><td>JavaScript code to execute. The return value of the last expression is returned as the result.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>The return value of the executed script (serialized as a string).</p>
+    <h4>Example</h4>
+    <pre><code>// Read a value from the page
+execute_browser_script(terminalId="Alice", tabId="abc123",
+  script="document.getElementById('status').textContent")
+
+// Modify the page
+execute_browser_script(terminalId="Alice", tabId="abc123",
+  script="document.body.style.background = '#1e1e2e'")</code></pre>
+  </div>
+
+  <!-- get_browser_console_logs -->
+  <div class="tool-block" id="get_browser_console_logs">
+    <h3>get_browser_console_logs</h3>
+    <p>Get console log messages (log, warn, error, info) from a browser tab. Useful for debugging JavaScript in pages you've loaded.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Maximum number of log entries to return (most recent first). Default: all.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Array of console log entries with level, message, and timestamp.</p>
+    <h4>Example</h4>
+    <pre><code>get_browser_console_logs(terminalId="Alice", tabId="abc123", limit=10)</code></pre>
+  </div>
+
+  <!-- get_browser_element_content -->
+  <div class="tool-block" id="get_browser_element_content">
+    <h3>get_browser_element_content</h3>
+    <p>Read the content of a DOM element by CSS selector. Returns text content, innerHTML, or other properties.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>selector</code></td><td>string</td><td>Yes</td><td>CSS selector (e.g., <code>#myId</code>, <code>.myClass</code>, <code>div.content > p:first-child</code>)</td></tr>
+        <tr><td><code>property</code></td><td>string</td><td>No</td><td>Element property to read: <code>textContent</code> (default), <code>innerHTML</code>, <code>outerHTML</code>, <code>value</code>, <code>className</code>, <code>id</code>, or any attribute name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>The requested property value of the matched element.</p>
+    <h4>Example</h4>
+    <pre><code>// Read text of a heading
+get_browser_element_content(terminalId="Alice", tabId="abc123", selector="h1")
+
+// Read innerHTML of a container
+get_browser_element_content(terminalId="Alice", tabId="abc123",
+  selector="#results", property="innerHTML")</code></pre>
+  </div>
+
+  <!-- post_browser_message -->
+  <div class="tool-block" id="post_browser_message">
+    <h3>post_browser_message</h3>
+    <p>Send a JSON message to a browser tab's page. The page receives it via <code>window.chrome.webview.addEventListener('message', e =&gt; { /* e.data */ })</code>. Use for bidirectional communication between agent and page JavaScript.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>data</code></td><td>object</td><td>Yes</td><td>JSON data to send to the page. Available as <code>e.data</code> in the message event handler.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Confirmation message.</p>
+    <h4>Example</h4>
+    <pre><code>// Send a command to the page
+post_browser_message(terminalId="Alice", tabId="abc123",
+  data={"type": "update", "cpu": 47, "status": "running"})
+
+// Page receives it:
+// window.chrome.webview.addEventListener('message', e =&gt; {
+//   console.log(e.data.type);  // "update"
+//   console.log(e.data.cpu);   // 47
+// });</code></pre>
+  </div>
+
+  <!-- get_browser_messages -->
+  <div class="tool-block" id="get_browser_messages">
+    <h3>get_browser_messages</h3>
+    <p>Get messages sent from a browser tab's page via <code>window.chrome.webview.postMessage()</code>. Pages use this to send data back to the agent. Returns buffered messages with timestamps.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Maximum number of messages to return (most recent). Default: all.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Array of messages sent from the page, each with data and timestamp.</p>
+    <h4>Example</h4>
+    <pre><code>// Page sends: window.chrome.webview.postMessage({type: "click", id: "btn1"})
+// Agent reads:
+get_browser_messages(terminalId="Alice", tabId="abc123")</code></pre>
+  </div>
+
+  <!-- capture_browser_screenshot -->
+  <div class="tool-block" id="capture_browser_screenshot">
+    <h3>capture_browser_screenshot</h3>
+    <p>Capture a PNG screenshot of a browser tab's content. Returns base64-encoded image data.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Base64-encoded PNG image data of the tab's visible content.</p>
+    <h4>Example</h4>
+    <pre><code>capture_browser_screenshot(terminalId="Alice", tabId="abc123")</code></pre>
+  </div>
+
+  <!-- list_webmcp_tools -->
+  <div class="tool-block" id="list_webmcp_tools">
+    <h3>list_webmcp_tools</h3>
+    <p>List WebMCP tools registered by a page in a browser tab. Pages use <code>navigator.modelContext.registerTool()</code> to expose structured tools. Returns tool names, descriptions, and input schemas. Use this before <code>invoke_webmcp_tool</code> to see what's available.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Array of registered tool definitions with names, descriptions, and input schemas.</p>
+    <h4>Example</h4>
+    <pre><code>list_webmcp_tools(terminalId="Alice", tabId="abc123")</code></pre>
+  </div>
+
+  <!-- invoke_webmcp_tool -->
+  <div class="tool-block" id="invoke_webmcp_tool">
+    <h3>invoke_webmcp_tool</h3>
+    <p>Invoke a WebMCP tool registered by a page in a browser tab. The page must have registered the tool via <code>navigator.modelContext.registerTool()</code>. Use <code>list_webmcp_tools</code> first to discover available tools and their input schemas.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>terminalId</code></td><td>string</td><td>Yes</td><td>Your terminal ID or name</td></tr>
+        <tr><td><code>tabId</code></td><td>string</td><td>Yes</td><td>Tab ID returned from open_browser_tab</td></tr>
+        <tr><td><code>toolName</code></td><td>string</td><td>Yes</td><td>Name of the WebMCP tool to invoke (from list_webmcp_tools)</td></tr>
+        <tr><td><code>input</code></td><td>object</td><td>No</td><td>Input parameters for the tool, matching the tool's inputSchema</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>The tool's return value as defined by the page.</p>
+    <h4>Example</h4>
+    <pre><code>invoke_webmcp_tool(
+  terminalId="Alice",
+  tabId="abc123",
+  toolName="search_results",
+  input={"query": "SQL injection", "limit": 10}
+)</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="build">Build &amp; Run</h2>
+  <!-- ================================================================== -->
+  <p>Windows build tools integrated from the Windows Build Runner. Auto-detect and build projects, run commands, batch files, and PowerShell scripts.</p>
+
+  <!-- build_project -->
+  <div class="tool-block" id="build_project">
+    <h3>build_project</h3>
+    <p>Auto-detect and build a project (.sln, .csproj, .vbproj, etc.). Locates MSBuild or dotnet automatically.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Path to project file or directory containing the project</td></tr>
+        <tr><td><code>configuration</code></td><td>string</td><td>No</td><td>Build configuration. Default: <code>Release</code></td></tr>
+        <tr><td><code>platform</code></td><td>string</td><td>No</td><td>Platform to build for. Default: <code>Any CPU</code></td></tr>
+        <tr><td><code>additionalArgs</code></td><td>string</td><td>No</td><td>Additional MSBuild/dotnet arguments</td></tr>
+        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Name of process to terminate before build</td></tr>
+        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Destination path to copy build output to after success</td></tr>
+        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>600000</code> (10 min)</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Build output with stdout, stderr, exit code, and build tool used.</p>
+    <h4>Example</h4>
+    <pre><code>build_project(
+  projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
+  configuration="Release",
+  processToKill="MultiTerminal"
+)</code></pre>
+  </div>
+
+  <!-- find_build_tools -->
+  <div class="tool-block" id="find_build_tools">
+    <h3>find_build_tools</h3>
+    <p>Find installed build tools (MSBuild, dotnet, etc.).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>tool</code></td><td>string</td><td>No</td><td>Specific tool to find: <code>msbuild</code>, <code>dotnet</code>, <code>all</code>. Default: <code>all</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>List of found build tools with paths and versions.</p>
+    <h4>Example</h4>
+    <pre><code>find_build_tools(tool="msbuild")</code></pre>
+  </div>
+
+  <!-- run_command -->
+  <div class="tool-block" id="run_command">
+    <h3>run_command</h3>
+    <p>Execute a Windows command directly and return its output.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>command</code></td><td>string</td><td>Yes</td><td>Windows command to execute</td></tr>
+        <tr><td><code>workingDirectory</code></td><td>string</td><td>No</td><td>Working directory for execution</td></tr>
+        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>300000</code> (5 min)</td></tr>
+        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Process to terminate before execution</td></tr>
+        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Copy output to this path after success</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Command output with stdout, stderr, and exit code.</p>
+    <h4>Example</h4>
+    <pre><code>run_command(command="dir /b *.cs", workingDirectory="H:\\DevLaptop\\MyProject")</code></pre>
+  </div>
+
+  <!-- run_batch_file -->
+  <div class="tool-block" id="run_batch_file">
+    <h3>run_batch_file</h3>
+    <p>Execute a Windows batch file and return its output.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>batchFile</code></td><td>string</td><td>Yes</td><td>Path to the batch file to execute</td></tr>
+        <tr><td><code>workingDirectory</code></td><td>string</td><td>No</td><td>Working directory for execution</td></tr>
+        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>300000</code> (5 min)</td></tr>
+        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Process to terminate before execution</td></tr>
+        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Copy output to this path after success</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Batch file output with stdout, stderr, and exit code.</p>
+    <h4>Example</h4>
+    <pre><code>run_batch_file(batchFile="H:\\DevLaptop\\build.bat", workingDirectory="H:\\DevLaptop\\MyProject")</code></pre>
+  </div>
+
+  <!-- run_powershell_script -->
+  <div class="tool-block" id="run_powershell_script">
+    <h3>run_powershell_script</h3>
+    <p>Execute a PowerShell script and return its output.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>scriptFile</code></td><td>string</td><td>Yes</td><td>Path to the PowerShell script to execute</td></tr>
+        <tr><td><code>workingDirectory</code></td><td>string</td><td>No</td><td>Working directory for execution</td></tr>
+        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>300000</code> (5 min)</td></tr>
+        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Process to terminate before execution</td></tr>
+        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Copy output to this path after success</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Script output with stdout, stderr, and exit code.</p>
+    <h4>Example</h4>
+    <pre><code>run_powershell_script(scriptFile="H:\\DevLaptop\\deploy.ps1")</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="xaml-tools">XAML</h2>
+  <!-- ================================================================== -->
+
+  <!-- render_xaml -->
+  <div class="tool-block" id="render_xaml">
+    <h3>render_xaml</h3>
+    <p>Render a WPF XAML snippet to a PNG image and return it as base64. Use this to preview XAML UI layouts, dialogs, and controls without launching the app. The XAML must have a root element (e.g. Border, Grid, StackPanel) with xmlns declarations.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>xaml</code></td><td>string</td><td>Yes</td><td>WPF XAML markup (must include xmlns declarations)</td></tr>
+        <tr><td><code>width</code></td><td>number</td><td>No</td><td>Render width in pixels. Default: <code>520</code></td></tr>
+        <tr><td><code>height</code></td><td>number</td><td>No</td><td>Render height in pixels. Default: <code>400</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Base64-encoded PNG image of the rendered XAML.</p>
+    <h4>Example</h4>
+    <pre><code>render_xaml(
+  xaml="&lt;Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Background='#1e1e2e'&gt;&lt;TextBlock Text='Hello' Foreground='White'/&gt;&lt;/Border&gt;",
+  width=520,
+  height=400
 )</code></pre>
   </div>
 
@@ -1034,6 +1678,67 @@ add_project_association(projectId="proj-123", type="skill", skillName="kanban-ta
     <p>Status object with count, isPaused, and maxCapacity.</p>
     <h4>Example</h4>
     <pre><code>debug_status()</code></pre>
+  </div>
+
+  <!-- debug_log_files -->
+  <div class="tool-block" id="debug_log_files">
+    <h3>debug_log_files</h3>
+    <p>List all available debug log files from previous sessions, most recent first. Each session creates a timestamped log file that persists across restarts.</p>
+    <h4>Parameters</h4>
+    <p>None.</p>
+    <h4>Returns</h4>
+    <p>List of log file paths with timestamps and sizes.</p>
+    <h4>Example</h4>
+    <pre><code>debug_log_files()</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="search">Code Search</h2>
+  <!-- ================================================================== -->
+  <p>Fast code and file search powered by <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a> (bundled as <code>tools/rg.exe</code>). Provides regex search across codebases with structured results.</p>
+
+  <!-- search_code -->
+  <div class="tool-block" id="search_code">
+    <h3>search_code</h3>
+    <p>Search file contents using ripgrep. Returns matching lines with file paths and line numbers. Supports regex patterns, glob filtering, file type filtering, context lines, and more.</p>
+    <h4>Parameters</h4>
+    <table>
+      <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      <tr><td><code>pattern</code></td><td>string</td><td>Yes</td><td>Regex pattern to search for (or literal string if fixedStrings is true)</td></tr>
+      <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Directory or file path to search in</td></tr>
+      <tr><td><code>caseInsensitive</code></td><td>boolean</td><td>No</td><td>Case insensitive search (default: false)</td></tr>
+      <tr><td><code>multiline</code></td><td>boolean</td><td>No</td><td>Enable multiline matching where . matches newlines</td></tr>
+      <tr><td><code>fixedStrings</code></td><td>boolean</td><td>No</td><td>Treat pattern as literal string, not regex</td></tr>
+      <tr><td><code>glob</code></td><td>string</td><td>No</td><td>Glob pattern to filter files (e.g. "*.cs", "*.{ts,tsx}")</td></tr>
+      <tr><td><code>fileType</code></td><td>string</td><td>No</td><td>File type to search (e.g. "cs", "js", "py")</td></tr>
+      <tr><td><code>maxCount</code></td><td>number</td><td>No</td><td>Maximum matches per file (0 = unlimited)</td></tr>
+      <tr><td><code>context</code></td><td>number</td><td>No</td><td>Lines of context before and after each match</td></tr>
+      <tr><td><code>before</code></td><td>number</td><td>No</td><td>Lines of context before each match</td></tr>
+      <tr><td><code>after</code></td><td>number</td><td>No</td><td>Lines of context after each match</td></tr>
+      <tr><td><code>filesWithMatches</code></td><td>boolean</td><td>No</td><td>Only return file paths that contain matches</td></tr>
+      <tr><td><code>count</code></td><td>boolean</td><td>No</td><td>Only return match counts per file</td></tr>
+    </table>
+    <h4>Returns</h4>
+    <p>Formatted text with match count, stats (files searched, elapsed time), and matching lines as <code>filepath:line:text</code>.</p>
+    <h4>Example</h4>
+    <pre><code>search_code(pattern="class.*Service", path="H:\\project", glob="*.cs", context=2)</code></pre>
+  </div>
+
+  <!-- search_files -->
+  <div class="tool-block" id="search_files">
+    <h3>search_files</h3>
+    <p>Find files matching a glob pattern using ripgrep. Fast file discovery across directories.</p>
+    <h4>Parameters</h4>
+    <table>
+      <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Directory to search in</td></tr>
+      <tr><td><code>glob</code></td><td>string</td><td>No</td><td>Glob pattern to match file names (e.g. "*.cs", "test_*.py")</td></tr>
+      <tr><td><code>fileType</code></td><td>string</td><td>No</td><td>File type filter (e.g. "cs", "js", "py")</td></tr>
+    </table>
+    <h4>Returns</h4>
+    <p>File count and list of matching file paths.</p>
+    <h4>Example</h4>
+    <pre><code>search_files(path="H:\\project", glob="*.cs")</code></pre>
   </div>
 
 </div>

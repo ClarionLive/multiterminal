@@ -28,6 +28,33 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Message priority levels. Higher numeric value = higher priority.
+        /// Critical messages (blockers) surface above all others.
+        /// </summary>
+        public static class MessagePriority
+        {
+            public const string Low = "low";         // FYI, background info
+            public const string Normal = "normal";    // Routine status updates (default)
+            public const string High = "high";        // Task complete, needs review
+            public const string Critical = "critical"; // Blockers, urgent issues
+
+            /// <summary>
+            /// Returns numeric sort value for priority (higher = more urgent).
+            /// </summary>
+            public static int ToSortOrder(string priority)
+            {
+                switch (priority?.ToLowerInvariant())
+                {
+                    case "critical": return 3;
+                    case "high": return 2;
+                    case "normal": return 1;
+                    case "low": return 0;
+                    default: return 1; // default to normal
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the path to the message queue database.
         /// </summary>
         public static string GetDatabasePath()
@@ -104,6 +131,7 @@ namespace MultiTerminal.Services
                 CREATE INDEX IF NOT EXISTS idx_message_queue_notification_type ON message_queue(notification_type);
                 CREATE INDEX IF NOT EXISTS idx_message_queue_reply_to_id ON message_queue(reply_to_id);
                 CREATE INDEX IF NOT EXISTS idx_message_queue_thread_id ON message_queue(thread_id);
+                CREATE INDEX IF NOT EXISTS idx_message_queue_priority ON message_queue(priority);
             ";
 
             using var indexCommand = new SQLiteCommand(indexSchema, _connection);
@@ -166,6 +194,17 @@ namespace MultiTerminal.Services
                 cmd5.ExecuteNonQuery();
             }
             catch (SQLiteException) { /* Column already exists */ }
+
+            // Add priority column for priority-tiered message delivery
+            try
+            {
+                const string addPriority = @"
+                    ALTER TABLE message_queue ADD COLUMN priority TEXT DEFAULT 'normal';
+                ";
+                using var cmd6 = new SQLiteCommand(addPriority, _connection);
+                cmd6.ExecuteNonQuery();
+            }
+            catch (SQLiteException) { /* Column already exists */ }
         }
 
         /// <summary>
@@ -207,13 +246,15 @@ namespace MultiTerminal.Services
         /// <param name="taskTitle">Optional task title for task-related notifications.</param>
         /// <param name="replyToId">Optional ID of message being replied to (for threading).</param>
         /// <param name="threadId">Optional thread identifier (for threading).</param>
+        /// <param name="priority">Message priority: "low", "normal" (default), "high", "critical".</param>
         /// <returns>The message ID.</returns>
         public long EnqueueMessage(string fromTerminal, string toTerminal, string content,
-            string notificationType, string taskId, string taskTitle, string replyToId, string threadId)
+            string notificationType, string taskId, string taskTitle, string replyToId, string threadId,
+            string priority = null)
         {
             const string sql = @"
-                INSERT INTO message_queue (from_terminal, to_terminal, content, status, created_at, notification_type, task_id, task_title, reply_to_id, thread_id)
-                VALUES (@from, @to, @content, 'pending', @createdAt, @notificationType, @taskId, @taskTitle, @replyToId, @threadId);
+                INSERT INTO message_queue (from_terminal, to_terminal, content, status, created_at, notification_type, task_id, task_title, reply_to_id, thread_id, priority)
+                VALUES (@from, @to, @content, 'pending', @createdAt, @notificationType, @taskId, @taskTitle, @replyToId, @threadId, @priority);
                 SELECT last_insert_rowid();
             ";
 
@@ -227,6 +268,7 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@taskTitle", (object)taskTitle ?? DBNull.Value);
             command.Parameters.AddWithValue("@replyToId", (object)replyToId ?? DBNull.Value);
             command.Parameters.AddWithValue("@threadId", (object)threadId ?? DBNull.Value);
+            command.Parameters.AddWithValue("@priority", priority ?? MessagePriority.Normal);
 
             var result = command.ExecuteScalar();
             return Convert.ToInt64(result);
@@ -244,7 +286,7 @@ namespace MultiTerminal.Services
 
             var sql = @"
                 SELECT id, from_terminal, to_terminal, content, status, retry_count, created_at, error,
-                       notification_type, task_id, task_title, reply_to_id, thread_id
+                       notification_type, task_id, task_title, reply_to_id, thread_id, priority
                 FROM message_queue
                 WHERE status = 'pending' AND retry_count < @maxRetries
             ";
@@ -254,7 +296,16 @@ namespace MultiTerminal.Services
                 sql += " AND to_terminal = @to";
             }
 
-            sql += " ORDER BY created_at ASC";
+            // Sort by priority (critical first) then by creation time within each priority tier
+            sql += @" ORDER BY
+                CASE COALESCE(priority, 'normal')
+                    WHEN 'critical' THEN 3
+                    WHEN 'high' THEN 2
+                    WHEN 'normal' THEN 1
+                    WHEN 'low' THEN 0
+                    ELSE 1
+                END DESC,
+                created_at ASC";
 
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@maxRetries", maxRetries);
@@ -280,7 +331,8 @@ namespace MultiTerminal.Services
                     TaskId = reader.IsDBNull(9) ? null : reader.GetString(9),
                     TaskTitle = reader.IsDBNull(10) ? null : reader.GetString(10),
                     ReplyToId = reader.IsDBNull(11) ? null : reader.GetString(11),
-                    ThreadId = reader.IsDBNull(12) ? null : reader.GetString(12)
+                    ThreadId = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    Priority = reader.IsDBNull(13) ? MessagePriority.Normal : reader.GetString(13)
                 });
             }
 
@@ -498,5 +550,11 @@ namespace MultiTerminal.Services
         /// Thread identifier for grouping related messages.
         /// </summary>
         public string ThreadId { get; set; }
+
+        /// <summary>
+        /// Message priority: "low", "normal" (default), "high", "critical".
+        /// Critical = blockers, High = task complete/needs review, Normal = routine, Low = FYI.
+        /// </summary>
+        public string Priority { get; set; } = "normal";
     }
 }

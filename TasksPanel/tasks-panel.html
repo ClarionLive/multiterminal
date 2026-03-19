@@ -379,16 +379,10 @@
             font-weight: 500;
             margin-bottom: 6px;
             font-size: 12px;
+            cursor: pointer;
         }
-
-        .task-description {
-            font-size: 11px;
-            color: var(--timestamp-color);
-            margin-bottom: 8px;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
+        .task-title:hover {
+            color: #4A90D9;
         }
 
         .task-meta {
@@ -656,37 +650,75 @@
         .progress-segment.testing { background-color: #F39C12; }
         .progress-segment.coding { background-color: #4A90D9; }
 
-        /* Workflow info sections on card */
-        .task-workflow-info {
-            margin-top: 6px;
-            font-size: 11px;
-        }
-        .workflow-section {
+        /* Agent review scores on card */
+        .agent-review-bar {
+            display: flex;
+            gap: 6px;
+            align-items: center;
             padding: 4px 8px;
             margin-top: 4px;
-            background: rgba(255,255,255,0.03);
+            background: rgba(255, 255, 255, 0.03);
             border-radius: 4px;
-            border-left: 2px solid var(--border-color);
+            flex-wrap: wrap;
         }
-        .workflow-section-header {
-            font-size: 10px;
-            font-weight: 600;
-            text-transform: uppercase;
+        .agent-review-label {
+            font-size: 9px;
             color: var(--timestamp-color);
-            margin-bottom: 2px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-right: 2px;
         }
-        .workflow-section-content {
-            font-size: 11px;
-            color: var(--text-color);
-            white-space: pre-wrap;
-            max-height: 60px;
-            overflow: hidden;
-            line-height: 1.4;
+        .agent-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            cursor: pointer;
+            border: 1px solid transparent;
         }
-        .workflow-section.continuation { border-left-color: #F39C12; }
-        .workflow-section.plan { border-left-color: #4A90D9; }
-        .workflow-section.substatus-active { border-left-color: #4CAF50; }
-        .workflow-section.substatus-paused { border-left-color: #F39C12; }
+        .agent-badge.pass {
+            background: rgba(76, 175, 80, 0.15);
+            color: #4CAF50;
+            border-color: rgba(76, 175, 80, 0.3);
+        }
+        .agent-badge.fail {
+            background: rgba(244, 67, 54, 0.15);
+            color: #F44336;
+            border-color: rgba(244, 67, 54, 0.3);
+        }
+        .agent-badge.pending {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--timestamp-color);
+            border-color: rgba(255, 255, 255, 0.1);
+        }
+        .agent-badge:hover {
+            filter: brightness(1.3);
+        }
+        .review-code-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            border: 1px solid rgba(74, 144, 217, 0.4);
+            background: rgba(74, 144, 217, 0.15);
+            color: #4A90D9;
+            cursor: pointer;
+            margin-left: auto;
+        }
+        .review-code-btn:hover {
+            background: rgba(74, 144, 217, 0.3);
+        }
+        .review-code-btn.disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        /* (workflow info sections removed — detail lives in lifecycle board) */
         .substatus-badge {
             display: inline-block;
             font-size: 9px;
@@ -783,23 +815,18 @@
             background: rgba(255, 255, 255, 0.3);
         }
 
-        /* Task card hover icons */
+        /* Task card header - icons on top, title below */
         .task-card-header {
             display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            gap: 8px;
+            flex-direction: column;
+            gap: 4px;
         }
 
         .task-card-icons {
             display: flex;
             gap: 4px;
-            opacity: 0;
-            transition: opacity 0.2s;
-        }
-
-        .task-card:hover .task-card-icons {
-            opacity: 1;
+            align-items: center;
+            position: relative;
         }
 
         .task-icon-btn {
@@ -832,14 +859,51 @@
             fill: #4A90D9;
         }
 
-        .task-icon-btn.native-helper svg {
-            fill: #F39C12;
+        .task-icon-btn.done-btn:hover svg {
+            fill: #4CAF50;
+        }
+        .task-icon-btn.status-btn:hover svg {
+            fill: #4A90D9;
+        }
+        .task-icon-btn.review-btn:hover svg {
+            fill: #9C27B0;
         }
 
-        .task-icon-btn.native-helper:hover svg {
-            fill: #FFC107;
-            filter: drop-shadow(0 0 2px #F39C12);
+        /* Status popup */
+        .status-popup {
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 4px;
+            background: var(--bubble-bg, #2d2d2d);
+            border: 1px solid var(--border-color, #444);
+            border-radius: 6px;
+            padding: 8px 10px;
+            z-index: 100;
+            min-width: 180px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            font-size: 11px;
         }
+        .status-popup-title {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--timestamp-color);
+            margin-bottom: 6px;
+        }
+        .status-popup .agent-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin: 2px 2px;
+            cursor: pointer;
+        }
+        .status-popup .agent-badge.pass { background: rgba(76,175,80,0.15); color: #66bb6a; border: 1px solid rgba(76,175,80,0.3); }
+        .status-popup .agent-badge.fail { background: rgba(244,67,54,0.15); color: #ef9a9a; border: 1px solid rgba(244,67,54,0.3); }
+        .status-popup .agent-badge.pending { background: rgba(255,255,255,0.05); color: #888; border: 1px solid rgba(255,255,255,0.1); }
 
         /* Active native helpers section */
         .task-native-helpers {
@@ -1346,6 +1410,13 @@
                 case 'helper_message_logged':
                     handleHelperMessage(data);
                     break;
+                case 'task_reports_updated':
+                    // Invalidate cache for this task and re-fetch reports
+                    if (data.taskId) {
+                        delete taskReportsCache[data.taskId];
+                        fetchTaskReports(data.taskId);
+                    }
+                    break;
             }
         }
 
@@ -1363,6 +1434,9 @@
         // Task management
         function updateTasks(newTasks) {
             console.log('[TasksPanel JS] updateTasks called, count:', newTasks?.length);
+            // Prune cache entries for tasks no longer in the list (don't clear all — reports rarely change)
+            const newTaskIds = new Set((newTasks || []).map(t => t.id));
+            Object.keys(taskReportsCache).forEach(k => { if (!newTaskIds.has(k)) delete taskReportsCache[k]; });
             tasks = newTasks;
             renderAllTasks();
             renderTerminalDropdown();
@@ -1456,13 +1530,17 @@
             const statusClass = status === 'in_progress' ? 'in-progress' : status;
             const priority = task.Priority || 'normal';
 
+            // Trigger async report fetch for in_progress tasks (for status popup + review icon)
+            if (status === 'in_progress' && !taskReportsCache[task.id]) {
+                taskReportsCache[task.id] = { loading: true, reports: [] };
+                fetchTaskReports(task.id);
+            }
+
             let actions = '';
             if (status === 'suggestion') {
                 actions = `<button class="task-btn claim" onclick="promoteTask('${task.id}')">To Do</button>`;
             } else if (status === 'todo') {
                 actions = `<button class="task-btn claim" onclick="claimTask('${task.id}')">Claim</button>`;
-            } else if (status === 'in_progress') {
-                actions = `<button class="task-btn complete" onclick="completeTask('${task.id}')">Done</button>`;
             }
 
             // Show priority badge only for non-normal priorities
@@ -1470,44 +1548,43 @@
                 ? `<span class="task-priority-badge ${priority}">${priority}</span>`
                 : '';
 
+            // Build icon row — always visible
+            const hasReports = taskReportsCache[task.id] && taskReportsCache[task.id].reports && taskReportsCache[task.id].reports.length > 0;
+            const doneIcon = status === 'in_progress' ? `<button class="task-icon-btn done-btn" onclick="event.stopPropagation(); completeTask('${task.id}')" title="Mark task done">
+                <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            </button>` : '';
+            const statusIcon = status === 'in_progress' ? `<button class="task-icon-btn status-btn" onclick="event.stopPropagation(); toggleStatusPopup(event, '${task.id}')" title="Pipeline status">
+                <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM10 17l-3.5-3.5 1.41-1.41L10 14.17l5.09-5.09 1.41 1.41L10 17z"/></svg>
+            </button>` : '';
+            const reviewIcon = (status === 'in_progress' && hasReports) ? `<button class="task-icon-btn review-btn" onclick="event.stopPropagation(); openCodeReview('${task.id}')" title="Review code">
+                <svg viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+            </button>` : '';
+
             return `
                 <div class="task-card ${statusClass}" data-task-id="${task.id}" draggable="true" ondragstart="handleDragStart(event)" ondragend="handleDragEnd(event)">
                     <div class="task-card-header">
-                        <div class="task-title">${escapeHtml(task.title)}${priorityBadge}</div>
                         <div class="task-card-icons">
-                            <button class="task-icon-btn assign" onclick="openAssignDropdown(event, '${task.id}')" title="Assign to terminal">
+                            <button class="task-icon-btn assign" onclick="event.stopPropagation(); openAssignDropdown(event, '${task.id}')" title="Assign to terminal">
                                 <svg viewBox="0 0 24 24"><path d="M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
-                            </button>
-                            <button class="task-icon-btn edit" onclick="openLifecycleBoard('${task.id}')" title="Open lifecycle board">
-                                <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
                             </button>
                             <button class="task-icon-btn delete" onclick="openDeletePopover(event, '${task.id}')" title="Delete task">
                                 <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                             </button>
-                            <button class="task-icon-btn helper" onclick="addHelperToTask('${task.id}')" title="Add helper">
+                            <button class="task-icon-btn helper" onclick="event.stopPropagation(); addHelperToTask('${task.id}')" title="Add helper">
                                 <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
                             </button>
-                            <button class="task-icon-btn native-helper" onclick="spawnNativeHelper('${task.id}')" title="Spawn native helper (temporary)">
-                                <svg viewBox="0 0 24 24"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
-                            </button>
+                            ${doneIcon}
+                            ${statusIcon}
+                            ${reviewIcon}
                         </div>
+                        <div class="task-title" onclick="event.stopPropagation(); openLifecycleBoard('${task.id}')" title="Open lifecycle board">${escapeHtml(task.title)}${priorityBadge}</div>
                     </div>
-                    ${task.description ? `<div class="task-description">${escapeHtml(task.description)}</div>` : ''}
                     ${task.Helpers && task.Helpers.length > 0 ? `
                         <div class="task-helpers">
                             <span class="helpers-label">Helpers:</span>
                             ${task.Helpers.map(helper => {
                                 const helperColor = getTerminalColor(helper);
                                 return `<span class="helper-badge" style="background-color: ${helperColor}" title="${escapeHtml(helper)}" onclick="event.stopPropagation(); removeHelperFromTask('${task.id}', '${escapeHtml(helper)}')">${escapeHtml(helper)}<span class="helper-remove">&times;</span></span>`;
-                            }).join('')}
-                        </div>
-                    ` : ''}
-                    ${task.NativeHelpers && task.NativeHelpers.length > 0 ? `
-                        <div class="task-native-helpers">
-                            <span class="native-helpers-label">&#x26A1; Native Helpers:</span>
-                            ${task.NativeHelpers.map(helper => {
-                                const lifecycleIcon = helper.status === 'spawning' ? '&#x1F504;' : helper.status === 'working' ? '&#x2699;' : helper.status === 'completed' ? '&#x2705;' : '&#x1F464;';
-                                return `<span class="native-helper-badge ${helper.status}" title="${escapeHtml(helper.prompt)}">${lifecycleIcon} ${escapeHtml(helper.name || 'Helper')}</span>`;
                             }).join('')}
                         </div>
                     ` : ''}
@@ -1519,11 +1596,10 @@
                         </div>
                     ` : ''}
                     ${renderChecklist(task)}
-                    ${renderWorkflowInfo(task)}
                     <div class="task-meta">
                         <div class="task-assignee">
                             ${task.assignee ? `<span class="badge" style="background-color: ${assigneeColor}"></span><span>${escapeHtml(task.assignee)}</span>` : '<span>Unassigned</span>'}
-                            ${task.SubStatus ? `<span class="substatus-badge ${task.SubStatus}">${task.SubStatus}</span>` : ''}
+                            ${task.SubStatus ? `<span class="substatus-badge ${escapeHtml(task.SubStatus)}">${escapeHtml(task.SubStatus)}</span>` : ''}
                         </div>
                         <div class="task-actions">
                             ${actions}
@@ -1550,7 +1626,7 @@
             const hasWorkflowStatus = checklist.some(item => item.status);
 
             if (hasWorkflowStatus) {
-                // Workflow-enhanced checklist with status colors
+                // Workflow-enhanced checklist — progress bar only (details in lifecycle board)
                 const counts = { done: 0, coding: 0, testing: 0, pending: 0 };
                 checklist.forEach(item => {
                     const s = item.status || (item.done ? 'done' : 'pending');
@@ -1560,18 +1636,11 @@
                 const donePercent = total > 0 ? (counts.done / total) * 100 : 0;
                 const testingPercent = total > 0 ? (counts.testing / total) * 100 : 0;
                 const codingPercent = total > 0 ? (counts.coding / total) * 100 : 0;
-
-                // Build progress summary text
-                let progressParts = [];
-                if (counts.done > 0) progressParts.push(`${counts.done} done`);
-                if (counts.testing > 0) progressParts.push(`${counts.testing} testing`);
-                if (counts.coding > 0) progressParts.push(`${counts.coding} coding`);
-                if (counts.pending > 0) progressParts.push(`${counts.pending} pending`);
                 const progressText = `${counts.done}/${total} done`;
 
                 return `
                     <div class="task-checklist">
-                        <div class="checklist-header" onclick="event.stopPropagation(); toggleChecklist('${task.id}')">
+                        <div class="checklist-header">
                             <span class="checklist-icon">&#x2713;</span>
                             <span class="checklist-progress">${progressText}</span>
                             <div class="checklist-progress-bar-segments">
@@ -1579,139 +1648,718 @@
                                 ${testingPercent > 0 ? `<div class="progress-segment testing" style="width:${testingPercent}%"></div>` : ''}
                                 ${codingPercent > 0 ? `<div class="progress-segment coding" style="width:${codingPercent}%"></div>` : ''}
                             </div>
-                            <span class="checklist-toggle">&#x25BC;</span>
-                        </div>
-                        <div class="checklist-items" id="checklist-${task.id}" style="display: none;">
-                            ${checklist.map((item, index) => {
-                                const status = item.status || (item.done ? 'done' : 'pending');
-                                const notesCount = item.notes ? item.notes.length : 0;
-                                const cycleCount = item.cycleCount || item.CycleCount || 0;
-                                const latestNote = notesCount > 0 ? item.notes[notesCount - 1] : null;
-                                const noteTooltip = latestNote ? `Last: ${escapeHtml(latestNote.by || '')} - ${escapeHtml((latestNote.text || '').substring(0, 80))}` : '';
-                                return `
-                                    <div class="checklist-item">
-                                        <span class="checklist-item-status ${status}">${status}</span>
-                                        <span class="checklist-item-name ${status === 'done' ? 'done' : ''}">${escapeHtml(item.item)}</span>
-                                        ${cycleCount > 0 ? `<span class="checklist-item-cycle" title="${cycleCount} coding/testing cycles">&#x1f504;${cycleCount}</span>` : ''}
-                                        ${notesCount > 0 ? `<span class="checklist-item-notes-count" title="${escapeHtml(noteTooltip)}">${notesCount} note${notesCount > 1 ? 's' : ''}</span>` : ''}
-                                    </div>
-                                `;
-                            }).join('')}
                         </div>
                     </div>
                 `;
             } else {
-                // Legacy checklist with done/not-done checkboxes
+                // Legacy checklist — progress bar only
                 const completed = checklist.filter(item => item.done).length;
                 const total = checklist.length;
                 const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
 
                 return `
                     <div class="task-checklist">
-                        <div class="checklist-header" onclick="event.stopPropagation(); toggleChecklist('${task.id}')">
+                        <div class="checklist-header">
                             <span class="checklist-icon">&#x2713;</span>
                             <span class="checklist-progress">${completed}/${total} completed</span>
                             <div class="checklist-progress-bar">
                                 <div class="checklist-progress-fill" style="width: ${percentage}%"></div>
                             </div>
-                            <span class="checklist-toggle">&#x25BC;</span>
-                        </div>
-                        <div class="checklist-items" id="checklist-${task.id}" style="display: none;">
-                            ${checklist.map((item, index) => `
-                                <div class="checklist-item">
-                                    <input type="checkbox"
-                                           id="check-${task.id}-${index}"
-                                           ${item.done ? 'checked' : ''}
-                                           onchange="toggleChecklistItem('${task.id}', ${index})"
-                                           onclick="event.stopPropagation()">
-                                    <label for="check-${task.id}-${index}" onclick="event.stopPropagation()">${escapeHtml(item.item)}</label>
-                                </div>
-                            `).join('')}
                         </div>
                     </div>
                 `;
             }
         }
 
-        function renderWorkflowInfo(task) {
-            // Only show for in-progress tasks that have workflow data
-            if (task.status !== 'in_progress') return '';
+        // Cache for agent reports per task (populated async)
+        const taskReportsCache = {};
+        // Track blob URL for cleanup
+        let _currentBlobUrl = null;
 
-            let sections = '';
+        // Agent name mappings for the 4 pipeline agents
+        const REVIEW_AGENTS = [
+            { key: 'verifier', label: 'Build', match: s => /verifier/i.test(s) },
+            { key: 'code-reviewer', label: 'Quality', match: s => /code.?review/i.test(s) },
+            { key: 'security-auditor', label: 'Security', match: s => /security/i.test(s) },
+            { key: 'debugger', label: 'Debug', match: s => /debug/i.test(s) }
+        ];
 
-            // Continuation notes - most important for handoff context
-            if (task.ContinuationNotes) {
-                const preview = task.ContinuationNotes.length > 150
-                    ? task.ContinuationNotes.substring(0, 150) + '...'
-                    : task.ContinuationNotes;
-                sections += `
-                    <div class="workflow-section continuation">
-                        <div class="workflow-section-header">Continue From</div>
-                        <div class="workflow-section-content">${escapeHtml(preview)}</div>
-                    </div>
-                `;
-            }
+        // renderAgentReviewBar removed — pipeline status now in status popup icon
 
-            // Plan preview
-            if (task.Plan) {
-                const preview = task.Plan.length > 120
-                    ? task.Plan.substring(0, 120) + '...'
-                    : task.Plan;
-                sections += `
-                    <div class="workflow-section plan">
-                        <div class="workflow-section-header">Plan</div>
-                        <div class="workflow-section-content">${escapeHtml(preview)}</div>
-                    </div>
-                `;
-            }
-
-            if (!sections) return '';
-
-            return `<div class="task-workflow-info">${sections}</div>`;
-        }
-
-        function toggleChecklist(taskId) {
-            const checklistItems = document.getElementById(`checklist-${taskId}`);
-            const isVisible = checklistItems.style.display !== 'none';
-            checklistItems.style.display = isVisible ? 'none' : 'block';
-
-            // Toggle arrow direction
-            const header = checklistItems.previousElementSibling;
-            const toggle = header.querySelector('.checklist-toggle');
-            toggle.textContent = isVisible ? '\u25BC' : '\u25B2';
-        }
-
-        function toggleChecklistItem(taskId, itemIndex) {
-            // Find the task in our tasks array
-            const task = tasks.find(t => t.id === taskId);
-            if (!task) return;
-
-            // Parse checklist
-            let checklist = [];
+        async function fetchTaskReports(taskId) {
             try {
-                checklist = task.ChecklistJson ? JSON.parse(task.ChecklistJson) : [];
-            } catch (e) {
-                checklist = [];
+                const resp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/reports');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    taskReportsCache[taskId] = { loading: false, reports: data.reports || [] };
+                } else {
+                    taskReportsCache[taskId] = { loading: false, reports: [] };
+                }
+            } catch(e) {
+                taskReportsCache[taskId] = { loading: false, reports: [] };
+            }
+            // Re-render to show updated badges
+            renderAllTasks();
+        }
+
+        async function viewAgentReport(taskId, reportId) {
+            try {
+                const resp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/reports/' + reportId);
+                if (!resp.ok) return;
+                const report = await resp.json();
+                let content;
+                if (report.report_type === 'html') {
+                    // Render HTML reports in sandboxed iframe to prevent XSS
+                    if (_currentBlobUrl) { URL.revokeObjectURL(_currentBlobUrl); _currentBlobUrl = null; }
+                    const blob = new Blob([report.report_content], { type: 'text/html' });
+                    const blobUrl = URL.createObjectURL(blob);
+                    _currentBlobUrl = blobUrl;
+                    content = '<iframe sandbox="" src="' + blobUrl + '" style="width:100%;height:100%;border:none;background:#fff;"></iframe>';
+                } else {
+                    content = '<pre style="white-space:pre-wrap;font-family:monospace;padding:16px;">' + escapeHtml(report.report_content) + '</pre>';
+                }
+                showOverlay(report.agent_name + ' Report — ' + (report.verdict || 'No verdict'), content);
+            } catch(e) {
+                console.error('Failed to load report:', e);
+            }
+        }
+
+        async function openCodeReview(taskId) {
+            try {
+                const resp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/code-review');
+                if (!resp.ok) { alert('Failed to load code review data'); return; }
+                const data = await resp.json();
+
+                // Fetch latest code-reviewer report for agent-enriched summaries
+                try {
+                    const listResp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/reports?agentName=code-reviewer&limit=1');
+                    if (listResp.ok) {
+                        const listData = await listResp.json();
+                        const reports = listData.reports || listData;
+                        if (reports && reports.length > 0) {
+                            const reportId = reports[0].id;
+                            const fullResp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/reports/' + reportId);
+                            if (fullResp.ok) {
+                                const fullReport = await fullResp.json();
+                                data.agentReport = fullReport.report_content || fullReport.reportContent || null;
+                            }
+                        }
+                    }
+                } catch(re) {
+                    // Agent report fetch is optional — continue without it
+                    console.log('No agent report available:', re.message);
+                }
+
+                showCodeReviewOverlay(taskId, data);
+            } catch(e) {
+                console.error('Failed to load code review:', e);
+                alert('Code review endpoint not available');
+            }
+        }
+
+        function showOverlay(title, htmlContent) {
+            let overlay = document.getElementById('report-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'report-overlay';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg-color,#1e1e1e);z-index:9999;display:flex;flex-direction:column;';
+                document.body.appendChild(overlay);
+            }
+            overlay.innerHTML = `
+                <div style="display:flex;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border-color,#333);gap:8px;">
+                    <button onclick="closeOverlay()" style="background:none;border:1px solid var(--border-color,#555);color:var(--text-color,#ddd);padding:4px 12px;border-radius:4px;cursor:pointer;">&#x2190; Back</button>
+                    <span style="font-size:13px;font-weight:600;color:var(--text-color,#ddd);">${escapeHtml(title)}</span>
+                </div>
+                <div style="flex:1;overflow:auto;padding:0;">${htmlContent}</div>
+            `;
+            overlay.style.display = 'flex';
+        }
+
+        function closeOverlay() {
+            if (_currentBlobUrl) { URL.revokeObjectURL(_currentBlobUrl); _currentBlobUrl = null; }
+            const overlay = document.getElementById('report-overlay');
+            if (overlay) overlay.style.display = 'none';
+        }
+
+        // ── Inline Code Review System ──
+        // Tracks comments per file, keyed by file index
+        let _crComments = {};  // { fileIndex: [{ file, line, lineContent, severity, comment }] }
+        let _crFiles = [];     // files array from API
+        let _crTaskId = null;
+        let _crHunkSummaries = {};  // { fileIndex: [{ oldStart, oldCount, newStart, newCount, addedLines, removedLines, hunkId, hunkIndex, changeType, basicSummary }] }
+        let _crAgentSummaries = null;  // parsed from code-reviewer report, keyed by file path
+
+        function showCodeReviewOverlay(taskId, data) {
+            const files = data.files || [];
+            if (files.length === 0) {
+                showOverlay('Code Review — No Files', '<div style="padding:20px;color:var(--text-color,#ddd);">No linked files found for this task. Agents should use <code>link_task_file</code> to track changed files.</div>');
+                return;
             }
 
-            if (itemIndex >= checklist.length) return;
+            // Reset state
+            _crComments = {};
+            _crFiles = files;
+            _crTaskId = taskId;
+            _crHunkSummaries = {};
+            _crAgentSummaries = null;
 
-            // Toggle the item
-            checklist[itemIndex].done = !checklist[itemIndex].done;
+            const fileListHtml = files.map((f, i) => {
+                const shortPath = f.filePath.split(/[/\\]/).slice(-2).join('/');
+                const statusIcon = f.hasDiff ? '&#x1F4DD;' : '&#x2796;';
+                return `<div class="cr-file-item ${i === 0 ? 'active' : ''}" id="cr-file-tab-${i}" onclick="showFileDiff(${i})" title="${escapeHtml(f.filePath)}">${statusIcon} ${escapeHtml(shortPath)}<span class="cr-file-badge" id="cr-file-badge-${i}"></span></div>`;
+            }).join('');
 
-            // Update the task's ChecklistJson
-            task.ChecklistJson = JSON.stringify(checklist);
+            const diffHtml = files.map((f, i) => {
+                if (!f.diff) return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===0?'block':'none'};padding:16px;color:var(--text-color,#ddd);">No changes detected for this file.</div>`;
+                return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===0?'block':'none'};">${renderUnifiedDiff(f.diff, f.filePath, i)}</div>`;
+            }).join('');
 
-            // Send update to backend
-            sendToHost({
-                type: 'update_checklist',
-                taskId: taskId,
-                checklistJson: task.ChecklistJson
+            const html = `
+                <style>
+                    .cr-container { display:flex; height:100%; flex-direction:column; }
+                    .cr-body { display:flex; flex:1; overflow:hidden; }
+                    .cr-file-list { width:220px; border-right:1px solid var(--border-color,#333); overflow-y:auto; padding:4px 0; flex-shrink:0; }
+                    .cr-file-item { padding:6px 10px; font-size:11px; cursor:pointer; color:var(--text-color,#ddd); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:4px; }
+                    .cr-file-item:hover { background:rgba(255,255,255,0.05); }
+                    .cr-file-item.active { background:rgba(74,144,217,0.2); border-left:2px solid #4A90D9; }
+                    .cr-file-badge { font-size:9px; padding:1px 5px; border-radius:8px; background:rgba(255,255,255,0.1); color:#aaa; margin-left:auto; display:none; }
+                    .cr-file-badge.has-comments { display:inline; }
+                    .cr-diff-area { flex:1; overflow:auto; }
+                    .cr-diff-pane { font-family:'Cascadia Code','Consolas',monospace; font-size:12px; }
+                    .diff-header { padding:8px 12px; background:rgba(255,255,255,0.03); border-bottom:1px solid var(--border-color,#333); color:var(--timestamp-color,#888); font-size:11px; }
+                    .diff-line { padding:0 12px; line-height:20px; white-space:pre-wrap; word-break:break-all; display:flex; }
+                    .diff-line:hover { background:rgba(255,255,255,0.04); }
+                    .diff-line.add { background:rgba(76,175,80,0.1); color:#a5d6a7; }
+                    .diff-line.add:hover { background:rgba(76,175,80,0.18); }
+                    .diff-line.remove { background:rgba(244,67,54,0.1); color:#ef9a9a; }
+                    .diff-line.remove:hover { background:rgba(244,67,54,0.18); }
+                    .diff-line.hunk { color:#4A90D9; background:rgba(74,144,217,0.05); padding:4px 12px; margin:4px 0; }
+                    .diff-line.context { color:var(--text-color,#ccc); }
+                    .diff-line-num { width:40px; text-align:right; padding-right:8px; color:#666; cursor:pointer; user-select:none; flex-shrink:0; font-size:11px; }
+                    .diff-line-num:hover { color:#4A90D9; text-decoration:underline; }
+                    .diff-line-content { flex:1; }
+                    .diff-line.hunk .diff-line-num { color:transparent; cursor:default; }
+                    .diff-line.hunk .diff-line-num:hover { color:transparent; text-decoration:none; }
+
+                    /* Comment input box */
+                    .cr-comment-input { padding:8px 12px 8px 48px; background:rgba(74,144,217,0.08); border-left:3px solid #4A90D9; margin:2px 0; }
+                    .cr-comment-row { display:flex; gap:8px; align-items:flex-start; }
+                    .cr-severity-select { background:#2a2a2a; color:#ddd; border:1px solid #555; border-radius:4px; padding:4px 6px; font-size:11px; }
+                    .cr-comment-textarea { flex:1; background:#1e1e1e; color:#ddd; border:1px solid #555; border-radius:4px; padding:6px 8px; font-size:12px; font-family:inherit; resize:vertical; min-height:40px; max-height:120px; }
+                    .cr-comment-textarea:focus { border-color:#4A90D9; outline:none; }
+                    .cr-comment-actions { display:flex; gap:6px; margin-top:6px; justify-content:flex-end; }
+                    .cr-comment-btn { padding:4px 12px; border-radius:4px; border:none; cursor:pointer; font-size:11px; font-weight:600; }
+                    .cr-comment-btn.add { background:#4A90D9; color:#fff; }
+                    .cr-comment-btn.add:hover { background:#3a7bc8; }
+                    .cr-comment-btn.cancel { background:#555; color:#ddd; }
+                    .cr-comment-btn.cancel:hover { background:#666; }
+
+                    /* Inline comment badge (saved comment) */
+                    .cr-inline-comment { padding:6px 12px 6px 48px; margin:1px 0; display:flex; align-items:flex-start; gap:8px; font-size:11px; }
+                    .cr-inline-comment .cr-sev-tag { padding:1px 6px; border-radius:3px; font-size:10px; font-weight:700; flex-shrink:0; }
+                    .cr-sev-tag.BLOCKER { background:rgba(244,67,54,0.2); color:#ef5350; }
+                    .cr-sev-tag.SUGGESTION { background:rgba(74,144,217,0.2); color:#64B5F6; }
+                    .cr-sev-tag.NITPICK { background:rgba(158,158,158,0.2); color:#bbb; }
+                    .cr-sev-tag.QUESTION { background:rgba(255,193,7,0.2); color:#FFD54F; }
+                    .cr-inline-comment .cr-comment-text { flex:1; color:#ddd; }
+                    .cr-inline-comment .cr-comment-del { cursor:pointer; color:#888; font-size:13px; }
+                    .cr-inline-comment .cr-comment-del:hover { color:#F44336; }
+                    .cr-inline-comment .cr-comment-edit { cursor:pointer; color:#888; font-size:13px; margin-right:2px; }
+                    .cr-inline-comment .cr-comment-edit:hover { color:#4A90D9; }
+
+                    /* Bottom bar */
+                    .cr-bottom { border-top:1px solid var(--border-color,#333); }
+                    .cr-summary { padding:6px 12px; font-size:11px; color:#aaa; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+                    .cr-summary-tag { padding:1px 6px; border-radius:3px; font-size:10px; font-weight:700; }
+                    .cr-actions { display:flex; gap:8px; padding:8px 12px; justify-content:flex-end; }
+                    .cr-btn { padding:6px 16px; border-radius:4px; border:none; cursor:pointer; font-size:12px; font-weight:600; }
+                    .cr-btn.pass { background:#4CAF50; color:#fff; }
+                    .cr-btn.pass:hover { background:#388E3C; }
+                    .cr-btn.submit-notes { background:#4A90D9; color:#fff; opacity:0.4; pointer-events:none; }
+                    .cr-btn.submit-notes.enabled { opacity:1; pointer-events:auto; cursor:pointer; }
+                    .cr-btn.submit-notes.enabled:hover { background:#3a7bc8; }
+
+                    /* Summary sidebar */
+                    .cr-summary-sidebar { width:260px; border-left:1px solid var(--border-color,#333); overflow-y:auto; flex-shrink:0; display:flex; flex-direction:column; transition:width 0.2s ease, padding 0.2s ease; }
+                    .cr-summary-sidebar.collapsed { width:0; border-left:none; overflow:hidden; padding:0; }
+                    .cr-sidebar-header { padding:8px 12px; font-size:11px; font-weight:600; color:var(--text-color,#ddd); border-bottom:1px solid var(--border-color,#333); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+                    .cr-sidebar-header button { background:none; border:none; color:#888; cursor:pointer; font-size:14px; padding:0 4px; }
+                    .cr-sidebar-header button:hover { color:var(--text-color,#ddd); }
+                    .cr-sidebar-content { flex:1; overflow-y:auto; padding:4px 0; }
+                    .cr-summary-card { padding:8px 12px; margin:4px 8px; border-radius:4px; cursor:pointer; font-size:11px; border-left:3px solid #555; background:rgba(255,255,255,0.02); transition:background 0.15s, border-left-color 0.15s; }
+                    .cr-summary-card:hover { background:rgba(255,255,255,0.06); }
+                    .cr-summary-card.active { background:rgba(74,144,217,0.12); border-left-color:#4A90D9 !important; }
+                    .cr-summary-card.additions { border-left-color:#4CAF50; }
+                    .cr-summary-card.deletions { border-left-color:#F44336; }
+                    .cr-summary-card.mixed { border-left-color:#FF9800; }
+                    .cr-scard-title { color:var(--text-color,#ddd); margin-bottom:3px; line-height:1.3; }
+                    .cr-scard-meta { color:#888; font-size:10px; }
+                    .cr-scard-agent { color:#64B5F6; font-size:10px; margin-top:4px; line-height:1.3; }
+                    .diff-line.hunk.highlighted { background:rgba(74,144,217,0.15); }
+                    .cr-toggle-sidebar { background:none; border:1px solid var(--border-color,#555); color:var(--text-color,#ddd); padding:4px 10px; border-radius:4px; cursor:pointer; font-size:11px; }
+                    .cr-toggle-sidebar:hover { background:rgba(255,255,255,0.05); }
+                </style>
+                <div class="cr-container">
+                    <div class="cr-body">
+                        <div class="cr-file-list">${fileListHtml}</div>
+                        <div class="cr-diff-area" id="cr-diff-area">${diffHtml}</div>
+                        <div class="cr-summary-sidebar" id="cr-summary-sidebar">
+                            <div class="cr-sidebar-header">
+                                <span>Changes</span>
+                                <button onclick="toggleSummarySidebar()" title="Hide sidebar">&#x2715;</button>
+                            </div>
+                            <div class="cr-sidebar-content" id="cr-sidebar-content"></div>
+                        </div>
+                    </div>
+                    <div class="cr-bottom">
+                        <div class="cr-summary" id="cr-summary"></div>
+                        <div class="cr-actions">
+                            <button class="cr-toggle-sidebar" onclick="toggleSummarySidebar()" id="cr-sidebar-toggle" style="display:none;">&#x1F4CB; Changes</button>
+                            <button class="cr-btn submit-notes" id="cr-submit-btn" onclick="crSubmitNotes()">&#x1F4DD; Submit Notes — Back to Coding</button>
+                            <button class="cr-btn pass" onclick="codeReviewVerdict('${taskId}', 'pass')">&#x2705; Pass — Approve</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            showOverlay('Code Review — ' + files.length + ' file(s)', html);
+            crUpdateSummary();
+
+            // Parse agent summaries if available
+            if (data.agentReport) {
+                _crAgentSummaries = crParseAgentReport(data.agentReport);
+            }
+
+            // Render initial summary cards for first file and start scroll tracking
+            crRenderSummaryCards(0);
+            crSetupScrollTracking();
+        }
+
+        function showFileDiff(index) {
+            document.querySelectorAll('.cr-diff-pane').forEach((el, i) => el.style.display = i === index ? 'block' : 'none');
+            document.querySelectorAll('.cr-file-item').forEach((el, i) => el.classList.toggle('active', i === index));
+            crRenderSummaryCards(index);
+        }
+
+        function renderUnifiedDiff(diffText, filePath, fileIndex) {
+            const lines = diffText.split(/\r?\n/);
+            let html = '<div class="diff-header">' + escapeHtml(filePath) + '</div>';
+            let lineNum = 0;
+            let hunkIndex = -1;
+            let currentHunk = null;
+            _crHunkSummaries[fileIndex] = [];
+
+            for (let idx = 0; idx < lines.length; idx++) {
+                const line = lines[idx];
+                if (line.startsWith('@@')) {
+                    // Finalize previous hunk
+                    if (currentHunk) crFinalizeHunk(currentHunk, fileIndex);
+
+                    // Parse hunk header: @@ -oldStart,oldCount +newStart,newCount @@
+                    const match = line.match(/@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+                    hunkIndex++;
+                    const hunkId = 'cr-hunk-' + fileIndex + '-' + hunkIndex;
+                    currentHunk = {
+                        oldStart: match ? parseInt(match[1]) : 0,
+                        oldCount: match ? parseInt(match[2] || '1') : 0,
+                        newStart: match ? parseInt(match[3]) : 0,
+                        newCount: match ? parseInt(match[4] || '1') : 0,
+                        addedLines: 0,
+                        removedLines: 0,
+                        hunkId: hunkId,
+                        hunkIndex: hunkIndex
+                    };
+                    if (match) lineNum = parseInt(match[3]) - 1;
+                    html += `<div class="diff-line hunk" id="${hunkId}" onclick="crHighlightSummaryCard(${fileIndex},${hunkIndex})"><span class="diff-line-num"></span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+                } else if (line.startsWith('+') && !line.startsWith('+++')) {
+                    lineNum++;
+                    if (currentHunk) currentHunk.addedLines++;
+                    html += `<div class="diff-line add"><span class="diff-line-num" onclick="crOpenComment(${fileIndex},${lineNum},this)" title="Click to add a review note">${lineNum}</span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+                } else if (line.startsWith('-') && !line.startsWith('---')) {
+                    if (currentHunk) currentHunk.removedLines++;
+                    html += `<div class="diff-line remove"><span class="diff-line-num" onclick="crOpenComment(${fileIndex},${lineNum || -1},this)" title="Click to add a review note">&minus;</span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+                } else if (line.startsWith('---') || line.startsWith('+++')) {
+                    continue;
+                } else {
+                    lineNum++;
+                    html += `<div class="diff-line context"><span class="diff-line-num" onclick="crOpenComment(${fileIndex},${lineNum},this)" title="Click to add a review note">${lineNum}</span><span class="diff-line-content">${escapeHtml(line)}</span></div>`;
+                }
+            }
+            // Finalize last hunk
+            if (currentHunk) crFinalizeHunk(currentHunk, fileIndex);
+
+            return html;
+        }
+
+        function crFinalizeHunk(hunk, fileIndex) {
+            let changeType = 'mixed';
+            if (hunk.addedLines > 0 && hunk.removedLines === 0) changeType = 'additions';
+            else if (hunk.removedLines > 0 && hunk.addedLines === 0) changeType = 'deletions';
+
+            let basicSummary = '';
+            if (changeType === 'additions') basicSummary = 'Added ' + hunk.addedLines + ' line' + (hunk.addedLines !== 1 ? 's' : '');
+            else if (changeType === 'deletions') basicSummary = 'Removed ' + hunk.removedLines + ' line' + (hunk.removedLines !== 1 ? 's' : '');
+            else basicSummary = 'Changed: +' + hunk.addedLines + ' \u2212' + hunk.removedLines + ' lines';
+
+            _crHunkSummaries[fileIndex].push({
+                oldStart: hunk.oldStart, oldCount: hunk.oldCount,
+                newStart: hunk.newStart, newCount: hunk.newCount,
+                addedLines: hunk.addedLines, removedLines: hunk.removedLines,
+                hunkId: hunk.hunkId, hunkIndex: hunk.hunkIndex,
+                changeType: changeType,
+                basicSummary: basicSummary
+            });
+        }
+
+        function crOpenComment(fileIndex, lineNum, clickedEl) {
+            // Don't open if there's already an input box open
+            if (document.querySelector('.cr-comment-input')) {
+                document.querySelector('.cr-comment-input').remove();
+            }
+            const lineEl = clickedEl.closest('.diff-line');
+            const lineContent = lineEl ? lineEl.querySelector('.diff-line-content')?.textContent || '' : '';
+
+            const inputDiv = document.createElement('div');
+            inputDiv.className = 'cr-comment-input';
+            inputDiv.setAttribute('data-file-index', fileIndex);
+            inputDiv.setAttribute('data-line-num', lineNum);
+            inputDiv.setAttribute('data-line-content', lineContent);
+            inputDiv.innerHTML = `
+                <div class="cr-comment-row">
+                    <select class="cr-severity-select" id="cr-sev-select">
+                        <option value="BLOCKER">BLOCKER</option>
+                        <option value="SUGGESTION" selected>SUGGESTION</option>
+                        <option value="NITPICK">NITPICK</option>
+                        <option value="QUESTION">QUESTION</option>
+                    </select>
+                    <textarea class="cr-comment-textarea" id="cr-comment-text" placeholder="What should the agent know about this line?" rows="2"></textarea>
+                </div>
+                <div class="cr-comment-actions">
+                    <button class="cr-comment-btn cancel" onclick="this.closest('.cr-comment-input').remove()">Cancel</button>
+                    <button class="cr-comment-btn add" onclick="crAddCommentFromInput(this)">Add Note</button>
+                </div>
+            `;
+            lineEl.after(inputDiv);
+
+            // Focus the textarea and handle Escape key
+            const textarea = inputDiv.querySelector('#cr-comment-text');
+            textarea.focus();
+            textarea.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') { inputDiv.remove(); e.stopPropagation(); }
+                if (e.key === 'Enter' && e.ctrlKey) {
+                    document.querySelector('.cr-comment-btn.add')?.click();
+                    e.preventDefault();
+                }
+            });
+        }
+
+        function crAddCommentFromInput(btnEl) {
+            const container = btnEl.closest('.cr-comment-input');
+            if (!container) return;
+            const fileIndex = parseInt(container.getAttribute('data-file-index'));
+            const lineNum = parseInt(container.getAttribute('data-line-num'));
+            const lineContent = container.getAttribute('data-line-content') || '';
+            crAddComment(fileIndex, lineNum, lineContent);
+        }
+
+        function crAddComment(fileIndex, lineNum, lineContent) {
+            const severity = document.getElementById('cr-sev-select').value;
+            const comment = document.getElementById('cr-comment-text').value.trim();
+            if (!comment) return;
+
+            if (!_crComments[fileIndex]) _crComments[fileIndex] = [];
+            const file = _crFiles[fileIndex];
+            _crComments[fileIndex].push({
+                file: file.filePath,
+                line: lineNum,
+                lineContent: lineContent,
+                severity: severity,
+                comment: comment
             });
 
-            // Re-render the tasks to update the UI
-            renderTasks();
+            // Remove the input box
+            document.querySelector('.cr-comment-input')?.remove();
+
+            // Insert inline badge after the line
+            crRenderInlineComments(fileIndex);
+            crUpdateSummary();
+            crUpdateFileBadges();
         }
+
+        function crDeleteComment(fileIndex, commentIndex) {
+            if (_crComments[fileIndex]) {
+                _crComments[fileIndex].splice(commentIndex, 1);
+                if (_crComments[fileIndex].length === 0) delete _crComments[fileIndex];
+            }
+            crRenderInlineComments(fileIndex);
+            crUpdateSummary();
+            crUpdateFileBadges();
+        }
+
+        function crEditComment(fileIndex, commentIndex) {
+            const comment = _crComments[fileIndex][commentIndex];
+            // Remove the comment and re-open input at the right location
+            // For simplicity, delete and let user re-add
+            crDeleteComment(fileIndex, commentIndex);
+            // Find the line in the diff and open comment there
+            const diffPane = document.getElementById('cr-diff-' + fileIndex);
+            if (!diffPane) return;
+            const lineNums = diffPane.querySelectorAll('.diff-line-num');
+            for (const ln of lineNums) {
+                if (ln.textContent.trim() == comment.line) {
+                    crOpenComment(fileIndex, comment.line, ln);
+                    // Pre-fill
+                    setTimeout(() => {
+                        const sevSelect = document.getElementById('cr-sev-select');
+                        const textArea = document.getElementById('cr-comment-text');
+                        if (sevSelect) sevSelect.value = comment.severity;
+                        if (textArea) { textArea.value = comment.comment; textArea.focus(); }
+                    }, 50);
+                    return;
+                }
+            }
+        }
+
+        function crRenderInlineComments(fileIndex) {
+            const diffPane = document.getElementById('cr-diff-' + fileIndex);
+            if (!diffPane) return;
+            // Remove existing inline comments for this file
+            diffPane.querySelectorAll('.cr-inline-comment').forEach(el => el.remove());
+
+            const comments = _crComments[fileIndex] || [];
+            // Group comments by line and insert after matching diff-line
+            const lineNums = diffPane.querySelectorAll('.diff-line-num');
+            // Build a map of line -> last element
+            const lineMap = {};
+            lineNums.forEach(ln => {
+                const num = ln.textContent.trim();
+                if (num && num !== '−') lineMap[num] = ln.closest('.diff-line');
+            });
+
+            const validSeverities = ['BLOCKER','SUGGESTION','NITPICK','QUESTION'];
+            comments.forEach((c, ci) => {
+                const targetLine = lineMap[c.line];
+                if (!targetLine) return;
+                const safeSeverity = validSeverities.includes(c.severity) ? c.severity : 'SUGGESTION';
+                const badge = document.createElement('div');
+                badge.className = 'cr-inline-comment';
+                badge.innerHTML = `
+                    <span class="cr-sev-tag ${safeSeverity}">${escapeHtml(safeSeverity)}</span>
+                    <span class="cr-comment-text">${escapeHtml(c.comment)}</span>
+                    <span class="cr-comment-edit" onclick="crEditComment(${fileIndex},${ci})" title="Edit">&#x270E;</span>
+                    <span class="cr-comment-del" onclick="crDeleteComment(${fileIndex},${ci})" title="Delete">&#x2716;</span>
+                `;
+                // Insert after the target line (or after last comment on same line)
+                let insertAfter = targetLine;
+                let next = insertAfter.nextElementSibling;
+                while (next && next.classList.contains('cr-inline-comment')) {
+                    insertAfter = next;
+                    next = insertAfter.nextElementSibling;
+                }
+                insertAfter.after(badge);
+            });
+        }
+
+        function crUpdateSummary() {
+            const summaryEl = document.getElementById('cr-summary');
+            const submitBtn = document.getElementById('cr-submit-btn');
+            if (!summaryEl) return;
+
+            const allComments = Object.values(_crComments).flat();
+            const total = allComments.length;
+
+            if (total === 0) {
+                summaryEl.innerHTML = '<span style="color:#888;">Click a line number to add review notes</span>';
+                if (submitBtn) submitBtn.classList.remove('enabled');
+                return;
+            }
+
+            const counts = { BLOCKER: 0, SUGGESTION: 0, NITPICK: 0, QUESTION: 0 };
+            allComments.forEach(c => { counts[c.severity] = (counts[c.severity] || 0) + 1; });
+
+            let parts = [`<span>${total} note${total !== 1 ? 's' : ''}:</span>`];
+            if (counts.BLOCKER) parts.push(`<span class="cr-summary-tag cr-sev-tag BLOCKER">${counts.BLOCKER} blocker${counts.BLOCKER !== 1 ? 's' : ''}</span>`);
+            if (counts.SUGGESTION) parts.push(`<span class="cr-summary-tag cr-sev-tag SUGGESTION">${counts.SUGGESTION} suggestion${counts.SUGGESTION !== 1 ? 's' : ''}</span>`);
+            if (counts.NITPICK) parts.push(`<span class="cr-summary-tag cr-sev-tag NITPICK">${counts.NITPICK} nitpick${counts.NITPICK !== 1 ? 's' : ''}</span>`);
+            if (counts.QUESTION) parts.push(`<span class="cr-summary-tag cr-sev-tag QUESTION">${counts.QUESTION} question${counts.QUESTION !== 1 ? 's' : ''}</span>`);
+            summaryEl.innerHTML = parts.join('');
+
+            if (submitBtn) submitBtn.classList.add('enabled');
+        }
+
+        function crUpdateFileBadges() {
+            _crFiles.forEach((f, i) => {
+                const badge = document.getElementById('cr-file-badge-' + i);
+                if (!badge) return;
+                const count = (_crComments[i] || []).length;
+                if (count > 0) {
+                    badge.textContent = count;
+                    badge.classList.add('has-comments');
+                } else {
+                    badge.textContent = '';
+                    badge.classList.remove('has-comments');
+                }
+            });
+        }
+
+        function crSubmitNotes() {
+            const allComments = Object.values(_crComments).flat();
+            if (allComments.length === 0) return;
+
+            // Add timestamp to each note
+            const now = new Date().toISOString();
+            allComments.forEach(c => c.timestamp = now);
+
+            sendToHost({
+                type: 'code_review_verdict',
+                taskId: _crTaskId,
+                verdict: 'fail',
+                reviewNotes: allComments
+            });
+            closeOverlay();
+        }
+
+        function codeReviewVerdict(taskId, verdict) {
+            sendToHost({ type: 'code_review_verdict', taskId: taskId, verdict: verdict });
+            closeOverlay();
+        }
+
+        // ── Summary Sidebar Functions ──
+
+        function crRenderSummaryCards(fileIndex) {
+            const sidebar = document.getElementById('cr-sidebar-content');
+            if (!sidebar) return;
+            const hunks = _crHunkSummaries[fileIndex] || [];
+            if (hunks.length === 0) {
+                sidebar.innerHTML = '<div style="padding:12px;color:#888;font-size:11px;">No changes in this file.</div>';
+                return;
+            }
+            const filePath = _crFiles[fileIndex] ? _crFiles[fileIndex].filePath : '';
+            const shortFile = filePath.split(/[/\\]/).pop() || filePath;
+
+            // Check for agent summaries for this file
+            const agentFileSummaries = _crAgentSummaries ? (_crAgentSummaries[filePath] || _crAgentSummaries[shortFile] || null) : null;
+
+            sidebar.innerHTML = hunks.map((h, i) => {
+                // Try to match agent summary by line range
+                let agentText = null;
+                if (agentFileSummaries) {
+                    agentText = crMatchAgentSummary(agentFileSummaries, h.newStart, h.newStart + h.newCount - 1);
+                }
+                const title = agentText || h.basicSummary;
+                const metaRange = 'Lines ' + h.newStart + '\u2013' + (h.newStart + h.newCount - 1);
+                const metaStats = '+' + h.addedLines + ' \u2212' + h.removedLines;
+                return '<div class="cr-summary-card ' + h.changeType + '" id="cr-scard-' + fileIndex + '-' + i + '" onclick="crScrollToHunk(' + fileIndex + ',' + i + ')">' +
+                    '<div class="cr-scard-title">' + escapeHtml(title) + '</div>' +
+                    '<div class="cr-scard-meta">' + metaRange + ' &middot; ' + metaStats + '</div>' +
+                    '</div>';
+            }).join('');
+
+            // Update header with count
+            const header = document.querySelector('.cr-sidebar-header span');
+            if (header) header.textContent = 'Changes (' + hunks.length + ')';
+        }
+
+        function crScrollToHunk(fileIndex, hunkIndex) {
+            const hunk = (_crHunkSummaries[fileIndex] || [])[hunkIndex];
+            if (!hunk) return;
+            const el = document.getElementById(hunk.hunkId);
+            if (!el) return;
+
+            // Highlight the hunk header briefly
+            document.querySelectorAll('.diff-line.hunk.highlighted').forEach(h => h.classList.remove('highlighted'));
+            el.classList.add('highlighted');
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => el.classList.remove('highlighted'), 2000);
+
+            // Highlight the summary card
+            crSetActiveCard(fileIndex, hunkIndex);
+        }
+
+        function crHighlightSummaryCard(fileIndex, hunkIndex) {
+            crSetActiveCard(fileIndex, hunkIndex);
+            // Scroll the card into view in the sidebar
+            const card = document.getElementById('cr-scard-' + fileIndex + '-' + hunkIndex);
+            if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function crSetActiveCard(fileIndex, hunkIndex) {
+            document.querySelectorAll('.cr-summary-card.active').forEach(c => c.classList.remove('active'));
+            const card = document.getElementById('cr-scard-' + fileIndex + '-' + hunkIndex);
+            if (card) card.classList.add('active');
+        }
+
+        function toggleSummarySidebar() {
+            const sidebar = document.getElementById('cr-summary-sidebar');
+            const toggleBtn = document.getElementById('cr-sidebar-toggle');
+            if (!sidebar) return;
+            const isCollapsed = sidebar.classList.toggle('collapsed');
+            if (toggleBtn) toggleBtn.style.display = isCollapsed ? 'inline-block' : 'none';
+        }
+
+        function crSetupScrollTracking() {
+            const diffArea = document.getElementById('cr-diff-area');
+            if (!diffArea) return;
+            let scrollTimeout;
+            diffArea.addEventListener('scroll', () => {
+                clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(() => {
+                    // Find which hunk is most visible (only in the currently visible diff pane)
+                    const visiblePane = diffArea.querySelector('.cr-diff-pane[style*="display:block"], .cr-diff-pane[style*="display: block"]');
+                    if (!visiblePane) return;
+                    const hunks = visiblePane.querySelectorAll('.diff-line.hunk');
+                    const areaRect = diffArea.getBoundingClientRect();
+                    // Use top-third as anchor — hunks entering the viewport feel "current" sooner than center
+                    const areaCenter = areaRect.top + areaRect.height / 3;
+                    let closestHunk = null;
+                    let closestDist = Infinity;
+                    hunks.forEach(h => {
+                        const rect = h.getBoundingClientRect();
+                        const dist = Math.abs(rect.top - areaCenter);
+                        if (dist < closestDist) { closestDist = dist; closestHunk = h; }
+                    });
+                    if (closestHunk && closestHunk.id) {
+                        const match = closestHunk.id.match(/cr-hunk-(\d+)-(\d+)/);
+                        if (match) crSetActiveCard(parseInt(match[1]), parseInt(match[2]));
+                    }
+                }, 100);
+            });
+        }
+
+        function crMatchAgentSummary(fileSummaries, startLine, endLine) {
+            // fileSummaries is an array of { startLine, endLine, summary }
+            if (!Array.isArray(fileSummaries)) return null;
+            for (const s of fileSummaries) {
+                // Check if ranges overlap
+                if (s.startLine <= endLine && s.endLine >= startLine) return s.summary;
+            }
+            return null;
+        }
+
+        function crParseAgentReport(reportContent) {
+            // Parse the code-reviewer report to extract per-hunk change summaries
+            // Looks for a "### Change Summaries" section with lines like:
+            // - **file.cs:100-120** — Description of what changed
+            if (!reportContent) return null;
+            const summaryMatch = reportContent.match(/###\s*Change Summaries([\s\S]*?)(?=###|$)/i);
+            if (!summaryMatch) return null;
+
+            const result = {};
+            const lines = summaryMatch[1].split('\n');
+            for (const line of lines) {
+                const m = line.match(/[-*]\s+\*\*(.+?):(\d+)-(\d+)\*\*\s*[—\-]+\s*(.+)/);
+                if (m) {
+                    const filePath = m[1].trim();
+                    const startLine = parseInt(m[2]);
+                    const endLine = parseInt(m[3]);
+                    const summary = m[4].trim();
+                    if (!result[filePath]) result[filePath] = [];
+                    result[filePath].push({ startLine, endLine, summary });
+                }
+            }
+            return Object.keys(result).length > 0 ? result : null;
+        }
+
+        // renderWorkflowInfo, toggleChecklist, toggleChecklistItem removed — detail lives in lifecycle board
 
         function promoteTask(taskId) {
             sendToHost({
@@ -1926,6 +2574,42 @@
         function openLifecycleBoard(taskId) {
             sendToHost({ type: 'open_lifecycle_board', taskId: taskId });
         }
+
+        // Status popup for pipeline results
+        let _activeStatusPopup = null;
+        function toggleStatusPopup(event, taskId) {
+            event.stopPropagation();
+            // Close existing popup
+            if (_activeStatusPopup) {
+                _activeStatusPopup.remove();
+                if (_activeStatusPopup.dataset.taskId === taskId) { _activeStatusPopup = null; return; }
+                _activeStatusPopup = null;
+            }
+            const cached = taskReportsCache[taskId];
+            const reports = (cached && !cached.loading) ? cached.reports : [];
+            const agentResults = REVIEW_AGENTS.map(agent => {
+                const report = reports.find(r => agent.match(r.agent_name));
+                if (!report) return { ...agent, status: 'pending', score: null, reportId: null };
+                const passed = /pass/i.test(report.verdict);
+                return { ...agent, status: passed ? 'pass' : 'fail', score: report.score, reportId: report.id, verdict: report.verdict };
+            });
+            const badges = agentResults.map(a => {
+                const icon = a.status === 'pass' ? '&#x2705;' : a.status === 'fail' ? '&#x274C;' : '&#x23F3;';
+                const scoreText = a.score !== null ? ` ${a.score}` : '';
+                const onclick = a.reportId ? `onclick="event.stopPropagation(); viewAgentReport('${taskId}', '${a.reportId}')"` : '';
+                return `<span class="agent-badge ${a.status}" style="cursor:${a.reportId ? 'pointer' : 'default'}" ${onclick}>${icon} ${a.label}${scoreText}</span>`;
+            }).join(' ');
+            const popup = document.createElement('div');
+            popup.className = 'status-popup';
+            popup.dataset.taskId = taskId;
+            popup.innerHTML = `<div class="status-popup-title">Pipeline Status</div><div>${badges || '<span style="color:#888">No reports yet</span>'}</div>`;
+            const btn = event.currentTarget;
+            const iconsRow = btn.closest('.task-card-icons');
+            iconsRow.appendChild(popup);
+            _activeStatusPopup = popup;
+        }
+        // Close status popup on outside click
+        document.addEventListener('click', () => { if (_activeStatusPopup) { _activeStatusPopup.remove(); _activeStatusPopup = null; } });
 
         // Old modal functions removed - edit is now handled by lifecycle board
 
@@ -2295,7 +2979,18 @@
             draggedTaskId = card.dataset.taskId;
             card.classList.add('dragging');
             event.dataTransfer.effectAllowed = 'move';
-            event.dataTransfer.setData('text/plain', draggedTaskId);
+            // Include task title for cross-control drag (kanban → terminal drop)
+            const task = tasks.find(t => t.id === draggedTaskId);
+            const dragPayload = JSON.stringify({
+                taskId: draggedTaskId,
+                title: task ? task.title : '',
+                source: 'multiterminal-kanban'
+            });
+            event.dataTransfer.setData('text/plain', dragPayload);
+
+            // Side-channel: notify C# host about drag data
+            // (WebView2 doesn't reliably pass dataTransfer to WinForms OLE drag-drop)
+            sendToHost({ type: 'task_drag_start', taskId: draggedTaskId, title: task ? task.title : '' });
         }
 
         function handleDragEnd(event) {
@@ -2309,6 +3004,9 @@
             document.querySelectorAll('.column-tasks').forEach(col => {
                 col.classList.remove('drag-over');
             });
+
+            // Clear the side-channel drag data
+            sendToHost({ type: 'task_drag_end' });
         }
 
         function handleDragOver(event) {

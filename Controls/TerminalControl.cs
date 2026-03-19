@@ -38,6 +38,7 @@ namespace MultiTerminal.Controls
         private string _pendingSpawnerName;
         private string _pendingProjectId;
         private bool _pendingIsTeamLead;
+        private string _pendingGatewayProfile;
         private TerminalTheme _pendingTheme = TerminalTheme.Dark;
         private string _terminalTitle = "PowerShell";
         private DebugLogService _debugLogService;
@@ -106,6 +107,12 @@ namespace MultiTerminal.Controls
         public bool IsRunning => _terminal != null && _terminal.IsRunning;
 
         /// <summary>
+        /// Gets the underlying ConPTY terminal instance for direct I/O access.
+        /// Used by TerminalStreamService for WebSocket streaming.
+        /// </summary>
+        public ConPtyTerminal ConPty => _terminal;
+
+        /// <summary>
         /// Gets whether the WebView2/xterm.js renderer is initialized and ready for input.
         /// </summary>
         public bool IsRendererReady => _renderer?.IsInitialized ?? false;
@@ -164,7 +171,7 @@ namespace MultiTerminal.Controls
             if (_pendingStart)
             {
                 _pendingStart = false;
-                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead);
+                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile);
             }
         }
 
@@ -177,7 +184,7 @@ namespace MultiTerminal.Controls
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
-        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
+        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
         {
             if (_terminal != null && _terminal.IsRunning)
             {
@@ -187,7 +194,7 @@ namespace MultiTerminal.Controls
             // If renderer is initialized, start immediately
             if (_renderer.IsInitialized)
             {
-                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
+                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
             }
             else
             {
@@ -200,6 +207,7 @@ namespace MultiTerminal.Controls
                 _pendingSpawnerName = spawnerName;
                 _pendingProjectId = projectId;
                 _pendingIsTeamLead = isTeamLead;
+                _pendingGatewayProfile = gatewayProfile;
             }
         }
 
@@ -208,7 +216,7 @@ namespace MultiTerminal.Controls
             FontSizeChanged?.Invoke(this, e);
         }
 
-        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
+        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
         {
             // Reset Claude Code detection so the event fires again for this new session
             _claudeCodeDetectedThisSession = false;
@@ -228,7 +236,7 @@ namespace MultiTerminal.Controls
 
             try
             {
-                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
+                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
             }
             catch (Exception ex)
             {
@@ -569,6 +577,9 @@ namespace MultiTerminal.Controls
             {
                 _terminal.Write(data);
             }
+
+            // Buffer input characters to detect slash commands
+            BufferInputForSlashDetection(data);
         }
 
         /// <summary>
@@ -578,6 +589,70 @@ namespace MultiTerminal.Controls
 
         private bool _claudeCodeDetectedThisSession = false;
         private StringBuilder _outputBuffer = new StringBuilder();
+
+        // Slash command interception: buffer user input to detect commands like /clear
+        private readonly StringBuilder _inputLineBuffer = new StringBuilder();
+
+        /// <summary>
+        /// Buffers user input characters and checks for slash commands on Enter.
+        /// </summary>
+        private void BufferInputForSlashDetection(byte[] data)
+        {
+            try
+            {
+                for (int i = 0; i < data.Length; i++)
+                {
+                    byte b = data[i];
+
+                    if (b == 0x0D) // Enter (CR)
+                    {
+                        string line = _inputLineBuffer.ToString().Trim();
+                        _inputLineBuffer.Clear();
+
+                        if (line.Equals("/clear", StringComparison.OrdinalIgnoreCase))
+                        {
+                            OnSlashClearDetected();
+                        }
+                    }
+                    else if (b == 0x7F || b == 0x08) // Backspace / DEL
+                    {
+                        if (_inputLineBuffer.Length > 0)
+                            _inputLineBuffer.Length--;
+                    }
+                    else if (b == 0x03 || b == 0x1B) // Ctrl+C or ESC — reset buffer
+                    {
+                        _inputLineBuffer.Clear();
+                    }
+                    else if (b >= 0x20 && b < 0x7F) // Printable ASCII
+                    {
+                        _inputLineBuffer.Append((char)b);
+                        // Safety: don't let buffer grow unbounded
+                        if (_inputLineBuffer.Length > 200)
+                            _inputLineBuffer.Clear();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TerminalControl] Input buffer error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Called when user types /clear. Waits for the CLI to process it, then injects /project-management.
+        /// </summary>
+        private async void OnSlashClearDetected()
+        {
+            LogTrace("Detected /clear — will inject /project-management after delay");
+
+            // Wait for Claude Code to process /clear (it's instant, but give the UI a moment)
+            await Task.Delay(1500);
+
+            if (_isDisposed || _terminal == null || !_terminal.IsRunning) return;
+
+            LogTrace("Injecting /project-management after /clear");
+            TypeInput("/project-management", "cr", 20);
+        }
 
         /// <summary>
         /// Called when ConPTY terminal outputs data.

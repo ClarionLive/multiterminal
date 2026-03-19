@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
 
@@ -48,6 +49,78 @@ namespace MultiTerminal.API.Controllers
 
             return Ok(new { success = true });
         }
+
+        [HttpPost("execute-script")]
+        public async Task<IActionResult> ExecuteScript([FromBody] ExecuteScriptRequest request)
+        {
+            var (success, result, error) = await _broker.ExecuteBrowserScript(
+                request.TerminalId, request.TabId, request.Script);
+
+            if (!success)
+                return BadRequest(new { error });
+
+            return Ok(new { success = true, result });
+        }
+
+        [HttpPost("console-logs")]
+        public async Task<IActionResult> GetConsoleLogs([FromBody] GetConsoleLogsRequest request)
+        {
+            var (success, result, error) = await _broker.GetBrowserConsoleLogs(
+                request.TerminalId, request.TabId, request.Limit);
+
+            if (!success)
+                return BadRequest(new { error });
+
+            return Ok(new { success = true, logs = result });
+        }
+
+        [HttpPost("element-content")]
+        public async Task<IActionResult> GetElementContent([FromBody] GetElementContentRequest request)
+        {
+            var (success, result, error) = await _broker.GetBrowserElementContent(
+                request.TerminalId, request.TabId, request.Selector, request.Property);
+
+            if (!success)
+                return BadRequest(new { error });
+
+            return Ok(new { success = true, content = result });
+        }
+
+        [HttpPost("capture-screenshot")]
+        public async Task<IActionResult> CaptureScreenshot([FromBody] CaptureScreenshotRequest request)
+        {
+            var (success, result, error) = await _broker.CaptureBrowserScreenshot(
+                request.TerminalId, request.TabId);
+
+            if (!success)
+                return BadRequest(new { error });
+
+            return Ok(new { success = true, imageBase64 = result });
+        }
+
+        [HttpPost("post-message")]
+        public async Task<IActionResult> PostMessage([FromBody] PostBrowserMessageRequest request)
+        {
+            var (success, error) = await _broker.PostBrowserMessage(
+                request.TerminalId, request.TabId, request.Data);
+
+            if (!success)
+                return BadRequest(new { error });
+
+            return Ok(new { success = true });
+        }
+
+        [HttpPost("get-messages")]
+        public async Task<IActionResult> GetMessages([FromBody] GetBrowserMessagesRequest request)
+        {
+            var (success, result, error) = await _broker.GetBrowserMessages(
+                request.TerminalId, request.TabId, request.Limit);
+
+            if (!success)
+                return BadRequest(new { error });
+
+            return Ok(new { success = true, messages = result });
+        }
     }
 
     public class OpenBrowserTabRequest
@@ -71,5 +144,47 @@ namespace MultiTerminal.API.Controllers
     {
         public string TerminalId { get; set; }
         public string TabId { get; set; }
+    }
+
+    public class ExecuteScriptRequest
+    {
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+        public string Script { get; set; }
+    }
+
+    public class GetConsoleLogsRequest
+    {
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+        public int? Limit { get; set; }
+    }
+
+    public class GetElementContentRequest
+    {
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+        public string Selector { get; set; }
+        public string Property { get; set; }
+    }
+
+    public class CaptureScreenshotRequest
+    {
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+    }
+
+    public class PostBrowserMessageRequest
+    {
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+        public string Data { get; set; }
+    }
+
+    public class GetBrowserMessagesRequest
+    {
+        public string TerminalId { get; set; }
+        public string TabId { get; set; }
+        public int? Limit { get; set; }
     }
 }

@@ -21,12 +21,12 @@ if ($sqliteAvailable) {
     Write-Host "SQLite3 found, performing maintenance..."
     Write-Host ""
 
-    # Checkpoint tasks.db
-    $tasksDb = Join-Path $configDir "tasks.db"
+    # Checkpoint multiterminal.db
+    $tasksDb = Join-Path $configDir "multiterminal.db"
     if (Test-Path $tasksDb) {
-        Write-Host "Checkpointing tasks.db..."
+        Write-Host "Checkpointing multiterminal.db..."
         & $sqlite $tasksDb "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | Out-Null
-        Write-Host "  [OK] tasks.db checkpointed"
+        Write-Host "  [OK] multiterminal.db checkpointed"
     }
 
     # Checkpoint messages.db
@@ -44,8 +44,8 @@ if ($sqliteAvailable) {
     Write-Host "Skipping database checkpoint."
     Write-Host ""
     Write-Host "Alternative: Delete WAL files manually:"
-    Write-Host "  - tasks.db-wal"
-    Write-Host "  - tasks.db-shm"
+    Write-Host "  - multiterminal.db-wal"
+    Write-Host "  - multiterminal.db-shm"
     Write-Host "  - messages.db-wal"
     Write-Host "  - messages.db-shm"
     Write-Host ""

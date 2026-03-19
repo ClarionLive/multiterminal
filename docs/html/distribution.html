@@ -20,12 +20,14 @@
       <nav class="sidebar-nav">
         <div class="nav-section-title">Getting Started</div>
         <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
         <div class="nav-section-title">Reference</div>
         <a href="features.html" class="nav-link">Features</a>
         <a href="api-reference.html" class="nav-link">REST API</a>
         <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
         <div class="nav-section-title">Technical</div>
         <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
         <a href="distribution.html" class="nav-link active">Distribution</a>
         <a href="deployment.html" class="nav-link">Deployment</a>
         <div class="nav-section-title"></div>
@@ -169,7 +171,7 @@
         </div>
 
         <!-- Category 4: HTML Panels -->
-        <h2 id="html-panels">4. HTML Panels (13 files)</h2>
+        <h2 id="html-panels">4. HTML Panels (14 files)</h2>
         <p>Each UI panel is rendered via WebView2 using a self-contained HTML file with embedded CSS and JavaScript.</p>
 
         <table>
@@ -181,6 +183,7 @@
             <tr><td><code>AgentPanel/agent-panel.html</code></td><td>Agent Panel</td><td>Observe spawned Claude Code team agents and their transcript activity</td></tr>
             <tr><td><code>ChatPanel/chat-panel.html</code></td><td>Chat Panel</td><td>Inter-terminal messaging UI for point-to-point and broadcast chat</td></tr>
             <tr><td><code>Controls/TaskHudPanel/task-hud.html</code></td><td>Task HUD</td><td>Heads-up display overlay showing current task and checklist status</td></tr>
+            <tr><td><code>FilePreviewPanel/file-preview.html</code></td><td>File Preview Panel</td><td>WebView2-based file preview for HTML, Markdown, images, and other file types</td></tr>
             <tr><td><code>Controls/TerminalStatusBar/statusbar.html</code></td><td>Terminal Status Bar</td><td>3-row status bar: folder path, model/git info, context usage meter</td></tr>
             <tr><td><code>InboxPanel/inbox-panel.html</code></td><td>Inbox Panel</td><td>Notification center for task updates, messages, and checklist transitions</td></tr>
             <tr><td><code>OfficePanel/panel.html</code></td><td>Office Panel</td><td>Team office view showing terminal status and agent presence</td></tr>
@@ -228,8 +231,8 @@
           </thead>
           <tbody>
             <tr>
-              <td><code>tasks.db</code></td>
-              <td><code>%APPDATA%\MultiTerminal\tasks.db</code></td>
+              <td><code>multiterminal.db</code></td>
+              <td><code>%APPDATA%\MultiTerminal\multiterminal.db</code></td>
               <td>Main database: kanban tasks, team profiles, activity feed, inbox, terminal registrations, helper sessions, projects, agents, MCP config</td>
             </tr>
             <tr>
@@ -299,8 +302,8 @@
             <tr><td><code>.claude/project.json</code></td><td>Project identity (ID, name, timestamps). Used by MultiTerminal to track the project.</td></tr>
             <tr><td><code>.claude/settings.json</code></td><td>Project-level Claude Code settings</td></tr>
             <tr><td><code>.claude/settings.local.json</code></td><td>Local permission presets for MCP tools and commands (not committed to git)</td></tr>
-            <tr><td><code>.claude/agents/</code></td><td>Specialist agent definitions (7 files): debugger, devils-advocate, security-auditor, session-distiller, session-summarizer, test-designer, verifier</td></tr>
-            <tr><td><code>.claude/hooks/</code></td><td>Claude Code hooks for activity tracking and context injection</td></tr>
+            <tr><td><code>.claude/agents/</code></td><td>Specialist agent definitions (8 files): code-reviewer, debugger, devils-advocate, security-auditor, session-distiller, session-summarizer, test-designer, verifier</td></tr>
+            <tr><td><code>.claude/hooks/</code></td><td>Claude Code hooks (9 files): inbox-check-hook.js, project-context-hook.js, safety-hook.js, subagent-office-hook.js, task-to-agent-hook.js, session-status-hook.js, pipeline-trigger-hook.js, active-context-hook.js, notification-hook.js</td></tr>
             <tr><td><code>.claude/skills/</code></td><td>Custom skill definitions (slash commands like /kanban-task, /new-project)</td></tr>
             <tr><td><code>.claude/rules/</code></td><td>Additional behavioral rules for agents</td></tr>
           </tbody>
@@ -405,6 +408,7 @@
 +-- Controls/
 |   +-- TaskHudPanel/            (task HUD overlay HTML)
 |   +-- TerminalStatusBar/       (status bar HTML)
++-- FilePreviewPanel/            (file preview HTML)
 +-- InboxPanel/                  (notifications HTML)
 +-- OfficePanel/                 (team office HTML)
 +-- ProfilePanel/                (team profiles HTML)
@@ -413,9 +417,22 @@
 +-- TaskLifecycleBoard/          (task lifecycle HTML)
 +-- TasksPanel/                  (kanban board HTML)
 +-- Terminal/                    (terminal emulator HTML)
++-- tools/                       (bundled utilities: rg.exe for ripgrep code search)
 +-- runtimes/                    (native runtime libraries)
 +-- cs/, de/, es/, fr/, ...      (13 localization folders)
 +-- publish/                     (staging build output)</code></pre>
+
+        <h2 id="installer">Installer</h2>
+        <p>The <code>installer/</code> directory in the source tree contains the Inno Setup installer configuration and supporting scripts:</p>
+        <table>
+          <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>installer/MultiTerminal.iss</code></td><td>Inno Setup script defining the installer (file selection, registry, shortcuts)</td></tr>
+            <tr><td><code>installer/build-installer.ps1</code></td><td>PowerShell script to compile the installer from the build output</td></tr>
+            <tr><td><code>installer/post-install.js</code></td><td>Node.js post-install hook: registers MCP servers, creates config files</td></tr>
+            <tr><td><code>installer/post-uninstall.js</code></td><td>Node.js post-uninstall hook: cleans up MCP registrations</td></tr>
+          </tbody>
+        </table>
       </div>
     </main>
   </div>

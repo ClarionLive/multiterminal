@@ -17,6 +17,10 @@ namespace MultiTerminal.Controls
         private readonly TableLayoutPanel _agentLayout;
         private bool _isDarkTheme = true;
 
+        // Layout thrashing guard: debounce rapid VisibilityRequested events
+        private bool _rebuildInProgress;
+        private readonly object _rebuildLock = new object();
+
         // Theme colors (matched to app-wide palette)
         private static readonly Color DarkBackground = Color.FromArgb(30, 30, 30);
         private static readonly Color LightBackground = Color.FromArgb(240, 240, 240);
@@ -144,33 +148,59 @@ namespace MultiTerminal.Controls
         /// </summary>
         private void RebuildLayout()
         {
-            _agentLayout.SuspendLayout();
-            _agentLayout.Controls.Clear();
-            _agentLayout.RowStyles.Clear();
-
-            if (_agentSlots.Count == 0)
+            // Thread-safe guard against concurrent and re-entrant calls.
+            // Multiple RemoveAgentSlot calls (from Stopped + CleanupTeamPanels) can
+            // race on different threads via BeginInvoke/Invoke.
+            lock (_rebuildLock)
             {
-                _agentLayout.Visible = false;
-                _noAgentsLabel.Visible = true;
-                _agentLayout.ResumeLayout(false);
-                VisibilityRequested?.Invoke(this, false);
-                return;
+                if (_rebuildInProgress) return;
+                _rebuildInProgress = true;
             }
 
-            _noAgentsLabel.Visible = false;
-            _agentLayout.Visible = true;
-            VisibilityRequested?.Invoke(this, true);
-
-            _agentLayout.RowCount = _agentSlots.Count;
-            float rowPercent = 100f / _agentSlots.Count;
-
-            for (int i = 0; i < _agentSlots.Count; i++)
+            try
             {
-                _agentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, rowPercent));
-                _agentLayout.Controls.Add(_agentSlots[i], 0, i);
-            }
+                _agentLayout.SuspendLayout();
+                _agentLayout.Controls.Clear();
+                _agentLayout.RowStyles.Clear();
 
-            _agentLayout.ResumeLayout(true);
+                bool wantVisible = _agentSlots.Count > 0;
+
+                if (!wantVisible)
+                {
+                    _agentLayout.Visible = false;
+                    _noAgentsLabel.Visible = true;
+                    _agentLayout.ResumeLayout(false);
+
+                    // Always fire hide when count is zero — don't rely on cached state.
+                    // The handler (TerminalDocument) checks Panel2Collapsed itself.
+                    VisibilityRequested?.Invoke(this, false);
+                    return;
+                }
+
+                _noAgentsLabel.Visible = false;
+                _agentLayout.Visible = true;
+
+                // Always fire show — handler is idempotent (checks Panel2Collapsed)
+                VisibilityRequested?.Invoke(this, true);
+
+                _agentLayout.RowCount = _agentSlots.Count;
+                float rowPercent = 100f / _agentSlots.Count;
+
+                for (int i = 0; i < _agentSlots.Count; i++)
+                {
+                    _agentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, rowPercent));
+                    _agentLayout.Controls.Add(_agentSlots[i], 0, i);
+                }
+
+                _agentLayout.ResumeLayout(true);
+            }
+            finally
+            {
+                lock (_rebuildLock)
+                {
+                    _rebuildInProgress = false;
+                }
+            }
         }
 
         /// <summary>

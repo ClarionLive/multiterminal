@@ -9,7 +9,7 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// SQLite database service for persisting Plans and related entities.
-    /// Uses the same database as TaskDatabase at %APPDATA%\multiterminal\tasks.db
+    /// Uses the same database as TaskDatabase at %APPDATA%\multiterminal\multiterminal.db
     /// </summary>
     public class PlanDatabase : IDisposable
     {

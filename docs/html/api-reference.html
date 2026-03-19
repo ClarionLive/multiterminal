@@ -21,12 +21,14 @@
   <nav class="sidebar-nav">
     <div class="nav-section-title">Getting Started</div>
     <a href="getting-started.html" class="nav-link">Quick Start</a>
+    <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
     <div class="nav-section-title">Reference</div>
     <a href="features.html" class="nav-link">Features</a>
     <a href="api-reference.html" class="nav-link active">REST API</a>
     <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
     <div class="nav-section-title">Technical</div>
     <a href="architecture.html" class="nav-link">Architecture</a>
+    <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
     <a href="distribution.html" class="nav-link">Distribution</a>
     <a href="deployment.html" class="nav-link">Deployment</a>
     <div class="nav-section-title"></div>
@@ -56,6 +58,18 @@
       <li><a href="#projects">Projects</a></li>
       <li><a href="#team">Team</a></li>
       <li><a href="#debug">Debug</a></li>
+      <li><a href="#search">Code Search</a></li>
+      <li><a href="#task-relationships">Task Relationships</a></li>
+      <li><a href="#task-files">Task File Links</a></li>
+      <li><a href="#task-reports">Task Reports</a></li>
+      <li><a href="#agent-stats">Agent Stats</a></li>
+      <li><a href="#notifications">Notifications</a></li>
+      <li><a href="#owner-profile">Owner Profile</a></li>
+      <li><a href="#companions">Companions</a></li>
+      <li><a href="#gateway">MCP Gateway</a></li>
+      <li><a href="#browser-tabs">Browser Tabs</a></li>
+      <li><a href="#terminal-stream">Terminal Streaming</a></li>
+      <li><a href="#xaml">XAML Preview</a></li>
     </ul>
   </nav>
 
@@ -1092,12 +1106,13 @@
   <div class="endpoint-block">
     <span class="method get">GET</span> <code>/api/session-lineage/latest</code>
   </div>
-  <p>Get the most recent session for a project. If no cached summary exists, returns the last 10 assistant messages for lazy summary generation.</p>
+  <p>Get the most recent session for a project. Optionally filter by agent name to get a specific agent's last session. If no cached summary exists, returns the last 10 assistant messages for lazy summary generation.</p>
   <h4>Query Parameters</h4>
   <table>
     <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
     <tbody>
       <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Filesystem path to the project</td></tr>
+      <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Filter by agent name (e.g. "Alice"). Returns the most recent session for this specific agent.</td></tr>
     </tbody>
   </table>
   <h4>Response</h4>
@@ -1113,7 +1128,11 @@
   "recentMessages": null
 }</code></pre>
   <h4>curl</h4>
-  <pre><code>curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLaptop%5C..."</code></pre>
+  <pre><code># Latest session across all agents
+curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLaptop%5C..."
+
+# Latest session for a specific agent
+curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLaptop%5C...&amp;agentName=Alice"</code></pre>
 
   <div class="endpoint-block">
     <span class="method put">PUT</span> <code>/api/session-lineage/{sessionId}/summary</code>
@@ -1336,6 +1355,794 @@
 }</code></pre>
   <h4>curl</h4>
   <pre><code>curl http://localhost:5050/api/debug/status</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="search">Code Search</h2>
+  <!-- ================================================================== -->
+  <p>Fast code and file search powered by <a href="https://github.com/BurntSushi/ripgrep">ripgrep</a> (bundled as <code>tools/rg.exe</code>). Endpoints are under <code>/api/search</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/search/content</code>
+  </div>
+  <p>Search file contents using ripgrep regex. Returns matches with file paths, line numbers, and search statistics.</p>
+  <h4>Request</h4>
+  <pre><code>{
+  "pattern": "class.*Service",
+  "path": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
+  "caseInsensitive": false,
+  "glob": "*.cs",
+  "fileType": null,
+  "maxCount": 10,
+  "context": 2,
+  "before": 0,
+  "after": 0,
+  "multiline": false,
+  "fixedStrings": false,
+  "filesWithMatches": false,
+  "count": false
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "matchCount": 15,
+  "matches": [
+    {
+      "filePath": "Services/RipgrepService.cs",
+      "lineNumber": 10,
+      "text": "    public class RipgrepService",
+      "line": "Services/RipgrepService.cs:10:    public class RipgrepService"
+    }
+  ],
+  "stats": {
+    "matchedLines": 15,
+    "matches": 15,
+    "searchedFiles": 80,
+    "elapsedMs": 12.3
+  }
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/search/content \
+  -H "Content-Type: application/json" \
+  -d '{"pattern":"class.*Service","path":"H:\\\\project","glob":"*.cs"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/search/files</code>
+  </div>
+  <p>Find files matching a glob pattern or file type filter.</p>
+  <h4>Request</h4>
+  <pre><code>{
+  "path": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
+  "glob": "*.cs",
+  "fileType": null
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "fileCount": 80,
+  "files": [
+    "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal\\MainForm.cs",
+    "..."
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/search/files \
+  -H "Content-Type: application/json" \
+  -d '{"path":"H:\\\\project","glob":"*.cs"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/search/status</code>
+  </div>
+  <p>Check if ripgrep is available.</p>
+  <h4>Response</h4>
+  <pre><code>{ "available": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/search/status</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="task-relationships">Task Relationships</h2>
+  <!-- ================================================================== -->
+  <p>Blocking and dependency relationships between tasks. Automatically creates inverse relationships. Endpoints are under <code>/api/tasks/{taskId}/relationships</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/relationships</code>
+  </div>
+  <p>Add a relationship between two tasks. Automatically creates the inverse relationship (e.g., if A blocks B, then B is blocked_by A).</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "targetTaskId": "d4e5f6a7",
+  "type": "blocks",
+  "createdBy": "Alice"
+}</code></pre>
+  <table>
+    <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>targetTaskId</code></td><td>string</td><td>Yes</td><td>Target task ID</td></tr>
+      <tr><td><code>type</code></td><td>string</td><td>Yes</td><td><code>blocks</code>, <code>depends_on</code>, <code>related_to</code></td></tr>
+      <tr><td><code>createdBy</code></td><td>string</td><td>Yes</td><td>Who created the relationship</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/relationships \
+  -H "Content-Type: application/json" \
+  -d '{"targetTaskId":"d4e5f6a7","type":"blocks","createdBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/relationships</code>
+  </div>
+  <p>Get all relationships for a task.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "relationships": [
+    {
+      "sourceTaskId": "c0ce8037",
+      "targetTaskId": "d4e5f6a7",
+      "type": "blocks",
+      "createdBy": "Alice"
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037/relationships</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method delete">DELETE</span> <code>/api/tasks/{taskId}/relationships/{relatedTaskId}</code>
+  </div>
+  <p>Remove a relationship between two tasks (removes both directions).</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X DELETE http://localhost:5050/api/tasks/c0ce8037/relationships/d4e5f6a7</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="task-files">Task File Links</h2>
+  <!-- ================================================================== -->
+  <p>Link files to tasks for code review context and agent orientation. Supports optional line ranges. Endpoints are under <code>/api/tasks/{taskId}/files</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/files</code>
+  </div>
+  <p>Link a file to a task.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "filePath": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal\\Services\\TaskDatabase.cs",
+  "description": "Core persistence layer being modified",
+  "lineStart": 100,
+  "lineEnd": 250,
+  "addedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "fileCount": 3 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/files \
+  -H "Content-Type: application/json" \
+  -d '{"filePath":"H:\\\\path\\\\to\\\\file.cs","description":"Relevant file","addedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/files</code>
+  </div>
+  <p>Get all files linked to a task.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "files": [
+    {
+      "filePath": "H:\\DevLaptop\\...\\TaskDatabase.cs",
+      "description": "Core persistence layer",
+      "lineStart": 100,
+      "lineEnd": 250,
+      "addedBy": "Alice",
+      "addedAt": "2026-03-10T10:00:00Z"
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037/files</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/files/unlink</code>
+  </div>
+  <p>Unlink a file from a task.</p>
+  <h4>Request Body</h4>
+  <pre><code>{ "filePath": "H:\\DevLaptop\\...\\TaskDatabase.cs" }</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/files/unlink \
+  -H "Content-Type: application/json" \
+  -d '{"filePath":"H:\\\\path\\\\to\\\\file.cs"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/code-review</code>
+  </div>
+  <p>Get code review diff data for all linked files in a task. Returns file list with git diff output for each.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "taskId": "c0ce8037",
+  "fileCount": 2,
+  "files": [
+    {
+      "filePath": "H:\\DevLaptop\\...\\TaskDatabase.cs",
+      "description": "Core persistence layer",
+      "hasDiff": true,
+      "diff": "--- a/Services/TaskDatabase.cs\n+++ b/Services/TaskDatabase.cs\n..."
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037/code-review</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="task-reports">Task Reports</h2>
+  <!-- ================================================================== -->
+  <p>Persisted agent reports (HTML/markdown) linked to kanban tasks. Generated by specialist agents (verifier, code-reviewer, security-auditor). Endpoints are under <code>/api/tasks/{taskId}/reports</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/reports</code>
+  </div>
+  <p>List reports for a task (metadata only, no content).</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>agentName</code></td><td>string</td><td>-</td><td>Filter by agent name</td></tr>
+      <tr><td><code>limit</code></td><td>integer</td><td><code>50</code></td><td>Max reports to return</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "taskId": "c0ce8037",
+  "count": 2,
+  "reports": [
+    {
+      "id": "rpt12345",
+      "taskId": "c0ce8037",
+      "agentName": "verifier",
+      "reportType": "html",
+      "verdict": "PASS",
+      "score": 95,
+      "createdAt": "2026-03-10T10:00:00Z",
+      "createdBy": "Alice"
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/tasks/c0ce8037/reports?agentName=verifier"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/tasks/{taskId}/reports/{reportId}</code>
+  </div>
+  <p>Get full report content by ID.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "id": "rpt12345",
+  "task_id": "c0ce8037",
+  "agent_name": "verifier",
+  "report_type": "html",
+  "report_content": "&lt;h1&gt;Verification Report&lt;/h1&gt;...",
+  "verdict": "PASS",
+  "score": 95
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/tasks/c0ce8037/reports/rpt12345</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/reports</code>
+  </div>
+  <p>Save a new agent report.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "agentName": "verifier",
+  "reportContent": "&lt;h1&gt;Verification Report&lt;/h1&gt;&lt;p&gt;All checks passed.&lt;/p&gt;",
+  "reportType": "html",
+  "verdict": "PASS",
+  "score": 95,
+  "invocationId": "inv-abc123",
+  "createdBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "reportId": "rpt12345" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/reports \
+  -H "Content-Type: application/json" \
+  -d '{"agentName":"verifier","reportContent":"...","verdict":"PASS","score":95,"createdBy":"Alice"}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="agent-stats">Agent Stats</h2>
+  <!-- ================================================================== -->
+  <p>Aggregated agent performance statistics and invocation tracking. Endpoints are under <code>/api/agents</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/agents/stats</code>
+  </div>
+  <p>Get aggregated performance stats per agent (invocation counts, average scores, verdicts).</p>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "agentName": "verifier",
+    "totalInvocations": 15,
+    "avgScore": 87,
+    "passCount": 12,
+    "failCount": 3
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/agents/stats</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/agents/invocations</code>
+  </div>
+  <p>List recent agent invocations with optional filters.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>agentName</code></td><td>string</td><td>-</td><td>Filter by agent name</td></tr>
+      <tr><td><code>taskId</code></td><td>string</td><td>-</td><td>Filter by task</td></tr>
+      <tr><td><code>limit</code></td><td>integer</td><td><code>50</code></td><td>Max results (max 500)</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "id": "inv-abc123",
+    "agentName": "verifier",
+    "taskId": "c0ce8037",
+    "invokedBy": "Alice",
+    "modelUsed": "opus",
+    "verdict": "PASS",
+    "score": 95,
+    "findingsCount": 0,
+    "durationMs": 45000,
+    "invokedAt": "2026-03-10T10:00:00Z",
+    "completedAt": "2026-03-10T10:00:45Z"
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/agents/invocations?agentName=verifier&limit=20"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/agents/invocations</code>
+  </div>
+  <p>Record a new agent invocation.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "agentName": "verifier",
+  "taskId": "c0ce8037",
+  "invokedBy": "Alice",
+  "modelUsed": "opus",
+  "verdict": "PASS",
+  "score": 95,
+  "findingsCount": 0,
+  "durationMs": 45000,
+  "reportSummary": "All checks passed"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "invocationId": "inv-abc123" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/agents/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"agentName":"verifier","taskId":"c0ce8037","invokedBy":"Alice","verdict":"PASS","score":95}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="notifications">Notifications</h2>
+  <!-- ================================================================== -->
+  <p>Runtime notifications from Claude Code hooks. Stores events in DB and optionally forwards to ClaudeRemote for phone push notifications. Rate limited to 100/minute. Endpoints are under <code>/api/notifications</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/notifications</code>
+  </div>
+  <p>Receive a Claude Code runtime notification. Stores in DB, fires broker event, and forwards to ClaudeRemote for phone push.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "notification_type": "task_complete",
+  "title": "Task completed",
+  "message": "Alice finished 'Add dark mode'",
+  "session_id": "abc123",
+  "agent_name": "Alice",
+  "cwd": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "id": "ntf12345" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/notifications \
+  -H "Content-Type: application/json" \
+  -d '{"notification_type":"task_complete","title":"Task completed","message":"Alice finished task"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/notifications</code>
+  </div>
+  <p>Query notification history.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>limit</code></td><td>integer</td><td><code>50</code></td><td>Max notifications (max 500)</td></tr>
+      <tr><td><code>unreadOnly</code></td><td>boolean</td><td><code>false</code></td><td>Only return unread notifications</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "id": "ntf12345",
+    "notificationType": "task_complete",
+    "title": "Task completed",
+    "message": "Alice finished 'Add dark mode'",
+    "agentName": "Alice",
+    "readAt": null,
+    "createdAt": "2026-03-10T10:00:00Z"
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/notifications?unreadOnly=true&limit=20"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/notifications/{id}/read</code>
+  </div>
+  <p>Mark a notification as read.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/notifications/ntf12345/read</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/notifications/unread-count</code>
+  </div>
+  <p>Get count of unread notifications.</p>
+  <h4>Response</h4>
+  <pre><code>{ "count": 5 }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/notifications/unread-count</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="owner-profile">Owner Profile</h2>
+  <!-- ================================================================== -->
+  <p>Owner identity and git configuration. Used by agents for git operations. Endpoints are under <code>/api/owner-profile</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/owner-profile</code>
+  </div>
+  <p>Get the owner profile (git identity, GitHub config).</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "configured": true,
+  "fullName": "John Hickey",
+  "email": "john@example.com",
+  "gitHubUsername": "jhickey",
+  "hasGitHubToken": true,
+  "createdAt": "2026-02-01T10:00:00Z",
+  "updatedAt": "2026-03-01T10:00:00Z"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/owner-profile</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/owner-profile/github-token</code>
+  </div>
+  <p>Get the GitHub token for agent use during git operations. Returns 404 if no token is stored.</p>
+  <h4>Response</h4>
+  <pre><code>{ "token": "ghp_xxxx..." }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/owner-profile/github-token</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="companions">Companions</h2>
+  <!-- ================================================================== -->
+  <p>Status of configured companion processes (external services managed by MultiTerminal). Endpoints are under <code>/api/companions</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/companions/status</code>
+  </div>
+  <p>Get the status of all configured companion processes.</p>
+  <h4>Response</h4>
+  <pre><code>[
+  {
+    "name": "MCP Gateway",
+    "status": "running",
+    "pid": 12345
+  }
+]</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/companions/status</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="gateway">MCP Gateway</h2>
+  <!-- ================================================================== -->
+  <p>Query MCP Gateway server status and discovered tools. Reads from the gateway's SQLite database. Endpoints are under <code>/api/gateway</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/gateway/servers</code>
+  </div>
+  <p>List all gateway backend servers with live connection status and tool counts.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "servers": [
+    {
+      "name": "sqlite",
+      "connected": true,
+      "enabled": true,
+      "toolCount": 12
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "connected": 4,
+    "enabled": 5,
+    "totalTools": 45
+  }
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/gateway/servers</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/gateway/tools</code>
+  </div>
+  <p>List all discovered tools across all connected gateway backends. Filter by server or profile.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>server</code></td><td>string</td><td>-</td><td>Filter by server name</td></tr>
+      <tr><td><code>profile</code></td><td>string</td><td>-</td><td>Filter by gateway profile</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "profile": "(all)",
+  "totalTools": 45,
+  "serverBreakdown": [
+    { "server": "sqlite", "toolCount": 12 }
+  ],
+  "tools": [
+    {
+      "serverName": "sqlite",
+      "toolName": "query",
+      "description": "Execute a SQL query"
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/gateway/tools?server=sqlite"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/gateway/tools/{server__toolname}</code>
+  </div>
+  <p>Get a specific tool's full schema by namespaced name (format: <code>server__toolname</code>).</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "serverName": "sqlite",
+  "toolName": "query",
+  "description": "Execute a SQL query",
+  "inputSchema": { ... }
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/gateway/tools/sqlite__query</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="browser-tabs">Browser Tabs</h2>
+  <!-- ================================================================== -->
+  <p>Per-terminal tabbed browser (WebView2) management. All endpoints use POST with JSON bodies. Endpoints are under <code>/api/browser-tabs</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/open</code>
+  </div>
+  <p>Open a new browser tab in a terminal's HUD area.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "title": "Dashboard",
+  "url": "file:///H:/docs/index.html",
+  "content": null
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "tabId": "tab-abc123" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/open \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","title":"Dashboard","content":"&lt;h1&gt;Hello&lt;/h1&gt;"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/update</code>
+  </div>
+  <p>Update an existing browser tab's content, URL, or title.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123",
+  "title": "Updated Dashboard",
+  "content": "&lt;h1&gt;Updated&lt;/h1&gt;"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/update \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123","content":"&lt;h1&gt;Updated&lt;/h1&gt;"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/close</code>
+  </div>
+  <p>Close a browser tab.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/close \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/execute-script</code>
+  </div>
+  <p>Execute JavaScript in a browser tab and return the result.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123",
+  "script": "document.getElementById('status').textContent"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "result": "Ready" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/execute-script \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123","script":"document.title"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/console-logs</code>
+  </div>
+  <p>Get console log messages from a browser tab.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123",
+  "limit": 10
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "logs": "[{\"level\":\"log\",\"message\":\"Hello\",\"timestamp\":\"...\"}]" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/console-logs \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123","limit":10}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/element-content</code>
+  </div>
+  <p>Read the content of a DOM element by CSS selector.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123",
+  "selector": "#results",
+  "property": "innerHTML"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "content": "&lt;p&gt;Results here&lt;/p&gt;" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/element-content \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123","selector":"h1","property":"textContent"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/capture-screenshot</code>
+  </div>
+  <p>Capture a PNG screenshot of a browser tab's content.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "imageBase64": "iVBORw0KGgoAAAANSUhEUgAA..." }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/capture-screenshot \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/post-message</code>
+  </div>
+  <p>Send a JSON message to a browser tab's page (received via <code>window.chrome.webview.addEventListener</code>).</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123",
+  "data": "{\"type\":\"update\",\"cpu\":47}"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/post-message \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123","data":"{\"type\":\"update\"}"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/browser-tabs/get-messages</code>
+  </div>
+  <p>Get messages sent from a browser tab's page via <code>window.chrome.webview.postMessage()</code>.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "terminalId": "Alice",
+  "tabId": "tab-abc123",
+  "limit": 20
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "messages": "[{\"data\":{\"type\":\"click\"},\"timestamp\":\"...\"}]" }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/browser-tabs/get-messages \
+  -H "Content-Type: application/json" \
+  -d '{"terminalId":"Alice","tabId":"tab-abc123"}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="terminal-stream">Terminal Streaming</h2>
+  <!-- ================================================================== -->
+  <p>WebSocket endpoint for real-time terminal I/O streaming. Binary frames carry raw VT/ANSI escape sequences; text frames carry JSON control messages.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/terminal/{id}/stream</code>
+  </div>
+  <p>WebSocket endpoint for streaming terminal I/O. Upgrades HTTP to WebSocket. Protocol: binary frames = raw terminal I/O, text frames = JSON control messages (resize, disconnect, status).</p>
+  <h4>Note</h4>
+  <p>This is a WebSocket endpoint. Use a WebSocket client, not curl.</p>
+  <pre><code>// JavaScript example
+const ws = new WebSocket("ws://localhost:5050/api/terminal/my-terminal/stream");
+ws.binaryType = "arraybuffer";
+ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/terminal/streams</code>
+  </div>
+  <p>List active terminal streams with subscriber counts.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "streams": [
+    { "terminalId": "Alice", "subscriberCount": 2 },
+    { "terminalId": "Bob", "subscriberCount": 1 }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/terminal/streams</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="xaml">XAML Preview</h2>
+  <!-- ================================================================== -->
+  <p>Render WPF XAML to PNG images for visual preview without launching the app. Endpoints are under <code>/api/xaml</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/xaml/render</code>
+  </div>
+  <p>Render a WPF XAML snippet to a base64-encoded PNG image. Runs on an STA thread for WPF rendering.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "xaml": "&lt;Border xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Background='#1e1e2e' Padding='20'&gt;&lt;TextBlock Text='Hello World' Foreground='White' FontSize='24'/&gt;&lt;/Border&gt;",
+  "width": 520,
+  "height": 400
+}</code></pre>
+  <table>
+    <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>xaml</code></td><td>string</td><td>Yes</td><td>-</td><td>WPF XAML markup (must include xmlns)</td></tr>
+      <tr><td><code>width</code></td><td>integer</td><td>No</td><td><code>520</code></td><td>Render width in pixels</td></tr>
+      <tr><td><code>height</code></td><td>integer</td><td>No</td><td><code>400</code></td><td>Render height in pixels</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "imageBase64": "iVBORw0KGgoAAAANSUhEUgAA...",
+  "width": 520,
+  "height": 400
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/xaml/render \
+  -H "Content-Type: application/json" \
+  -d '{"xaml":"&lt;Border xmlns=...&gt;...&lt;/Border&gt;","width":520,"height":400}'</code></pre>
 
 </div>
 </main>

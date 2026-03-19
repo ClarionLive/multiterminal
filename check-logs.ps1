@@ -41,13 +41,13 @@ if (Test-Path $chunkLog) {
 # Check database WAL files
 Write-Host "Database WAL Status:"
 Write-Host "----------------------------------------"
-$tasks_wal = Join-Path $configDir "tasks.db-wal"
+$tasks_wal = Join-Path $configDir "multiterminal.db-wal"
 $messages_wal = Join-Path $configDir "messages.db-wal"
 $sessions_db = Join-Path $configDir "sessions.db"
 
 if (Test-Path $tasks_wal) {
     $size = (Get-Item $tasks_wal).Length
-    Write-Host "tasks.db-wal: $([math]::Round($size/1MB, 2)) MB"
+    Write-Host "multiterminal.db-wal: $([math]::Round($size/1MB, 2)) MB"
 }
 if (Test-Path $messages_wal) {
     $size = (Get-Item $messages_wal).Length

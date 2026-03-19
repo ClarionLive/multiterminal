@@ -148,7 +148,9 @@ namespace MultiTerminal.API.Controllers
         /// so the caller can generate a summary lazily.
         /// </summary>
         [HttpGet("latest")]
-        public IActionResult GetLatestSession([FromQuery] string projectPath)
+        public IActionResult GetLatestSession(
+            [FromQuery] string projectPath,
+            [FromQuery] string agentName = null)
         {
             if (string.IsNullOrWhiteSpace(projectPath))
                 return BadRequest(new { error = "projectPath is required" });
@@ -157,7 +159,7 @@ namespace MultiTerminal.API.Controllers
             if (service == null)
                 return ServiceUnavailable();
 
-            var session = service.GetMostRecentSessionForProject(projectPath);
+            var session = service.GetMostRecentSessionForProject(projectPath, agentName);
             if (session == null)
                 return NotFound(new { error = "No session found for the given project path" });
 
@@ -174,6 +176,30 @@ namespace MultiTerminal.API.Controllers
                 session,
                 summary = session.Summary,
                 recentMessages
+            });
+        }
+
+        /// <summary>
+        /// Returns sessions that have no cached summary for a given project path.
+        /// Used by agents to batch-generate summaries at session start.
+        /// </summary>
+        [HttpGet("unsummarized")]
+        public IActionResult GetUnsummarizedSessions(
+            [FromQuery] string projectPath,
+            [FromQuery] int limit = 10)
+        {
+            if (string.IsNullOrWhiteSpace(projectPath))
+                return BadRequest(new { error = "projectPath is required" });
+
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            var sessions = service.GetUnsummarizedSessions(projectPath, limit);
+            return Ok(new
+            {
+                sessions,
+                count = sessions.Count
             });
         }
 

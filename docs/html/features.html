@@ -20,12 +20,14 @@
       <nav class="sidebar-nav">
         <div class="nav-section-title">Getting Started</div>
         <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
         <div class="nav-section-title">Reference</div>
         <a href="features.html" class="nav-link active">Features</a>
         <a href="api-reference.html" class="nav-link">REST API</a>
         <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
         <div class="nav-section-title">Technical</div>
         <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
         <a href="distribution.html" class="nav-link">Distribution</a>
         <a href="deployment.html" class="nav-link">Deployment</a>
         <div class="nav-section-title"></div>
@@ -44,7 +46,7 @@
         <div class="card">
           <h3>On This Page</h3>
           <ol>
-            <li><a href="#ui-panels">UI Panels (9 panels + controls)</a></li>
+            <li><a href="#ui-panels">UI Panels (10 panels + controls)</a></li>
             <li><a href="#terminal-management">Terminal Management</a></li>
             <li><a href="#kanban-board">Kanban Board</a></li>
             <li><a href="#messaging">Messaging</a></li>
@@ -53,13 +55,14 @@
             <li><a href="#institutional-memory">Institutional Memory</a></li>
             <li><a href="#settings-theme">Settings &amp; Theme</a></li>
             <li><a href="#dialogs">Dialogs</a></li>
+            <li><a href="#claude-remote">ClaudeRemote (Mobile Access)</a></li>
           </ol>
         </div>
 
         <!-- =========================================== -->
         <!-- 1. UI PANELS -->
         <!-- =========================================== -->
-        <h2 id="ui-panels">1. UI Panels</h2>
+        <h2 id="ui-panels">1. UI Panels (10 panels + controls)</h2>
         <p>MultiTerminal uses a VS-style docking framework (DockPanelSuite). All panels can be toggled from the toolbar, dragged to dock at any edge, floated as windows, or auto-hidden as slide-out tabs.</p>
 
         <!-- Tasks Panel -->
@@ -178,6 +181,19 @@
           </ul>
         </div>
 
+        <!-- File Preview Panel -->
+        <h3 id="panel-file-preview">File Preview Panel</h3>
+        <div class="card">
+          <p><strong>Toolbar button:</strong> Preview &nbsp;|&nbsp; <strong>HTML:</strong> <code>FilePreviewPanel/file-preview.html</code></p>
+          <p>A WebView2-based panel for previewing files directly within MultiTerminal. Supports rendering of HTML, Markdown, images, and other file types without leaving the application.</p>
+          <p><strong>Key interactions:</strong></p>
+          <ul>
+            <li>Preview files from the project directory</li>
+            <li>Rendered output for supported file types (HTML, Markdown, images)</li>
+            <li>Integrated with the terminal workflow for quick file inspection</li>
+          </ul>
+        </div>
+
         <!-- Start Screen -->
         <h3 id="panel-start">Start Screen</h3>
         <div class="card">
@@ -203,6 +219,32 @@
         <div class="card">
           <p><strong>Toolbar button:</strong> HUD &nbsp;|&nbsp; <strong>HTML:</strong> <code>Controls/TaskHudPanel/task-hud.html</code></p>
           <p>A heads-up display overlay on the active terminal showing the current task title, status, and checklist progress. Provides at-a-glance awareness of what the terminal is working on.</p>
+        </div>
+
+        <h4>Per-Terminal Browser Tabs</h4>
+        <div class="card">
+          <p><strong>Location:</strong> HUD area (tabbed WebView2 above terminal) &nbsp;|&nbsp; <strong>Source:</strong> <code>Controls/HudTabContainer/</code></p>
+          <p>Each terminal has a tabbed browser area in its HUD where agents can open WebView2 tabs via MCP tools. Tabs can display URLs, raw HTML content, or full interactive web applications.</p>
+          <h5>Capabilities</h5>
+          <ul>
+            <li><strong>Open tabs:</strong> Load a URL or render raw HTML content (<code>open_browser_tab</code>)</li>
+            <li><strong>Update content:</strong> Change a tab's HTML, URL, or title on the fly (<code>set_browser_content</code>)</li>
+            <li><strong>Execute JavaScript:</strong> Run arbitrary JS in the tab and get the return value (<code>execute_browser_script</code>)</li>
+            <li><strong>Read DOM elements:</strong> Query elements by CSS selector and read text, attributes, or innerHTML (<code>get_browser_element_content</code>)</li>
+            <li><strong>Bidirectional messaging:</strong> Agent sends JSON to the page (<code>post_browser_message</code>); page sends JSON back via <code>window.chrome.webview.postMessage()</code> (<code>get_browser_messages</code>)</li>
+            <li><strong>Push notifications:</strong> When a page calls <code>postMessage()</code>, the agent receives a <code>[cm]</code> nudge automatically so it can react in real-time</li>
+            <li><strong>Console logs:</strong> Read console.log/warn/error output from the tab for debugging (<code>get_browser_console_logs</code>)</li>
+            <li><strong>Screenshots:</strong> Capture a PNG screenshot of the tab's rendered content (<code>capture_browser_screenshot</code>)</li>
+          </ul>
+          <h5>Use Cases</h5>
+          <ul>
+            <li>Live dashboards updated in real-time by the agent</li>
+            <li>Interactive HTML apps with button clicks routed back to the agent</li>
+            <li>Documentation and file previews</li>
+            <li>Visual debugging and DOM inspection</li>
+            <li>Drawing canvases, mini-games, and rich UI prototypes</li>
+          </ul>
+          <p>See <a href="mcp-tools.html#browser">MCP Tools &mdash; Browser Tabs</a> for the full 9-tool API reference.</p>
         </div>
 
         <h4>Task Lifecycle Board</h4>
@@ -365,7 +407,9 @@
           <li><strong>Test Designer:</strong> Generates acceptance criteria per checklist item</li>
           <li><strong>Security Auditor:</strong> OWASP Top 10 scanning, injection detection</li>
           <li><strong>Debugger:</strong> Root cause analysis when testing fails</li>
+          <li><strong>Code Reviewer:</strong> Quality, patterns, naming, and consistency review</li>
           <li><strong>Session Distiller:</strong> Compresses session learnings into memory</li>
+          <li><strong>Session Summarizer:</strong> Generates session recaps from JSONL transcripts</li>
         </ul>
 
         <h3>New Project Wizard</h3>
@@ -532,12 +576,49 @@
               <td>Project panel</td>
             </tr>
             <tr>
+              <td><strong>Owner Profile (WPF)</strong></td>
+              <td>Manage owner identity, display name, avatar, and git configuration</td>
+              <td>Toolbar profile button</td>
+            </tr>
+            <tr>
               <td><strong>About</strong></td>
               <td>Application version, build info, and credits</td>
               <td>Toolbar info button</td>
             </tr>
           </tbody>
         </table>
+
+        <h2 id="claude-remote">10. ClaudeRemote (Mobile Access)</h2>
+        <p>ClaudeRemote is a companion application that provides mobile access to MultiTerminal from your phone. It runs as a lightweight ASP.NET web server (port 5100) that proxies requests to the MultiTerminal REST API and adds mobile-friendly features.</p>
+
+        <div class="card">
+          <h3>Architecture</h3>
+          <pre><code>Phone (PWA) &rarr; Caddy (HTTPS) &rarr; ClaudeRemote :5100 &rarr; MultiTerminal :5050</code></pre>
+          <p>ClaudeRemote is managed as a <strong>companion process</strong> &mdash; MultiTerminal's <code>CompanionProcessManager</code> auto-launches it on startup using the configuration in <code>%AppData%\MultiTerminal\companion-processes.json</code>.</p>
+        </div>
+
+        <h3>Mobile Features</h3>
+        <table>
+          <thead>
+            <tr><th>Feature</th><th>Description</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Task Board</strong></td><td>View and manage kanban tasks with checklist status</td></tr>
+            <tr><td><strong>Terminal Management</strong></td><td>List running terminals and spawn new ones from your phone</td></tr>
+            <tr><td><strong>Interactive Console</strong></td><td>Full xterm.js terminal via WebSocket &mdash; type commands from your phone</td></tr>
+            <tr><td><strong>Chat Messaging</strong></td><td>Send messages to agents with voice input (Web Speech API)</td></tr>
+            <tr><td><strong>Push Notifications</strong></td><td>Native phone notifications for task updates, messages, and alerts (Web Push API + VAPID)</td></tr>
+            <tr><td><strong>Live Commentary</strong></td><td>Optional TTS commentary on agent activity via edge-tts</td></tr>
+            <tr><td><strong>PWA Support</strong></td><td>Add to home screen, works offline-first with service worker</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Notification Pipeline</h3>
+        <p>Claude Code hooks fire events &rarr; MultiTerminal's <code>NotificationsController</code> receives them &rarr; forwards to ClaudeRemote at <code>http://localhost:5100/api/notifications/runtime</code> &rarr; ClaudeRemote pushes to subscribed phones via Web Push.</p>
+
+        <h3>Setup</h3>
+        <p>ClaudeRemote is bundled with the MultiTerminal installer as an optional component. Configuration is in <code>appsettings.json</code> (port, auth credentials, MultiTerminal API URL). HTTPS is provided by Caddy with automatic Let's Encrypt certificates for external access.</p>
+
       </div>
     </main>
   </div>

@@ -12,11 +12,45 @@ namespace MultiTerminal.API.Controllers
     {
         private readonly MessageBroker _broker;
         private readonly ProjectService _projectService;
+        private readonly ProjectDatabase _projectDb;
 
-        public TeamController(MessageBroker broker, ProjectService projectService)
+        public TeamController(MessageBroker broker, ProjectService projectService, ProjectDatabase projectDb)
         {
             _broker = broker;
             _projectService = projectService;
+            _projectDb = projectDb;
+        }
+
+        /// <summary>
+        /// GET /api/team/profiles — All team member profiles with online status.
+        /// Used by ClaudeRemote to populate the agent picker when launching terminals.
+        /// </summary>
+        [HttpGet("profiles")]
+        public IActionResult GetAllProfiles()
+        {
+            var summaries = _projectDb.GetAllProfileSummaries();
+            var activeTerminals = _broker.GetTerminals();
+            var onlineNames = new System.Collections.Generic.HashSet<string>(
+                activeTerminals
+                    .Where(t => t.IsConnected)
+                    .Select(t => t.Name),
+                System.StringComparer.OrdinalIgnoreCase);
+
+            var profiles = summaries.Select(s =>
+            {
+                var profileResult = _broker.GetProfile(s.DisplayName ?? s.Id);
+                var isLead = profileResult.Success && profileResult.Profile != null && profileResult.Profile.IsTeamLead;
+                return new
+                {
+                    name = s.DisplayName ?? s.Id,
+                    role = s.Role ?? "",
+                    preferredModel = s.PreferredModel ?? "sonnet",
+                    isOnline = onlineNames.Contains(s.DisplayName ?? s.Id),
+                    isTeamLead = isLead
+                };
+            }).ToList();
+
+            return Ok(new { count = profiles.Count, profiles });
         }
 
         /// <summary>

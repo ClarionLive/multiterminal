@@ -1,534 +1,318 @@
 # MultiTerminal Deployment Guide
 
-This guide covers all files and configurations needed to deploy the MultiTerminal application to another developer's computer.
+**Version:** 1.3.0
+**Last Updated:** 2026-03-19
+
+This guide covers how to deploy MultiTerminal to a new machine. The primary method is the Inno Setup installer, which handles everything automatically. A manual deployment section is included for advanced users.
 
 ## Table of Contents
-1. [Main Application Files](#1-main-application-files)
-2. [MCP Session History Server](#2-mcp-session-history-server)
-3. [Claude Code Hooks](#3-claude-code-hooks)
-4. [Project Configuration](#4-project-configuration)
-5. [Database and Data Files](#5-database-and-data-files)
-6. [Global Claude Configuration](#6-global-claude-configuration)
-7. [Installation Instructions](#7-installation-instructions)
+
+1. [Prerequisites](#1-prerequisites)
+2. [Installer Deployment (Recommended)](#2-installer-deployment-recommended)
+3. [What the Installer Does](#3-what-the-installer-does)
+4. [Post-Install Verification](#4-post-install-verification)
+5. [Manual Deployment (Advanced)](#5-manual-deployment-advanced)
+6. [Component Reference](#6-component-reference)
+7. [Troubleshooting](#7-troubleshooting)
 
 ---
 
-## 1. Main Application Files
+## 1. Prerequisites
 
-### Current Location (Source)
-```
-H:\DevLaptop\ClarionPowerShell\Deploy\
-```
+The installer checks for these and warns if missing:
 
-### Target Location (Destination)
-```
-<USER_CHOSEN_LOCATION>\MultiTerminal\
-```
-Example: `C:\Applications\MultiTerminal\`
-
-### Files to Deploy
-Copy **all files and folders** from the Deploy directory, including:
-- `MultiTerminal.exe` - Main executable
-- `MultiTerminal.dll` - Application library
-- `MultiTerminal.pdb` - Debug symbols
-- `MultiTerminal.deps.json` - Dependency configuration
-- `MultiTerminal.runtimeconfig.json` - Runtime configuration
-- `MultiTerminal.exe.config` - Application configuration
-- `*.dll` - All dependency DLLs (WebView2, SQLite, DockPanelSuite, MCP, etc.)
-- `Terminal\` - Terminal HTML panel
-- `ProjectPanel\` - Project panel HTML
-- `ChatPanel\` - Chat panel HTML
-- `ActivityPanel\` - Activity panel HTML
-- `TasksPanel\` - Tasks panel HTML
-- `runtimes\` - Native runtime libraries
-- `x64\` - x64 native libraries
-- `win-x64\` - Windows x64 libraries
-- `mcp-session-history\` - MCP server (see section 2)
+| Requirement | Purpose | Download |
+|-------------|---------|----------|
+| **Windows 10/11 (x64)** | Host OS | -- |
+| **.NET 8 Desktop Runtime + ASP.NET Core** | Application runtime. If not detected, installer bundles all runtime DLLs (self-contained mode). | [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/8.0) |
+| **Claude Code CLI** | MCP servers and hooks require `~/.claude.json` to exist. Must be installed and run at least once. | `npm install -g @anthropic-ai/claude-code` |
+| **Node.js 18+** | MCP server, hooks, and post-install scripts. | [nodejs.org](https://nodejs.org/) |
+| **WebView2 Runtime** | UI panels (pre-installed on Windows 11; may need manual install on Windows 10). | [developer.microsoft.com](https://developer.microsoft.com/microsoft-edge/webview2/) |
 
 ---
 
-## 2. MCP Session History Server
+## 2. Installer Deployment (Recommended)
 
-The `mcp-session-history` server provides session history search capabilities.
+### Building the Installer
 
-### Current Location (Source)
-```
-H:\DevLaptop\ClarionPowerShell\MultiTerminal\mcp-session-history\
-```
+From the source tree, run:
 
-### Target Location (Destination)
-```
-<MultiTerminal_Install_Dir>\mcp-session-history\
-```
-
-### Files to Deploy
-Copy the **entire mcp-session-history folder** including:
-- `index.js` - Main MCP server entry point
-- `package.json` - NPM package configuration
-- `package-lock.json` - Locked dependency versions
-- `embedding-service.js` - AI embedding service
-- `vector-search.js` - Vector search functionality
-- `chunking.js` - Text chunking utilities
-- `index-cli.js` - CLI indexing tool
-- `node_modules\` - **All dependencies** (critical - includes better-sqlite3, transformers)
-
-**Important:** The `node_modules` folder contains compiled native modules. If copying between different Windows versions or architectures, you may need to run `npm install` in the destination folder.
-
-### Installation Check
-After deployment, verify the MCP server works:
 ```powershell
-node <MultiTerminal_Install_Dir>\mcp-session-history\index.js
+cd H:\DevLaptop\ClarionPowerShell\MultiTerminal\installer
+.\build-installer.ps1
 ```
+
+This script:
+1. Publishes MultiTerminal (`dotnet publish -c Release -r win-x64 --self-contained true`)
+2. Publishes MCP Gateway (`dotnet publish -c Release -r win-x64 --no-self-contained`)
+3. Compiles the Inno Setup script (`MultiTerminal.iss`) into `installer\Output\MultiTerminalSetup-1.3.0.exe`
+
+Options:
+- `.\build-installer.ps1 -SkipPublish` -- reuse last publish output, compile installer only
+- `.\build-installer.ps1 -Verbose` -- show detailed build output
+
+### Running the Installer
+
+1. Run `MultiTerminalSetup-1.3.0.exe`
+2. The installer checks prerequisites (.NET 8, Claude Code, Node.js, WebView2) and warns about missing items
+3. Choose installation type:
+   - **Full** -- app + all Claude Code integration (hooks, skills, agents, MCP servers, docs)
+   - **Application only** -- just the app and bundled tools
+   - **Custom** -- pick individual components
+4. Select optional MCP servers to install alongside MultiTerminal (MSSQL, SQLite, Windows Build Runner, Windows SnapIt, Everything Search)
+5. The post-install script configures Claude Code integration automatically
+6. Optionally launch MultiTerminal at the end
+
+### Installation Components
+
+| Component | Description | Install Location |
+|-----------|-------------|------------------|
+| **MultiTerminal Application** (fixed) | Main executable, DLLs, HTML panels | `{app}\` (e.g., `C:\Program Files\MultiTerminal`) |
+| **Bundled Tools** (fixed) | ripgrep (`rg.exe`) for code search | `{app}\tools\` |
+| **HTML Documentation** | 9-file documentation site | `{app}\docs\html\` |
+| **MCP Servers** | `multiterminal` (Node.js) + `mcp-gateway` (.NET) | `%APPDATA%\multiterminal\mcp\` + `{app}\mcp-gateway\` |
+| **Session Hooks** (global) | Activity tracking, session management | `%USERPROFILE%\.claude\hooks\` |
+| **Session Hooks** (project) | Task routing, inbox, safety, office panel | `{app}\.claude\hooks\` |
+| **Skills** | `/kanban-task`, `/project-management`, `/new-project`, `/profile` | `%USERPROFILE%\.claude\skills\` |
+| **Specialist Agents** | verifier, debugger, security auditor, devils advocate, test designer, session summarizer, session distiller | `{app}\.claude\agents\` |
+| **Optional MCP Servers** | MSSQL, SQLite, Build Runner, SnapIt, Everything Search | `{app}\mcps\{name}\` |
 
 ---
 
-## 3. Claude Code Hooks
+## 3. What the Installer Does
 
-Hooks integrate Claude Code with MultiTerminal's activity feed and task management.
+### Prerequisite Detection
 
-### Current Location (Source)
-```
-C:\Users\John Hickey\.claude\hooks\
-```
+- **.NET 8:** Checks registry for both `Microsoft.WindowsDesktop.App` and `Microsoft.AspNetCore.App` 8.x. If found, skips ~380 runtime DLLs (framework-dependent mode). If not found, includes them (self-contained mode).
+- **Claude Code:** Checks for `~/.claude.json`. Required -- installer aborts if missing.
+- **Node.js:** Checks `node --version`. Warns but allows continuing without it.
+- **WebView2:** Checks registry keys. Warns but allows continuing without it.
 
-### Target Location (Destination)
-```
-C:\Users\<NEW_USER>\.claude\hooks\
-```
+### Post-Install Script (`post-install.js`)
 
-### Files to Deploy
+The installer runs `post-install.js` after copying files. It performs 6 steps:
 
-#### 3.1. activity-hook.js
-**Purpose:** Records tool usage, build events, and subagent activity to MultiTerminal's activity feed
+1. **Merge global hooks into `~/.claude/settings.json`** -- adds MultiTerminal hooks to SessionStart, SessionEnd, PreToolUse, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop. Creates a backup (`.pre-multiterminal.bak`). Removes duplicate hooks on re-install.
+2. **Register MCP servers in `~/.claude.json`** -- adds `multiterminal` (Node.js) and `mcp-gateway` (native .NET) server entries. Creates a backup.
+3. **Register optional MCP servers** -- writes `gateway-defaults.json` for the MCP Gateway to auto-seed on first startup.
+4. **Generate `{app}/.claude/project.json`** -- creates a unique project ID, name, and project-level SessionStart hooks.
+5. **Generate `{app}/.claude/settings.local.json`** -- configures all project-level hooks (task routing, inbox checks, safety, subagent office, session status).
+6. **Patch `runtimeconfig.json`** -- if .NET 8 was detected, converts self-contained config to framework-dependent for smaller install.
 
-**Current Path:**
-```
-C:\Users\John Hickey\.claude\hooks\activity-hook.js
-```
+### Uninstall Script (`post-uninstall.js`)
 
-**Target Path:**
-```
-C:\Users\<NEW_USER>\.claude\hooks\activity-hook.js
-```
+On uninstall, `post-uninstall.js` cleans up:
 
-**Configuration Needed:**
-- Line 22-23: Update the hard-coded path to point to the new user's mcp-session-history location
-- The hook looks for better-sqlite3 in multiple locations; add the new installation path
-
-#### 3.2. pool-context.js
-**Purpose:** Injects plan context and Kanban task assignments at Claude Code session start
-
-**Current Path:**
-```
-C:\Users\John Hickey\.claude\hooks\pool-context.js
-```
-
-**Target Path:**
-```
-C:\Users\<NEW_USER>\.claude\hooks\pool-context.js
-```
-
-**Configuration Needed:**
-- Line 23-25: Update the hard-coded path to point to the new user's mcp-session-history location
-- Line 120: Database path is read from `%APPDATA%\multiterminal\tasks.db` (auto-configured)
+1. Removes MultiTerminal hooks from `~/.claude/settings.json`
+2. Removes global hook script files from `~/.claude/hooks/`
+3. Removes skill folders from `~/.claude/skills/`
+4. Removes MCP server files from `%APPDATA%\multiterminal\mcp\`
+5. Removes MCP server entries from `~/.claude.json`
+6. Removes optional MCP servers from gateway database
+7. Restores `runtimeconfig.json` backup if it exists
+8. Optionally deletes user data (`%APPDATA%\multiterminal\`) -- prompts user
 
 ---
 
-## 4. Project Configuration
+## 4. Post-Install Verification
 
-### Current Location (Source)
-```
-H:\DevLaptop\ClarionPowerShell\MultiTerminal\.claude\
-```
+After installation, verify these work:
 
-### Files to Deploy
-
-#### 4.1. project.json
-**Current Path:**
-```
-H:\DevLaptop\ClarionPowerShell\MultiTerminal\.claude\project.json
-```
-
-**Target Path:**
-```
-<MultiTerminal_Install_Dir>\.claude\project.json
-```
-
-**Configuration:**
-```json
-{
-  "id": "<NEW_PROJECT_ID>",
-  "name": "MultiTerminal",
-  "description": "",
-  "changeLog": "",
-  "createdAt": "<TIMESTAMP>",
-  "lastOpenedAt": "<TIMESTAMP>",
-  "isPinned": false,
-  "prompts": []
-}
-```
-
-**Note:** Generate a new project ID (GUID) for the new installation
-
-#### 4.2. settings.local.json (Optional)
-**Purpose:** Project-specific permission presets
-
-**Current Path:**
-```
-H:\DevLaptop\ClarionPowerShell\MultiTerminal\.claude\settings.local.json
-```
-
-**Target Path:**
-```
-<MultiTerminal_Install_Dir>\.claude\settings.local.json
-```
-
-Contains pre-approved permissions for MCP tools and common commands.
+- [ ] `MultiTerminal.exe` launches without errors
+- [ ] Database created at `%APPDATA%\multiterminal\multiterminal.db`
+- [ ] WebView2 panels load (Terminal, Tasks, Chat, Activity, etc.)
+- [ ] REST API responds: `curl http://localhost:5050/health`
+- [ ] MCP server loads in Claude Code (check `claude mcp list`)
+- [ ] Hooks execute on Claude Code events (check activity feed in MultiTerminal)
+- [ ] Task management works (create task, list tasks)
+- [ ] Inter-terminal messaging works (register terminals, send messages)
+- [ ] Start Menu shortcuts work (app + documentation)
 
 ---
 
-## 5. Database and Data Files
+## 5. Manual Deployment (Advanced)
 
-### 5.1. Main Task Database
+For development or custom setups where the installer is not appropriate.
 
-**Purpose:** Stores tasks, plans, activity feed, chat messages, terminal registrations
+### Step 1: Build and Copy Application
 
-**Current Location:**
-```
-C:\Users\John Hickey\AppData\Roaming\multiterminal\tasks.db
-```
+```powershell
+# From MultiTerminal source directory
+dotnet publish -c Release -r win-x64 --self-contained true -o bin\Release\net8.0-windows\win-x64\publish
 
-**Target Location:**
-```
-C:\Users\<NEW_USER>\AppData\Roaming\multiterminal\tasks.db
-```
-
-**Deployment Options:**
-- **Option A:** Don't copy (starts fresh with empty database)
-- **Option B:** Copy database to share existing tasks/history
-- **Option C:** Export specific data only (e.g., task templates)
-
-**Note:** The application will create a new database automatically on first run if it doesn't exist.
-
-### 5.2. SQLite MCP Database
-
-**Purpose:** Stores MCP server state (if using sqlite MCP server)
-
-**Current Location:**
-```
-H:\DevLaptop\ClarionPowerShell\MultiTerminal\mcp_sqlite.db
+# Copy publish output to target
+Copy-Item -Path "bin\Release\net8.0-windows\win-x64\publish\*" `
+          -Destination "C:\Applications\MultiTerminal\" -Recurse -Force
 ```
 
-**Target Location:**
-```
-<MultiTerminal_Install_Dir>\mcp_sqlite.db
-```
+### Step 2: Deploy MCP Server
 
-**Note:** This is optional and depends on whether the sqlite MCP server is configured.
+The MCP server (Node.js) lives at `%APPDATA%\multiterminal\mcp\`:
 
-### 5.3. Session History Database
-
-**Purpose:** Stores Claude Code session history for the mcp-session-history server
-
-**Current Location:**
-```
-C:\Users\John Hickey\.claude\sessions.db
+```powershell
+$mcpDir = "$env:APPDATA\multiterminal\mcp"
+New-Item -ItemType Directory -Path $mcpDir -Force
+Copy-Item -Path "path\to\mcp-server\*" -Destination $mcpDir -Recurse
 ```
 
-**Target Location:**
-```
-C:\Users\<NEW_USER>\.claude\sessions.db
-```
+### Step 3: Register MCP Servers
 
-**Note:** This is managed by Claude Code itself. Don't copy unless you want to share session history.
+Edit `%USERPROFILE%\.claude.json` and add under `mcpServers`:
 
----
-
-## 6. Global Claude Configuration
-
-### 6.1. MCP Servers Configuration
-
-**Purpose:** Registers MCP servers with Claude Code
-
-**Current Location:**
-```
-C:\Users\John Hickey\.claude\mcp_servers.json
-```
-
-**Target Location:**
-```
-C:\Users\<NEW_USER>\.claude\mcp_servers.json
-```
-
-**Configuration Example:**
 ```json
 {
   "mcpServers": {
-    "mcp-session-history": {
+    "multiterminal": {
+      "type": "stdio",
       "command": "node",
-      "args": [
-        "<MultiTerminal_Install_Dir>\\mcp-session-history\\index.js"
-      ],
-      "env": {
-        "SESSIONS_DB_PATH": "C:\\Users\\<NEW_USER>\\.claude\\sessions.db"
-      }
+      "args": ["C:/Users/<USER>/AppData/Roaming/multiterminal/mcp/index.js"],
+      "env": {}
+    },
+    "mcp-gateway": {
+      "type": "stdio",
+      "command": "C:/Program Files/MultiTerminal/mcp-gateway/McpGateway.exe",
+      "args": [],
+      "env": {}
     }
   }
 }
 ```
 
-**Important:** Update all paths to match the new user's installation directories.
+### Step 4: Deploy Hooks
 
-### 6.2. Global Claude Instructions
+**Global hooks** go to `%USERPROFILE%\.claude\hooks\`:
 
-**Purpose:** User-specific instructions for Claude Code behavior
+| Hook File | Event | Purpose |
+|-----------|-------|---------|
+| `pool-context.js` | SessionStart | Injects plan context and task assignments |
+| `activity-hook.js` | PreToolUse, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop | Records tool usage and agent activity |
+| `session-status-hook.js` | SessionStart | Writes active context for session continuity |
+| `profile-status-hook.js` | SessionStart, SessionEnd | Updates agent online/offline status |
+| `session-import-hook.js` | SessionEnd | Auto-imports session transcripts |
 
-**Current Location:**
-```
-C:\Users\John Hickey\.claude\CLAUDE.md
-```
+**Project-level hooks** go to `<install-dir>\.claude\hooks\`:
 
-**Target Location:**
-```
-C:\Users\<NEW_USER>\.claude\CLAUDE.md
-```
+| Hook File | Event | Purpose |
+|-----------|-------|---------|
+| `task-to-agent-hook.js` | PreToolUse (Task) | Routes task operations to correct agent |
+| `inbox-check-hook.js` | PostToolUse, Stop, UserPromptSubmit, SubagentStop | Checks inbox for new messages |
+| `subagent-office-hook.js` | SubagentStart, SubagentStop, TeammateIdle | Manages office panel agent avatars |
+| `project-context-hook.js` | SessionStart | Injects project context into sessions |
+| `safety-hook.js` | PreToolUse (Bash, Read, Write, Edit, SQL) | Guards against dangerous operations |
+| `session-status-hook.js` | SessionStart | Writes active context file |
+| `active-context-hook.js` | PostToolUse (build, checklist, status) | Auto-writes active context after key events |
+| `notification-hook.js` | Various | Forwards runtime notifications |
+| `pipeline-trigger-hook.js` | Various | Triggers CI/CD pipeline actions |
 
-**Note:** This is optional and user-specific. Contains PowerShell preferences, multiterminal chat mode instructions, etc.
+Configure hooks in `%USERPROFILE%\.claude\settings.json` -- see `post-install.js` for the exact structure.
 
-### 6.3. Memory Files
+### Step 5: Deploy Skills
 
-**Purpose:** Persistent auto-memory for Claude Code
+Copy skill folders to `%USERPROFILE%\.claude\skills\`:
 
-**Current Location:**
-```
-C:\Users\John Hickey\.claude\projects\H--DevLaptop-ClarionPowerShell-MultiTerminal\memory\
-```
+- `kanban-task/` -- Kanban workflow management (`/kanban-task`)
+- `project-management/` -- Full project management (`/project-management`)
+- `new-project/` -- New project wizard (`/new-project`)
+- `multiterminal-addproject/` -- Add existing project (`/add-project`)
+- `profile/` -- Agent profile management (`/profile`)
 
-**Target Location:**
-```
-C:\Users\<NEW_USER>\.claude\projects\<PROJECT_PATH_HASH>\memory\
-```
+### Step 6: Deploy Specialist Agents
 
-**Files:**
-- `MEMORY.md` - Main memory file (loaded into system prompt)
-- Additional topic-specific memory files
+Copy agent definitions to `<install-dir>\.claude\agents\`:
 
-**Note:** Memory files are project-specific. The path hash is auto-generated by Claude Code based on the project path.
+- `verifier.md` -- Confirms work completion
+- `debugger.md` -- Root cause analysis
+- `security-auditor.md` -- OWASP security scanning
+- `code-reviewer.md` -- Code quality review
+- `devils-advocate.md` -- Plan scoring and challenges
+- `test-designer.md` -- Acceptance criteria generation
+- `session-summarizer.md` -- Session recap generation
+- `session-distiller.md` -- Session learning compression
 
----
+### Step 7: Create Data Directory
 
-## 7. Installation Instructions
-
-### Prerequisites
-1. Windows 10/11 (x64)
-2. .NET 8.0 Runtime (Windows Desktop) - [Download](https://dotnet.microsoft.com/download/dotnet/8.0)
-3. Node.js 18+ (for MCP servers) - [Download](https://nodejs.org/)
-4. Claude Code CLI installed
-5. WebView2 Runtime (usually pre-installed on Windows 11)
-
-### Step-by-Step Installation
-
-#### Step 1: Deploy Main Application
-```powershell
-# Create installation directory
-New-Item -ItemType Directory -Path "C:\Applications\MultiTerminal" -Force
-
-# Copy all files from Deploy folder
-Copy-Item -Path "H:\DevLaptop\ClarionPowerShell\Deploy\*" `
-          -Destination "C:\Applications\MultiTerminal\" `
-          -Recurse -Force
-```
-
-#### Step 2: Install MCP Session History Dependencies
-```powershell
-cd "C:\Applications\MultiTerminal\mcp-session-history"
-npm install
-```
-
-**Note:** If you copied the node_modules folder and it's not working, delete it and run `npm install` fresh.
-
-#### Step 3: Deploy Hooks
-```powershell
-# Create hooks directory
-New-Item -ItemType Directory -Path "$env:USERPROFILE\.claude\hooks" -Force
-
-# Copy hook files
-Copy-Item -Path "C:\Users\John Hickey\.claude\hooks\activity-hook.js" `
-          -Destination "$env:USERPROFILE\.claude\hooks\activity-hook.js"
-
-Copy-Item -Path "C:\Users\John Hickey\.claude\hooks\pool-context.js" `
-          -Destination "$env:USERPROFILE\.claude\hooks\pool-context.js"
-```
-
-#### Step 4: Update Hook Paths
-Edit both hook files and update hard-coded paths:
-
-**In activity-hook.js (line 22-23):**
-```javascript
-path.join(__dirname, '..', '..', 'Applications', 'MultiTerminal', 'mcp-session-history', 'node_modules', 'better-sqlite3'),
-'C:\\Applications\\MultiTerminal\\mcp-session-history\\node_modules\\better-sqlite3',
-```
-
-**In pool-context.js (line 23-25):**
-```javascript
-path.join(__dirname, '..', '..', 'Applications', 'MultiTerminal', 'mcp-session-history', 'node_modules', 'better-sqlite3'),
-'C:\\Applications\\MultiTerminal\\mcp-session-history\\node_modules\\better-sqlite3',
-```
-
-#### Step 5: Configure Claude Code Hooks
-Create or edit `$env:USERPROFILE\.claude\hooks.json`:
-
-```json
-{
-  "SessionStart": {
-    "command": "node",
-    "args": [
-      "C:\\Users\\<USER>\\.claude\\hooks\\pool-context.js"
-    ],
-    "injectAs": "user-prompt-prefix"
-  },
-  "PreToolUse": {
-    "command": "node",
-    "args": [
-      "C:\\Users\\<USER>\\.claude\\hooks\\activity-hook.js"
-    ]
-  },
-  "PostToolUse": {
-    "command": "node",
-    "args": [
-      "C:\\Users\\<USER>\\.claude\\hooks\\activity-hook.js"
-    ]
-  },
-  "PostToolUseFailure": {
-    "command": "node",
-    "args": [
-      "C:\\Users\\<USER>\\.claude\\hooks\\activity-hook.js"
-    ]
-  },
-  "SubagentStart": {
-    "command": "node",
-    "args": [
-      "C:\\Users\\<USER>\\.claude\\hooks\\activity-hook.js"
-    ]
-  },
-  "SubagentStop": {
-    "command": "node",
-    "args": [
-      "C:\\Users\\<USER>\\.claude\\hooks\\activity-hook.js"
-    ]
-  }
-}
-```
-
-#### Step 6: Configure MCP Servers
-Create or edit `$env:USERPROFILE\.claude\mcp_servers.json`:
-
-```json
-{
-  "mcpServers": {
-    "mcp-session-history": {
-      "command": "node",
-      "args": [
-        "C:\\Applications\\MultiTerminal\\mcp-session-history\\index.js"
-      ],
-      "env": {
-        "SESSIONS_DB_PATH": "C:\\Users\\<USER>\\.claude\\sessions.db"
-      }
-    }
-  }
-}
-```
-
-Replace `<USER>` with the actual Windows username.
-
-#### Step 7: Create Application Data Directory
 ```powershell
 New-Item -ItemType Directory -Path "$env:APPDATA\multiterminal" -Force
 ```
 
-The application will create `tasks.db` automatically on first run.
+The application creates `multiterminal.db` automatically on first run.
 
-#### Step 8: Run MultiTerminal
+---
+
+## 6. Component Reference
+
+### Database Files
+
+| Database | Location | Purpose |
+|----------|----------|---------|
+| `multiterminal.db` | `%APPDATA%\multiterminal\` | Tasks, projects, profiles, activity, session lineage, notifications, agent stats |
+| `messages.db` | `%APPDATA%\multiterminal\` | Reliable message delivery queue |
+| `plans.db` | `%APPDATA%\multiterminal\` | Plan phases and milestones |
+| `gateway.db` | `%APPDATA%\multiterminal\gateway\` | MCP Gateway server registry and tool catalog |
+
+### REST API
+
+The embedded REST API runs on port 5050. See `API/README.md` for full endpoint documentation (21 controllers, 100+ endpoints).
+
+### MCP Servers
+
+| Server | Type | Purpose |
+|--------|------|---------|
+| **multiterminal** | Node.js (stdio) | Agent tools: tasks, messaging, browser tabs, search, sessions, knowledge, projects |
+| **mcp-gateway** | .NET native (stdio) | Aggregates multiple MCP backends (MSSQL, SQLite, Build Runner, SnapIt, Everything Search) |
+
+### HTML Panels
+
+All UI panels use WebView2 with HTML/CSS/JS frontends:
+
+`Terminal/`, `TasksPanel/`, `ChatPanel/`, `ActivityPanel/`, `InboxPanel/`, `ProfilePanel/`, `ProjectPanel/`, `OfficePanel/`, `AgentPanel/`, `StartScreen/`, `TaskLifecycleBoard/`, `Controls/` (status bar)
+
+---
+
+## 7. Troubleshooting
+
+### Installer won't run: "Claude Code was not detected"
+
+Claude Code must be installed and run at least once to create `~/.claude.json`:
+
 ```powershell
-cd "C:\Applications\MultiTerminal"
-.\MultiTerminal.exe
+npm install -g @anthropic-ai/claude-code
+claude   # Run once to initialize, then exit
 ```
 
-### Verification Checklist
+### MCP Server not connecting
 
-- [ ] MultiTerminal.exe launches without errors
-- [ ] Database created at `%APPDATA%\multiterminal\tasks.db`
-- [ ] MCP session-history server accessible (check Claude Code logs)
-- [ ] Hooks execute on Claude Code events (check activity feed in MultiTerminal)
-- [ ] Task management features work (create task, list tasks, etc.)
-- [ ] Inter-terminal chat works (register terminals, send messages)
-- [ ] WebView2 panels load correctly (Terminal, Chat, Tasks, etc.)
+1. Verify Node.js is installed: `node --version`
+2. Check MCP server path in `~/.claude.json`
+3. Test manually: `node "%APPDATA%\multiterminal\mcp\index.js"`
+4. Check Claude Code logs: `claude mcp list`
 
----
+### Hooks not executing
 
-## 8. Troubleshooting
+1. Verify `~/.claude/settings.json` contains MultiTerminal hook entries
+2. Check that hook files exist at the paths referenced in settings
+3. Test a hook manually: `node "%USERPROFILE%\.claude\hooks\activity-hook.js"`
 
-### Issue: MCP Server Not Found
-**Solution:** Verify Node.js is installed and in PATH. Check mcp_servers.json paths.
+### WebView2 panels blank or not loading
 
-### Issue: Hooks Not Executing
-**Solution:** Verify hooks.json exists and paths are correct. Check Node.js is in PATH.
+1. Install WebView2 Evergreen Runtime from Microsoft
+2. Check if `%LOCALAPPDATA%\Microsoft\EdgeWebView` exists
+3. Try deleting `%LOCALAPPDATA%\MultiTerminal\EBWebView` (WebView2 cache) and restarting
 
-### Issue: Database Errors
-**Solution:** Ensure %APPDATA%\multiterminal folder exists and is writable.
+### Database errors
 
-### Issue: better-sqlite3 Module Not Found
-**Solution:** Run `npm install` in the mcp-session-history directory.
+1. Ensure `%APPDATA%\multiterminal` exists and is writable
+2. If database is corrupted, rename the `.db` file -- a fresh one is created on next launch
+3. Check disk space
 
-### Issue: WebView2 Not Loading
-**Solution:** Install WebView2 Runtime from Microsoft.
+### Build errors when compiling installer
 
----
+1. Ensure Inno Setup 6.1+ is installed (for `Excludes` support)
+2. Verify publish output exists: `.\build-installer.ps1 -SkipPublish` will fail if no prior publish
+3. Check that all source directories referenced in `MultiTerminal.iss` exist
 
-## 9. Optional: Share Configuration
+### REST API not responding
 
-If you want to provide a pre-configured setup, create a deployment package:
-
-```
-MultiTerminal-Deploy/
-├── Application/                    # Main app files
-│   └── (all files from Deploy folder)
-├── Hooks/                          # Claude Code hooks
-│   ├── activity-hook.js
-│   └── pool-context.js
-├── Config/                         # Configuration templates
-│   ├── hooks.json.template
-│   └── mcp_servers.json.template
-├── Database/                       # Optional: pre-seeded database
-│   └── tasks.db (optional)
-└── INSTALLATION.md                 # This guide
-```
-
----
-
-## Summary: Complete File List
-
-### Mandatory Files:
-1. ✅ MultiTerminal.exe + all DLLs and dependencies
-2. ✅ mcp-session-history folder (entire folder with node_modules)
-3. ✅ activity-hook.js (with updated paths)
-4. ✅ pool-context.js (with updated paths)
-5. ✅ hooks.json (Claude Code hook configuration)
-6. ✅ mcp_servers.json (MCP server registration)
-
-### Optional Files:
-7. ⭕ tasks.db (start fresh or copy existing)
-8. ⭕ sessions.db (Claude Code session history)
-9. ⭕ CLAUDE.md (user-specific instructions)
-10. ⭕ MEMORY.md (project memory files)
-11. ⭕ .claude/settings.local.json (permission presets)
-12. ⭕ .claude/project.json (project configuration)
-
----
-
-## Contact & Support
-
-For questions or issues, refer to the MultiTerminal repository or contact the development team.
-
-**Version:** 1.0
-**Last Updated:** 2026-02-05
+1. Check that port 5050 is not in use by another application
+2. Verify the app started without errors (check the Start Screen for status)
+3. Try: `curl http://localhost:5050/health`

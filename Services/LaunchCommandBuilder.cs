@@ -6,12 +6,12 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// Builds the Claude Code CLI launch command for a project.
-    /// Constructs the full 'claude' command string with MT config flags (--add-dir, --settings)
+    /// Constructs the full 'claude' command string with MT config flags (--add-dir, --settings, --mcp-config)
     /// derived dynamically from the assembly location. Returns a LaunchCommand object
     /// consumed by TerminalDocument to start ConPtyTerminal with the correct working directory
     /// and auto-run command.
-    /// Note: --mcp-config is no longer passed here; per-project .mcp.json files are generated
-    /// by McpConfigService and written to the project root, where Claude Code picks them up automatically.
+    /// MCP servers are loaded from %APPDATA%\multiterminal\.mcp.json via --mcp-config flag,
+    /// giving MultiTerminal full control over MCP registration (not ~/.claude.json).
     /// </summary>
     public static class LaunchCommandBuilder
     {
@@ -50,8 +50,7 @@ namespace MultiTerminal.Services
         /// Builds the optional CLI flags string. Returns empty string if MT source path is unavailable.
         /// Skips --settings flag if the file doesn't exist on disk.
         /// All path values have single quotes doubled for PowerShell single-quoted string safety.
-        /// Note: --mcp-config is intentionally omitted. McpConfigService generates per-project .mcp.json
-        /// files in each project's root, which Claude Code discovers automatically.
+        /// Adds --mcp-config pointing to %APPDATA%\multiterminal\.mcp.json for centralized MCP registration.
         /// </summary>
         private static string BuildFlags(string mtSourcePath)
         {
@@ -72,7 +71,26 @@ namespace MultiTerminal.Services
                 flags += $" --settings '{safeSettingsPath}'";
             }
 
+            // --mcp-config: Centralized MCP server config at %APPDATA%\multiterminal\.mcp.json
+            string mcpConfigPath = GetMcpConfigPath();
+            if (mcpConfigPath != null)
+            {
+                string safeMcpPath = EscapeSingleQuotes(mcpConfigPath);
+                flags += $" --mcp-config '{safeMcpPath}'";
+            }
+
             return flags;
+        }
+
+        /// <summary>
+        /// Returns the path to the centralized MCP config file if it exists.
+        /// Location: %APPDATA%\multiterminal\.mcp.json
+        /// </summary>
+        public static string GetMcpConfigPath()
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string mcpConfig = Path.Combine(appData, "multiterminal", ".mcp.json");
+            return File.Exists(mcpConfig) ? mcpConfig : null;
         }
 
         /// <summary>
@@ -160,5 +178,11 @@ namespace MultiTerminal.Services
         /// The project ID passed to ConPtyTerminal as MULTITERMINAL_PROJECT_ID env var.
         /// </summary>
         public string ProjectId { get; set; }
+
+        /// <summary>
+        /// The MCP Gateway profile name passed to ConPtyTerminal as MCP_GATEWAY_PROFILE env var.
+        /// Enables per-project server filtering in the gateway.
+        /// </summary>
+        public string GatewayProfile { get; set; }
     }
 }

@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MCP Architecture - Technical deep-dive into MultiTerminal's MCP system">
+  <title>MCP Architecture - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Hamburger (mobile) -->
+<button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+
+<!-- Sidebar overlay (mobile) -->
+<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+<div class="page-wrapper">
+
+  <!-- Sidebar Navigation -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-icon">MT</span>
+        MultiTerminal
+      </div>
+      <div class="tagline">Documentation</div>
+    </div>
+    <nav>
+      <div class="nav-section-title">Getting Started</div>
+      <a href="getting-started.html" class="nav-link">Getting Started</a>
+      <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+      <div class="nav-section-title">Reference</div>
+      <a href="features.html" class="nav-link">Features</a>
+      <a href="api-reference.html" class="nav-link">REST API</a>
+      <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+
+      <div class="nav-section-title">Technical</div>
+      <a href="architecture.html" class="nav-link">Architecture</a>
+      <a href="mcp-architecture.html" class="nav-link active">MCP Architecture</a>
+      <a href="distribution.html" class="nav-link">Distribution</a>
+      <a href="deployment.html" class="nav-link">Deployment</a>
+
+      <div class="nav-section-title"></div>
+      <a href="index.html" class="nav-link">Home</a>
+    </nav>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="content-container">
+
+      <h1>MCP Architecture</h1>
+      <p class="lead">Technical documentation for the MCP (Model Context Protocol) subsystem. Covers the two-server design, gateway proxy architecture, configuration flow, and data storage.</p>
+
+      <!-- Table of Contents -->
+      <nav class="toc">
+        <h3>On This Page</h3>
+        <ul>
+          <li><a href="#overview">System Overview</a></li>
+          <li><a href="#config-flow">Configuration &amp; Launch Flow</a></li>
+          <li><a href="#multiterminal-mcp">MultiTerminal MCP Server</a></li>
+          <li><a href="#mcp-gateway">MCP Gateway</a></li>
+          <li><a href="#gateway-database">Gateway Database Schema</a></li>
+          <li><a href="#tool-routing">Tool Routing &amp; Aggregation</a></li>
+          <li><a href="#profiles">Profile System</a></li>
+          <li><a href="#lifecycle">Server Lifecycle &amp; Recovery</a></li>
+          <li><a href="#installer">Installer Integration</a></li>
+          <li><a href="#file-reference">File Reference</a></li>
+        </ul>
+      </nav>
+
+      <!-- Overview -->
+      <h2 id="overview">System Overview</h2>
+
+      <p>Claude Code connects to exactly <strong>two</strong> MCP servers. One of those servers (the gateway) acts as a proxy, aggregating tools from any number of backend servers. This keeps the Claude Code connection count fixed while allowing unlimited MCP server expansion.</p>
+
+      <pre><code>Claude Code (in MultiTerminal terminal)
+    |
+    |-- --mcp-config %APPDATA%\multiterminal\.mcp.json
+    |
+    +-- mcp-gateway (McpGateway.exe)          [.NET 8 console app]
+    |     |
+    |     +-- sqlite MCP server               [backend, managed by gateway]
+    |     +-- mssql MCP server                [backend, managed by gateway]
+    |     +-- any-other-mcp                   [backend, managed by gateway]
+    |     +-- gateway__* tools                [self-management tools]
+    |
+    +-- multiterminal (index.js)              [Node.js MCP server]
+          |
+          +-- REST API (localhost:5050)       [MultiTerminal app]</code></pre>
+
+      <p>From Claude Code's perspective, it sees tools from all sources merged into two server connections. The gateway transparently proxies tool calls to the correct backend.</p>
+
+      <!-- Config Flow -->
+      <h2 id="config-flow">Configuration &amp; Launch Flow</h2>
+
+      <p>When MultiTerminal launches a terminal with Claude Code, the following happens:</p>
+
+      <ol>
+        <li><strong>LaunchCommandBuilder</strong> constructs the Claude Code command line, adding <code>--mcp-config</code> pointing to <code>%APPDATA%\multiterminal\.mcp.json</code></li>
+        <li><strong>McpConfigService</strong> writes an empty <code>.mcp.json</code> to the project folder (project-level servers are managed by gateway profiles, not static config)</li>
+        <li>Claude Code starts and reads the <code>--mcp-config</code> file, connecting to both servers</li>
+        <li>The <strong>mcp-gateway</strong> starts, reads its SQLite database, and spawns all enabled backend servers for the active profile</li>
+        <li>The <strong>multiterminal</strong> server starts and connects to the REST API at <code>localhost:5050</code></li>
+      </ol>
+
+      <h3>Configuration file</h3>
+      <p>The MCP configuration lives at <code>%APPDATA%\multiterminal\.mcp.json</code>:</p>
+
+      <pre><code>{
+  "mcpServers": {
+    "mcp-gateway": {
+      "type": "stdio",
+      "command": "C:\\Program Files\\MultiTerminal\\mcp-gateway\\McpGateway.exe",
+      "args": []
+    },
+    "multiterminal": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:\\Users\\...\\AppData\\Roaming\\multiterminal\\mcp\\index.js"]
+    }
+  }
+}</code></pre>
+
+      <div class="note">
+        <p>This file is generated by the installer's <code>post-install.js</code> script with correct paths for the target machine. It is not shipped as a static file.</p>
+      </div>
+
+      <!-- MultiTerminal MCP Server -->
+      <h2 id="multiterminal-mcp">MultiTerminal MCP Server</h2>
+
+      <p>The <strong>multiterminal</strong> server is a Node.js application that wraps the MultiTerminal REST API (port 5050) with MCP tool interfaces. It provides 58+ tools organized into categories:</p>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Tools</th>
+              <th>Examples</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Task Management</td>
+              <td>14</td>
+              <td><code>list_tasks</code>, <code>create_task</code>, <code>update_checklist</code></td>
+            </tr>
+            <tr>
+              <td>Messaging</td>
+              <td>7</td>
+              <td><code>send_message</code>, <code>broadcast_message</code>, <code>get_inbox</code></td>
+            </tr>
+            <tr>
+              <td>Code Search</td>
+              <td>2</td>
+              <td><code>search_code</code> (ripgrep), <code>search_files</code></td>
+            </tr>
+            <tr>
+              <td>Browser Tabs</td>
+              <td>7</td>
+              <td><code>open_browser_tab</code>, <code>set_browser_content</code>, <code>capture_browser_screenshot</code></td>
+            </tr>
+            <tr>
+              <td>Projects</td>
+              <td>6</td>
+              <td><code>get_project</code>, <code>list_projects</code>, <code>update_project</code></td>
+            </tr>
+            <tr>
+              <td>Session &amp; Knowledge</td>
+              <td>8</td>
+              <td><code>search_session_history</code>, <code>query_knowledge</code>, <code>save_code_digest</code></td>
+            </tr>
+            <tr>
+              <td>Build &amp; Run</td>
+              <td>5</td>
+              <td><code>build_project</code>, <code>run_command</code>, <code>run_powershell_script</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Key files</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Location</th>
+              <th>Role</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>index.js</code></td>
+              <td><code>%APPDATA%\multiterminal\mcp\</code></td>
+              <td>Entry point, tool registration, stdio transport</td>
+            </tr>
+            <tr>
+              <td><code>package.json</code></td>
+              <td><code>%APPDATA%\multiterminal\mcp\</code></td>
+              <td>Dependencies (<code>@modelcontextprotocol/sdk</code>)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>All tool calls are translated to HTTP requests against <code>http://localhost:5050/api/*</code>. The REST API is hosted by the MultiTerminal WinForms application via <code>MultiTerminalRestServer.cs</code>.</p>
+
+      <!-- MCP Gateway -->
+      <h2 id="mcp-gateway">MCP Gateway</h2>
+
+      <p>The gateway is a .NET 8 console application that implements the MCP protocol over stdio. It serves two purposes:</p>
+
+      <ol>
+        <li><strong>Proxy:</strong> spawns backend MCP servers as child processes and aggregates their tools into its own tool list. Tool calls are routed to the correct backend transparently.</li>
+        <li><strong>Manager:</strong> exposes its own <code>gateway__*</code> tools for adding, removing, enabling, and disabling backend servers at runtime.</li>
+      </ol>
+
+      <h3>Application architecture</h3>
+      <pre><code>McpGateway.exe
+  |
+  Program.cs                    Entry point, DI container setup
+  |
+  Services/
+  |  GatewayHostedService.cs    MCP server host, tool routing, startup orchestration
+  |  BackendManager.cs          Spawns/stops backend MCP processes, stdio communication
+  |  ProfileManager.cs          Active profile tracking, server filtering
+  |  ToolAggregator.cs          Merges tool lists from all connected backends
+  |
+  Tools/
+  |  ServerManagementTools.cs   gateway__list/add/remove/enable/disable_server
+  |  ProfileManagementTools.cs  gateway__list/create/delete/set_profile
+  |  ImportTools.cs             gateway__import_mcp_config, gateway__import_claude_config
+  |
+  Data/
+     GatewayDatabase.cs         SQLite persistence (servers, profiles, associations)</code></pre>
+
+      <h3>Communication</h3>
+      <ul>
+        <li><strong>Upstream</strong> (Claude Code &harr; gateway): MCP protocol over stdio (stdin/stdout)</li>
+        <li><strong>Downstream</strong> (gateway &harr; backends): MCP protocol over stdio (each backend is a child process)</li>
+        <li><strong>Logging:</strong> stderr only, disabled by default. Set <code>MCP_GATEWAY_DEBUG=1</code> to enable.</li>
+      </ul>
+
+      <div class="warning">
+        <p>Stdout is reserved for the MCP protocol. Any console output to stdout will corrupt the protocol stream. All logging must go to stderr.</p>
+      </div>
+
+      <!-- Gateway Database -->
+      <h2 id="gateway-database">Gateway Database Schema</h2>
+
+      <p>The gateway stores all configuration in SQLite at <code>%APPDATA%\multiterminal\gateway\gateway.db</code>. The database is created automatically on first run.</p>
+
+      <h3>servers</h3>
+      <p>Registry of all MCP servers known to the gateway.</p>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Column</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment ID</td></tr>
+            <tr><td><code>name</code></td><td>TEXT UNIQUE</td><td>Server name (e.g., "sqlite", "my-api")</td></tr>
+            <tr><td><code>command</code></td><td>TEXT</td><td>Executable to run (e.g., "npx", "node")</td></tr>
+            <tr><td><code>args_json</code></td><td>TEXT</td><td>JSON array of command arguments</td></tr>
+            <tr><td><code>env_json</code></td><td>TEXT</td><td>JSON object of environment variables</td></tr>
+            <tr><td><code>is_enabled</code></td><td>INTEGER</td><td>1 = enabled, 0 = disabled</td></tr>
+            <tr><td><code>created_at</code></td><td>TEXT</td><td>ISO 8601 timestamp</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>profiles</h3>
+      <p>Named server groupings for different contexts.</p>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Column</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>id</code></td><td>INTEGER PK</td><td>Auto-increment ID</td></tr>
+            <tr><td><code>name</code></td><td>TEXT UNIQUE</td><td>Profile name (e.g., "default", "web-dev")</td></tr>
+            <tr><td><code>is_active</code></td><td>INTEGER</td><td>1 = currently active profile</td></tr>
+            <tr><td><code>created_at</code></td><td>TEXT</td><td>ISO 8601 timestamp</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>profile_servers</h3>
+      <p>Many-to-many join between profiles and servers.</p>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Column</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>profile_id</code></td><td>INTEGER FK</td><td>References profiles(id)</td></tr>
+            <tr><td><code>server_id</code></td><td>INTEGER FK</td><td>References servers(id)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Foreign keys are enforced. Deleting a profile cascades to remove its profile_servers entries.</p>
+
+      <!-- Tool Routing -->
+      <h2 id="tool-routing">Tool Routing &amp; Aggregation</h2>
+
+      <p>When Claude Code requests the tool list, the gateway:</p>
+
+      <ol>
+        <li>Collects tools from all connected backend servers via <code>ToolAggregator</code></li>
+        <li>Prefixes each tool name with the server name (e.g., <code>sqlite__read_query</code>, <code>mssql__query</code>) to avoid collisions</li>
+        <li>Adds its own management tools (<code>gateway__list_servers</code>, etc.)</li>
+        <li>Returns the merged list to Claude Code</li>
+      </ol>
+
+      <p>When Claude Code calls a tool:</p>
+
+      <ol>
+        <li><code>GatewayHostedService</code> receives the call</li>
+        <li>If the tool starts with <code>gateway__</code>, it's handled internally (server/profile/import tools)</li>
+        <li>Otherwise, the prefix identifies the backend server, and the call is forwarded via <code>BackendManager</code></li>
+        <li>The backend's response is returned to Claude Code</li>
+      </ol>
+
+      <pre><code>Claude Code calls: mssql__query(sql="SELECT 1")
+                        |
+               GatewayHostedService
+                        |
+                  prefix = "mssql"
+                  tool   = "query"
+                        |
+               BackendManager.CallTool("mssql", "query", {sql: "SELECT 1"})
+                        |
+                  mssql child process (stdio)
+                        |
+                  result returned to Claude Code</code></pre>
+
+      <!-- Profiles -->
+      <h2 id="profiles">Profile System</h2>
+
+      <p>Profiles control which backend servers are active. Only one profile is active at a time.</p>
+
+      <h3>Startup behavior</h3>
+      <ol>
+        <li>Gateway reads <code>gateway.db</code></li>
+        <li>If no profiles exist, creates a <code>default</code> profile containing all servers</li>
+        <li>If <code>--profile &lt;name&gt;</code> or <code>MCP_GATEWAY_PROFILE</code> is set, activates that profile</li>
+        <li>Connects all enabled servers in the active profile</li>
+      </ol>
+
+      <h3>Runtime switching</h3>
+      <p>When <code>gateway__set_profile</code> is called:</p>
+      <ol>
+        <li>Disconnects servers not in the new profile</li>
+        <li>Connects servers that are in the new profile but weren't connected</li>
+        <li>Keeps servers that are in both profiles running</li>
+        <li>Fires a <code>tools/list_changed</code> notification so Claude Code refreshes its tool list</li>
+      </ol>
+
+      <p>MultiTerminal's <code>GatewayIntegrationService</code> can sync project-specific profiles automatically. When you open a project, it activates the corresponding gateway profile, giving agents access to the right set of tools for that project.</p>
+
+      <!-- Lifecycle -->
+      <h2 id="lifecycle">Server Lifecycle &amp; Recovery</h2>
+
+      <h3>Backend startup</h3>
+      <p>Each backend server is spawned as a child process with a <strong>30-second connection timeout</strong>. If a server fails to initialize within this window, it's marked as disconnected but remains registered.</p>
+
+      <h3>Crash recovery</h3>
+      <p>If a backend process crashes, the gateway detects the exit and attempts automatic restart:</p>
+      <ul>
+        <li><strong>3 retry attempts</strong> with exponential backoff (2s, 5s, 10s)</li>
+        <li>If all retries fail, the server is marked as disconnected</li>
+        <li>The server can be manually restarted via <code>gateway__enable_server</code></li>
+      </ul>
+
+      <h3>Gateway shutdown</h3>
+      <p>When Claude Code closes the MCP connection (session end), the gateway:</p>
+      <ol>
+        <li>Sends shutdown signals to all backend child processes</li>
+        <li>Waits briefly for graceful shutdown</li>
+        <li>Terminates any remaining processes</li>
+        <li>Exits cleanly</li>
+      </ol>
+
+      <!-- Installer -->
+      <h2 id="installer">Installer Integration</h2>
+
+      <p>The Inno Setup installer handles MCP distribution and configuration:</p>
+
+      <h3>What gets installed</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Component</th>
+              <th>Install Location</th>
+              <th>Contents</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>MCP Gateway</td>
+              <td><code>{app}\mcp-gateway\</code></td>
+              <td><code>McpGateway.exe</code> + .NET dependencies (framework-dependent)</td>
+            </tr>
+            <tr>
+              <td>MultiTerminal MCP</td>
+              <td><code>%APPDATA%\multiterminal\mcp\</code></td>
+              <td><code>index.js</code>, <code>package.json</code>, <code>node_modules\</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Post-install configuration</h3>
+      <p>The <code>post-install.js</code> script runs after file installation and:</p>
+      <ol>
+        <li>Generates <code>%APPDATA%\multiterminal\.mcp.json</code> with correct paths to both servers</li>
+        <li>Removes any legacy MCP entries from <code>~/.claude.json</code> (from older versions)</li>
+        <li>Merges hooks into Claude Code's global <code>settings.json</code></li>
+        <li>Generates project-level <code>.claude/project.json</code> and <code>settings.local.json</code></li>
+      </ol>
+
+      <h3>Uninstall cleanup</h3>
+      <p>The <code>post-uninstall.js</code> script:</p>
+      <ol>
+        <li>Deletes <code>%APPDATA%\multiterminal\.mcp.json</code></li>
+        <li>Removes legacy entries from <code>~/.claude.json</code></li>
+        <li>Removes MCP server files from AppData</li>
+        <li>Optionally deletes user data (databases) if the user confirms</li>
+      </ol>
+
+      <h3>Build process</h3>
+      <p>Run <code>installer\build-installer.ps1</code> to publish both projects and compile the installer:</p>
+      <pre><code># Full build: publish + installer
+.\build-installer.ps1
+
+# Installer only (reuse last publish output)
+.\build-installer.ps1 -SkipPublish</code></pre>
+      <p>The script publishes MultiTerminal (self-contained) and MCP Gateway (framework-dependent, win-x64) before invoking Inno Setup.</p>
+
+      <!-- File Reference -->
+      <h2 id="file-reference">File Reference</h2>
+
+      <h3>Runtime files (end-user machine)</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>%APPDATA%\multiterminal\.mcp.json</code></td>
+              <td>MCP server config (loaded via <code>--mcp-config</code>)</td>
+            </tr>
+            <tr>
+              <td><code>%APPDATA%\multiterminal\mcp\index.js</code></td>
+              <td>MultiTerminal MCP server entry point</td>
+            </tr>
+            <tr>
+              <td><code>%APPDATA%\multiterminal\gateway\gateway.db</code></td>
+              <td>Gateway SQLite database (servers, profiles)</td>
+            </tr>
+            <tr>
+              <td><code>{app}\mcp-gateway\McpGateway.exe</code></td>
+              <td>MCP Gateway executable</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Source files (development)</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>McpGateway/Program.cs</code></td>
+              <td>Gateway entry point and DI setup</td>
+            </tr>
+            <tr>
+              <td><code>McpGateway/Services/BackendManager.cs</code></td>
+              <td>Backend MCP process lifecycle</td>
+            </tr>
+            <tr>
+              <td><code>McpGateway/Services/GatewayHostedService.cs</code></td>
+              <td>MCP server host and tool routing</td>
+            </tr>
+            <tr>
+              <td><code>McpGateway/Data/GatewayDatabase.cs</code></td>
+              <td>SQLite persistence layer</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal/Services/McpConfigService.cs</code></td>
+              <td>Per-project MCP config generation</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal/Services/GatewayIntegrationService.cs</code></td>
+              <td>Gateway profile sync for projects</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal/Services/LaunchCommandBuilder.cs</code></td>
+              <td>Adds <code>--mcp-config</code> to Claude Code launch command</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal/installer/post-install.js</code></td>
+              <td>Generates .mcp.json during installation</td>
+            </tr>
+            <tr>
+              <td><code>MultiTerminal/installer/build-installer.ps1</code></td>
+              <td>Publish + compile installer script</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Next Steps -->
+      <h2>Related Documentation</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <a href="mcp-guide.html">
+            <h3>MCP Guide</h3>
+            <p>End-user guide to understanding and using MCPs.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="mcp-tools.html">
+            <h3>MCP Tools Reference</h3>
+            <p>Full list of 58+ tools with parameters and examples.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="architecture.html">
+            <h3>System Architecture</h3>
+            <p>Overall MultiTerminal architecture and data flow.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="deployment.html">
+            <h3>Deployment</h3>
+            <p>Build process and deployment workflow.</p>
+          </a>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <p>MultiTerminal &copy; 2026. See <code>THIRD-PARTY-NOTICES.md</code> for license information.</p>
+      </footer>
+
+    </div>
+  </main>
+
+</div>
+
+<!-- Theme Toggle -->
+<button class="theme-toggle" aria-label="Toggle theme" onclick="toggleTheme()">&#9790;</button>
+
+<script>
+/* Theme toggle */
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme') || 'dark';
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('mt-docs-theme', next);
+}
+
+/* Restore saved theme */
+(function() {
+  var saved = localStorage.getItem('mt-docs-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+/* Mobile sidebar toggle */
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.querySelector('.sidebar-overlay').classList.toggle('visible');
+}
+</script>
+
+</body>
+</html>

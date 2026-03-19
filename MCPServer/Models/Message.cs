@@ -95,6 +95,12 @@ namespace MultiTerminal.MCPServer.Models
         /// If this is the first message in a thread, ThreadId equals Id.
         /// </summary>
         public string ThreadId { get; set; }
+
+        /// <summary>
+        /// Message priority: "low", "normal" (default), "high", "critical".
+        /// Critical = blockers, High = task complete/needs review, Normal = routine, Low = FYI.
+        /// </summary>
+        public string Priority { get; set; } = "normal";
     }
 
     /// <summary>

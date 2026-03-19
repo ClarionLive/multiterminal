@@ -60,6 +60,7 @@ namespace MultiTerminal.StartScreen
         /// Raised when the user clicks "New Project".
         /// </summary>
         public event EventHandler NewProjectRequested;
+        public event EventHandler JustClaudeRequested;
 
         // ── Constructor ───────────────────────────────────────────────────────
 
@@ -252,6 +253,10 @@ namespace MultiTerminal.StartScreen
                             if (!string.IsNullOrEmpty(pinId) && pinId.Length <= 36)
                                 ToggleProjectPin(pinId);
                         }
+                        break;
+
+                    case "just_claude":
+                        JustClaudeRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "open_powershell":

@@ -13,10 +13,10 @@ namespace MultiTerminal.Dialogs
     /// </summary>
     public partial class ChatHistoryDialog : Form
     {
-        private readonly SessionDatabase _database;
+        private readonly TaskDatabase _database;
         private readonly TerminalTheme _theme;
-        private List<ChatMessage> _allMessages;
-        private List<ChatMessage> _filteredMessages;
+        private List<ChatMessageRecord> _allMessages;
+        private List<ChatMessageRecord> _filteredMessages;
 
         // Controls
         private TextBox _searchBox;
@@ -33,7 +33,7 @@ namespace MultiTerminal.Dialogs
         /// </summary>
         /// <param name="database">The session database for chat message queries.</param>
         /// <param name="theme">The terminal theme to apply.</param>
-        public ChatHistoryDialog(SessionDatabase database, TerminalTheme theme)
+        public ChatHistoryDialog(TaskDatabase database, TerminalTheme theme)
         {
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _theme = theme ?? TerminalTheme.Dark;
@@ -50,7 +50,7 @@ namespace MultiTerminal.Dialogs
         {
             try
             {
-                _allMessages = _database.GetChatMessages(limit: 1000);
+                _allMessages = _database.GetChatMessages(1000);
                 PopulateTerminalFilter();
                 ApplyFilters();
             }
@@ -62,8 +62,8 @@ namespace MultiTerminal.Dialogs
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
-                _allMessages = new List<ChatMessage>();
-                _filteredMessages = new List<ChatMessage>();
+                _allMessages = new List<ChatMessageRecord>();
+                _filteredMessages = new List<ChatMessageRecord>();
             }
         }
 
@@ -230,7 +230,7 @@ namespace MultiTerminal.Dialogs
         {
             if (_messagesGrid.SelectedRows.Count > 0)
             {
-                var msg = _messagesGrid.SelectedRows[0].Tag as ChatMessage;
+                var msg = _messagesGrid.SelectedRows[0].Tag as ChatMessageRecord;
                 if (msg != null)
                 {
                     _previewBox.Text = msg.Content ?? "";
@@ -299,7 +299,7 @@ namespace MultiTerminal.Dialogs
         {
             if (_messagesGrid.SelectedRows.Count > 0)
             {
-                var msg = _messagesGrid.SelectedRows[0].Tag as ChatMessage;
+                var msg = _messagesGrid.SelectedRows[0].Tag as ChatMessageRecord;
                 if (msg != null && !string.IsNullOrEmpty(msg.Content))
                 {
                     try

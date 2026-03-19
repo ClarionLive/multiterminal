@@ -29,6 +29,7 @@ const DEBUG_LOG = path.join(os.tmpdir(), 'mt-task-hook-debug.log');
 const REDIRECT_TYPES = [];
 
 const PENDING_DESC_FILE = path.join(os.tmpdir(), 'mt-pending-agent-descriptions.json');
+const TEAM_SPAWNER_FILE = path.join(os.tmpdir(), 'mt-team-spawners.json');
 
 /**
  * Write task description to a pending file so subagent-office-hook.js
@@ -48,6 +49,27 @@ function writePendingDescription(description, name, subagentType) {
     log(`PENDING DESC written: "${description}" (${subagentType})`);
   } catch (e) {
     log(`PENDING DESC write error: ${e.message}`);
+  }
+}
+
+/**
+ * Write team→spawner mapping so TeamWatcherService can route
+ * agent panels to the correct terminal.
+ */
+function writeTeamSpawner(teamName, spawnerName) {
+  try {
+    let mapping = {};
+    if (fs.existsSync(TEAM_SPAWNER_FILE)) {
+      mapping = JSON.parse(fs.readFileSync(TEAM_SPAWNER_FILE, 'utf8'));
+      if (typeof mapping !== 'object' || Array.isArray(mapping)) mapping = {};
+    }
+    mapping[teamName] = { spawnerName, timestamp: Date.now() };
+    const tempPath = TEAM_SPAWNER_FILE + '.tmp';
+    fs.writeFileSync(tempPath, JSON.stringify(mapping, null, 2), 'utf8');
+    fs.renameSync(tempPath, TEAM_SPAWNER_FILE);
+    log(`TEAM SPAWNER written: ${teamName} → ${spawnerName}`);
+  } catch (e) {
+    log(`TEAM SPAWNER write error: ${e.message}`);
   }
 }
 
@@ -134,6 +156,8 @@ async function main() {
     log(`PASS-THROUGH: Native team agent spawn (team_name=${toolInput.team_name})`);
     // Write description so TeamWatcherService can pick it up via tracking
     writePendingDescription(toolInput.description || '', toolInput.name || '', subagentType || 'general-purpose');
+    // Write team→spawner mapping so TeamWatcherService knows which terminal owns this team
+    writeTeamSpawner(toolInput.team_name, spawnerName);
     process.exit(0);
     return;
   }

@@ -135,6 +135,14 @@ namespace MultiTerminal.MCPServer.Models
         public string ContinuationNotes { get; set; }
 
         /// <summary>
+        /// JSON array of inline code review notes from the human reviewer.
+        /// Each note: { file, line, lineContent, severity, comment, timestamp }.
+        /// Severity: BLOCKER, SUGGESTION, NITPICK, QUESTION.
+        /// Written when the dev submits notes from the diff viewer; cleared on next pass.
+        /// </summary>
+        public string ReviewNotes { get; set; }
+
+        /// <summary>
         /// When true, parent task status is auto-derived from checklist item positions:
         /// - All in Planning → "todo"
         /// - Any in Coding/Testing → "in_progress"
@@ -403,5 +411,66 @@ namespace MultiTerminal.MCPServer.Models
     {
         public bool Success { get; set; }
         public string Error { get; set; }
+    }
+
+    public class TaskRelationship
+    {
+        public string Id { get; set; }
+        public string SourceTaskId { get; set; }
+        public string TargetTaskId { get; set; }
+        public string Type { get; set; } // "blocks", "depends_on", "related_to"
+        public string CreatedBy { get; set; }
+        public DateTime CreatedAt { get; set; }
+    }
+
+    public class AddRelationshipResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class RemoveRelationshipResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class GetRelationshipsResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+        public List<TaskRelationship> Relationships { get; set; } = new List<TaskRelationship>();
+    }
+
+    public class TaskFileLink
+    {
+        public string Id { get; set; }
+        public string TaskId { get; set; }
+        public string FilePath { get; set; }
+        public string Description { get; set; }
+        public int? LineStart { get; set; }
+        public int? LineEnd { get; set; }
+        public string AddedBy { get; set; }
+        public DateTime CreatedAt { get; set; }
+    }
+
+    public class LinkFileResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+        public int FileCount { get; set; }
+    }
+
+    public class UnlinkFileResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class GetTaskFilesResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+        public List<TaskFileLink> Files { get; set; } = new List<TaskFileLink>();
     }
 }

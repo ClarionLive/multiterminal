@@ -1,6 +1,7 @@
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
+using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Controllers
 {
@@ -9,10 +10,12 @@ namespace MultiTerminal.API.Controllers
     public class SpawnController : ControllerBase
     {
         private readonly SpawnService _spawnService;
+        private readonly ProjectDatabase _projectDatabase;
 
-        public SpawnController(SpawnService spawnService)
+        public SpawnController(SpawnService spawnService, ProjectDatabase projectDatabase)
         {
             _spawnService = spawnService;
+            _projectDatabase = projectDatabase;
         }
 
         /// <summary>
@@ -46,6 +49,57 @@ namespace MultiTerminal.API.Controllers
                 sessionId = agent?.SessionId
             });
         }
+
+        /// <summary>
+        /// Spawn a new ConPTY terminal with Claude Code.
+        /// If projectId is provided, resolves the project's source path as working directory.
+        /// Used by ClaudeRemote to launch terminals from the phone app.
+        /// </summary>
+        [HttpPost("terminal")]
+        public async Task<IActionResult> SpawnTerminal([FromBody] SpawnTerminalRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request.AgentName))
+                return BadRequest(new { success = false, error = "agentName is required" });
+
+            string workingDir = request.WorkingDir;
+
+            // If projectId provided, look up project source path
+            if (!string.IsNullOrWhiteSpace(request.ProjectId))
+            {
+                var project = _projectDatabase.GetRichProject(request.ProjectId);
+                if (project == null)
+                    return NotFound(new { success = false, error = $"Project '{request.ProjectId}' not found" });
+
+                if (string.IsNullOrWhiteSpace(project.SourcePath))
+                    return BadRequest(new { success = false, error = $"Project '{project.Name}' has no source path configured" });
+
+                workingDir = project.SourcePath;
+            }
+
+            var (success, docId, error) = await _spawnService.SpawnTeammateAsync(
+                request.AgentName,
+                agentType: null,
+                workingDir,
+                initialPrompt: null,
+                spawnerName: "ClaudeRemote");
+
+            if (!success)
+                return BadRequest(new { success = false, error });
+
+            return Ok(new
+            {
+                success = true,
+                terminalName = request.AgentName,
+                docId
+            });
+        }
+    }
+
+    public class SpawnTerminalRequest
+    {
+        public string ProjectId { get; set; }
+        public string AgentName { get; set; }
+        public string WorkingDir { get; set; }
     }
 
     public class SpawnAgentProcessRequest

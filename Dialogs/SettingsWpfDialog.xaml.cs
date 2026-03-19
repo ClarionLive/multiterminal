@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
+using Microsoft.Win32;
+
 using MultiTerminal.Models;
 using MultiTerminal.Services;
 
@@ -15,7 +17,14 @@ namespace MultiTerminal.Dialogs
     public partial class SettingsWpfDialog : Window
     {
         private readonly SettingsService _settings;
+        private readonly OwnerProfileService _ownerProfileService;
         private List<ClaudeCommand> _commands;
+
+        /// <summary>
+        /// True if the user edited their owner profile during this settings session.
+        /// MainForm checks this to know if the profile was updated.
+        /// </summary>
+        public bool OwnerProfileEdited { get; private set; }
 
         // Font size options
         private static readonly float[] UiFontSizes = { 8f, 9f, 10f, 11f, 12f, 14f };
@@ -39,14 +48,17 @@ namespace MultiTerminal.Dialogs
         public string AgentPanelCloseMode =>
             AutoCloseRadio.IsChecked == true ? "AutoClose" : "ManualClose";
 
-        public SettingsWpfDialog(SettingsService settings, bool isDark)
+        public SettingsWpfDialog(SettingsService settings, bool isDark, OwnerProfileService ownerProfileService = null)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            _ownerProfileService = ownerProfileService;
             _commands = new List<ClaudeCommand>();
 
             InitializeComponent();
+
             PopulateComboBoxes();
             LoadSettings();
+            LoadProfileSummary();
         }
 
         private void PopulateComboBoxes()
@@ -111,6 +123,9 @@ namespace MultiTerminal.Dialogs
             AutoCloseRadio.IsChecked = closeMode == "AutoClose";
             KeepOpenRadio.IsChecked  = closeMode != "AutoClose";
 
+            // Default working directory
+            DefaultWorkingDirText.Text = _settings.GetDefaultWorkingDirectory() ?? "";
+
             // Claude commands
             _commands = _settings.GetClaudeCommands();
             RefreshCommandsGrid();
@@ -134,12 +149,34 @@ namespace MultiTerminal.Dialogs
                 _settings.SetAgentPanelLayout(AgentPanelLayout);
                 _settings.SetAgentPanelCloseMode(AgentPanelCloseMode);
 
+                _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
+
                 _settings.SetClaudeCommands(_commands);
             }
             finally
             {
                 _settings.EndBatch();
             }
+        }
+
+        // -----------------------------------------------------------------
+        // Browse for default working directory
+        // -----------------------------------------------------------------
+
+        private void BrowseDefaultDirButton_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "Select default working directory for Just Claude",
+                ShowNewFolderButton = true
+            };
+
+            string current = DefaultWorkingDirText.Text?.Trim();
+            if (!string.IsNullOrEmpty(current) && System.IO.Directory.Exists(current))
+                dlg.SelectedPath = current;
+
+            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                DefaultWorkingDirText.Text = dlg.SelectedPath;
         }
 
         // -----------------------------------------------------------------
@@ -256,6 +293,70 @@ namespace MultiTerminal.Dialogs
             var dlg = new CommandInputDialog(title, currentValue);
             dlg.Owner = this;
             return dlg.ShowDialog() == true ? dlg.EnteredValue : null;
+        }
+
+        // -----------------------------------------------------------------
+        // User Profile
+        // -----------------------------------------------------------------
+
+        private void LoadProfileSummary()
+        {
+            if (_ownerProfileService == null)
+            {
+                ProfileSummaryText.Text = "Not available";
+                EditProfileButton.IsEnabled = false;
+                return;
+            }
+
+            var profile = _ownerProfileService.GetProfile();
+            if (profile == null || string.IsNullOrWhiteSpace(profile.FullName))
+            {
+                ProfileSummaryText.Text = "Not configured";
+            }
+            else
+            {
+                var summary = $"{profile.FullName} <{profile.Email}>";
+                if (!string.IsNullOrWhiteSpace(profile.GitHubUsername))
+                    summary += $"  |  GitHub: {profile.GitHubUsername}";
+                if (profile.HasGitHubToken)
+                    summary += "  |  Token: Set";
+                ProfileSummaryText.Text = summary;
+            }
+        }
+
+        private void EditProfileButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_ownerProfileService == null) return;
+
+            var dialog = new OwnerProfileDialog();
+            dialog.Owner = this;
+
+            var existing = _ownerProfileService.GetProfile();
+            if (existing != null)
+            {
+                dialog.LoadExisting(existing.FullName, existing.Email,
+                    existing.GitHubUsername, existing.HasGitHubToken);
+            }
+
+            if (dialog.ShowDialog() == true)
+            {
+                var profile = existing ?? new Models.OwnerProfile();
+                profile.FullName = dialog.FullName;
+                profile.Email = dialog.Email;
+                profile.GitHubUsername = string.IsNullOrWhiteSpace(dialog.GitHubUsername)
+                    ? null : dialog.GitHubUsername;
+
+                _ownerProfileService.SaveProfile(profile);
+
+                var token = dialog.GitHubToken;
+                if (!string.IsNullOrEmpty(token) && token != "placeholder-existing")
+                {
+                    _ownerProfileService.SaveGitHubToken(token);
+                }
+
+                OwnerProfileEdited = true;
+                LoadProfileSummary();
+            }
         }
 
         // -----------------------------------------------------------------

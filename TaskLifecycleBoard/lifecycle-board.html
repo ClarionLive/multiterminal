@@ -245,6 +245,249 @@ body.light .chip-assignee {
 .chip-status.done { background: rgba(16,185,129,0.15); color: #10B981; border: 1px solid rgba(16,185,129,0.3); }
 
 /* ============================================================
+   Description Bar (between header and columns)
+   ============================================================ */
+.description-bar {
+    padding: 4px 16px 6px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border-column);
+    flex-shrink: 0;
+    min-height: 0;
+}
+
+.description-text {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    cursor: text;
+    padding: 2px 4px;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    max-height: 2.8em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.description-text:hover {
+    border-color: var(--border-input);
+    background: var(--bg-input);
+}
+
+.description-text.editing {
+    background: var(--bg-input-focus);
+    border-color: #3B82F6;
+    outline: none;
+    max-height: none;
+    overflow: visible;
+    display: block;
+    -webkit-line-clamp: unset;
+    white-space: pre-wrap;
+}
+
+.description-text.empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* ============================================================
+   Main Content Area (notes stream + columns)
+   ============================================================ */
+.main-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+}
+
+/* ============================================================
+   Notes Stream Panel (left sidebar)
+   ============================================================ */
+.notes-stream-panel {
+    display: flex;
+    flex-direction: column;
+    width: 280px;
+    min-width: 200px;
+    max-width: 400px;
+    background: var(--bg-column);
+    border-right: 1px solid var(--border-column);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.notes-stream-header {
+    padding: 8px 10px 6px;
+    border-bottom: 1px solid var(--border-column);
+    flex-shrink: 0;
+}
+
+.notes-stream-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.notes-stream-controls {
+    display: flex;
+    gap: 6px;
+}
+
+.notes-stream-filter {
+    flex: 0 0 auto;
+    padding: 3px 6px;
+    border: 1px solid var(--border-input);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 11px;
+    outline: none;
+    cursor: pointer;
+}
+
+.notes-stream-filter:focus {
+    border-color: #3B82F6;
+}
+
+.notes-stream-search {
+    flex: 1;
+    padding: 3px 6px;
+    border: 1px solid var(--border-input);
+    border-radius: 4px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 11px;
+    outline: none;
+    min-width: 0;
+}
+
+.notes-stream-search:focus {
+    border-color: #3B82F6;
+}
+
+.notes-stream-search::placeholder {
+    color: var(--text-muted);
+}
+
+.notes-stream-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px;
+}
+
+.notes-stream-empty {
+    padding: 16px 8px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-style: italic;
+    text-align: center;
+}
+
+/* Individual note entry in stream */
+.stream-note {
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    border-radius: 5px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-card);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.stream-note:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--text-muted);
+}
+
+.stream-note-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 3px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.stream-note-type {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    font-weight: 500;
+    flex-shrink: 0;
+}
+
+.stream-note-type.type-plan {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3B82F6;
+}
+.stream-note-type.type-impl {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10B981;
+}
+.stream-note-type.type-test {
+    background: rgba(249, 115, 22, 0.15);
+    color: #F97316;
+}
+.stream-note-type.type-continuation {
+    background: rgba(139, 92, 246, 0.15);
+    color: #A78BFA;
+}
+.stream-note-type.type-checklist {
+    background: rgba(236, 72, 153, 0.15);
+    color: #EC4899;
+}
+.stream-note-type.type-report {
+    background: rgba(245, 158, 11, 0.15);
+    color: #F59E0B;
+}
+
+.stream-note-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.stream-note-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.stream-note-preview {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-word;
+}
+
+/* Resize handle between notes stream and columns */
+.resize-handle {
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    flex-shrink: 0;
+    transition: background 0.15s;
+    position: relative;
+}
+
+.resize-handle:hover,
+.resize-handle.dragging {
+    background: #3B82F6;
+}
+
+/* ============================================================
    Columns Area
    ============================================================ */
 .columns-area {
@@ -663,165 +906,8 @@ body.light .badge-assignee {
 }
 
 /* ============================================================
-   Column Footer (Phase Notes) - Collapsible
+   (Intentionally blank — column footer notes replaced by notes stream)
    ============================================================ */
-.column-footer {
-    flex-shrink: 0;
-    border-top: 1px solid var(--border-column);
-}
-
-.notes-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    width: 100%;
-    padding: 6px 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    text-align: left;
-    transition: background 0.15s ease, color 0.15s ease;
-}
-
-.notes-toggle:hover {
-    background: var(--bg-card);
-    color: var(--text-secondary);
-}
-
-.notes-toggle-arrow {
-    font-size: 9px;
-    transition: transform 0.2s ease;
-    display: inline-block;
-}
-
-.notes-toggle-arrow.expanded {
-    transform: rotate(90deg);
-}
-
-.notes-content {
-    display: none;
-    padding: 0 8px 8px;
-}
-
-.notes-content.expanded {
-    display: block;
-}
-
-.notes-textarea {
-    width: 100%;
-    min-height: 80px;
-    max-height: 400px;
-    padding: 6px 8px;
-    border: 1px solid var(--border-input);
-    border-radius: 4px;
-    background: var(--bg-notes);
-    color: var(--text-primary);
-    font-family: "Segoe UI", system-ui, sans-serif;
-    font-size: 11.5px;
-    line-height: 1.45;
-    resize: vertical;
-    outline: none;
-    transition: border-color 0.15s ease;
-}
-
-.notes-textarea:focus {
-    border-color: #3B82F6;
-}
-
-.notes-textarea::placeholder {
-    color: var(--text-muted);
-}
-
-/* ============================================================
-   Session Notes Strip (Footer)
-   ============================================================ */
-.session-footer {
-    flex-shrink: 0;
-    border-top: 1px solid var(--border-column);
-    background: var(--bg-footer);
-}
-
-.session-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 7px 14px;
-    border: none;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    text-align: left;
-    transition: background 0.15s ease;
-}
-
-.session-toggle:hover {
-    background: var(--bg-card);
-}
-
-.session-icon {
-    font-size: 13px;
-}
-
-.session-content {
-    display: none;
-    padding: 0 14px 10px;
-}
-
-.session-content.expanded {
-    display: block;
-}
-
-.session-textarea {
-    width: 100%;
-    min-height: 80px;
-    max-height: 500px;
-    padding: 6px 8px;
-    border: 1px solid var(--border-input);
-    border-radius: 4px;
-    background: var(--bg-notes);
-    color: var(--text-primary);
-    font-family: "Segoe UI", system-ui, sans-serif;
-    font-size: 12px;
-    line-height: 1.45;
-    resize: vertical;
-    outline: none;
-    transition: border-color 0.15s ease;
-}
-
-.session-textarea:focus {
-    border-color: #3B82F6;
-}
-
-.session-textarea::placeholder {
-    color: var(--text-muted);
-}
-
-/* ============================================================
-   Notes Toggle Bar (holds toggle + expand button)
-   ============================================================ */
-.notes-toggle-bar {
-    display: flex;
-    align-items: center;
-}
-
-.notes-toggle-bar .notes-toggle {
-    flex: 1;
-}
-
-.session-toggle-bar {
-    display: flex;
-    align-items: center;
-}
-
-.session-toggle-bar .session-toggle {
-    flex: 1;
-}
 
 /* ============================================================
    Markdown Rendered View (shared)
@@ -871,69 +957,11 @@ body.light .badge-assignee {
     margin: 8px 0;
 }
 
-/* Phase Notes Rendered */
-.notes-rendered {
-    padding: 8px 10px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: var(--bg-notes);
-    color: var(--text-primary);
-    font-size: 11.5px;
-    line-height: 1.55;
-    min-height: 40px;
-    max-height: 250px;
-    overflow-y: auto;
-    cursor: pointer;
-    transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.notes-rendered:hover {
-    border-color: var(--border-input);
-}
-
+/* Empty state for expand overlay (shared) */
 .notes-rendered-empty {
     color: var(--text-muted);
     font-style: italic;
     font-size: 11px;
-}
-
-/* Session Notes Rendered */
-.session-rendered {
-    padding: 10px 12px;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    background: var(--bg-notes);
-    color: var(--text-primary);
-    font-size: 12px;
-    line-height: 1.6;
-    min-height: 48px;
-    max-height: 400px;
-    overflow-y: auto;
-    cursor: pointer;
-    transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.session-rendered:hover {
-    border-color: var(--border-input);
-}
-
-/* Notes Toolbar Buttons (expand/edit) */
-.notes-toolbar-btn {
-    padding: 3px 7px;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 14px;
-    cursor: pointer;
-    border-radius: 3px;
-    line-height: 1;
-    transition: background 0.15s, color 0.15s;
-    flex-shrink: 0;
-}
-
-.notes-toolbar-btn:hover {
-    background: var(--bg-card);
-    color: var(--text-primary);
 }
 
 /* ============================================================
@@ -1145,28 +1173,6 @@ body.light .badge-assignee {
     border-color: #3B82F6;
 }
 
-.close-board-btn {
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border-card);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 18px;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
-    margin-left: 4px;
-}
-
-.close-board-btn:hover {
-    background: #DC2626;
-    color: #fff;
-    border-color: #DC2626;
-}
 
 /* ============================================================
    Gear Popover
@@ -1926,7 +1932,6 @@ body.light .helper-chip {
         <div style="position: relative;">
             <button class="gear-btn" id="gearBtn" title="Task settings">&#x2699;</button>
         </div>
-        <button class="close-board-btn" id="closeBoardBtn" title="Close">&#x2715;</button>
     </div>
 
     <!-- Gear Popover Overlay -->
@@ -2068,136 +2073,103 @@ body.light .helper-chip {
         </div>
     </div>
 
-    <!-- Columns -->
-    <div class="columns-area" id="columnsArea">
-        <!-- Planning Column -->
-        <div class="column" data-status="pending">
-            <div class="column-header">
-                <div class="column-title">
-                    <span class="column-icon">&#x1F4CB;</span>
-                    <span>Planning</span>
-                </div>
-                <div class="column-header-right">
-                    <span class="column-count" data-count="pending">0</span>
-                    <button class="column-add-btn" data-add-status="pending" title="Add card">+</button>
-                </div>
-            </div>
-            <div class="column-body" data-drop="pending"></div>
-            <div class="column-footer">
-                <div class="notes-toggle-bar">
-                    <button class="notes-toggle" data-notes-toggle="planning">
-                        <span class="notes-toggle-arrow">&#x25B6;</span>
-                        Plan Notes
-                    </button>
-                    <button class="notes-toolbar-btn" data-expand="planning" title="Pop out">&#x2197;</button>
-                </div>
-                <div class="notes-content" data-notes="planning">
-                    <div class="notes-rendered md-content" data-rendered="planning"></div>
-                    <textarea class="notes-textarea hidden" data-phase="planning" placeholder="Planning notes..."></textarea>
-                </div>
-            </div>
-        </div>
-
-        <!-- Coding Column -->
-        <div class="column" data-status="coding">
-            <div class="column-header">
-                <div class="column-title">
-                    <span class="column-icon">&#x1F528;</span>
-                    <span>Coding</span>
-                </div>
-                <div class="column-header-right">
-                    <span class="column-count" data-count="coding">0</span>
-                    <button class="column-add-btn" data-add-status="coding" title="Add card">+</button>
-                </div>
-            </div>
-            <div class="column-body" data-drop="coding"></div>
-            <div class="column-footer">
-                <div class="notes-toggle-bar">
-                    <button class="notes-toggle" data-notes-toggle="coding">
-                        <span class="notes-toggle-arrow">&#x25B6;</span>
-                        Impl Notes
-                    </button>
-                    <button class="notes-toolbar-btn" data-expand="coding" title="Pop out">&#x2197;</button>
-                </div>
-                <div class="notes-content" data-notes="coding">
-                    <div class="notes-rendered md-content" data-rendered="coding"></div>
-                    <textarea class="notes-textarea hidden" data-phase="coding" placeholder="Implementation notes..."></textarea>
-                </div>
-            </div>
-        </div>
-
-        <!-- Testing Column -->
-        <div class="column" data-status="testing">
-            <div class="column-header">
-                <div class="column-title">
-                    <span class="column-icon">&#x1F9EA;</span>
-                    <span>Testing</span>
-                </div>
-                <div class="column-header-right">
-                    <span class="column-count" data-count="testing">0</span>
-                    <button class="column-add-btn" data-add-status="testing" title="Add card">+</button>
-                </div>
-            </div>
-            <div class="column-body" data-drop="testing"></div>
-            <div class="column-footer">
-                <div class="notes-toggle-bar">
-                    <button class="notes-toggle" data-notes-toggle="testing">
-                        <span class="notes-toggle-arrow">&#x25B6;</span>
-                        Test Notes
-                    </button>
-                    <button class="notes-toolbar-btn" data-expand="testing" title="Pop out">&#x2197;</button>
-                </div>
-                <div class="notes-content" data-notes="testing">
-                    <div class="notes-rendered md-content" data-rendered="testing"></div>
-                    <textarea class="notes-textarea hidden" data-phase="testing" placeholder="Test results..."></textarea>
-                </div>
-            </div>
-        </div>
-
-        <!-- Done Column -->
-        <div class="column" data-status="done">
-            <div class="column-header">
-                <div class="column-title">
-                    <span class="column-icon">&#x2705;</span>
-                    <span>Done</span>
-                </div>
-                <div class="column-header-right">
-                    <span class="column-count" data-count="done">0</span>
-                    <button class="column-add-btn" data-add-status="done" title="Add card">+</button>
-                </div>
-            </div>
-            <div class="column-body" data-drop="done"></div>
-            <div class="column-footer">
-                <div class="notes-toggle-bar">
-                    <button class="notes-toggle" data-notes-toggle="done">
-                        <span class="notes-toggle-arrow">&#x25B6;</span>
-                        Done Notes
-                    </button>
-                    <button class="notes-toolbar-btn" data-expand="done" title="Pop out">&#x2197;</button>
-                </div>
-                <div class="notes-content" data-notes="done">
-                    <div class="notes-rendered md-content" data-rendered="done"></div>
-                    <textarea class="notes-textarea hidden" data-phase="done" placeholder="Completion notes..." readonly></textarea>
-                </div>
-            </div>
-        </div>
+    <!-- Description Bar -->
+    <div class="description-bar">
+        <div class="description-text empty" id="descriptionText" title="Click to edit description">Add a description...</div>
     </div>
 
-    <!-- Session Notes Strip -->
-    <div class="session-footer">
-        <div class="session-toggle-bar">
-            <button class="session-toggle" id="sessionToggle">
-                <span class="notes-toggle-arrow" id="sessionArrow">&#x25B6;</span>
-                <span class="session-icon">&#x1F4DD;</span>
-                Session Notes
-            </button>
-            <button class="notes-toolbar-btn" id="sessionExpandBtn" title="Pop out">&#x2197;</button>
+    <!-- Main Content: Notes Stream + Columns -->
+    <div class="main-content">
+
+        <!-- Notes Stream Panel (left) -->
+        <div class="notes-stream-panel" id="notesStreamPanel">
+            <div class="notes-stream-header">
+                <div class="notes-stream-title">Notes</div>
+                <div class="notes-stream-controls">
+                    <select class="notes-stream-filter" id="notesStreamFilter">
+                        <option value="all">All</option>
+                        <option value="plan">Plan</option>
+                        <option value="checklist">Checklist</option>
+                        <option value="impl">Implementation</option>
+                        <option value="test">Test Results</option>
+                        <option value="continuation">Continuation</option>
+                        <option value="report">Reports</option>
+                    </select>
+                    <input type="text" class="notes-stream-search" id="notesStreamSearch" placeholder="Search...">
+                </div>
+            </div>
+            <div class="notes-stream-body" id="notesStreamBody">
+                <div class="notes-stream-empty">No notes yet</div>
+            </div>
         </div>
-        <div class="session-content" id="sessionContent">
-            <div class="session-rendered md-content" id="sessionRendered"></div>
-            <textarea class="session-textarea hidden" id="sessionNotes" placeholder="Where to pick up next session..."></textarea>
+
+        <!-- Resize Handle -->
+        <div class="resize-handle" id="resizeHandle"></div>
+
+        <!-- Columns -->
+        <div class="columns-area" id="columnsArea">
+            <!-- Planning Column -->
+            <div class="column" data-status="pending">
+                <div class="column-header">
+                    <div class="column-title">
+                        <span class="column-icon">&#x1F4CB;</span>
+                        <span>Planning</span>
+                    </div>
+                    <div class="column-header-right">
+                        <span class="column-count" data-count="pending">0</span>
+                        <button class="column-add-btn" data-add-status="pending" title="Add card">+</button>
+                    </div>
+                </div>
+                <div class="column-body" data-drop="pending"></div>
+            </div>
+
+            <!-- Coding Column -->
+            <div class="column" data-status="coding">
+                <div class="column-header">
+                    <div class="column-title">
+                        <span class="column-icon">&#x1F528;</span>
+                        <span>Coding</span>
+                    </div>
+                    <div class="column-header-right">
+                        <span class="column-count" data-count="coding">0</span>
+                        <button class="column-add-btn" data-add-status="coding" title="Add card">+</button>
+                    </div>
+                </div>
+                <div class="column-body" data-drop="coding"></div>
+            </div>
+
+            <!-- Testing Column -->
+            <div class="column" data-status="testing">
+                <div class="column-header">
+                    <div class="column-title">
+                        <span class="column-icon">&#x1F9EA;</span>
+                        <span>Testing</span>
+                    </div>
+                    <div class="column-header-right">
+                        <span class="column-count" data-count="testing">0</span>
+                        <button class="column-add-btn" data-add-status="testing" title="Add card">+</button>
+                    </div>
+                </div>
+                <div class="column-body" data-drop="testing"></div>
+            </div>
+
+            <!-- Done Column -->
+            <div class="column" data-status="done">
+                <div class="column-header">
+                    <div class="column-title">
+                        <span class="column-icon">&#x2705;</span>
+                        <span>Done</span>
+                    </div>
+                    <div class="column-header-right">
+                        <span class="column-count" data-count="done">0</span>
+                        <button class="column-add-btn" data-add-status="done" title="Add card">+</button>
+                    </div>
+                </div>
+                <div class="column-body" data-drop="done"></div>
+            </div>
         </div>
-    </div>
+
+    </div><!-- /main-content -->
 
     <!-- Expand Overlay (fullscreen pop-out for reading notes) -->
     <div class="expand-overlay" id="expandOverlay">
@@ -2225,7 +2197,7 @@ body.light .helper-chip {
     let currentTask = null;
     let currentAttachments = [];
     let checklist = [];       // Parsed checklist items
-    let originalIndices = []; // Maps rendered order back to original array index
+    // (originalIndices removed — unused after notes stream refactor)
     let terminals = [];
     let members = [];   // All team members (online + offline) from profiles
     let projects = [];
@@ -2297,6 +2269,11 @@ body.light .helper-chip {
 
         // Clean up: merge adjacent blockquotes
         html = html.replace(/<\/blockquote>\n<blockquote>/g, '<br>');
+
+        // Defense-in-depth: strip any script tags or event handlers that
+        // could theoretically result from regex edge cases
+        html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
+        html = html.replace(/\bon\w+\s*=/gi, "data-blocked=");
 
         return html;
     }
@@ -2483,9 +2460,9 @@ body.light .helper-chip {
         }
 
         renderHeader();
+        renderDescription();
         renderColumns();
-        renderPhaseNotes();
-        renderSessionNotes();
+        renderNotesStream();
     }
 
     // -----------------------------------------------------------
@@ -2595,6 +2572,7 @@ body.light .helper-chip {
     // Columns Rendering
     // -----------------------------------------------------------
     var STATUS_ORDER = ["pending", "coding", "testing", "done"];
+    var STATUS_LABELS = { pending: "Planning", coding: "Coding", testing: "Testing", done: "Done" };
 
     function renderColumns() {
         // Group cards by status, tracking original index
@@ -2899,7 +2877,7 @@ body.light .helper-chip {
         if (now - invalidDropThrottle < 2000) return; // throttle: one toast per 2s
         invalidDropThrottle = now;
 
-        var statusLabels = { pending: "Planning", coding: "Coding", testing: "Testing", done: "Done" };
+        var statusLabels = STATUS_LABELS;
         var fromLabel = statusLabels[fromStatus] || fromStatus;
         var toLabel = statusLabels[toStatus] || toStatus;
         var toast = document.getElementById("invalidDropToast");
@@ -2966,19 +2944,25 @@ body.light .helper-chip {
         var item = checklist[cardIndex];
         var itemName = item ? (item.Item || "Card") : "Card";
 
-        var statusLabels = { pending: "Planning", coding: "Coding", testing: "Testing", done: "Done" };
+        var statusLabels = STATUS_LABELS;
         var fromLabel = statusLabels[oldStatus] || oldStatus;
         var toLabel = statusLabels[newStatus] || newStatus;
 
         document.getElementById("transitionPromptHeader").textContent =
             "Moving: " + (itemName.length > 40 ? itemName.substring(0, 40) + "..." : itemName);
 
-        var badgeClass = "to-" + newStatus;
-        document.getElementById("transitionPromptContext").innerHTML =
-            '<span class="transition-prompt-badge from">' + fromLabel + '</span>' +
-            ' &rarr; ' +
-            '<span class="transition-prompt-badge ' + badgeClass + '">' + toLabel + '</span>' +
-            '<br><br>' + getTransitionPromptText(oldStatus, newStatus);
+        var contextEl = document.getElementById("transitionPromptContext");
+        contextEl.innerHTML = "";
+        var fromBadge = createEl("span", "transition-prompt-badge from");
+        fromBadge.textContent = fromLabel;
+        contextEl.appendChild(fromBadge);
+        contextEl.appendChild(document.createTextNode(" \u2192 "));
+        var toBadge = createEl("span", "transition-prompt-badge to-" + newStatus);
+        toBadge.textContent = toLabel;
+        contextEl.appendChild(toBadge);
+        contextEl.appendChild(document.createElement("br"));
+        contextEl.appendChild(document.createElement("br"));
+        contextEl.appendChild(document.createTextNode(getTransitionPromptText(oldStatus, newStatus)));
 
         var textarea = document.getElementById("transitionPromptNotes");
         textarea.value = "";
@@ -3230,181 +3214,323 @@ body.light .helper-chip {
     }
 
     // -----------------------------------------------------------
-    // Phase Notes
+    // Description Bar
     // -----------------------------------------------------------
-    var phaseDataMap = {
-        planning: "plan",
-        coding: "implementationSummary",
-        testing: "testResults",
-        done: null
-    };
-
-    function getPhaseNotes(phase) {
-        if (!currentTask) return "";
-        if (phase === "planning") return currentTask.plan || "";
-        if (phase === "coding") return currentTask.implementationSummary || "";
-        if (phase === "testing") return currentTask.testResults || "";
-        return "";
+    function renderDescription() {
+        if (!currentTask) return;
+        var el = document.getElementById("descriptionText");
+        var desc = currentTask.description || "";
+        if (desc) {
+            el.textContent = desc;
+            el.classList.remove("empty");
+        } else {
+            el.textContent = "Add a description...";
+            el.classList.add("empty");
+        }
     }
 
-    var phaseLabels = {
-        planning: "Plan Notes",
-        coding: "Implementation Notes",
-        testing: "Test Notes",
-        done: "Done Notes",
-        session: "Session Notes"
-    };
+    function initDescriptionBar() {
+        var el = document.getElementById("descriptionText");
 
-    function renderPhaseNotes() {
-        if (!currentTask) return;
-
-        ["planning", "coding", "testing", "done"].forEach(function (phase) {
-            var text = getPhaseNotes(phase);
-            var rendered = document.querySelector('[data-rendered="' + phase + '"]');
-            var ta = document.querySelector('[data-phase="' + phase + '"]');
-
-            if (rendered) {
-                if (text) {
-                    rendered.innerHTML = renderMarkdown(text);
-                } else {
-                    rendered.innerHTML = '<span class="notes-rendered-empty">Click to edit...</span>';
-                }
+        el.addEventListener("click", function () {
+            if (el.contentEditable === "true") return;
+            var desc = (currentTask && currentTask.description) || "";
+            el.textContent = desc;
+            el.classList.remove("empty");
+            el.contentEditable = "true";
+            el.classList.add("editing");
+            el.focus();
+            if (desc) {
+                var range = document.createRange();
+                range.selectNodeContents(el);
+                var sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
             }
-            if (ta && document.activeElement !== ta) {
-                ta.value = text;
+        });
+
+        el.addEventListener("blur", function () {
+            el.contentEditable = "false";
+            el.classList.remove("editing");
+            var newDesc = el.textContent.trim();
+            if (currentTask && newDesc !== (currentTask.description || "")) {
+                currentTask.description = newDesc;
+                sendToHost({ type: "update_description", description: newDesc });
+            }
+            renderDescription();
+        });
+
+        el.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                el.blur();
+            } else if (e.key === "Escape") {
+                el.textContent = (currentTask && currentTask.description) || "";
+                el.blur();
             }
         });
     }
 
-    function initPhaseNotesListeners() {
-        // Textarea blur → save and switch back to rendered view
-        document.querySelectorAll(".notes-textarea[data-phase]").forEach(function (ta) {
-            var phase = ta.dataset.phase;
-            if (phase === "done") return; // read-only
+    // -----------------------------------------------------------
+    // Notes Stream (unified notes feed)
+    // -----------------------------------------------------------
+    function buildNotesStream() {
+        if (!currentTask) return [];
+        var notes = [];
 
-            ta.addEventListener("blur", function () {
-                sendToHost({
-                    type: "update_phase_notes",
-                    phase: phase,
-                    notes: ta.value
+        // Plan
+        var plan = currentTask.plan || "";
+        if (plan) {
+            notes.push({
+                type: "plan",
+                typeLabel: "Plan",
+                title: "Implementation Plan",
+                text: plan,
+                phase: "planning",
+                sortKey: 0
+            });
+        }
+
+        // Implementation Summary
+        var impl = currentTask.implementationSummary || "";
+        if (impl) {
+            notes.push({
+                type: "impl",
+                typeLabel: "Impl",
+                title: "Implementation Summary",
+                text: impl,
+                phase: "coding",
+                sortKey: 1
+            });
+        }
+
+        // Test Results
+        var testRes = currentTask.testResults || "";
+        if (testRes) {
+            notes.push({
+                type: "test",
+                typeLabel: "Test",
+                title: "Test Results",
+                text: testRes,
+                phase: "testing",
+                sortKey: 2
+            });
+        }
+
+        // Continuation Notes
+        var cont = currentTask.continuationNotes || "";
+        if (cont) {
+            notes.push({
+                type: "continuation",
+                typeLabel: "Session",
+                title: "Continuation Notes",
+                text: cont,
+                phase: "session",
+                sortKey: 3
+            });
+        }
+
+        // Checklist Notes (grouped per item)
+        for (var i = 0; i < checklist.length; i++) {
+            var item = checklist[i];
+            if (item.Notes && item.Notes.length > 0) {
+                var itemLabel = item.Item || "Item " + (i + 1);
+                if (itemLabel.length > 50) itemLabel = itemLabel.substring(0, 50) + "...";
+                var combined = [];
+                for (var n = item.Notes.length - 1; n >= 0; n--) {
+                    var note = item.Notes[n];
+                    var line = "";
+                    if (note.By) line += note.By;
+                    if (note.Transition) line += " (" + note.Transition + ")";
+                    if (note.Text) line += ": " + note.Text;
+                    combined.push(line);
+                }
+                notes.push({
+                    type: "checklist",
+                    typeLabel: "Checklist",
+                    title: itemLabel,
+                    text: combined.join("\n"),
+                    meta: item.Notes.length + " note" + (item.Notes.length !== 1 ? "s" : ""),
+                    sortKey: 4 + i
                 });
-                // Switch back to rendered view
-                var rendered = document.querySelector('[data-rendered="' + phase + '"]');
-                if (rendered) {
-                    var text = ta.value;
-                    rendered.innerHTML = text ? renderMarkdown(text) : '<span class="notes-rendered-empty">Click to edit...</span>';
-                    rendered.classList.remove("hidden");
-                }
-                ta.classList.add("hidden");
+            }
+        }
+
+        // Agent Reports (from task.reports if available)
+        if (currentTask.reports && currentTask.reports.length > 0) {
+            for (var r = 0; r < currentTask.reports.length; r++) {
+                var report = currentTask.reports[r];
+                var reportTitle = (report.agentName || "Agent") + " Report";
+                if (report.verdict) reportTitle += " — " + report.verdict;
+                if (report.score !== undefined && report.score !== null) reportTitle += " (" + report.score + "/100)";
+                notes.push({
+                    type: "report",
+                    typeLabel: "Report",
+                    title: reportTitle,
+                    text: report.reportContent || "",
+                    meta: report.agentName,
+                    sortKey: 100 + r
+                });
+            }
+        }
+
+        return notes;
+    }
+
+    function renderNotesStream() {
+        var container = document.getElementById("notesStreamBody");
+        if (!container) return;
+
+        var allNotes = buildNotesStream();
+        var filterValue = document.getElementById("notesStreamFilter").value;
+        var searchText = (document.getElementById("notesStreamSearch").value || "").toLowerCase().trim();
+
+        // Apply filter
+        var filtered = allNotes;
+        if (filterValue !== "all") {
+            filtered = filtered.filter(function (n) { return n.type === filterValue; });
+        }
+
+        // Apply search
+        if (searchText) {
+            filtered = filtered.filter(function (n) {
+                return (n.title && n.title.toLowerCase().indexOf(searchText) !== -1) ||
+                       (n.text && n.text.toLowerCase().indexOf(searchText) !== -1);
+            });
+        }
+
+        container.innerHTML = "";
+
+        if (filtered.length === 0) {
+            var empty = createEl("div", "notes-stream-empty");
+            empty.textContent = searchText || filterValue !== "all" ? "No matching notes" : "No notes yet";
+            container.appendChild(empty);
+            return;
+        }
+
+        filtered.forEach(function (note) {
+            var entry = createEl("div", "stream-note");
+
+            // Header line: type badge + title + meta
+            var header = createEl("div", "stream-note-header");
+
+            var typeBadge = createEl("span", "stream-note-type type-" + note.type);
+            typeBadge.textContent = note.typeLabel;
+            header.appendChild(typeBadge);
+
+            var titleSpan = createEl("span", "stream-note-title");
+            titleSpan.textContent = note.title;
+            header.appendChild(titleSpan);
+
+            if (note.meta) {
+                var metaSpan = createEl("span", "stream-note-meta");
+                metaSpan.textContent = note.meta;
+                header.appendChild(metaSpan);
+            }
+
+            entry.appendChild(header);
+
+            // Preview (2 lines)
+            var preview = createEl("div", "stream-note-preview");
+            // Strip markdown for preview
+            var plainText = note.text.replace(/[#*`_~>\[\]()]/g, "").replace(/\n+/g, " ").trim();
+            preview.textContent = plainText;
+            entry.appendChild(preview);
+
+            // Click to expand full-window
+            entry.addEventListener("click", function () {
+                openExpandOverlayFromStream(note);
             });
 
-            ta.addEventListener("keydown", function (e) {
-                if (e.key === "Escape") {
-                    ta.blur();
-                }
-            });
+            container.appendChild(entry);
         });
+    }
 
-        // Double-click rendered → switch to edit mode
-        document.querySelectorAll(".notes-rendered[data-rendered]").forEach(function (rendered) {
-            var phase = rendered.dataset.rendered;
-            if (phase === "done") return; // read-only
+    function openExpandOverlayFromStream(note) {
+        var overlay = document.getElementById("expandOverlay");
+        var title = document.getElementById("expandTitle");
+        var body = document.getElementById("expandBody");
+        var textarea = document.getElementById("expandTextarea");
+        var editBtn = document.getElementById("expandEditBtn");
 
-            rendered.addEventListener("dblclick", function () {
-                var ta = document.querySelector('[data-phase="' + phase + '"]');
-                if (!ta) return;
-                rendered.classList.add("hidden");
-                ta.classList.remove("hidden");
-                ta.focus();
-            });
+        expandCurrentPhase = note.phase || null;
+        expandEditMode = false;
+
+        title.textContent = note.title;
+        body.innerHTML = note.text ? renderMarkdown(note.text) : '<span class="notes-rendered-empty">No content</span>';
+        body.style.display = "";
+        textarea.classList.remove("visible");
+        textarea.value = note.text || "";
+
+        // Enable editing for plan, impl, test, continuation — not checklist/reports
+        var editable = note.phase && note.type !== "checklist" && note.type !== "report";
+        editBtn.style.display = editable ? "" : "none";
+
+        overlay.classList.add("visible");
+    }
+
+    function initNotesStream() {
+        document.getElementById("notesStreamFilter").addEventListener("change", function () {
+            renderNotesStream();
         });
-
-        // Toggle buttons
-        document.querySelectorAll("[data-notes-toggle]").forEach(function (btn) {
-            var phase = btn.dataset.notesToggle;
-            btn.addEventListener("click", function () {
-                var content = document.querySelector('[data-notes="' + phase + '"]');
-                var arrow = btn.querySelector(".notes-toggle-arrow");
-                if (content) {
-                    content.classList.toggle("expanded");
-                    if (arrow) arrow.classList.toggle("expanded");
-                }
-            });
-        });
-
-        // Expand buttons
-        document.querySelectorAll("[data-expand]").forEach(function (btn) {
-            btn.addEventListener("click", function (e) {
-                e.stopPropagation();
-                var phase = btn.dataset.expand;
-                openExpandOverlay(phase);
-            });
+        document.getElementById("notesStreamSearch").addEventListener("input", function () {
+            renderNotesStream();
         });
     }
 
     // -----------------------------------------------------------
-    // Session Notes
+    // Resize Handle for Notes Stream Panel
     // -----------------------------------------------------------
-    function renderSessionNotes() {
+    function initResizeHandle() {
+        var handle = document.getElementById("resizeHandle");
+        var panel = document.getElementById("notesStreamPanel");
+        var isResizing = false;
+
+        handle.addEventListener("mousedown", function (e) {
+            isResizing = true;
+            handle.classList.add("dragging");
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            e.preventDefault();
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!isResizing) return;
+            var panelRect = panel.getBoundingClientRect();
+            var newWidth = e.clientX - panelRect.left;
+            if (newWidth < 200) newWidth = 200;
+            if (newWidth > 400) newWidth = 400;
+            panel.style.width = newWidth + "px";
+        });
+
+        document.addEventListener("mouseup", function () {
+            if (isResizing) {
+                isResizing = false;
+                handle.classList.remove("dragging");
+                document.body.style.cursor = "";
+                document.body.style.userSelect = "";
+            }
+        });
+
+        // Reset resize state if mouse leaves browser window
+        window.addEventListener("blur", function () {
+            if (isResizing) {
+                isResizing = false;
+                handle.classList.remove("dragging");
+                document.body.style.cursor = "";
+                document.body.style.userSelect = "";
+            }
+        });
+    }
+
+    // -----------------------------------------------------------
+    // Helper: update local task field from phase name
+    // -----------------------------------------------------------
+    function updateLocalPhaseField(phase, text) {
         if (!currentTask) return;
-        var ta = document.getElementById("sessionNotes");
-        var rendered = document.getElementById("sessionRendered");
-        var text = currentTask.continuationNotes || "";
-
-        if (ta && document.activeElement !== ta) {
-            ta.value = text;
-        }
-        if (rendered) {
-            if (text) {
-                rendered.innerHTML = renderMarkdown(text);
-            } else {
-                rendered.innerHTML = '<span class="notes-rendered-empty">Click to add session notes...</span>';
-            }
-        }
-    }
-
-    function initSessionNotesListeners() {
-        var toggle = document.getElementById("sessionToggle");
-        var content = document.getElementById("sessionContent");
-        var arrow = document.getElementById("sessionArrow");
-        var ta = document.getElementById("sessionNotes");
-        var rendered = document.getElementById("sessionRendered");
-
-        toggle.addEventListener("click", function () {
-            content.classList.toggle("expanded");
-            arrow.classList.toggle("expanded");
-        });
-
-        // Double-click rendered → switch to edit mode
-        rendered.addEventListener("dblclick", function () {
-            rendered.classList.add("hidden");
-            ta.classList.remove("hidden");
-            ta.focus();
-        });
-
-        // Blur → save and switch back to rendered view
-        ta.addEventListener("blur", function () {
-            sendToHost({
-                type: "update_continuation_notes",
-                notes: ta.value
-            });
-            var text = ta.value;
-            rendered.innerHTML = text ? renderMarkdown(text) : '<span class="notes-rendered-empty">Click to add session notes...</span>';
-            rendered.classList.remove("hidden");
-            ta.classList.add("hidden");
-        });
-
-        ta.addEventListener("keydown", function (e) {
-            if (e.key === "Escape") {
-                ta.blur();
-            }
-        });
-
-        // Expand button
-        document.getElementById("sessionExpandBtn").addEventListener("click", function (e) {
-            e.stopPropagation();
-            openExpandOverlay("session");
-        });
+        if (phase === "planning") currentTask.plan = text;
+        else if (phase === "coding") currentTask.implementationSummary = text;
+        else if (phase === "testing") currentTask.testResults = text;
     }
 
     // -----------------------------------------------------------
@@ -3412,38 +3538,6 @@ body.light .helper-chip {
     // -----------------------------------------------------------
     var expandCurrentPhase = null;
     var expandEditMode = false;
-
-    function openExpandOverlay(phase) {
-        expandCurrentPhase = phase;
-        expandEditMode = false;
-
-        var overlay = document.getElementById("expandOverlay");
-        var title = document.getElementById("expandTitle");
-        var body = document.getElementById("expandBody");
-        var textarea = document.getElementById("expandTextarea");
-        var editBtn = document.getElementById("expandEditBtn");
-
-        // Get the text content for this phase
-        var text = "";
-        if (phase === "session") {
-            text = currentTask ? (currentTask.continuationNotes || "") : "";
-            title.textContent = "Session Notes";
-        } else {
-            text = getPhaseNotes(phase);
-            title.textContent = phaseLabels[phase] || "Notes";
-        }
-
-        // Show rendered markdown
-        body.innerHTML = text ? renderMarkdown(text) : '<span class="notes-rendered-empty">No content yet</span>';
-        body.style.display = "";
-        textarea.classList.remove("visible");
-        textarea.value = text;
-
-        // Show/hide edit button (done column is read-only)
-        editBtn.style.display = (phase === "done") ? "none" : "";
-
-        overlay.classList.add("visible");
-    }
 
     function closeExpandOverlay() {
         var overlay = document.getElementById("expandOverlay");
@@ -3455,9 +3549,12 @@ body.light .helper-chip {
             var newText = textarea.value;
             if (expandCurrentPhase === "session") {
                 sendToHost({ type: "update_continuation_notes", notes: newText });
+                if (currentTask) currentTask.continuationNotes = newText;
             } else {
                 sendToHost({ type: "update_phase_notes", phase: expandCurrentPhase, notes: newText });
+                updateLocalPhaseField(expandCurrentPhase, newText);
             }
+            renderNotesStream();
         }
 
         overlay.classList.remove("visible");
@@ -3481,12 +3578,15 @@ body.light .helper-chip {
             editBtn.textContent = "Edit";
             expandEditMode = false;
 
-            // Save
+            // Save and update local model
             if (expandCurrentPhase === "session") {
                 sendToHost({ type: "update_continuation_notes", notes: newText });
+                if (currentTask) currentTask.continuationNotes = newText;
             } else if (expandCurrentPhase) {
                 sendToHost({ type: "update_phase_notes", phase: expandCurrentPhase, notes: newText });
+                updateLocalPhaseField(expandCurrentPhase, newText);
             }
+            renderNotesStream();
         } else {
             // Switch to edit mode
             body.style.display = "none";
@@ -3514,12 +3614,6 @@ body.light .helper-chip {
     // Gear Popover
     // -----------------------------------------------------------
     // Close Board Button
-    // -----------------------------------------------------------
-    function initCloseBoardButton() {
-        document.getElementById("closeBoardBtn").addEventListener("click", function () {
-            sendToHost({ type: "close_form" });
-        });
-    }
 
     // -----------------------------------------------------------
     var gearPopoverOpen = false;
@@ -3622,7 +3716,12 @@ body.light .helper-chip {
                 currentTask.helpers.push(val);
                 renderHelperChips();
                 // Refresh the add-helper dropdown to remove the newly added helper
-                addHelperSelect.querySelector('option[value="' + val + '"]').remove();
+                for (var oi = 0; oi < addHelperSelect.options.length; oi++) {
+                    if (addHelperSelect.options[oi].value === val) {
+                        addHelperSelect.options[oi].remove();
+                        break;
+                    }
+                }
             }
             addHelperSelect.value = "";
         };
@@ -3731,6 +3830,7 @@ body.light .helper-chip {
 
         // Re-render chips to reflect changes
         renderHeader();
+        renderDescription();
         closeGearPopover();
     }
 
@@ -3938,6 +4038,7 @@ body.light .helper-chip {
 
         // Re-render to reflect changes
         renderColumns();
+        renderNotesStream();
         closeCardModal();
     }
 
@@ -4045,7 +4146,7 @@ body.light .helper-chip {
             var thumb = createEl("div", "card-modal-image-thumb");
 
             var img = document.createElement("img");
-            img.src = "http://localhost:5050/api/tasks/attachments/" + att.id + "/image";
+            img.src = "http://localhost:5050/api/tasks/attachments/" + encodeURIComponent(att.id) + "/image";
             img.alt = att.fileName;
             img.loading = "lazy";
             thumb.appendChild(img);
@@ -4084,10 +4185,10 @@ body.light .helper-chip {
     function init() {
         initHostListener();
         initDragDrop();
-        initPhaseNotesListeners();
-        initSessionNotesListeners();
+        initDescriptionBar();
+        initNotesStream();
+        initResizeHandle();
         initGearPopover();
-        initCloseBoardButton();
         initCardModal();
         initImageHandlers();
         initTransitionPrompt();

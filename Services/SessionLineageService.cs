@@ -192,6 +192,9 @@ namespace MultiTerminal.Services
             // Get already-imported session IDs in one query
             var importedIds = _db.GetImportedSessionIds();
 
+            // Get currently active session IDs — skip these to avoid importing in-progress sessions
+            var activeIds = _db.GetActiveSessionIds();
+
             // Top-level JSONL files
             foreach (var file in Directory.GetFiles(claudeProjectPath, "*.jsonl"))
             {
@@ -202,9 +205,19 @@ namespace MultiTerminal.Services
                     continue;
                 }
 
+                // Skip sessions that are currently active (being written by a live terminal)
+                if (activeIds.Contains(sessionId))
+                {
+                    result.Skipped++;
+                    continue;
+                }
+
                 try
                 {
-                    var r = ImportSession(file, defaultTaskId, defaultAgentName);
+                    // Look up agent name from hook-written mapping, fall back to default
+                    string agentName = _db.GetSessionAgentName(sessionId) ?? defaultAgentName;
+
+                    var r = ImportSession(file, defaultTaskId, agentName);
                     if (r.Success)
                         result.Imported++;
                     else
@@ -216,7 +229,7 @@ namespace MultiTerminal.Services
                 }
             }
 
-            // Subagent JSONL files inside <sessionId>/subagents/
+            // Subagent JSONL files inside sessionId/subagents/
             foreach (var sessionDir in Directory.GetDirectories(claudeProjectPath))
             {
                 string subagentsDir = Path.Combine(sessionDir, "subagents");
@@ -232,9 +245,19 @@ namespace MultiTerminal.Services
                         continue;
                     }
 
+                    if (activeIds.Contains(sessionId))
+                    {
+                        result.Skipped++;
+                        continue;
+                    }
+
                     try
                     {
-                        var r = ImportSession(file, defaultTaskId, defaultAgentName, sessionType: "subagent");
+                        // For subagents, use parent session's agent name if available
+                        string parentId = Path.GetFileName(sessionDir);
+                        string agentName = _db.GetSessionAgentName(parentId) ?? defaultAgentName;
+
+                        var r = ImportSession(file, defaultTaskId, agentName, sessionType: "subagent");
                         if (r.Success)
                             result.Imported++;
                         else
@@ -272,13 +295,13 @@ namespace MultiTerminal.Services
         /// project path to its .claude/projects/ folder and querying by file path prefix.
         /// Returns null if the project folder doesn't exist or no sessions are found.
         /// </summary>
-        public SessionLineageRecord GetMostRecentSessionForProject(string projectPath)
+        public SessionLineageRecord GetMostRecentSessionForProject(string projectPath, string agentName = null)
         {
             string claudeFolder = GetClaudeProjectFolder(projectPath);
             if (claudeFolder == null)
                 return null;
 
-            return _db.GetMostRecentSessionByFolder(claudeFolder);
+            return _db.GetMostRecentSessionByFolder(claudeFolder, agentName);
         }
 
         /// <summary>
@@ -289,11 +312,38 @@ namespace MultiTerminal.Services
             => _db.UpdateSessionSummary(sessionId, summary);
 
         /// <summary>
+        /// Returns sessions with no summary for a given project path.
+        /// Excludes subagent sessions. Most recent first.
+        /// </summary>
+        public List<SessionLineageRecord> GetUnsummarizedSessions(string projectPath, int limit = 10)
+        {
+            var syncService = new SessionSyncService();
+            string claudeFolder = syncService.GetClaudeProjectPath(projectPath);
+            if (string.IsNullOrEmpty(claudeFolder))
+                return new List<SessionLineageRecord>();
+
+            return _db.GetUnsummarizedSessions(claudeFolder, limit);
+        }
+
+        /// <summary>
         /// Returns the last N assistant messages for a session, ordered most-recent-first.
         /// Provides raw material for lazy summary generation when no cached summary exists.
         /// </summary>
         public List<SessionMessageRecord> GetRecentSessionMessages(string sessionId, int limit = 20)
             => _db.GetRecentSessionMessages(sessionId, "assistant", limit);
+
+        /// <summary>
+        /// Returns sessions whose file path is within the given Claude project folder.
+        /// Used by ProjectPanel to show sessions for a specific project.
+        /// </summary>
+        public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
+            => _db.GetSessionsByFolder(claudeProjectFolder, limit);
+
+        /// <summary>
+        /// Returns all messages (user + assistant) for a given session, ordered by message_index.
+        /// </summary>
+        public List<SessionMessageRecord> GetSessionMessagesBySessionId(string sessionId, int limit = 500)
+            => _db.GetSessionMessagesBySessionId(sessionId, limit);
 
         /// <summary>
         /// Searches session messages with optional filters for taskId, role, and agentName.
@@ -342,7 +392,11 @@ namespace MultiTerminal.Services
             var result = new ParseResult { Messages = new List<SessionMessageRecord>() };
 
             // Derive sessionId from file name (Claude Code names files by session GUID)
+            // IMPORTANT: The filename IS the canonical session ID. Do NOT override it with
+            // the embedded sessionId from JSONL lines — subagent files embed the PARENT's
+            // session ID, which would cause the subagent to overwrite the parent record.
             string sessionId = Path.GetFileNameWithoutExtension(jsonlPath);
+            string canonicalSessionId = sessionId; // preserve filename-derived ID
 
             string parentSessionId = overrideParentSessionId;
             string startedAt = null;
@@ -351,6 +405,7 @@ namespace MultiTerminal.Services
                                    jsonlPath.Contains('/' + "subagents" + '/');
             string sessionType = overrideSessionType ?? (inSubagentsDir ? "subagent" : "terminal");
             int messageIndex = 0;
+            string detectedAgentName = null; // extracted from JSONL content
 
             try
             {
@@ -370,11 +425,25 @@ namespace MultiTerminal.Services
                         var root = doc.RootElement;
 
                         // Top-level metadata present on every line
+                        // For subagent files, the embedded sessionId is the PARENT's ID — capture
+                        // it as parentSessionId but keep the filename-derived ID as canonical.
+                        // For top-level files, the embedded ID should match the filename.
                         if (root.TryGetProperty("sessionId", out var sidEl))
                         {
                             string embedded = sidEl.GetString();
                             if (!string.IsNullOrEmpty(embedded))
-                                sessionId = embedded;
+                            {
+                                if (inSubagentsDir && embedded != canonicalSessionId)
+                                {
+                                    // Subagent file: embedded ID is the parent session
+                                    if (parentSessionId == null)
+                                        parentSessionId = embedded;
+                                }
+                                else
+                                {
+                                    sessionId = embedded;
+                                }
+                            }
                         }
 
                         // isSidechain=true means this is a subagent transcript
@@ -421,6 +490,12 @@ namespace MultiTerminal.Services
                             else if (contentEl.ValueKind == JsonValueKind.Array)
                             {
                                 content = FlattenContentArray(contentEl, out toolName);
+
+                                // Try to detect agent name from register_terminal tool calls
+                                if (detectedAgentName == null && role == "assistant")
+                                {
+                                    detectedAgentName = ExtractAgentNameFromContent(contentEl);
+                                }
                             }
                         }
 
@@ -451,12 +526,22 @@ namespace MultiTerminal.Services
             if (messageIndex == 0)
                 return result; // No messages — caller treats Lineage==null as "skip"
 
+            // Use detected agent name from JSONL content if available
+            string resolvedAgentName = detectedAgentName ?? defaultAgentName;
+
+            // Backfill agent name on already-added messages
+            if (detectedAgentName != null)
+            {
+                foreach (var msg in result.Messages)
+                    msg.AgentName = resolvedAgentName;
+            }
+
             result.Lineage = new SessionLineageRecord
             {
                 SessionId = sessionId,
                 ParentSessionId = parentSessionId,
                 TaskId = taskId,
-                AgentName = defaultAgentName,
+                AgentName = resolvedAgentName,
                 SessionType = sessionType,
                 SessionFilePath = jsonlPath,
                 StartedAt = startedAt,
@@ -465,6 +550,55 @@ namespace MultiTerminal.Services
             };
 
             return result;
+        }
+
+        /// <summary>
+        /// Extracts the agent name from a JSONL content array by looking for:
+        /// 1. register_terminal tool calls with a "name" input
+        /// 2. send_message / broadcast_message with a "fromTerminalId" input
+        /// Returns null if no agent name could be detected.
+        /// </summary>
+        private static string ExtractAgentNameFromContent(JsonElement contentArray)
+        {
+            foreach (var block in contentArray.EnumerateArray())
+            {
+                if (!block.TryGetProperty("type", out var typeEl) || typeEl.GetString() != "tool_use")
+                    continue;
+
+                if (!block.TryGetProperty("name", out var nameEl))
+                    continue;
+
+                string toolName = nameEl.GetString();
+                if (toolName == null)
+                    continue;
+
+                if (!block.TryGetProperty("input", out var inputEl) || inputEl.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                // register_terminal has a "name" field with the agent name
+                if (toolName.Contains("register_terminal"))
+                {
+                    if (inputEl.TryGetProperty("name", out var regNameEl))
+                    {
+                        string regName = regNameEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(regName))
+                            return regName;
+                    }
+                }
+
+                // send_message / broadcast_message have "fromTerminalId" with the agent name
+                if (toolName.Contains("send_message") || toolName.Contains("broadcast_message"))
+                {
+                    if (inputEl.TryGetProperty("fromTerminalId", out var fromEl))
+                    {
+                        string fromName = fromEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(fromName))
+                            return fromName;
+                    }
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

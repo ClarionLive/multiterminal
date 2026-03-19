@@ -38,7 +38,7 @@ Write-Host "2. Checking for database file..."
 Write-Host ""
 
 # Check for SQLite database
-$dbPath = Join-Path $roaming "tasks.db"
+$dbPath = Join-Path $roaming "multiterminal.db"
 if (Test-Path $dbPath) {
     $db = Get-Item $dbPath
     Write-Host "Found database: $dbPath"

@@ -87,10 +87,31 @@ namespace MultiTerminal.Controls
             _contentArea.Controls.Add(_taskHud);
             _activeTabIndex = 0;
 
-            // Forward HUD visibility requests
+            // Forward HUD visibility requests, but don't let the TaskHud
+            // stomp on an active browser tab's visibility.
             _taskHud.HudVisibilityRequested += (s, show) =>
             {
+                if (show && BrowserTabCount > 0 && _activeTabIndex != 0)
+                {
+                    // A browser tab is active — keep it visible, just ensure
+                    // Panel2 is expanded (VisibilityRequested=true) and update
+                    // TaskHud data silently without switching tabs.
+                    _taskHud.Visible = false;
+                    VisibilityRequested?.Invoke(this, true);
+                    return;
+                }
                 VisibilityRequested?.Invoke(this, show);
+            };
+
+            // Prevent TaskHudRenderer from setting Visible=true directly when
+            // a browser tab is the active tab — that would overlay the HUD on
+            // top of the browser content.
+            _taskHud.VisibleChanged += (s, ev) =>
+            {
+                if (_taskHud.Visible && _activeTabIndex != 0)
+                {
+                    _taskHud.Visible = false;
+                }
             };
         }
 

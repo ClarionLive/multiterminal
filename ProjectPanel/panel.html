@@ -960,35 +960,8 @@
             text-align: center;
         }
 
-        /* Picker section divider used in MCP picker */
-        .picker-section-header {
-            font-size: 10px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: var(--text-muted);
-            padding: 8px 16px 4px;
-            margin-top: 4px;
-            border-top: 1px solid var(--border-color);
-        }
-
-        .picker-section-header:first-child {
-            margin-top: 0;
-            border-top: none;
-        }
-
-        /* Locked picker item — always-included tier, checkbox disabled */
-        .picker-item-locked {
-            opacity: 0.7;
-            cursor: default;
-        }
-
-        .picker-item-locked input[type="checkbox"] {
-            cursor: not-allowed;
-        }
-
-        /* Tier badge displayed inline in picker item description */
-        .picker-tier-badge {
+        /* Status badge displayed inline in MCP server picker item description */
+        .picker-status-badge {
             display: inline-block;
             padding: 1px 5px;
             border-radius: 3px;
@@ -1040,233 +1013,6 @@
             color: var(--success-color);
         }
 
-        /* MCP Registry Management overlay */
-        .registry-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.55);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .registry-dialog {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            width: 520px;
-            max-height: 85vh;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-        }
-
-        .registry-dialog-header {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border-color);
-            font-size: 14px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        .registry-dialog-header-actions {
-            display: flex;
-            gap: 8px;
-        }
-
-        .registry-list {
-            overflow-y: auto;
-            flex: 1;
-            padding: 4px 0;
-        }
-
-        .registry-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 7px 12px;
-            border-bottom: 1px solid var(--border-color);
-            font-size: 12px;
-            transition: background 0.12s;
-        }
-
-        .registry-row:hover {
-            background: var(--bg-hover);
-        }
-
-        .registry-row-info {
-            flex: 1;
-            min-width: 0;
-        }
-
-        .registry-row-name {
-            font-size: 13px;
-            font-weight: 500;
-            color: var(--text-primary);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .registry-row-desc {
-            font-size: 11px;
-            color: var(--text-muted);
-            margin-top: 1px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .tier-badge {
-            font-size: 10px;
-            font-weight: 600;
-            padding: 2px 6px;
-            border-radius: 10px;
-            flex-shrink: 0;
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-        }
-
-        .tier-badge.multiterminal {
-            background: rgba(0, 120, 212, 0.25);
-            color: #4dabf7;
-            border: 1px solid rgba(77, 171, 247, 0.4);
-        }
-
-        .tier-badge.global {
-            background: rgba(78, 201, 176, 0.2);
-            color: #4ec9b0;
-            border: 1px solid rgba(78, 201, 176, 0.35);
-        }
-
-        .tier-badge.optional {
-            background: rgba(220, 220, 170, 0.15);
-            color: #dcdcaa;
-            border: 1px solid rgba(220, 220, 170, 0.3);
-        }
-
-        .transport-badge {
-            font-size: 10px;
-            padding: 1px 5px;
-            border-radius: 8px;
-            flex-shrink: 0;
-            background: var(--bg-tertiary);
-            color: var(--text-muted);
-            border: 1px solid var(--border-color);
-        }
-
-        .registry-row-actions {
-            display: flex;
-            gap: 4px;
-            flex-shrink: 0;
-        }
-
-        .registry-icon-btn {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            cursor: pointer;
-            padding: 2px 5px;
-            border-radius: 4px;
-            font-size: 12px;
-            line-height: 1;
-            transition: background 0.12s, color 0.12s;
-        }
-
-        .registry-icon-btn:hover {
-            background: var(--bg-hover);
-            color: var(--text-primary);
-        }
-
-        .registry-icon-btn.danger:hover {
-            color: #f48771;
-        }
-
-        .registry-dialog-footer {
-            padding: 10px 16px;
-            border-top: 1px solid var(--border-color);
-            display: flex;
-            gap: 8px;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .registry-empty {
-            padding: 24px 16px;
-            text-align: center;
-            color: var(--text-muted);
-            font-size: 12px;
-        }
-
-        /* Registry entry form (add/edit) */
-        .registry-form {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .registry-form-title {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 2px;
-        }
-
-        .registry-form-row {
-            display: flex;
-            gap: 8px;
-            align-items: flex-start;
-        }
-
-        .registry-form-row label {
-            font-size: 11px;
-            color: var(--text-muted);
-            width: 72px;
-            flex-shrink: 0;
-            padding-top: 6px;
-        }
-
-        .registry-form-row input,
-        .registry-form-row select,
-        .registry-form-row textarea {
-            flex: 1;
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
-            color: var(--text-primary);
-            font-size: 12px;
-            padding: 4px 8px;
-            font-family: inherit;
-            outline: none;
-            transition: border-color 0.15s;
-        }
-
-        .registry-form-row input:focus,
-        .registry-form-row select:focus,
-        .registry-form-row textarea:focus {
-            border-color: var(--accent-color);
-        }
-
-        .registry-form-row textarea {
-            min-height: 60px;
-            resize: vertical;
-            font-family: 'Cascadia Mono', Consolas, monospace;
-            font-size: 11px;
-        }
-
-        .registry-form-actions {
-            display: flex;
-            gap: 8px;
-            justify-content: flex-end;
-        }
-
         /* Notification toast for mcp.json write result */
         .mcp-toast {
             position: fixed;
@@ -1294,23 +1040,355 @@
             to   { opacity: 1; transform: translateX(-50%) translateY(0); }
         }
 
-        /* Manage Registry button in section header */
-        .section-manage-btn {
-            font-size: 10px;
-            padding: 1px 7px;
-            border-radius: 10px;
-            border: 1px solid var(--border-color);
-            background: var(--bg-tertiary);
-            color: var(--text-muted);
-            cursor: pointer;
-            margin-left: auto;
-            transition: background 0.12s, color 0.12s;
+        /* Tab bar */
+        .tab-bar {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 12px;
+            gap: 0;
         }
 
-        .section-manage-btn:hover {
-            background: var(--bg-hover);
+        .tab-btn {
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--text-secondary);
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 8px 16px;
+            cursor: pointer;
+            transition: color 0.15s, border-color 0.15s;
+            white-space: nowrap;
+        }
+
+        .tab-btn:hover {
             color: var(--text-primary);
         }
+
+        .tab-btn.active {
+            color: var(--accent-color);
+            border-bottom-color: var(--accent-color);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* File explorer tree */
+        .file-tree {
+            font-size: 12px;
+            user-select: none;
+        }
+
+        .tree-node {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 0;
+            padding-left: var(--indent, 0px);
+            cursor: pointer;
+            border-radius: 3px;
+            transition: background 0.1s;
+        }
+
+        .tree-node:hover {
+            background: var(--bg-hover);
+        }
+
+        .tree-node.selected {
+            background: rgba(0, 120, 212, 0.15);
+        }
+
+        .tree-toggle {
+            width: 16px;
+            font-size: 10px;
+            color: var(--text-muted);
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .tree-icon {
+            font-size: 14px;
+            flex-shrink: 0;
+            width: 18px;
+            text-align: center;
+        }
+
+        .tree-name {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--text-primary);
+        }
+
+        .tree-size {
+            font-size: 10px;
+            color: var(--text-muted);
+            flex-shrink: 0;
+            margin-left: auto;
+            padding-right: 4px;
+        }
+
+        .tree-children {
+            overflow: hidden;
+        }
+
+        .tree-children.collapsed {
+            display: none;
+        }
+
+        .tree-loading {
+            padding: 4px 0;
+            padding-left: calc(var(--indent, 0px) + 20px);
+            color: var(--text-muted);
+            font-size: 11px;
+            font-style: italic;
+        }
+
+        /* File viewer */
+        .file-viewer {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: 60vh;
+        }
+
+        .file-viewer-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .file-viewer-header .file-name {
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .file-viewer-close {
+            margin-left: auto;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+            padding: 0 4px;
+        }
+
+        .file-viewer-close:hover {
+            color: var(--text-primary);
+        }
+
+        .file-viewer-content {
+            overflow: auto;
+            max-height: 55vh;
+            padding: 0;
+        }
+
+        .file-viewer-content pre {
+            margin: 0;
+            padding: 10px;
+            font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-primary);
+            white-space: pre;
+            overflow-x: auto;
+            tab-size: 4;
+        }
+
+        .file-viewer-content::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .file-viewer-content::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+
+        .file-viewer-image {
+            padding: 16px;
+            text-align: center;
+        }
+
+        .file-viewer-image img {
+            max-width: 100%;
+            max-height: 50vh;
+            object-fit: contain;
+            border-radius: 4px;
+        }
+
+        /* Line numbers for code */
+        .line-numbers {
+            display: flex;
+        }
+
+        .line-numbers .line-nums {
+            text-align: right;
+            padding: 10px 8px 10px 10px;
+            color: var(--text-muted);
+            font-family: 'Cascadia Mono', Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            user-select: none;
+            border-right: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+
+        .line-numbers pre {
+            flex: 1;
+            min-width: 0;
+        }
+
+        /* Syntax highlighting tokens (simple keyword-based) */
+        .syn-keyword { color: #569cd6; }
+        .syn-string { color: #ce9178; }
+        .syn-comment { color: #6a9955; }
+        .syn-number { color: #b5cea8; }
+        .syn-type { color: #4ec9b0; }
+        .syn-function { color: #dcdcaa; }
+        .syn-tag { color: #569cd6; }
+        .syn-attr { color: #9cdcfe; }
+        .syn-value { color: #ce9178; }
+
+        body.light .syn-keyword { color: #0000ff; }
+        body.light .syn-string { color: #a31515; }
+        body.light .syn-comment { color: #008000; }
+        body.light .syn-number { color: #098658; }
+        body.light .syn-type { color: #267f99; }
+        body.light .syn-function { color: #795e26; }
+        body.light .syn-tag { color: #800000; }
+        body.light .syn-attr { color: #ff0000; }
+        body.light .syn-value { color: #0000ff; }
+
+        /* Project selector button (next to project name) */
+        .project-selector-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+
+        .project-selector-btn:hover {
+            background: var(--bg-hover);
+            color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        /* Project selector popup (reuses picker overlay/dialog pattern) */
+        .project-selector-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px 16px;
+            margin: 4px 10px;
+            cursor: pointer;
+            transition: background 0.15s, box-shadow 0.15s;
+            border-left: 3px solid transparent;
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+        }
+
+        .project-selector-item:hover {
+            background: var(--bg-hover);
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+        }
+
+        .project-selector-item.current {
+            border-left-color: var(--accent-color);
+            background: rgba(0, 120, 212, 0.08);
+        }
+
+        .project-selector-icon {
+            font-size: 16px;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        .project-selector-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .project-selector-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 3px;
+        }
+
+        .project-selector-desc {
+            font-size: 11px;
+            color: var(--text-secondary);
+            line-height: 1.4;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .project-selector-path {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .project-selector-search {
+            width: calc(100% - 32px);
+            margin: 8px 16px;
+            padding: 6px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 12px;
+            outline: none;
+        }
+
+        .project-selector-search:focus {
+            border-color: var(--accent-color);
+        }
+
+        .project-selector-search::placeholder {
+            color: var(--text-muted);
+        }
+
+        .project-selector-footer {
+            padding: 8px 16px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 8px;
+            justify-content: space-between;
+            align-items: center;
+        }
+
     </style>
 </head>
 <body>
@@ -1368,6 +1446,7 @@
                     <div class="project-name">
                         ${iconDisplay}
                         <span class="editable" data-field="name" data-value="${escapeHtml(project.name || '')}" onclick="startEdit(this)">${escapeHtml(project.name || 'Unnamed Project')}</span>
+                        <button class="project-selector-btn" onclick="openProjectSelector()" title="Switch project">&#9660;</button>
                     </div>
                     <div class="project-path" onclick="copyPath('${escapeJs(project.path)}')" title="Click to copy path">
                         ${escapeHtml(project.path || '')}
@@ -1377,50 +1456,62 @@
 
                 ${statsHtml}
 
-                ${projectInfoHtml}
+                <div class="tab-bar">
+                    <button class="tab-btn active" onclick="switchTab('project-info', this)">Project Info</button>
+                    <button class="tab-btn" onclick="switchTab('file-explorer', this)">File Explorer</button>
+                </div>
 
-                <div class="section">
-                    <div class="section-header" onclick="toggleSection(this)">
-                        <span class="section-toggle">▼</span>
-                        <span class="section-title">Description</span>
+                <div id="tab-project-info" class="tab-content active">
+                    ${projectInfoHtml}
+
+                    <div class="section">
+                        <div class="section-header" onclick="toggleSection(this)">
+                            <span class="section-toggle">▼</span>
+                            <span class="section-title">Description</span>
+                        </div>
+                        <div class="section-content">
+                            <div class="text-content ${project.description ? '' : 'empty'} editable" data-field="description" data-value="${escapeHtml(project.description || '')}" data-multiline="true" onclick="startEdit(this)">
+                                ${escapeHtml(project.description || 'No description')}
+                            </div>
+                        </div>
                     </div>
-                    <div class="section-content">
-                        <div class="text-content ${project.description ? '' : 'empty'} editable" data-field="description" data-value="${escapeHtml(project.description || '')}" data-multiline="true" onclick="startEdit(this)">
-                            ${escapeHtml(project.description || 'No description')}
+
+                    ${pathsSectionHtml}
+
+                    ${buildDeployHtml}
+
+                    ${gitHtml}
+
+                    <div class="section">
+                        <div class="section-header" onclick="toggleSection(this)">
+                            <span class="section-toggle collapsed">▼</span>
+                            <span class="section-title">Change Log</span>
+                        </div>
+                        <div class="section-content collapsed">
+                            <div class="text-content ${project.changeLog ? '' : 'empty'} editable" data-field="changeLog" data-value="${escapeHtml(project.changeLog || '')}" data-multiline="true" onclick="startEdit(this)">
+                                ${escapeHtml(project.changeLog || 'No changelog')}
+                            </div>
+                        </div>
+                    </div>
+
+                    ${metaSectionHtml}
+
+                    <div id="associations-container"></div>
+
+                    <div class="section">
+                        <div class="section-header" onclick="toggleSection(this)">
+                            <span class="section-toggle">▼</span>
+                            <span class="section-title">Prompts</span>
+                        </div>
+                        <div class="section-content">
+                            ${promptsHtml}
                         </div>
                     </div>
                 </div>
 
-                ${pathsSectionHtml}
-
-                ${buildDeployHtml}
-
-                ${gitHtml}
-
-                <div class="section">
-                    <div class="section-header" onclick="toggleSection(this)">
-                        <span class="section-toggle collapsed">▼</span>
-                        <span class="section-title">Change Log</span>
-                    </div>
-                    <div class="section-content collapsed">
-                        <div class="text-content ${project.changeLog ? '' : 'empty'} editable" data-field="changeLog" data-value="${escapeHtml(project.changeLog || '')}" data-multiline="true" onclick="startEdit(this)">
-                            ${escapeHtml(project.changeLog || 'No changelog')}
-                        </div>
-                    </div>
-                </div>
-
-                ${metaSectionHtml}
-
-                <div id="associations-container"></div>
-
-                <div class="section">
-                    <div class="section-header" onclick="toggleSection(this)">
-                        <span class="section-toggle">▼</span>
-                        <span class="section-title">Prompts</span>
-                    </div>
-                    <div class="section-content">
-                        ${promptsHtml}
-                    </div>
+                <div id="tab-file-explorer" class="tab-content">
+                    <div id="file-tree" class="file-tree"></div>
+                    <div id="file-viewer-container"></div>
                 </div>
 
             `;
@@ -2117,7 +2208,7 @@
         let currentAssociations = null;
         let cachedAvailableAgents = [];
         let cachedAvailableMcpServers = [];
-        let _mcpPickerPendingOpen = false;  // true when picker was requested but registry was not yet loaded
+        let _mcpPickerPendingOpen = false;  // true when picker was requested but gateway server list not yet loaded
         let cachedAvailableSkills = [];
         let _skillsPickerPendingOpen = false;
         let cachedAvailableSpecialistAgents = [];
@@ -2128,6 +2219,16 @@
             currentAssociations = data;
             const container = document.getElementById('associations-container');
             if (!container) return;
+
+            // Preserve which sections are expanded before rebuilding
+            const expandedSections = new Set();
+            container.querySelectorAll('.section').forEach(sec => {
+                const content = sec.querySelector('.section-content');
+                if (content && !content.classList.contains('collapsed')) {
+                    const title = sec.querySelector('.section-title');
+                    if (title) expandedSections.add(title.textContent);
+                }
+            });
 
             container.innerHTML =
                 renderAssocSection('Agents', 'agents', data.agents || [], [
@@ -2155,6 +2256,19 @@
                     { key: 'promptText', label: 'Text', wide: true },
                     { key: 'displayOrder', label: 'Order', narrow: true }
                 ]);
+
+            // Restore previously expanded sections
+            if (expandedSections.size > 0) {
+                container.querySelectorAll('.section').forEach(sec => {
+                    const title = sec.querySelector('.section-title');
+                    if (title && expandedSections.has(title.textContent)) {
+                        const toggle = sec.querySelector('.section-toggle');
+                        const content = sec.querySelector('.section-content');
+                        if (toggle) toggle.classList.remove('collapsed');
+                        if (content) content.classList.remove('collapsed');
+                    }
+                });
+            }
         }
 
         // Build HTML for one association section
@@ -2222,27 +2336,14 @@
         }
 
         // ============================================================
-        // MCP SERVERS SECTION (custom — adds Manage Registry button)
+        // MCP SERVERS SECTION
         // ============================================================
 
-        // Build the MCP Servers section HTML with a "Manage Registry" button in the header.
-        // Only shows optional-tier servers (global/multiterminal tier are always included
-        // implicitly and should not appear as per-project toggleable entries).
+        // Build the MCP Servers section HTML from gateway server data.
+        // All servers from the gateway are per-project toggleable.
         function renderMcpServersSection(rows) {
-            // Build a set of always-included server names from the registry cache.
-            // If the cache is empty (registry not yet loaded), we show all rows to
-            // avoid a blank list on first render — the re-render after stats will
-            // apply correct filtering once the cache is populated.
-            const alwaysIncludedNames = new Set(
-                cachedAvailableMcpServers
-                    .filter(s => isMcpTierAlwaysIncluded(s.tier))
-                    .map(s => s.serverName)
-            );
-            const optionalRows = cachedAvailableMcpServers.length === 0
-                ? rows   // registry not loaded yet — show all to avoid false-blank
-                : rows.filter(r => !alwaysIncludedNames.has(r.serverName));
-
-            const count = optionalRows.length;
+            // All gateway servers are per-project optional — no always-included tier concept.
+            const count = rows.length;
             const columns = [
                 { key: 'serverName', label: 'Server Name' },
                 { key: 'isEnabled', label: 'Enabled', toggle: true, narrow: true }
@@ -2254,9 +2355,9 @@
                 return `<span class="${cls}">${escapeHtml(c.label)}</span>`;
             }).join('') + '<span style="flex:0 0 28px"></span>';
 
-            let rowsHtml = optionalRows.length === 0
+            let rowsHtml = rows.length === 0
                 ? '<div class="assoc-empty">None enabled</div>'
-                : optionalRows.map(row => buildAssocRow(tableName, row, columns)).join('');
+                : rows.map(row => buildAssocRow(tableName, row, columns)).join('');
 
             return `
                 <div class="section">
@@ -2264,7 +2365,6 @@
                         <span class="section-toggle collapsed">&#x25BC;</span>
                         <span class="section-title">MCP Servers</span>
                         <span class="section-badge">${count}</span>
-                        <button class="section-manage-btn" onclick="event.stopPropagation(); openMcpRegistryManager()">Manage Registry</button>
                     </div>
                     <div class="section-content collapsed">
                         <div class="assoc-header-row">${colHeaderHtml}</div>
@@ -2275,221 +2375,7 @@
             `;
         }
 
-        // ============================================================
-        // MCP REGISTRY MANAGEMENT
-        // ============================================================
-
-        let cachedMcpRegistry = [];              // list of McpRegistryEntry from C#
-        const _mcpRegistryMap = new Map();       // serverName → entry object (safe alternative to JSON-in-onclick)
-        let _mcpRegistryPendingOpen = false;
-
-        function openMcpRegistryManager() {
-            _mcpRegistryPendingOpen = true;
-            sendToHost({ type: 'getMcpRegistry' });
-            // Dialog shown when mcpRegistry response arrives (see handleHostMessage)
-        }
-
-        function showMcpRegistryDialog(entries) {
-            const existing = document.querySelector('.registry-overlay');
-            if (existing) existing.remove();
-
-            cachedMcpRegistry = entries || [];
-            _mcpRegistryMap.clear();
-            cachedMcpRegistry.forEach(e => _mcpRegistryMap.set(e.serverName, e));
-
-            const overlay = document.createElement('div');
-            overlay.className = 'registry-overlay';
-            overlay.innerHTML = buildRegistryDialogHtml(cachedMcpRegistry);
-
-            // Close on backdrop click
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-
-            // Escape to close
-            const onKey = (e) => {
-                if (e.key === 'Escape') {
-                    const dlg = document.querySelector('.registry-overlay');
-                    if (dlg) { dlg.remove(); document.removeEventListener('keydown', onKey); }
-                }
-            };
-            document.addEventListener('keydown', onKey);
-
-            document.body.appendChild(overlay);
-        }
-
-        function buildRegistryDialogHtml(entries) {
-            const listHtml = entries.length === 0
-                ? '<div class="registry-empty">No servers in registry yet. Use Import to load from .mcp.json.</div>'
-                : entries.map(e => buildRegistryRowHtml(e)).join('');
-
-            return `
-                <div class="registry-dialog">
-                    <div class="registry-dialog-header">
-                        <span>MCP Registry</span>
-                        <div class="registry-dialog-header-actions">
-                            <button class="picker-btn" onclick="showRegistryAddForm()">+ Add</button>
-                            <button class="picker-btn" onclick="importMcpJsonFile()" title="Import servers from .mcp.json">&#x2B07; Import</button>
-                            <button class="picker-btn" onclick="regenerateAllMcpConfigs()" title="Regenerate global and all project .mcp.json files from registry">&#x21BB; Regenerate</button>
-                        </div>
-                    </div>
-                    <div id="registry-form-area"></div>
-                    <div class="registry-list" id="registry-list">${listHtml}</div>
-                    <div class="registry-dialog-footer">
-                        <span id="registry-status" style="font-size:11px; color:var(--text-muted)"></span>
-                        <button class="picker-btn" onclick="document.querySelector('.registry-overlay').remove()">Close</button>
-                    </div>
-                </div>`;
-        }
-
-        function buildRegistryRowHtml(entry) {
-            const tierClass = entry.tier || 'optional';
-            const tierLabel = tierClass === 'multiterminal' ? 'MT' : tierClass;
-            const desc = entry.description || entry.command || '';
-            const transport = entry.transportType || 'stdio';
-            const name = escapeHtml(entry.serverName || '');
-            const displayName = escapeHtml(entry.displayName || entry.serverName || '');
-            // Store entry in map so edit button can look it up by serverName (avoids JSON-in-attribute)
-            _mcpRegistryMap.set(entry.serverName, entry);
-
-            return `
-                <div class="registry-row" data-server="${name}">
-                    <div class="registry-row-info">
-                        <div class="registry-row-name">${displayName}</div>
-                        ${desc ? `<div class="registry-row-desc">${escapeHtml(desc)}</div>` : ''}
-                    </div>
-                    <span class="tier-badge ${escapeHtml(tierClass)}">${escapeHtml(tierLabel)}</span>
-                    <span class="transport-badge">${escapeHtml(transport)}</span>
-                    <div class="registry-row-actions">
-                        <button class="registry-icon-btn" title="Edit" onclick="showRegistryEditForm(_mcpRegistryMap.get('${name}'))">&#x270E;</button>
-                        <button class="registry-icon-btn danger" title="Delete" onclick="deleteRegistryEntry('${name}')">&#x2715;</button>
-                    </div>
-                </div>`;
-        }
-
-        function showRegistryAddForm() { showRegistryForm(null); }
-        function showRegistryEditForm(entry) { showRegistryForm(entry); }
-
-        function showRegistryForm(entry) {
-            const area = document.getElementById('registry-form-area');
-            if (!area) return;
-
-            const isEdit = !!(entry && entry.serverName);
-            const v = isEdit ? entry : {};
-
-            area.innerHTML = `
-                <div class="registry-form">
-                    <div class="registry-form-title">${isEdit ? 'Edit Server' : 'Add Server'}</div>
-                    <div class="registry-form-row">
-                        <label>Name</label>
-                        <input id="rf-serverName" type="text" placeholder="e.g. my-server"
-                               value="${isEdit ? escapeHtml(v.serverName) : ''}"
-                               ${isEdit ? 'readonly style="opacity:0.7"' : ''}>
-                    </div>
-                    <div class="registry-form-row">
-                        <label>Display</label>
-                        <input id="rf-displayName" type="text" placeholder="e.g. My Server"
-                               value="${isEdit ? escapeHtml(v.displayName || '') : ''}">
-                    </div>
-                    <div class="registry-form-row">
-                        <label>Description</label>
-                        <input id="rf-description" type="text" placeholder="Brief description"
-                               value="${isEdit ? escapeHtml(v.description || '') : ''}">
-                    </div>
-                    <div class="registry-form-row">
-                        <label>Tier</label>
-                        <select id="rf-tier">
-                            <option value="optional"       ${(!isEdit || v.tier==='optional')       ? 'selected':''}>optional</option>
-                            <option value="global"         ${(isEdit  && v.tier==='global')         ? 'selected':''}>global</option>
-                            <option value="multiterminal"  ${(isEdit  && v.tier==='multiterminal')  ? 'selected':''}>multiterminal</option>
-                        </select>
-                    </div>
-                    <div class="registry-form-row">
-                        <label>Transport</label>
-                        <select id="rf-transport">
-                            <option value="stdio" ${(!isEdit || v.transportType==='stdio') ? 'selected':''}>stdio</option>
-                            <option value="http"  ${(isEdit  && v.transportType==='http')  ? 'selected':''}>http</option>
-                            <option value="sse"   ${(isEdit  && v.transportType==='sse')   ? 'selected':''}>sse</option>
-                        </select>
-                    </div>
-                    <div class="registry-form-row">
-                        <label>Command/URL</label>
-                        <input id="rf-command" type="text" placeholder="node, python, https://..."
-                               value="${isEdit ? escapeHtml(v.command || '') : ''}">
-                    </div>
-                    <div class="registry-form-row">
-                        <label>Config JSON</label>
-                        <textarea id="rf-configJson" placeholder='{"command":"node","args":["path/index.js"]}'>${isEdit ? escapeHtml(v.configJson || '') : ''}</textarea>
-                    </div>
-                    <div class="registry-form-actions">
-                        <button class="picker-btn" onclick="document.getElementById('registry-form-area').innerHTML=''">Cancel</button>
-                        <button class="picker-btn primary" onclick="commitRegistryForm()">Save</button>
-                    </div>
-                </div>`;
-        }
-
-        function commitRegistryForm() {
-            const serverName = (document.getElementById('rf-serverName')?.value || '').trim();
-            if (!serverName) { setRegistryStatus('Server name is required', true); return; }
-
-            let configJson = (document.getElementById('rf-configJson')?.value || '').trim() || '{}';
-            try { JSON.parse(configJson); } catch {
-                setRegistryStatus('Config JSON is not valid', true);
-                return;
-            }
-
-            const entry = {
-                serverName:    serverName,
-                displayName:   (document.getElementById('rf-displayName')?.value || '').trim() || serverName,
-                description:   (document.getElementById('rf-description')?.value || '').trim(),
-                tier:          document.getElementById('rf-tier')?.value || 'optional',
-                transportType: document.getElementById('rf-transport')?.value || 'stdio',
-                command:       (document.getElementById('rf-command')?.value || '').trim(),
-                configJson:    configJson
-            };
-
-            sendToHost({ type: 'saveMcpRegistryEntry', item: JSON.stringify(entry) });
-            setRegistryStatus('Saving...');
-        }
-
-        function deleteRegistryEntry(serverName) {
-            if (!confirm(`Delete "${serverName}" from the MCP registry?`)) return;
-            sendToHost({ type: 'deleteMcpRegistryEntry', value: serverName });
-            setRegistryStatus('Deleting...');
-        }
-
-        function importMcpJsonFile() {
-            // Send empty path — C# will open a file dialog
-            sendToHost({ type: 'importMcpJson', path: '' });
-            setRegistryStatus('Opening file picker...');
-        }
-
-        function regenerateAllMcpConfigs() {
-            sendToHost({ type: 'regenerateAllMcpConfigs' });
-            setRegistryStatus('Regenerating...');
-        }
-
-        function setRegistryStatus(msg, isError = false) {
-            const el = document.getElementById('registry-status');
-            if (!el) return;
-            el.textContent = msg;
-            el.style.color = isError ? '#f48771' : 'var(--text-muted)';
-        }
-
-        function refreshRegistryList(entries) {
-            cachedMcpRegistry = entries || [];
-            _mcpRegistryMap.clear();
-            cachedMcpRegistry.forEach(e => _mcpRegistryMap.set(e.serverName, e));
-            const list = document.getElementById('registry-list');
-            if (list) {
-                list.innerHTML = entries.length === 0
-                    ? '<div class="registry-empty">No servers in registry yet.</div>'
-                    : entries.map(e => buildRegistryRowHtml(e)).join('');
-            }
-            // Clear form after successful save/delete
-            const formArea = document.getElementById('registry-form-area');
-            if (formArea) formArea.innerHTML = '';
-        }
-
-        // Transient toast notification for .mcp.json write and import results
+        // Transient toast notification for .mcp.json write results
         function showMcpToast(message, type = 'success') {
             const existing = document.querySelector('.mcp-toast');
             if (existing) existing.remove();
@@ -2901,16 +2787,9 @@
             });
         }
 
-        // Returns true for tier values that are always included in every project (not per-project toggleable).
-        function isMcpTierAlwaysIncluded(tier) {
-            return tier === 'multiterminal' || tier === 'global';
-        }
-
-        function openMcpServersPicker() {
-            // If the registry cache is empty, request it from the host and defer opening
-            // until the response arrives. This avoids the "No MCP servers found" flash on
-            // first open when the panel loads before the registry message is delivered.
-            if (cachedAvailableMcpServers.length === 0) {
+        function openMcpServersPicker(skipFetch) {
+            if (!skipFetch) {
+                // Fetch fresh data from the gateway, then the callback will re-invoke with skipFetch=true
                 _mcpPickerPendingOpen = true;
                 sendToHost({ type: 'getAvailableMcpServers' });
                 return;
@@ -2920,47 +2799,27 @@
             const currentServers = (currentAssociations?.mcpServers || []);
             const enabledNames = new Set(currentServers.map(s => s.serverName));
 
-            // Split into always-included tiers and optional tier
-            const alwaysIncluded = cachedAvailableMcpServers.filter(s => isMcpTierAlwaysIncluded(s.tier));
-            const optional = cachedAvailableMcpServers.filter(s => !isMcpTierAlwaysIncluded(s.tier));
-
+            // All gateway servers are optional — user checks which ones they want per project
             let listHtml = '';
+            cachedAvailableMcpServers.forEach(srv => {
+                // Gateway DTO uses 'name' as the server key
+                const serverName = srv.name || srv.serverName || '';
+                const isChecked = enabledNames.has(serverName);
+                const connectedLabel = srv.connected ? ' connected' : '';
+                const toolCountLabel = srv.toolCount > 0 ? ` · ${srv.toolCount} tools` : '';
+                listHtml += `
+                    <label class="picker-item">
+                        <input type="checkbox" data-server-name="${escapeHtml(serverName)}"
+                               ${isChecked ? 'checked' : ''}>
+                        <div class="picker-item-info">
+                            <div class="picker-item-name">${escapeHtml(srv.displayName || serverName)}</div>
+                            <div class="picker-item-role">${escapeHtml(srv.description || '')}${escapeHtml(connectedLabel + toolCountLabel)}</div>
+                        </div>
+                    </label>`;
+            });
 
-            // Always Included section (locked, cannot toggle)
-            if (alwaysIncluded.length > 0) {
-                listHtml += '<div class="picker-section-header">Always Included</div>';
-                alwaysIncluded.forEach(srv => {
-                    const tierLabel = srv.tier === 'multiterminal' ? 'MultiTerminal' : 'Global';
-                    listHtml += `
-                        <label class="picker-item picker-item-locked">
-                            <input type="checkbox" checked disabled
-                                   data-server-name="${escapeHtml(srv.serverName)}"
-                                   data-server-tier="${escapeHtml(srv.tier)}">
-                            <div class="picker-item-info">
-                                <div class="picker-item-name">${escapeHtml(srv.displayName || srv.serverName)}</div>
-                                <div class="picker-item-role">${escapeHtml(srv.description || '')} <span class="picker-tier-badge">${escapeHtml(tierLabel)}</span></div>
-                            </div>
-                        </label>`;
-                });
-            }
-
-            // Optional section (toggleable, pre-checked if already enabled for project)
-            if (optional.length > 0) {
-                listHtml += '<div class="picker-section-header">Optional</div>';
-                optional.forEach(srv => {
-                    const isChecked = enabledNames.has(srv.serverName);
-                    const transportLabel = srv.transportType ? ` (${escapeHtml(srv.transportType)})` : '';
-                    listHtml += `
-                        <label class="picker-item">
-                            <input type="checkbox" data-server-name="${escapeHtml(srv.serverName)}"
-                                   data-server-tier="${escapeHtml(srv.tier)}"
-                                   ${isChecked ? 'checked' : ''}>
-                            <div class="picker-item-info">
-                                <div class="picker-item-name">${escapeHtml(srv.displayName || srv.serverName)}</div>
-                                <div class="picker-item-role">${escapeHtml(srv.description || '')}${transportLabel}</div>
-                            </div>
-                        </label>`;
-                });
+            if (!listHtml) {
+                listHtml = '<div class="picker-empty">No MCP servers found in gateway.</div>';
             }
 
             showPickerDialog('Select MCP Servers', listHtml, () => {
@@ -2976,14 +2835,13 @@
             const currentServers = (currentAssociations?.mcpServers || []);
             const currentNames = new Set(currentServers.map(s => s.serverName));
 
-            // Read only non-disabled (optional tier) checkboxes
-            const checkboxes = overlay.querySelectorAll('input[type="checkbox"]:not(:disabled)');
+            const checkboxes = overlay.querySelectorAll('input[type="checkbox"]');
             const nowCheckedNames = new Set();
             checkboxes.forEach(cb => {
                 if (cb.checked) nowCheckedNames.add(cb.dataset.serverName);
             });
 
-            // Add optional servers that were just checked
+            // Add servers that were just checked
             nowCheckedNames.forEach(name => {
                 if (!currentNames.has(name)) {
                     sendToHost({
@@ -2995,11 +2853,9 @@
                 }
             });
 
-            // Remove optional servers that were unchecked (skip always-included tiers)
+            // Remove servers that were unchecked
             currentServers.forEach(s => {
-                if (nowCheckedNames.has(s.serverName)) return; // still checked — keep it
-                const registryEntry = cachedAvailableMcpServers.find(r => r.serverName === s.serverName);
-                if (!registryEntry || !isMcpTierAlwaysIncluded(registryEntry.tier)) {
+                if (!nowCheckedNames.has(s.serverName)) {
                     sendToHost({
                         type: 'updateAssociation',
                         tableName: 'mcpServers',
@@ -3009,8 +2865,358 @@
                 }
             });
 
-            // Notify C# to regenerate .mcp.json for this project (wired by Item 5)
+            // Notify C# to sync the gateway profile for this project
             sendToHost({ type: 'writeMcpJson' });
+        }
+
+        // ─── Tabs ──────────────────────────────────────────────────────
+        function switchTab(tabId, btnEl) {
+            // Deactivate all tabs and buttons
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+            // Activate selected
+            const tabEl = document.getElementById('tab-' + tabId);
+            if (tabEl) tabEl.classList.add('active');
+            if (btnEl) btnEl.classList.add('active');
+
+            // Lazy-load file explorer on first switch
+            if (tabId === 'file-explorer' && currentData && currentData.path) {
+                const tree = document.getElementById('file-tree');
+                if (tree && tree.children.length === 0) {
+                    loadDirectory(currentData.path, tree, 0);
+                }
+            }
+        }
+
+        // ─── File Explorer ────────────────────────────────────────────
+        let pendingDirCallbacks = {};
+
+        function loadDirectory(dirPath, containerEl, depth) {
+            // Show loading indicator
+            const loadingEl = document.createElement('div');
+            loadingEl.className = 'tree-loading';
+            loadingEl.style.setProperty('--indent', (depth * 16) + 'px');
+            loadingEl.textContent = 'Loading...';
+            containerEl.appendChild(loadingEl);
+
+            // Register callback for when data arrives
+            pendingDirCallbacks[dirPath] = { container: containerEl, depth: depth, loading: loadingEl };
+            sendToHost({ type: 'listDirectory', path: dirPath });
+        }
+
+        function renderDirectoryListing(dirPath, entries) {
+            const cb = pendingDirCallbacks[dirPath];
+            if (!cb) return;
+            delete pendingDirCallbacks[dirPath];
+
+            // Remove loading indicator
+            if (cb.loading && cb.loading.parentElement) {
+                cb.loading.remove();
+            }
+
+            const container = cb.container;
+            const depth = cb.depth;
+
+            entries.forEach(entry => {
+                if (entry.isDir) {
+                    // Directory node
+                    const nodeEl = document.createElement('div');
+
+                    const headerEl = document.createElement('div');
+                    headerEl.className = 'tree-node';
+                    headerEl.style.setProperty('--indent', (depth * 16) + 'px');
+                    headerEl.innerHTML = `
+                        <span class="tree-toggle">&#9654;</span>
+                        <span class="tree-icon">\uD83D\uDCC1</span>
+                        <span class="tree-name">${escapeHtml(entry.name)}</span>`;
+
+                    const childrenEl = document.createElement('div');
+                    childrenEl.className = 'tree-children collapsed';
+
+                    let loaded = false;
+                    headerEl.addEventListener('click', () => {
+                        const isCollapsed = childrenEl.classList.contains('collapsed');
+                        if (isCollapsed) {
+                            childrenEl.classList.remove('collapsed');
+                            headerEl.querySelector('.tree-toggle').innerHTML = '&#9660;';
+                            headerEl.querySelector('.tree-icon').textContent = '\uD83D\uDCC2'; // 📂
+                            if (!loaded) {
+                                loaded = true;
+                                loadDirectory(entry.path, childrenEl, depth + 1);
+                            }
+                        } else {
+                            childrenEl.classList.add('collapsed');
+                            headerEl.querySelector('.tree-toggle').innerHTML = '&#9654;';
+                            headerEl.querySelector('.tree-icon').textContent = '\uD83D\uDCC1'; // 📁
+                        }
+                    });
+
+                    nodeEl.appendChild(headerEl);
+                    nodeEl.appendChild(childrenEl);
+                    container.appendChild(nodeEl);
+                } else {
+                    // File node
+                    const nodeEl = document.createElement('div');
+                    nodeEl.className = 'tree-node';
+                    nodeEl.style.setProperty('--indent', (depth * 16) + 'px');
+                    const fileIcon = getFileIcon(entry.name);
+                    nodeEl.innerHTML = `
+                        <span class="tree-toggle"></span>
+                        <span class="tree-icon">${fileIcon}</span>
+                        <span class="tree-name">${escapeHtml(entry.name)}</span>
+                        <span class="tree-size">${formatFileSize(entry.size)}</span>`;
+                    nodeEl.addEventListener('click', () => {
+                        // Deselect all, select this
+                        document.querySelectorAll('.tree-node.selected').forEach(el => el.classList.remove('selected'));
+                        nodeEl.classList.add('selected');
+                        openFile(entry.path, entry.name);
+                    });
+                    container.appendChild(nodeEl);
+                }
+            });
+
+            if (entries.length === 0) {
+                const emptyEl = document.createElement('div');
+                emptyEl.className = 'tree-loading';
+                emptyEl.style.setProperty('--indent', (depth * 16 + 20) + 'px');
+                emptyEl.textContent = '(empty)';
+                container.appendChild(emptyEl);
+            }
+        }
+
+        function getFileIcon(filename) {
+            const ext = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+            const icons = {
+                'cs': '\uD83D\uDCDD', 'js': '\uD83D\uDFE8', 'ts': '\uD83D\uDD35', 'html': '\uD83C\uDF10',
+                'css': '\uD83C\uDFA8', 'json': '\u2699\uFE0F', 'xml': '\uD83D\uDCC4', 'md': '\uD83D\uDCD6',
+                'py': '\uD83D\uDC0D', 'ps1': '\uD83D\uDCBB', 'sh': '\uD83D\uDCBB', 'bat': '\uD83D\uDCBB',
+                'png': '\uD83D\uDDBC\uFE0F', 'jpg': '\uD83D\uDDBC\uFE0F', 'jpeg': '\uD83D\uDDBC\uFE0F',
+                'gif': '\uD83D\uDDBC\uFE0F', 'svg': '\uD83D\uDDBC\uFE0F', 'ico': '\uD83D\uDDBC\uFE0F',
+                'sln': '\uD83D\uDCE6', 'csproj': '\uD83D\uDCE6', 'clw': '\uD83D\uDD27', 'inc': '\uD83D\uDD27',
+                'xaml': '\uD83D\uDDA5\uFE0F', 'sql': '\uD83D\uDDC3\uFE0F'
+            };
+            return icons[ext] || '\uD83D\uDCC4';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // ─── File Viewer ──────────────────────────────────────────────
+        function openFile(filePath, fileName) {
+            sendToHost({ type: 'readFile', path: filePath });
+            // Show loading in viewer
+            const viewer = document.getElementById('file-viewer-container');
+            if (viewer) {
+                viewer.innerHTML = `
+                    <div class="file-viewer">
+                        <div class="file-viewer-header">
+                            <span class="file-name">${escapeHtml(fileName)}</span>
+                            <span style="color:var(--text-muted);font-size:10px;">${escapeHtml(filePath)}</span>
+                            <button class="file-viewer-close" onclick="closeFileViewer()" title="Close">&times;</button>
+                        </div>
+                        <div class="file-viewer-content">
+                            <div style="padding:16px;color:var(--text-muted);">Loading...</div>
+                        </div>
+                    </div>`;
+            }
+        }
+
+        function renderFileContent(filePath, content, isBinary) {
+            const viewer = document.getElementById('file-viewer-container');
+            if (!viewer) return;
+
+            const fileName = filePath.split(/[\\/]/).pop();
+            const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
+
+            let bodyHtml;
+            if (isBinary && content.startsWith('data:image')) {
+                // Image
+                bodyHtml = `<div class="file-viewer-image"><img src="${content}" alt="${escapeHtml(fileName)}"></div>`;
+            } else {
+                // Text content with syntax highlighting and line numbers
+                const highlighted = highlightSyntax(content, ext);
+                const lines = content.split('\n');
+                const lineNums = lines.map((_, i) => i + 1).join('\n');
+                bodyHtml = `
+                    <div class="line-numbers">
+                        <pre class="line-nums">${lineNums}</pre>
+                        <pre>${highlighted}</pre>
+                    </div>`;
+            }
+
+            viewer.innerHTML = `
+                <div class="file-viewer">
+                    <div class="file-viewer-header">
+                        <span class="file-name">${escapeHtml(fileName)}</span>
+                        <span style="color:var(--text-muted);font-size:10px;">${escapeHtml(filePath)}</span>
+                        <button class="file-viewer-close" onclick="closeFileViewer()" title="Close">&times;</button>
+                    </div>
+                    <div class="file-viewer-content">
+                        ${bodyHtml}
+                    </div>
+                </div>`;
+        }
+
+        function closeFileViewer() {
+            const viewer = document.getElementById('file-viewer-container');
+            if (viewer) viewer.innerHTML = '';
+            document.querySelectorAll('.tree-node.selected').forEach(el => el.classList.remove('selected'));
+        }
+
+        // ─── Simple Syntax Highlighting ───────────────────────────────
+        function highlightSyntax(code, ext) {
+            const escaped = escapeHtml(code);
+
+            const langGroup = {
+                'cs': 'csharp', 'js': 'js', 'ts': 'js', 'jsx': 'js', 'tsx': 'js',
+                'html': 'html', 'htm': 'html', 'xaml': 'html', 'xml': 'html', 'svg': 'html',
+                'css': 'css', 'json': 'json', 'py': 'python',
+                'ps1': 'powershell', 'sh': 'shell', 'bat': 'shell',
+                'md': 'markdown', 'sql': 'sql', 'clw': 'clarion', 'inc': 'clarion', 'equ': 'clarion'
+            };
+
+            const lang = langGroup[ext] || 'generic';
+
+            // Apply comment and string highlighting first (these take priority)
+            let result = escaped;
+
+            // Strings (double-quoted and single-quoted)
+            result = result.replace(/(&#x27;(?:[^&#]|&#(?!x27;))*?&#x27;|&quot;(?:[^&]|&(?!quot;))*?&quot;)/g,
+                '<span class="syn-string">$1</span>');
+
+            // Single-line comments
+            if (['csharp', 'js', 'json', 'css'].includes(lang)) {
+                result = result.replace(/(\/\/.*?)$/gm, '<span class="syn-comment">$1</span>');
+            } else if (lang === 'python') {
+                result = result.replace(/(#.*?)$/gm, '<span class="syn-comment">$1</span>');
+            } else if (['powershell', 'shell'].includes(lang)) {
+                result = result.replace(/(#.*?)$/gm, '<span class="syn-comment">$1</span>');
+            } else if (lang === 'html') {
+                result = result.replace(/(&lt;!--.*?--&gt;)/gs, '<span class="syn-comment">$1</span>');
+            } else if (lang === 'sql') {
+                result = result.replace(/(--.*?)$/gm, '<span class="syn-comment">$1</span>');
+            }
+
+            // Numbers — tag-aware to avoid corrupting already-highlighted spans
+            result = result.replace(new RegExp('(<[^>]+>)|\\b(\\d+\\.?\\d*)\\b', 'g'),
+                (m, tag, num) => tag ? tag : '<span class="syn-number">' + num + '</span>');
+
+            // Keywords by language
+            let keywords = [];
+            if (lang === 'csharp') {
+                keywords = ['abstract','as','async','await','base','bool','break','byte','case','catch','char','checked','class','const','continue','decimal','default','delegate','do','double','else','enum','event','explicit','extern','false','finally','fixed','float','for','foreach','goto','if','implicit','in','int','interface','internal','is','lock','long','namespace','new','null','object','operator','out','override','params','private','protected','public','readonly','ref','return','sbyte','sealed','short','sizeof','stackalloc','static','string','struct','switch','this','throw','true','try','typeof','uint','ulong','unchecked','unsafe','ushort','using','var','virtual','void','volatile','while','yield'];
+            } else if (lang === 'js') {
+                keywords = ['async','await','break','case','catch','class','const','continue','debugger','default','delete','do','else','export','extends','false','finally','for','from','function','if','import','in','instanceof','let','new','null','of','return','static','super','switch','this','throw','true','try','typeof','undefined','var','void','while','with','yield'];
+            } else if (lang === 'python') {
+                keywords = ['and','as','assert','async','await','break','class','continue','def','del','elif','else','except','False','finally','for','from','global','if','import','in','is','lambda','None','nonlocal','not','or','pass','raise','return','True','try','while','with','yield'];
+            } else if (lang === 'sql') {
+                keywords = ['SELECT','FROM','WHERE','INSERT','INTO','VALUES','UPDATE','SET','DELETE','CREATE','TABLE','ALTER','DROP','INDEX','JOIN','INNER','LEFT','RIGHT','OUTER','ON','AND','OR','NOT','NULL','IS','IN','LIKE','BETWEEN','ORDER','BY','GROUP','HAVING','UNION','AS','DISTINCT','TOP','LIMIT','OFFSET','BEGIN','END','COMMIT','ROLLBACK','TRANSACTION','PRIMARY','KEY','FOREIGN','REFERENCES','CONSTRAINT','DEFAULT','CHECK','UNIQUE','CASCADE','EXISTS','EXEC','DECLARE','IF','ELSE','WHILE','RETURN','PROCEDURE','FUNCTION','VIEW','TRIGGER','INT','VARCHAR','TEXT','INTEGER','REAL','BLOB','DATETIME','BOOLEAN'];
+            }
+
+            // Tag-aware keyword replacement — skips content inside HTML tags from earlier passes
+            if (keywords.length > 0) {
+                const kwPattern = new RegExp('(<[^>]+>)|\\b(' + keywords.join('|') + ')\\b', 'g');
+                result = result.replace(kwPattern, (m, tag, kw) => tag ? tag : '<span class="syn-keyword">' + kw + '</span>');
+            }
+
+            // HTML tags
+            if (lang === 'html') {
+                result = result.replace(/(&lt;\/?)([\w-]+)/g, '$1<span class="syn-tag">$2</span>');
+                result = result.replace(/\b([\w-]+)=/g, '<span class="syn-attr">$1</span>=');
+            }
+
+            return result;
+        }
+
+        // ─── Project Selector ───────────────────────────────────────────
+        let cachedProjectList = [];
+        let cachedCurrentProjectId = '';
+        let _projectSelectorPendingOpen = false;
+
+        function openProjectSelector() {
+            if (cachedProjectList.length > 0) {
+                showProjectSelectorPopup();
+            } else {
+                // Request data — popup will open when 'projectList' message arrives
+                _projectSelectorPendingOpen = true;
+                sendToHost({ type: 'getProjectList' });
+            }
+        }
+
+        function showProjectSelectorPopup(filterText) {
+            filterText = (filterText || '').toLowerCase();
+            const filtered = filterText
+                ? cachedProjectList.filter(p =>
+                    p.name.toLowerCase().includes(filterText) ||
+                    (p.description || '').toLowerCase().includes(filterText))
+                : cachedProjectList;
+
+            let itemsHtml = '';
+            if (filtered.length === 0) {
+                itemsHtml = '<div class="picker-empty">No matching projects</div>';
+            } else {
+                filtered.forEach(p => {
+                    const isCurrent = p.id === cachedCurrentProjectId;
+                    const icon = p.icon || '\uD83D\uDCC1'; // 📁
+                    const iconStyle = p.iconColor ? `style="color:${escapeHtml(p.iconColor)}"` : '';
+                    itemsHtml += `
+                        <div class="project-selector-item${isCurrent ? ' current' : ''}"
+                             onclick="selectProject('${escapeJs(p.id)}')">
+                            <span class="project-selector-icon" ${iconStyle}>${escapeHtml(icon)}</span>
+                            <div class="project-selector-info">
+                                <div class="project-selector-name">${escapeHtml(p.name)}${isCurrent ? ' <span style=\"font-size:10px;color:var(--accent-color)\">(current)</span>' : ''}</div>
+                                ${p.description ? `<div class="project-selector-desc">${escapeHtml(p.description)}</div>` : ''}
+                                <div class="project-selector-path">${escapeHtml(p.path)}</div>
+                            </div>
+                        </div>`;
+                });
+            }
+
+            // Remove existing overlay if any
+            const existing = document.querySelector('.picker-overlay.project-selector');
+            if (existing) existing.remove();
+
+            const overlay = document.createElement('div');
+            overlay.className = 'picker-overlay project-selector';
+            overlay.innerHTML = `
+                <div class="picker-dialog" style="width:440px;">
+                    <div class="picker-header">Switch Project</div>
+                    <input class="project-selector-search" type="text" placeholder="Search projects..."
+                           value="${escapeHtml(filterText)}" oninput="onProjectSearchInput(this.value)">
+                    <div class="picker-list" style="max-height:55vh; padding: 4px 0;">
+                        ${itemsHtml}
+                    </div>
+                    <div class="project-selector-footer">
+                        <button class="picker-btn" onclick="closeProjectSelector()">Close</button>
+                    </div>
+                </div>`;
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) closeProjectSelector();
+            });
+            document.body.appendChild(overlay);
+
+            // Focus search
+            const searchInput = overlay.querySelector('.project-selector-search');
+            if (searchInput) setTimeout(() => searchInput.focus(), 50);
+        }
+
+        function onProjectSearchInput(value) {
+            showProjectSelectorPopup(value);
+        }
+
+        function selectProject(projectId) {
+            closeProjectSelector();
+            sendToHost({ type: 'selectProject', value: projectId });
+        }
+
+        function closeProjectSelector() {
+            const overlay = document.querySelector('.picker-overlay.project-selector');
+            if (overlay) overlay.remove();
         }
 
         // Handle messages from C#
@@ -3078,25 +3284,19 @@
                             break;
                         }
                         case 'availableMcpServers': {
-                            // Only re-render associations if the cache was empty before — that means
-                            // renderMcpServersSection showed all rows unfiltered and needs correction.
-                            // Skip the re-render on the normal load path (cache was already populated).
+                            // Gateway servers: DTOs with name, displayName, description, enabled, connected, toolCount
                             const wasEmpty = cachedAvailableMcpServers.length === 0;
                             cachedAvailableMcpServers = JSON.parse(data);
                             // If the picker was deferred because the cache was empty, open it now.
-                            // Guard: only open if the registry is non-empty — if it's empty, clear the
-                            // flag and show the "no servers" dialog directly to prevent an infinite loop
-                            // (openMcpServersPicker would otherwise re-request getAvailableMcpServers).
                             if (_mcpPickerPendingOpen) {
                                 _mcpPickerPendingOpen = false;
                                 if (cachedAvailableMcpServers.length > 0) {
-                                    openMcpServersPicker();
+                                    openMcpServersPicker(true);
                                 } else {
-                                    showPickerDialog('Select MCP Servers', '<div class="picker-empty">No MCP servers found in registry.</div>', null);
+                                    showPickerDialog('Select MCP Servers', '<div class="picker-empty">No MCP servers found in gateway.</div>', null);
                                 }
                             }
-                            // Re-render only when transitioning from empty cache to populated —
-                            // avoids an unnecessary double-render on every normal project load.
+                            // Re-render only when transitioning from empty cache to populated.
                             if (wasEmpty && currentAssociations) {
                                 renderAssociations(currentAssociations);
                             }
@@ -3139,63 +3339,39 @@
                             }
                             break;
                         }
-                        case 'mcpRegistry': {
-                            const regEntries = JSON.parse(data);
-                            if (_mcpRegistryPendingOpen) {
-                                _mcpRegistryPendingOpen = false;
-                                showMcpRegistryDialog(regEntries);
-                            } else {
-                                // Refresh an already-open dialog
-                                refreshRegistryList(regEntries);
-                            }
-                            break;
-                        }
-                        case 'mcpRegistrySaved': {
-                            const rSaved = JSON.parse(data);
-                            if (rSaved.success) {
-                                setRegistryStatus('Saved.');
-                                // Reload registry list
-                                sendToHost({ type: 'getMcpRegistry' });
-                            } else {
-                                setRegistryStatus(rSaved.error || 'Save failed', true);
-                            }
-                            break;
-                        }
-                        case 'mcpRegistryDeleted': {
-                            const rDel = JSON.parse(data);
-                            if (rDel.success) {
-                                setRegistryStatus('Deleted.');
-                                sendToHost({ type: 'getMcpRegistry' });
-                            } else {
-                                setRegistryStatus('Delete failed', true);
-                            }
-                            break;
-                        }
-                        case 'mcpImportResult': {
-                            const imp = JSON.parse(data);
-                            if (imp.success) {
-                                setRegistryStatus(`Imported ${imp.count} server(s).`);
-                                // C# NotifyMcpImportResult already pushes updated mcpRegistry — no extra request needed
-                            } else {
-                                setRegistryStatus(imp.error || 'Import failed', true);
-                            }
-                            break;
-                        }
-                        case 'mcpRegenResult': {
-                            const rg = JSON.parse(data);
-                            const msg = rg.success
-                                ? `Synced ${rg.globalCount || 0} global + ${rg.projectCount || 0} project(s)`
-                                : ('Regeneration failed: ' + (rg.error || 'unknown error'));
-                            showMcpToast(msg, rg.success ? 'success' : 'error');
-                            setRegistryStatus(rg.success ? 'Done' : msg, !rg.success);
-                            break;
-                        }
                         case 'mcpJsonWriteResult': {
                             const wr = JSON.parse(data);
                             showMcpToast(
                                 wr.success ? '.mcp.json written successfully.' : ('Write failed: ' + (wr.error || 'unknown error')),
                                 wr.success ? 'success' : 'error'
                             );
+                            break;
+                        }
+                        case 'directoryListing': {
+                            const dirData = JSON.parse(data);
+                            renderDirectoryListing(dirData.path, dirData.entries || []);
+                            break;
+                        }
+                        case 'fileContent': {
+                            const fileData = JSON.parse(data);
+                            renderFileContent(fileData.path, fileData.content, fileData.isBinary);
+                            break;
+                        }
+                        case 'projectList': {
+                            const plData = JSON.parse(data);
+                            cachedProjectList = plData.projects || [];
+                            cachedCurrentProjectId = plData.currentProjectId || '';
+                            // If the selector was waiting for data, open it now
+                            if (_projectSelectorPendingOpen) {
+                                _projectSelectorPendingOpen = false;
+                                showProjectSelectorPopup();
+                            }
+                            // If the selector popup is already open, refresh it
+                            const existingSelector = document.querySelector('.picker-overlay.project-selector');
+                            if (existingSelector) {
+                                const searchInput = existingSelector.querySelector('.project-selector-search');
+                                showProjectSelectorPopup(searchInput ? searchInput.value : '');
+                            }
                             break;
                         }
                         case 'newProjectHint': {

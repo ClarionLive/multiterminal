@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Interop;
 
+
 namespace MultiTerminal.Dialogs
 {
     /// <summary>

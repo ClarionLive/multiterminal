@@ -23,7 +23,7 @@ public static string GetDatabasePath()
     // Production path
     string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
     string folder = Path.Combine(appData, "multiterminal");
-    return Path.Combine(folder, "tasks.db");
+    return Path.Combine(folder, "multiterminal.db");
 }
 ```
 

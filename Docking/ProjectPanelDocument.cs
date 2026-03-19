@@ -39,24 +39,17 @@ namespace MultiTerminal.Docking
         private PromptService _promptService;
         private ProjectDatabase _projectDatabase;
         private ProjectContextService _projectContextService;
-        private static SessionDatabase _sharedSessionDb;
-        private static readonly object _sessionDbLock = new object();
-        private SessionSyncService _syncService;
+        private SessionLineageService _lineageService;
+        private GatewayIntegrationService _gatewayService;
         private TerminalTheme _currentTheme;
         private string _currentWorkingDirectory;
         private Project _currentProject;
 
-        // Header controls
-        private Panel _headerPanel;
-        private Button _recentsButton;
-        private Button _newProjectButton;
-        private ContextMenuStrip _recentsContextMenu;
+        // Header controls removed — project selector now lives in WebView2
 
         // WebView2 renderer
         private ProjectPanelRenderer _renderer;
 
-        // Fonts
-        private Font _smallFont;
 
         #region Events
 
@@ -77,25 +70,10 @@ namespace MultiTerminal.Docking
         public event EventHandler<(string ProjectId, string SourcePath)> McpJsonWriteRequested;
 
         /// <summary>
-        /// Raised when JS requests to save (add/update) a registry entry.
-        /// Arg is the raw JSON of fields.
+        /// Raised when the user clicks a file in the file explorer.
+        /// Carries the full file path so the host can open it in the FilePreviewPanel.
         /// </summary>
-        public event EventHandler<string> McpRegistrySaveRequested;
-
-        /// <summary>
-        /// Raised when JS requests to delete a registry entry by server name.
-        /// </summary>
-        public event EventHandler<string> McpRegistryDeleteRequested;
-
-        /// <summary>
-        /// Raised when JS requests to import servers from a .mcp.json file path.
-        /// </summary>
-        public event EventHandler<string> ImportMcpJsonRequested;
-
-        /// <summary>
-        /// Raised when JS requests regeneration of all MCP config files (global + all projects).
-        /// </summary>
-        public event EventHandler RegenerateAllMcpConfigsRequested;
+        public event EventHandler<string> FilePreviewRequested;
 
         #endregion
 
@@ -108,9 +86,6 @@ namespace MultiTerminal.Docking
             CloseButtonVisible = true;
             HideOnClose = true; // Prevent disposal when closed - allows reopening via toggle button
 
-            _smallFont = new Font("Segoe UI", 8.5f);
-            _syncService = new SessionSyncService();
-
             InitializeComponent();
         }
 
@@ -120,11 +95,7 @@ namespace MultiTerminal.Docking
 
             BackColor = Color.FromArgb(30, 30, 30);
 
-            // Header panel with buttons
-            _headerPanel = CreateHeaderPanel();
-            _headerPanel.Dock = DockStyle.Top;
-
-            // WebView2 renderer for content
+            // WebView2 renderer for content (project selector now lives inside WebView2)
             _renderer = new ProjectPanelRenderer
             {
                 Dock = DockStyle.Fill
@@ -141,61 +112,20 @@ namespace MultiTerminal.Docking
             _renderer.RefreshAssociationsRequested += OnRefreshAssociationsRequested;
             _renderer.LaunchRequested += OnRendererLaunchRequested;
             _renderer.WriteMcpJsonRequested += OnWriteMcpJsonRequested;
-            _renderer.McpRegistryRequested += OnMcpRegistryRequested;
-            _renderer.McpRegistrySaveRequested += OnMcpRegistrySaveRequested;
-            _renderer.McpRegistryDeleteRequested += OnMcpRegistryDeleteRequested;
-            _renderer.ImportMcpJsonRequested += OnImportMcpJsonRequested;
             _renderer.AvailableMcpServersRequested += OnAvailableMcpServersRequested;
             _renderer.AvailableSkillsRequested += OnAvailableSkillsRequested;
             _renderer.AvailableSpecialistAgentsRequested += OnAvailableSpecialistAgentsRequested;
-            _renderer.RegenerateAllMcpConfigsRequested += OnRegenerateAllMcpConfigsRequested;
+            _renderer.SelectProjectRequested += OnSelectProjectRequested;
+            _renderer.NewProjectRequested += OnNewProjectRequested;
+            _renderer.ProjectListRequested += OnProjectListRequested;
+            _renderer.ListDirectoryRequested += OnListDirectoryRequested;
+            _renderer.ReadFileRequested += OnReadFileRequested;
 
             Controls.Add(_renderer);
-            Controls.Add(_headerPanel);
 
             ResumeLayout(false);
         }
 
-        private Panel CreateHeaderPanel()
-        {
-            var panel = new Panel
-            {
-                Height = 34,
-                Padding = new Padding(4)
-            };
-
-            _recentsButton = new Button
-            {
-                Text = "Projects \u25BC",
-                Width = 90,
-                Height = 24,
-                Font = _smallFont,
-                FlatStyle = FlatStyle.Flat,
-                Location = new Point(4, 5),
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-            _recentsButton.FlatAppearance.BorderSize = 1;
-            _recentsButton.Click += OnRecentsButtonClick;
-
-            // + button: opens /new-project skill guidance in the panel instead of a dialog
-            _newProjectButton = new Button
-            {
-                Text = "+",
-                Width = 26,
-                Height = 24,
-                Font = _smallFont,
-                FlatStyle = FlatStyle.Flat,
-                Location = new Point(99, 5),
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-            _newProjectButton.FlatAppearance.BorderSize = 1;
-            _newProjectButton.Click += OnNewProjectButtonClick;
-
-            panel.Controls.Add(_recentsButton);
-            panel.Controls.Add(_newProjectButton);
-
-            return panel;
-        }
 
         public void SetServices(ProjectService projectService, PromptService promptService)
         {
@@ -213,13 +143,15 @@ namespace MultiTerminal.Docking
             _projectContextService = new ProjectContextService(projectDatabase);
         }
 
-        public void SetSessionDatabase(SessionDatabase sessionDatabase)
+        public void SetGatewayService(GatewayIntegrationService gatewayService)
         {
-            lock (_sessionDbLock)
-            {
-                _sharedSessionDb = sessionDatabase;
-                System.Diagnostics.Trace.WriteLine($"[ProjectPanel] SessionDatabase injected from MainForm");
-            }
+            _gatewayService = gatewayService;
+        }
+
+        public void SetSessionLineageService(SessionLineageService lineageService)
+        {
+            _lineageService = lineageService;
+            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] SessionLineageService injected from MainForm");
         }
 
         public void SetTheme(TerminalTheme theme)
@@ -228,21 +160,6 @@ namespace MultiTerminal.Docking
             bool isDark = theme.IsDark;
 
             BackColor = isDark ? Color.FromArgb(30, 30, 30) : Color.FromArgb(240, 240, 240);
-            _headerPanel.BackColor = isDark ? Color.FromArgb(45, 45, 48) : Color.FromArgb(230, 236, 242);
-
-            Color buttonBg = isDark ? Color.FromArgb(60, 60, 60) : Color.FromArgb(220, 220, 220);
-            Color buttonFg = isDark ? Color.White : Color.FromArgb(30, 30, 30);
-            Color borderColor = isDark ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180);
-
-            foreach (Control c in _headerPanel.Controls)
-            {
-                if (c is Button btn)
-                {
-                    btn.BackColor = buttonBg;
-                    btn.ForeColor = buttonFg;
-                    btn.FlatAppearance.BorderColor = borderColor;
-                }
-            }
 
             _renderer?.SetTheme(isDark);
         }
@@ -264,7 +181,6 @@ namespace MultiTerminal.Docking
             if (project == null)
             {
                 _renderer?.ShowWelcome();
-                DisposeSessionDatabase();
                 return;
             }
 
@@ -340,7 +256,7 @@ namespace MultiTerminal.Docking
             // Send available agents for picker popup (reused after stats re-render)
             var availableAgents = SendAvailableAgents();
 
-            // Send MCP registry entries for picker popup (reused after stats re-render)
+            // Send gateway server list for picker popup (reused after stats re-render)
             var availableMcpServers = SendAvailableMcpServers();
 
             // Send available skills for picker popup (reused after stats re-render)
@@ -371,7 +287,7 @@ namespace MultiTerminal.Docking
             if (availableAgents != null)
                 _renderer?.SendAvailableAgents(availableAgents);
 
-            // Re-send MCP server registry (stats re-render clears the cached data)
+            // Re-send gateway server list (stats re-render clears the cached data)
             if (availableMcpServers != null)
                 _renderer?.SendAvailableMcpServers(availableMcpServers);
 
@@ -382,6 +298,9 @@ namespace MultiTerminal.Docking
             // Re-send available specialist agents (stats re-render clears the cached data)
             if (availableSpecialistAgents != null)
                 _renderer?.SendAvailableSpecialistAgents(availableSpecialistAgents);
+
+            // Send project list so the in-panel project selector popup has data
+            SendProjectListToRenderer();
 
             // Sessions section hidden for now (feature incomplete)
             // await LoadSessionsForProjectAsync(project.Path);
@@ -410,9 +329,8 @@ namespace MultiTerminal.Docking
 
             try
             {
-                // Count files (excluding common ignore patterns)
+                // Count files (excluding common ignore patterns — uses shared IgnoreFolders)
                 var extensions = new[] { ".cs", ".js", ".ts", ".html", ".css", ".json", ".xml", ".md", ".py", ".clw", ".inc", ".equ" };
-                var ignoreFolders = new[] { "bin", "obj", "node_modules", ".git", ".vs", "packages" };
 
                 int fileCount = 0;
                 int lineCount = 0;
@@ -421,10 +339,10 @@ namespace MultiTerminal.Docking
                     .Where(f =>
                     {
                         var dir = Path.GetDirectoryName(f);
-                        return !ignoreFolders.Any(ig => dir.Contains(Path.DirectorySeparatorChar + ig + Path.DirectorySeparatorChar) ||
+                        return !IgnoreFolders.Any(ig => dir.Contains(Path.DirectorySeparatorChar + ig + Path.DirectorySeparatorChar) ||
                                                          dir.EndsWith(Path.DirectorySeparatorChar + ig));
                     })
-                    .Where(f => extensions.Contains(Path.GetExtension(f).ToLower()))
+                    .Where(f => extensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
                     .Take(1000); // Limit for performance
 
                 foreach (var file in files)
@@ -499,15 +417,15 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Fetches all MCP registry entries and sends them to the panel for the MCP picker popup.
+        /// Fetches all gateway server entries and sends them to the panel for the MCP server picker popup.
         /// Returns the fetched entries so the caller can reuse them after stats re-render.
         /// </summary>
-        private List<MultiTerminal.Models.McpRegistryEntry> SendAvailableMcpServers()
+        private List<GatewayServerDto> SendAvailableMcpServers()
         {
-            if (_renderer == null || _projectDatabase == null) return null;
+            if (_renderer == null) return null;
             try
             {
-                var entries = _projectDatabase.GetAllMcpRegistryEntries();
+                var entries = _gatewayService?.GetAllGatewayServers() ?? new List<GatewayServerDto>();
                 _renderer.SendAvailableMcpServers(entries);
                 return entries;
             }
@@ -768,7 +686,22 @@ namespace MultiTerminal.Docking
             var el = item.Value;
 
             if (action == "delete")
-                return (_projectDatabase.DeleteProjectMcpServer(projectId, GetJsonString(el, "serverName")), 0);
+            {
+                bool deleted = _projectDatabase.DeleteProjectMcpServer(projectId, GetJsonString(el, "serverName"));
+                if (deleted) SyncGatewayProfile(projectId);
+                return (deleted, 0);
+            }
+
+            if (action == "update")
+            {
+                int id = GetJsonInt(el, "id");
+                if (id > 0 && el.TryGetProperty("isEnabled", out _))
+                {
+                    bool updated = _projectDatabase.UpdateMcpServerEnabled(id, GetJsonBool(el, "isEnabled"));
+                    if (updated) SyncGatewayProfile(projectId);
+                    return (updated, 0);
+                }
+            }
 
             _projectDatabase.SaveProjectMcpServer(new MultiTerminal.Models.ProjectMcpServer
             {
@@ -776,7 +709,29 @@ namespace MultiTerminal.Docking
                 ServerName = GetJsonString(el, "serverName"),
                 IsEnabled = GetJsonBool(el, "isEnabled", defaultValue: true)
             });
+            SyncGatewayProfile(projectId);
             return (true, 0);
+        }
+
+        /// <summary>
+        /// Syncs the project's enabled MCP servers to the gateway profile so changes
+        /// take effect immediately (next tools/list call).
+        /// </summary>
+        private void SyncGatewayProfile(string projectId)
+        {
+            try
+            {
+                if (_gatewayService == null || !_gatewayService.IsGatewayInstalled()) return;
+                string projectName = _currentProject?.Name;
+                if (string.IsNullOrWhiteSpace(projectName)) return;
+
+                var enabledNames = _projectDatabase.GetEnabledMcpServerNamesForProject(projectId);
+                _gatewayService.SyncProjectProfile(projectId, projectName, enabledNames);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SyncGatewayProfile failed: {ex.Message}");
+            }
         }
 
         private (bool success, int newId) HandleSpecialistAgentCrud(string projectId, string action, string itemJson)
@@ -787,6 +742,13 @@ namespace MultiTerminal.Docking
 
             if (action == "delete")
                 return (_projectDatabase.DeleteProjectSpecialistAgent(projectId, GetJsonString(el, "agentType")), 0);
+
+            if (action == "update")
+            {
+                int id = GetJsonInt(el, "id");
+                if (id > 0 && el.TryGetProperty("isEnabled", out _))
+                    return (_projectDatabase.UpdateSpecialistAgentEnabled(id, GetJsonBool(el, "isEnabled")), 0);
+            }
 
             _projectDatabase.SaveProjectSpecialistAgent(new MultiTerminal.Models.ProjectSpecialistAgent
             {
@@ -847,6 +809,13 @@ namespace MultiTerminal.Docking
             if (action == "delete")
                 return (_projectDatabase.DeleteProjectSkill(projectId, GetJsonString(el, "skillName")), 0);
 
+            if (action == "update")
+            {
+                int id = GetJsonInt(el, "id");
+                if (id > 0 && el.TryGetProperty("isEnabled", out _))
+                    return (_projectDatabase.UpdateSkillEnabled(id, GetJsonBool(el, "isEnabled")), 0);
+            }
+
             _projectDatabase.SaveProjectSkill(new MultiTerminal.Models.ProjectSkill
             {
                 ProjectId = projectId,
@@ -857,7 +826,7 @@ namespace MultiTerminal.Docking
         }
 
         // ============================================================
-        // MCP Registry & .mcp.json write handlers
+        // MCP .mcp.json write handlers
         // ============================================================
 
         private void OnWriteMcpJsonRequested(object sender, EventArgs e)
@@ -867,37 +836,20 @@ namespace MultiTerminal.Docking
                 _renderer?.SendMcpJsonWriteResult(false, "No project selected");
                 return;
             }
-            // Pass source path so McpConfigService can write without a SQLite project lookup.
-            // Projects from the JSON registry may not be in the SQLite projects table yet, so
-            // GetRichProject would return null and the write would fail. The panel always has
-            // _currentProject populated with SourcePath and/or Path from the registry.
+            // Pass source path so the handler can write without a SQLite project lookup.
             string sourcePath = _currentProject.SourcePath ?? _currentProject.Path;
             McpJsonWriteRequested?.Invoke(this, (_currentProject.Id, sourcePath));
         }
 
-        private void OnMcpRegistryRequested(object sender, EventArgs e)
+        /// <summary>
+        /// Called by MainForm after the .mcp.json write completes.
+        /// Forwards the result to JS so the user sees a success/error notification.
+        /// </summary>
+        public void NotifyMcpJsonWriteResult(bool success, string error = null)
         {
-            if (_projectDatabase == null)
-            {
-                _renderer?.SendMcpRegistryEntries(new List<MultiTerminal.Models.McpRegistryEntry>());
-                return;
-            }
-            try
-            {
-                var entries = _projectDatabase.GetAllMcpRegistryEntries();
-                _renderer?.SendMcpRegistryEntries(entries);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistryRequested error: {ex.Message}");
-                _renderer?.SendMcpRegistryEntries(new List<MultiTerminal.Models.McpRegistryEntry>());
-            }
+            _renderer?.SendMcpJsonWriteResult(success, error);
         }
 
-        /// <summary>
-        /// Called when JS requests the available MCP servers list for the picker popup.
-        /// Delegates to SendAvailableMcpServers which fetches from DB and sends to the renderer.
-        /// </summary>
         private void OnAvailableMcpServersRequested(object sender, EventArgs e)
         {
             SendAvailableMcpServers();
@@ -911,117 +863,6 @@ namespace MultiTerminal.Docking
         private void OnAvailableSpecialistAgentsRequested(object sender, EventArgs e)
         {
             SendAvailableSpecialistAgents();
-        }
-
-        private void OnMcpRegistrySaveRequested(object sender, string itemJson)
-        {
-            if (_projectDatabase == null || string.IsNullOrEmpty(itemJson))
-            {
-                _renderer?.SendMcpRegistrySaved(false, "Database not available");
-                return;
-            }
-            try
-            {
-                var item = TryParseItemJson(itemJson);
-                if (!item.HasValue)
-                {
-                    _renderer?.SendMcpRegistrySaved(false, "Invalid entry data");
-                    return;
-                }
-                var el = item.Value;
-                var rawTier = GetJsonString(el, "tier") ?? "optional";
-                var tier = (rawTier == "multiterminal" || rawTier == "global" || rawTier == "optional")
-                    ? rawTier : "optional";
-                var entry = new MultiTerminal.Models.McpRegistryEntry
-                {
-                    ServerName    = GetJsonString(el, "serverName") ?? "",
-                    DisplayName   = GetJsonString(el, "displayName") ?? GetJsonString(el, "serverName") ?? "",
-                    Description   = GetJsonString(el, "description") ?? "",
-                    ConfigJson    = GetJsonString(el, "configJson") ?? "{}",
-                    Tier          = tier,
-                    TransportType = GetJsonString(el, "transportType") ?? "stdio",
-                    Command       = GetJsonString(el, "command") ?? ""
-                };
-                _projectDatabase.SaveMcpRegistryEntry(entry);
-                _renderer?.SendMcpRegistrySaved(true);
-                // Raise so MainForm can also handle (e.g. refresh availableMcpServers cache)
-                McpRegistrySaveRequested?.Invoke(this, itemJson);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistrySaveRequested error: {ex.Message}");
-                _renderer?.SendMcpRegistrySaved(false, ex.Message);
-            }
-        }
-
-        private void OnMcpRegistryDeleteRequested(object sender, string serverName)
-        {
-            if (_projectDatabase == null || string.IsNullOrEmpty(serverName))
-            {
-                _renderer?.SendMcpRegistryDeleted(false);
-                return;
-            }
-            try
-            {
-                bool deleted = _projectDatabase.DeleteMcpRegistryEntry(serverName);
-                _renderer?.SendMcpRegistryDeleted(deleted);
-                McpRegistryDeleteRequested?.Invoke(this, serverName);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnMcpRegistryDeleteRequested error: {ex.Message}");
-                _renderer?.SendMcpRegistryDeleted(false);
-            }
-        }
-
-        private void OnImportMcpJsonRequested(object sender, string filePath)
-        {
-            // Delegate to MainForm via event — MainForm has McpConfigService
-            ImportMcpJsonRequested?.Invoke(this, filePath);
-        }
-
-        /// <summary>
-        /// Called by MainForm after McpConfigService.WriteMcpJsonToProject() completes.
-        /// Forwards the result to JS so the user sees a success/error notification.
-        /// </summary>
-        public void NotifyMcpJsonWriteResult(bool success, string error = null)
-        {
-            _renderer?.SendMcpJsonWriteResult(success, error);
-        }
-
-        private void OnRegenerateAllMcpConfigsRequested(object sender, EventArgs e)
-        {
-            RegenerateAllMcpConfigsRequested?.Invoke(this, EventArgs.Empty);
-        }
-
-        /// <summary>
-        /// Called by MainForm after regenerating all MCP configs (global via CLI + project files).
-        /// </summary>
-        public void NotifyMcpRegenResult(bool success, int globalCount = 0, int projectCount = 0, string error = null)
-        {
-            _renderer?.SendMcpRegenResult(success, globalCount, projectCount, error);
-        }
-
-        /// <summary>
-        /// Called by MainForm after McpConfigService.ImportFromMcpJsonFile() completes.
-        /// Forwards result to JS and refreshes the registry list.
-        /// </summary>
-        public void NotifyMcpImportResult(bool success, int count = 0, string error = null)
-        {
-            _renderer?.SendMcpImportResult(success, count, error);
-            if (success && _projectDatabase != null)
-            {
-                // Refresh registry view after a successful import
-                try
-                {
-                    var entries = _projectDatabase.GetAllMcpRegistryEntries();
-                    _renderer?.SendMcpRegistryEntries(entries);
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] NotifyMcpImportResult refresh error: {ex.Message}");
-                }
-            }
         }
 
         // Parse itemJson once and return the root element for use by all Handle*Crud methods.
@@ -1053,7 +894,11 @@ namespace MultiTerminal.Docking
         private static bool GetJsonBool(JsonElement root, string key, bool defaultValue = false)
         {
             if (!root.TryGetProperty(key, out var el)) return defaultValue;
-            return el.ValueKind == JsonValueKind.True;
+            if (el.ValueKind == JsonValueKind.True) return true;
+            if (el.ValueKind == JsonValueKind.False) return false;
+            if (el.ValueKind == JsonValueKind.String)
+                return string.Equals(el.GetString(), "true", StringComparison.OrdinalIgnoreCase);
+            return defaultValue;
         }
 
         private void OnRendererPastePrompt(object sender, string promptId)
@@ -1121,11 +966,18 @@ namespace MultiTerminal.Docking
                 return;
             }
 
-            // Check if project has Claude sessions (quick check, can stay on UI thread)
-            string claudeProjectPath = _syncService.GetClaudeProjectPath(projectPath);
-            if (claudeProjectPath == null)
+            var lineageService = _lineageService;
+            if (lineageService == null)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] No Claude sessions folder found for {projectPath}");
+                System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available");
+                _renderer?.ClearSessions();
+                return;
+            }
+
+            var claudeFolder = SessionLineageService.GetClaudeProjectFolder(projectPath);
+            if (claudeFolder == null)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] No Claude project folder found for {projectPath}");
                 _renderer?.ClearSessions();
                 return;
             }
@@ -1135,27 +987,23 @@ namespace MultiTerminal.Docking
                 // Load sessions from database on background thread
                 var sessionSummaries = await Task.Run(() =>
                 {
-                    // Ensure session database is available
-                    var db = GetSessionDatabase();
-
-                    // Load sessions from the database (includes orphaned/active sessions)
-                    var dbSessions = db?.GetSessionsByProject(projectPath, 20) ?? new List<Session>();
-                    return dbSessions
+                    var lineageRecords = lineageService.GetSessionsByFolder(claudeFolder, 20);
+                    return lineageRecords
                         .Select(s => new SessionSummary
                         {
                             SessionId = s.SessionId,
                             Summary = s.Summary,
-                            FirstPrompt = s.InitialPrompt,
-                            MessageCount = s.TotalMessages,
-                            Created = s.StartedAt,
-                            Modified = s.EndedAt ?? s.StartedAt,
-                            GitBranch = null // Not stored in db currently
+                            FirstPrompt = null,
+                            MessageCount = 0,
+                            Created = DateTime.TryParse(s.StartedAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var started) ? started : DateTime.MinValue,
+                            Modified = DateTime.TryParse(s.EndedAt ?? s.StartedAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var ended) ? ended : DateTime.MinValue,
+                            GitBranch = null
                         })
                         .ToList();
                 });
 
                 // Back on UI thread - update renderer
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Loaded {sessionSummaries.Count} sessions from database for {projectPath}");
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Loaded {sessionSummaries.Count} sessions from lineage for {projectPath}");
                 _renderer?.ShowSessions(sessionSummaries);
             }
             catch (Exception ex)
@@ -1165,22 +1013,6 @@ namespace MultiTerminal.Docking
             }
         }
 
-        private SessionDatabase GetSessionDatabase()
-        {
-            lock (_sessionDbLock)
-            {
-                if (_sharedSessionDb == null)
-                {
-                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] WARNING: SessionDatabase not injected, returning null");
-                }
-                return _sharedSessionDb;
-            }
-        }
-
-        private void DisposeSessionDatabase()
-        {
-            // Shared database is kept alive - no per-project disposal needed
-        }
 
         private void OnOpenSessionRequested(object sender, string sessionId)
         {
@@ -1209,18 +1041,29 @@ namespace MultiTerminal.Docking
 
             try
             {
-                var db = GetSessionDatabase();
-                if (db != null)
+                var lineageService = _lineageService;
+                if (lineageService == null)
                 {
-                    // Search message content in the database
-                    var results = db.SearchMessagesWithSessionInfo(query, _currentProject.Path, 50);
-                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Found {results.Count} message matches for '{query}'");
-                    _renderer?.ShowSearchResults(results, query);
+                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available for search");
+                    return;
                 }
-                else
+
+                var results = await Task.Run(() =>
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SessionDatabase not available for search");
-                }
+                    var messages = lineageService.SearchSessionMessages(query: query, limit: 50);
+                    return messages.Select(r => new MessageSearchResult
+                    {
+                        SessionId = r.SessionId,
+                        SessionSummary = null,
+                        MessageId = r.DbId,
+                        Role = r.Role,
+                        ContentSnippet = r.Content?.Length > 200 ? r.Content.Substring(0, 200) + "..." : r.Content,
+                        Timestamp = DateTime.TryParse(r.Timestamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var ts) ? ts : DateTime.MinValue
+                    }).ToList();
+                });
+
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Found {results.Count} message matches for '{query}'");
+                _renderer?.ShowSearchResults(results, query);
             }
             catch (Exception ex)
             {
@@ -1237,18 +1080,26 @@ namespace MultiTerminal.Docking
 
             try
             {
-                var db = GetSessionDatabase();
-                if (db == null)
+                var lineageService = _lineageService;
+                if (lineageService == null)
                 {
-                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] Failed to get session database");
+                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available for sync");
+                    _renderer?.ShowSyncResult(0);
+                    return;
+                }
+
+                var claudeFolder = SessionLineageService.GetClaudeProjectFolder(_currentProject.Path);
+                if (claudeFolder == null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] No Claude project folder for sync: {_currentProject.Path}");
                     _renderer?.ShowSyncResult(0);
                     return;
                 }
 
                 // Sync from Claude's storage to local database on background thread
-                var projectPath = _currentProject.Path;
-                int count = await Task.Run(() => _syncService.SyncProject(projectPath, db));
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Synced {count} sessions to local database");
+                var syncResult = await Task.Run(() => lineageService.SyncNewSessions(claudeFolder));
+                int count = syncResult.Imported;
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Synced {count} sessions to lineage database");
 
                 // Refresh the display (back on UI thread)
                 await LoadSessionsForProjectAsync(_currentProject.Path);
@@ -1273,10 +1124,10 @@ namespace MultiTerminal.Docking
 
             try
             {
-                var db = GetSessionDatabase();
-                if (db == null)
+                var lineageService = _lineageService;
+                if (lineageService == null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Session database not available");
+                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available");
                     _renderer?.ShowSessionMessages(sessionId, new List<SessionMessageSummary>());
                     return;
                 }
@@ -1284,16 +1135,7 @@ namespace MultiTerminal.Docking
                 // Query messages from SQLite on background thread
                 var summaries = await Task.Run(() =>
                 {
-                    // Get the session by its UUID
-                    var session = db.GetSessionBySessionId(sessionId);
-                    if (session == null)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Session not found in database: {sessionId}");
-                        return new List<SessionMessageSummary>();
-                    }
-
-                    // Get messages from database
-                    var messages = db.GetMessages(session.Id);
+                    var messages = lineageService.GetSessionMessagesBySessionId(sessionId, 500);
 
                     // Convert to summaries (only user and assistant messages)
                     return messages
@@ -1302,8 +1144,8 @@ namespace MultiTerminal.Docking
                         .Select(m => new SessionMessageSummary
                         {
                             Role = m.Role,
-                            Content = m.Content,
-                            Timestamp = m.Timestamp
+                            Content = m.Content?.Length > 300 ? m.Content.Substring(0, 300) + "..." : m.Content,
+                            Timestamp = DateTime.TryParse(m.Timestamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var ts) ? ts : DateTime.MinValue
                         })
                         .ToList();
                 });
@@ -1320,115 +1162,177 @@ namespace MultiTerminal.Docking
 
         #endregion
 
-        private void OnRecentsButtonClick(object sender, EventArgs e)
+        /// <summary>
+        /// Handles JS request to switch to a different project by ID.
+        /// Loads from SQLite first, falls back to JSON, then fires ProjectSelected.
+        /// </summary>
+        private void OnSelectProjectRequested(object sender, string projectId)
         {
-            ShowRecentsMenu();
-        }
+            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] SelectProject requested: {projectId}");
 
-        private void OnNewProjectButtonClick(object sender, EventArgs e)
-        {
-            _renderer?.ShowNewProjectHint();
-        }
-
-        private void ShowRecentsMenu()
-        {
-            if (_recentsContextMenu != null)
+            Project project = null;
+            if (_projectDatabase != null && !string.IsNullOrEmpty(projectId))
             {
-                _recentsContextMenu.Dispose();
+                project = _projectDatabase.GetRichProject(projectId);
+                if (project != null)
+                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from SQLite: {projectId}");
             }
 
-            _recentsContextMenu = new ContextMenuStrip();
-
-            bool isDark = _currentTheme?.IsDark ?? true;
-            _recentsContextMenu.BackColor = isDark ? Color.FromArgb(45, 45, 48) : Color.FromArgb(240, 240, 240);
-            _recentsContextMenu.ForeColor = isDark ? Color.White : Color.FromArgb(30, 30, 30);
-
-            // Get all projects and recent projects
-            var allProjects = _projectService?.GetAllRegisteredProjects() ?? new List<ProjectRegistryEntry>();
-            var recentProjects = _projectService?.GetRecentProjects(5) ?? new List<ProjectRegistryEntry>();
-            var recentIds = new HashSet<string>(recentProjects.Select(p => p.Id));
-
-            // Add recent projects first
-            foreach (var entry in recentProjects)
+            // Fall back to JSON registry
+            if (project == null)
             {
-                var item = new ToolStripMenuItem(entry.Name)
-                {
-                    Tag = entry
-                };
-                item.Click += OnProjectMenuItemClick;
-                _recentsContextMenu.Items.Add(item);
-            }
-
-            // Get remaining projects (not in recents), sorted alphabetically
-            var otherProjects = allProjects
-                .Where(p => !recentIds.Contains(p.Id))
-                .OrderBy(p => p.Name)
-                .ToList();
-
-            // Add separator and other projects if any exist
-            if (recentProjects.Any() && otherProjects.Any())
-            {
-                _recentsContextMenu.Items.Add(new ToolStripSeparator());
-            }
-
-            foreach (var entry in otherProjects)
-            {
-                var item = new ToolStripMenuItem(entry.Name)
-                {
-                    Tag = entry
-                };
-                item.Click += OnProjectMenuItemClick;
-                _recentsContextMenu.Items.Add(item);
-            }
-
-            if (_recentsContextMenu.Items.Count == 0)
-            {
-                var emptyItem = new ToolStripMenuItem("(No projects)")
-                {
-                    Enabled = false
-                };
-                _recentsContextMenu.Items.Add(emptyItem);
-            }
-
-            _recentsContextMenu.Show(_recentsButton, new Point(0, _recentsButton.Height));
-        }
-
-        private void OnProjectMenuItemClick(object sender, EventArgs e)
-        {
-            if (sender is ToolStripMenuItem item && item.Tag is ProjectRegistryEntry entry)
-            {
-                System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Menu item clicked: {entry.Name} at {entry.Path}");
-
-                // Load from SQLite first, fall back to JSON file
-                Project project = null;
-                if (_projectDatabase != null && !string.IsNullOrEmpty(entry.Id))
-                {
-                    project = _projectDatabase.GetRichProject(entry.Id);
-                    if (project != null)
-                        System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from SQLite: {entry.Id}");
-                }
-                if (project == null)
+                var allEntries = _projectService?.GetAllRegisteredProjects() ?? new List<ProjectRegistryEntry>();
+                var entry = allEntries.FirstOrDefault(e => e.Id == projectId);
+                if (entry != null)
                 {
                     project = _projectService?.LoadProject(entry.Path);
                     if (project != null)
                         System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from JSON: {entry.Path}");
                 }
-
-                if (project != null)
-                {
-                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded successfully, firing ProjectSelected event");
-                    ProjectSelected?.Invoke(this, new ProjectSelectedEventArgs(project));
-                }
-                else
-                {
-                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Failed to load project: {entry.Name} (ID: {entry.Id}, Path: {entry.Path})");
-                    MessageBox.Show(
-                        $"Could not load project:\n{entry.Name}\n\nNot found in database or at {entry.Path}",
-                        "Project Load Failed",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                }
             }
+
+            if (project != null)
+            {
+                ProjectSelected?.Invoke(this, new ProjectSelectedEventArgs(project));
+            }
+            else
+            {
+                System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Failed to load project: {projectId}");
+            }
+        }
+
+        /// <summary>
+        /// Handles JS request to create a new project (the "+" button in WebView2).
+        /// </summary>
+        private void OnNewProjectRequested(object sender, EventArgs e)
+        {
+            _renderer?.ShowNewProjectHint();
+        }
+
+        /// <summary>
+        /// Handles JS request for the project list (to populate the selector popup).
+        /// </summary>
+        private void OnProjectListRequested(object sender, EventArgs e)
+        {
+            SendProjectListToRenderer();
+        }
+
+        /// <summary>
+        /// Sends all registered projects (with descriptions from SQLite) to the WebView2 panel.
+        /// </summary>
+        private void SendProjectListToRenderer()
+        {
+            if (_renderer == null) return;
+
+            var allEntries = _projectService?.GetAllRegisteredProjects() ?? new List<ProjectRegistryEntry>();
+            var projectList = new List<(string Id, string Name, string Description, string Path, string Icon, string IconColor)>();
+
+            foreach (var entry in allEntries.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                string description = "";
+                string icon = "";
+                string iconColor = "";
+
+                // Try to get description from SQLite
+                if (_projectDatabase != null && !string.IsNullOrEmpty(entry.Id))
+                {
+                    var richProject = _projectDatabase.GetRichProject(entry.Id);
+                    if (richProject != null)
+                    {
+                        description = richProject.Description ?? "";
+                        icon = richProject.Icon ?? "";
+                        iconColor = richProject.IconColor ?? "";
+                    }
+                }
+
+                projectList.Add((entry.Id, entry.Name, description, entry.Path, icon, iconColor));
+            }
+
+            _renderer.SendProjectList(projectList, _currentProject?.Id);
+        }
+
+        /// <summary>
+        /// Handles JS request to list directory contents for the file explorer.
+        /// </summary>
+        /// <summary>
+        /// Validates that the given path is within the current project root.
+        /// Prevents path traversal attacks from the WebView2 JS layer.
+        /// </summary>
+        private bool IsPathWithinProject(string requestedPath)
+        {
+            var projectRoot = _currentProject?.Path;
+            if (string.IsNullOrEmpty(projectRoot)) return false;
+            try
+            {
+                var normalizedPath = Path.GetFullPath(requestedPath);
+                var normalizedRoot = Path.GetFullPath(projectRoot);
+                // Ensure trailing separator for prefix check
+                if (!normalizedRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                    normalizedRoot += Path.DirectorySeparatorChar;
+                return normalizedPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase)
+                    || Path.GetFullPath(requestedPath).Equals(Path.GetFullPath(projectRoot), StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        private static readonly HashSet<string> IgnoreFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "bin", "obj", "node_modules", ".git", ".vs", "packages", "__pycache__", ".idea", ".svn", ".hg" };
+
+        private void OnListDirectoryRequested(object sender, string dirPath)
+        {
+            if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath)) return;
+            if (!IsPathWithinProject(dirPath)) return;
+
+            try
+            {
+                var entries = new List<(string Name, string FullPath, bool IsDirectory, long Size)>();
+
+                // Directories first, sorted (use IgnoreFolders instead of hiding all dotfiles)
+                foreach (var dir in Directory.GetDirectories(dirPath)
+                    .Select(d => new DirectoryInfo(d))
+                    .Where(d => !IgnoreFolders.Contains(d.Name))
+                    .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    entries.Add((dir.Name, dir.FullName, true, 0));
+                }
+
+                // Files, sorted
+                foreach (var file in Directory.GetFiles(dirPath)
+                    .Select(f => new FileInfo(f))
+                    .OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    entries.Add((file.Name, file.FullName, false, file.Length));
+                }
+
+                _renderer?.SendDirectoryListing(dirPath, entries);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnListDirectoryRequested error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Handles JS request to read a file for the file viewer.
+        /// Sends content for text files, or a base64 data URL for images.
+        /// </summary>
+        private void OnReadFileRequested(object sender, string filePath)
+        {
+            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: filePath={filePath}");
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: file is null/empty or doesn't exist");
+                return;
+            }
+            if (!IsPathWithinProject(filePath))
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: path not within project. ProjectPath={_currentProject?.Path ?? "null"}");
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: invoking FilePreviewRequested");
+            // Route to the external FilePreviewPanel instead of rendering inline
+            FilePreviewRequested?.Invoke(this, filePath);
         }
 
         protected override string GetPersistString()
@@ -1440,8 +1344,6 @@ namespace MultiTerminal.Docking
         {
             if (disposing)
             {
-                _smallFont?.Dispose();
-                _recentsContextMenu?.Dispose();
                 _renderer?.Dispose();
                 _projectDatabase = null; // Shared instance — disposed by MainForm
             }

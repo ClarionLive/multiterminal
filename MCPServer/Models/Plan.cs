@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MultiTerminal.MCPServer.Models
 {
@@ -152,6 +153,7 @@ namespace MultiTerminal.MCPServer.Models
         /// Transition notes history - a conversation trail of coding/testing cycles.
         /// Each entry records who made the transition, when, and what was done/found.
         /// </summary>
+        [JsonConverter(typeof(ChecklistItemNoteListConverter))]
         public List<ChecklistItemNote> Notes { get; set; }
 
         /// <summary>
@@ -221,6 +223,49 @@ namespace MultiTerminal.MCPServer.Models
         /// The note content - what was done, what needs fixing, confirmation, etc.
         /// </summary>
         public string Text { get; set; }
+    }
+
+    /// <summary>
+    /// Handles legacy checklist JSON where notes may be plain strings instead of objects.
+    /// Converts string notes to ChecklistItemNote with the string as Text.
+    /// </summary>
+    public class ChecklistItemNoteListConverter : JsonConverter<List<ChecklistItemNote>>
+    {
+        public override List<ChecklistItemNote> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            var notes = new List<ChecklistItemNote>();
+            if (reader.TokenType != JsonTokenType.StartArray)
+                return notes;
+
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+            {
+                if (reader.TokenType == JsonTokenType.String)
+                {
+                    notes.Add(new ChecklistItemNote
+                    {
+                        By = "unknown",
+                        At = DateTime.UtcNow.ToString("o"),
+                        Transition = "legacy",
+                        Text = reader.GetString() ?? ""
+                    });
+                }
+                else if (reader.TokenType == JsonTokenType.StartObject)
+                {
+                    var note = JsonSerializer.Deserialize<ChecklistItemNote>(ref reader, options);
+                    if (note != null) notes.Add(note);
+                }
+                else
+                {
+                    reader.Skip();
+                }
+            }
+            return notes;
+        }
+
+        public override void Write(Utf8JsonWriter writer, List<ChecklistItemNote> value, JsonSerializerOptions options)
+        {
+            JsonSerializer.Serialize(writer, value, options);
+        }
     }
 
     /// <summary>

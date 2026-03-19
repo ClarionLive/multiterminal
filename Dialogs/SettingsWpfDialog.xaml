@@ -2,9 +2,9 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Settings"
-        Width="520" Height="780"
-        MinWidth="520" MaxWidth="520"
-        MinHeight="780" MaxHeight="780"
+        Width="880" Height="680"
+        MinWidth="880" MaxWidth="880"
+        MinHeight="680" MaxHeight="680"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
@@ -17,7 +17,7 @@
             <Setter Property="Foreground" Value="#E0E0E0"/>
             <Setter Property="BorderBrush" Value="#3E3E42"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="Padding" Value="8,4"/>
             <Setter Property="FontFamily" Value="Segoe UI"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="CaretBrush" Value="#E0E0E0"/>
@@ -27,9 +27,9 @@
                         <Border Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="3">
+                                CornerRadius="3"
+                                Padding="{TemplateBinding Padding}">
                             <ScrollViewer x:Name="PART_ContentHost"
-                                          Margin="{TemplateBinding Padding}"
                                           VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -369,12 +369,49 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Scrollable form content -->
-        <ScrollViewer Grid.Row="0"
-                      VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled"
-                      Margin="0">
-            <StackPanel Margin="16,16,16,8">
+        <!-- Two-column form content -->
+        <Grid Grid.Row="0" Margin="16,16,16,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- LEFT COLUMN -->
+            <StackPanel Grid.Column="0">
+
+                <!-- SECTION 0: General -->
+                <GroupBox Header="General"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <StackPanel Margin="4,8,4,4">
+                        <TextBlock Text="Default Working Directory (Just Claude)"
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="DefaultWorkingDirText"
+                                     Grid.Column="0"
+                                     Style="{StaticResource DarkTextBox}"
+                                     Foreground="#FFFFFF"
+                                     Height="32"
+                                     FontSize="12"
+                                     VerticalAlignment="Center"
+                                     ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                            <Button x:Name="BrowseDefaultDirButton"
+                                    Grid.Column="1"
+                                    Content="Browse..."
+                                    Style="{StaticResource SmallActionButton}"
+                                    Width="80" Height="32"
+                                    VerticalAlignment="Center"
+                                    Margin="6,0,0,0"
+                                    Click="BrowseDefaultDirButton_Click"/>
+                        </Grid>
+                    </StackPanel>
+                </GroupBox>
 
                 <!-- SECTION 1: Font Sizes -->
                 <GroupBox Header="Font Sizes"
@@ -460,18 +497,21 @@
                     </Grid>
                 </GroupBox>
 
+            </StackPanel>
+
+            <!-- RIGHT COLUMN -->
+            <StackPanel Grid.Column="2">
+
                 <!-- SECTION 3: Agent Panel -->
                 <GroupBox Header="Agent Panel"
                           Style="{StaticResource DarkGroupBox}"
                           Margin="0,0,0,10">
                     <StackPanel Margin="4,8,4,4">
 
-                        <!-- Layout sub-section label -->
                         <TextBlock Text="Layout"
                                    Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
                                    FontWeight="SemiBold" Margin="0,0,0,6"/>
 
-                        <!-- Layout radio buttons: 2x2 grid -->
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -503,12 +543,10 @@
                                          Style="{StaticResource DarkRadioButton}"/>
                         </Grid>
 
-                        <!-- On Complete sub-section label -->
                         <TextBlock Text="On Complete"
                                    Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
                                    FontWeight="SemiBold" Margin="0,0,0,6"/>
 
-                        <!-- On Complete radio buttons: horizontal -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                             <RadioButton x:Name="AutoCloseRadio"
                                          Content="Auto-close"
@@ -529,7 +567,6 @@
                           Margin="0,0,0,10">
                     <StackPanel Margin="4,8,4,4">
 
-                        <!-- Commands DataGrid -->
                         <DataGrid x:Name="CommandsGrid"
                                   Style="{StaticResource DarkDataGrid}"
                                   Height="150"
@@ -546,7 +583,6 @@
                             </DataGrid.Columns>
                         </DataGrid>
 
-                        <!-- Command action buttons -->
                         <StackPanel Orientation="Horizontal">
                             <Button x:Name="AddCommandButton"
                                     Content="Add"
@@ -575,8 +611,34 @@
                     </StackPanel>
                 </GroupBox>
 
+                <!-- SECTION 5: User Profile -->
+                <GroupBox Header="User Profile"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <Grid Margin="4,8,4,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ProfileSummaryText"
+                                   Grid.Column="0"
+                                   Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap"
+                                   Text="Not configured"/>
+                        <Button x:Name="EditProfileButton"
+                                Grid.Column="1"
+                                Content="Edit Profile"
+                                Style="{StaticResource SmallActionButton}"
+                                Width="90" Height="26"
+                                VerticalAlignment="Center"
+                                Margin="8,0,0,0"
+                                Click="EditProfileButton_Click"/>
+                    </Grid>
+                </GroupBox>
+
             </StackPanel>
-        </ScrollViewer>
+        </Grid>
 
         <!-- Bottom bar with OK / Cancel -->
         <Border Grid.Row="1"

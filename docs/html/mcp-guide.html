@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MCP Guide - Understanding and using MCP servers in MultiTerminal">
+  <title>MCP Guide - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Hamburger (mobile) -->
+<button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+
+<!-- Sidebar overlay (mobile) -->
+<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+<div class="page-wrapper">
+
+  <!-- Sidebar Navigation -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-icon">MT</span>
+        MultiTerminal
+      </div>
+      <div class="tagline">Documentation</div>
+    </div>
+    <nav>
+      <div class="nav-section-title">Getting Started</div>
+      <a href="getting-started.html" class="nav-link">Getting Started</a>
+      <a href="mcp-guide.html" class="nav-link active">MCP Guide</a>
+
+      <div class="nav-section-title">Reference</div>
+      <a href="features.html" class="nav-link">Features</a>
+      <a href="api-reference.html" class="nav-link">REST API</a>
+      <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+
+      <div class="nav-section-title">Technical</div>
+      <a href="architecture.html" class="nav-link">Architecture</a>
+      <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+      <a href="distribution.html" class="nav-link">Distribution</a>
+      <a href="deployment.html" class="nav-link">Deployment</a>
+
+      <div class="nav-section-title"></div>
+      <a href="index.html" class="nav-link">Home</a>
+    </nav>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    <div class="content-container">
+
+      <h1>MCP Guide</h1>
+      <p class="lead">MCP (Model Context Protocol) is how Claude Code agents interact with MultiTerminal. This guide explains what you'll see, how to manage your MCP servers, and how to bring your existing MCPs under one roof.</p>
+
+      <!-- Table of Contents -->
+      <nav class="toc">
+        <h3>On This Page</h3>
+        <ul>
+          <li><a href="#what-is-mcp">What is MCP?</a></li>
+          <li><a href="#what-you-see">What You See After Installation</a></li>
+          <li><a href="#two-built-in-servers">The Two Built-in Servers</a></li>
+          <li><a href="#your-existing-mcps">Your Existing MCPs</a></li>
+          <li><a href="#importing-mcps">Importing MCPs into the Gateway</a></li>
+          <li><a href="#managing-servers">Managing Servers</a></li>
+          <li><a href="#profiles">Using Profiles</a></li>
+          <li><a href="#troubleshooting">Troubleshooting</a></li>
+        </ul>
+      </nav>
+
+      <!-- What is MCP -->
+      <h2 id="what-is-mcp">What is MCP?</h2>
+
+      <p>MCP servers give Claude Code agents <strong>tools</strong> &mdash; the ability to do things beyond just generating text. Through MCP, agents can create tasks, send messages, search code, manage databases, and interact with external services.</p>
+
+      <p>Think of MCP servers as plugins for Claude Code. Each server provides a set of tools that agents can call. MultiTerminal ships with two MCP servers that give agents full access to the MultiTerminal platform.</p>
+
+      <!-- What You See -->
+      <h2 id="what-you-see">What You See After Installation</h2>
+
+      <p>After installing MultiTerminal, open a terminal and run <code>/mcp</code> in Claude Code. You'll see something like this:</p>
+
+      <pre><code>Manage MCP servers
+5 servers
+
+    your-existing-mcp-1 - connected
+    your-existing-mcp-2 - connected
+    your-existing-mcp-3 - connected
+
+    Built-in MCPs (always available)
+    mcp-gateway - connected
+    multiterminal - connected</code></pre>
+
+      <p>Your existing MCPs are unchanged &mdash; they still work exactly as before. MultiTerminal adds two new servers below them.</p>
+
+      <div class="tip">
+        <p>The two MultiTerminal servers are loaded automatically whenever you open a terminal through MultiTerminal. They won't appear in standalone Claude Code sessions outside of MultiTerminal.</p>
+      </div>
+
+      <!-- Two Built-in Servers -->
+      <h2 id="two-built-in-servers">The Two Built-in Servers</h2>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Server</th>
+              <th>Purpose</th>
+              <th>Example Tools</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>multiterminal</strong></td>
+              <td>Core tools for tasks, messaging, code search, browser tabs, projects, and team coordination</td>
+              <td><code>list_tasks</code>, <code>send_message</code>, <code>search_code</code>, <code>open_browser_tab</code></td>
+            </tr>
+            <tr>
+              <td><strong>mcp-gateway</strong></td>
+              <td>MCP proxy and manager &mdash; aggregates tools from other MCP servers and provides server/profile management</td>
+              <td><code>gateway__list_servers</code>, <code>gateway__add_server</code>, <code>gateway__set_profile</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The <strong>multiterminal</strong> server is what agents use day-to-day &mdash; managing tasks, sending messages, searching your codebase. See the <a href="mcp-tools.html">MCP Tools Reference</a> for the full list of 58+ tools.</p>
+
+      <p>The <strong>mcp-gateway</strong> server is your MCP management layer. It acts as a proxy: you register other MCP servers with the gateway, and it aggregates all their tools into a single connection. This gives you centralized control over which servers are active, organized by profiles.</p>
+
+      <!-- Your Existing MCPs -->
+      <h2 id="your-existing-mcps">Your Existing MCPs</h2>
+
+      <p>If you already have MCP servers configured in Claude Code (in your <code>~/.claude.json</code> or project-level <code>.mcp.json</code> files), they continue to work alongside MultiTerminal's servers. Nothing changes about your existing setup.</p>
+
+      <p>Over time, you can choose to <strong>import</strong> your existing MCPs into the gateway. This is optional but gives you benefits:</p>
+
+      <ul>
+        <li><strong>Centralized management</strong> &mdash; enable/disable servers without editing JSON files</li>
+        <li><strong>Profiles</strong> &mdash; switch between different server sets for different projects</li>
+        <li><strong>Visibility</strong> &mdash; see all your MCP servers and their status in one place</li>
+        <li><strong>Reliability</strong> &mdash; the gateway handles crash recovery and automatic reconnection</li>
+      </ul>
+
+      <!-- Importing MCPs -->
+      <h2 id="importing-mcps">Importing MCPs into the Gateway</h2>
+
+      <p>To bring your existing MCPs under gateway management, use the import tools from any Claude Code terminal:</p>
+
+      <h3>Import from Claude Code config</h3>
+      <p>This reads your <code>~/.claude.json</code> and imports all MCP servers found there:</p>
+      <pre><code>gateway__import_claude_config()</code></pre>
+
+      <h3>Import from an .mcp.json file</h3>
+      <p>Point to any <code>.mcp.json</code> file to import its servers:</p>
+      <pre><code>gateway__import_mcp_config(configPath="C:/path/to/.mcp.json")</code></pre>
+
+      <div class="note">
+        <p>Importing is non-destructive &mdash; it copies server configurations into the gateway database. Your original config files are not modified. You can remove the originals later once you've confirmed everything works through the gateway.</p>
+      </div>
+
+      <!-- Managing Servers -->
+      <h2 id="managing-servers">Managing Servers</h2>
+
+      <p>Once servers are registered with the gateway, you can manage them using these tools:</p>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>What It Does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>gateway__list_servers</code></td>
+              <td>Show all registered servers with connection status</td>
+            </tr>
+            <tr>
+              <td><code>gateway__add_server</code></td>
+              <td>Register a new MCP server (name, command, args)</td>
+            </tr>
+            <tr>
+              <td><code>gateway__remove_server</code></td>
+              <td>Unregister a server</td>
+            </tr>
+            <tr>
+              <td><code>gateway__enable_server</code></td>
+              <td>Enable a disabled server (starts it up)</td>
+            </tr>
+            <tr>
+              <td><code>gateway__disable_server</code></td>
+              <td>Disable a server without removing it</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Adding a server manually</h3>
+      <pre><code>gateway__add_server(
+  name="my-database-mcp",
+  command="npx",
+  args=["-y", "@my-org/database-mcp"],
+  env={"DB_URL": "postgresql://localhost/mydb"}
+)</code></pre>
+
+      <!-- Profiles -->
+      <h2 id="profiles">Using Profiles</h2>
+
+      <p>Profiles let you define <strong>sets of servers</strong> for different contexts. For example, you might have a "web-dev" profile with database and API servers, and a "data-science" profile with notebook and visualization servers.</p>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>What It Does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>gateway__list_profiles</code></td>
+              <td>Show all profiles and which is active</td>
+            </tr>
+            <tr>
+              <td><code>gateway__create_profile</code></td>
+              <td>Create a new profile with selected servers</td>
+            </tr>
+            <tr>
+              <td><code>gateway__set_profile</code></td>
+              <td>Switch the active profile (connects/disconnects servers as needed)</td>
+            </tr>
+            <tr>
+              <td><code>gateway__delete_profile</code></td>
+              <td>Remove a profile</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>A <code>default</code> profile is created automatically and includes all registered servers. You can create additional profiles to customize which servers are available per project.</p>
+
+      <div class="tip">
+        <p>MultiTerminal can automatically switch gateway profiles when you open different projects. Configure this in the project settings under MCP Servers.</p>
+      </div>
+
+      <!-- Troubleshooting -->
+      <h2 id="troubleshooting">Troubleshooting</h2>
+
+      <h3>MCP servers not showing up</h3>
+      <p>Make sure you're running Claude Code from within a MultiTerminal terminal. The MCP servers are loaded via the <code>--mcp-config</code> flag, which MultiTerminal sets automatically when launching terminals.</p>
+
+      <h3>Gateway shows "disconnected"</h3>
+      <p>Check that .NET 8 Runtime is installed. The gateway is a .NET application and requires the runtime. Run <code>dotnet --list-runtimes</code> to verify.</p>
+
+      <h3>Imported server won't connect</h3>
+      <p>Verify the server's command is available on your PATH. Use <code>gateway__list_servers</code> to check the connection status and error messages. The gateway retries failed connections automatically (up to 3 attempts with exponential backoff).</p>
+
+      <h3>Want to debug gateway output</h3>
+      <p>Set the environment variable <code>MCP_GATEWAY_DEBUG=1</code> to enable stderr logging from the gateway process.</p>
+
+      <!-- Next Steps -->
+      <h2>Next Steps</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <a href="mcp-tools.html">
+            <h3>MCP Tools Reference</h3>
+            <p>Full list of 58+ tools available to agents.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="mcp-architecture.html">
+            <h3>MCP Architecture</h3>
+            <p>Technical deep-dive into how the MCP system works.</p>
+          </a>
+        </div>
+        <div class="card">
+          <a href="features.html">
+            <h3>Features</h3>
+            <p>Explore all MultiTerminal capabilities.</p>
+          </a>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <p>MultiTerminal &copy; 2026. See <code>THIRD-PARTY-NOTICES.md</code> for license information.</p>
+      </footer>
+
+    </div>
+  </main>
+
+</div>
+
+<!-- Theme Toggle -->
+<button class="theme-toggle" aria-label="Toggle theme" onclick="toggleTheme()">&#9790;</button>
+
+<script>
+/* Theme toggle */
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme') || 'dark';
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('mt-docs-theme', next);
+}
+
+/* Restore saved theme */
+(function() {
+  var saved = localStorage.getItem('mt-docs-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+/* Mobile sidebar toggle */
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.querySelector('.sidebar-overlay').classList.toggle('visible');
+}
+</script>
+
+</body>
+</html>

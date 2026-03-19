@@ -19,6 +19,7 @@ namespace MultiTerminal.Terminal
         private IntPtr _processHandle;
         private IntPtr _threadHandle;
         private IntPtr _attributeList;
+        private IntPtr _jobHandle;
 
         private SafeFileHandle _inputReadSide;
         private SafeFileHandle _inputWriteSide;
@@ -82,7 +83,8 @@ namespace MultiTerminal.Terminal
         /// <param name="spawnerName">Name of the terminal that spawned this one (sets MULTITERMINAL_SPAWNER env var)</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
-        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
+        /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
+        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
         {
             if (_isRunning)
                 throw new InvalidOperationException("Terminal is already running");
@@ -102,9 +104,10 @@ namespace MultiTerminal.Terminal
 
             try
             {
-                // Set console code page to UTF-8 for proper Unicode support
-                NativeMethods.SetConsoleCP(NativeMethods.CP_UTF8);
-                NativeMethods.SetConsoleOutputCP(NativeMethods.CP_UTF8);
+                // Note: UTF-8 encoding is set inside the child PowerShell process via -Command string
+                // (see envSetup below). We do NOT call SetConsoleCP/SetConsoleOutputCP here because
+                // those APIs mutate the parent process's console state, which can corrupt
+                // the console subsystem when multiple ConPTY instances are created/destroyed.
 
                 // Create pipes for I/O
                 CreatePipes();
@@ -113,7 +116,7 @@ namespace MultiTerminal.Terminal
                 CreatePseudoConsole(cols, rows);
 
                 // Start the shell process
-                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead);
+                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
 
                 // Close the pipe ends that belong to the pseudo console.
                 // CreatePseudoConsole() duplicates these handles internally, so our
@@ -273,7 +276,7 @@ namespace MultiTerminal.Terminal
                     ". Make sure you're running Windows 10 version 1809 or later.");
         }
 
-        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false)
+        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
         {
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] shellPath: '{shellPath}'");
@@ -366,6 +369,13 @@ namespace MultiTerminal.Terminal
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_TEAM_LEAD = 'true'");
             }
 
+            if (!string.IsNullOrEmpty(gatewayProfile))
+            {
+                string safeGatewayProfile = gatewayProfile.Replace("'", "''");
+                envSetup += $"$env:MCP_GATEWAY_PROFILE = '{safeGatewayProfile}'; ";
+                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MCP_GATEWAY_PROFILE = '{gatewayProfile}'");
+            }
+
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
 
             // If autoRunCommand is specified, append it after the prompt function setup
@@ -415,11 +425,73 @@ namespace MultiTerminal.Terminal
             _processHandle = processInfo.hProcess;
             _threadHandle = processInfo.hThread;
 
+            // Assign the process to a Job Object so that all child processes (Claude Code,
+            // McpGateway, node.js MCP server) are terminated when we kill the job.
+            // Without this, TerminateProcess only kills the immediate PowerShell child,
+            // leaving orphaned grandchildren that hold ConPTY pipe handles open and can
+            // corrupt the console driver state.
+            CreateJobAndAssignProcess();
+
             // Create streams for I/O
             _inputWriter = new FileStream(_inputWriteSide, FileAccess.Write);
             _outputReader = new FileStream(_outputReadSide, FileAccess.Read);
 
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] ===== COMPLETE =====");
+        }
+
+        /// <summary>
+        /// Creates a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and assigns
+        /// the shell process to it. When the job handle is closed (during Cleanup), Windows
+        /// terminates the entire process tree — shell, Claude Code, McpGateway, node.js, etc.
+        /// </summary>
+        private void CreateJobAndAssignProcess()
+        {
+            try
+            {
+                _jobHandle = NativeMethods.CreateJobObject(IntPtr.Zero, null);
+                if (_jobHandle == IntPtr.Zero)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ConPtyTerminal] CreateJobObject failed: {Marshal.GetLastWin32Error()}");
+                    return;
+                }
+
+                // Configure the job to kill all processes when the job handle is closed
+                var info = new NativeMethods.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+                {
+                    BasicLimitInformation = new NativeMethods.JOBOBJECT_BASIC_LIMIT_INFORMATION
+                    {
+                        LimitFlags = NativeMethods.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    }
+                };
+
+                int infoSize = Marshal.SizeOf(typeof(NativeMethods.JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                IntPtr infoPtr = Marshal.AllocHGlobal(infoSize);
+                try
+                {
+                    Marshal.StructureToPtr(info, infoPtr, false);
+                    if (!NativeMethods.SetInformationJobObject(_jobHandle, NativeMethods.JobObjectExtendedLimitInformation, infoPtr, (uint)infoSize))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[ConPtyTerminal] SetInformationJobObject failed: {Marshal.GetLastWin32Error()}");
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(infoPtr);
+                }
+
+                if (!NativeMethods.AssignProcessToJobObject(_jobHandle, _processHandle))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ConPtyTerminal] AssignProcessToJobObject failed: {Marshal.GetLastWin32Error()}");
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("[ConPtyTerminal] Process assigned to job object — entire tree will be killed on cleanup");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ConPtyTerminal] Job object setup failed: {ex.Message}");
+            }
         }
 
         private void StartReading()
@@ -620,6 +692,46 @@ namespace MultiTerminal.Terminal
             try { _outputTimer?.Dispose(); } catch { }
             _outputTimer = null;
 
+            // === CRITICAL: Terminate the process tree FIRST ===
+            // This must happen before closing handles, because _processWaitThread is blocked
+            // on WaitForSingleObject(_processHandle). Killing the process unblocks the wait,
+            // which allows us to safely join _processWaitThread before closing handles.
+
+            // Use the Job Object to kill the entire process tree (shell + Claude Code +
+            // McpGateway + node.js). This prevents orphaned grandchildren that hold ConPTY
+            // pipe handles open and can corrupt the console driver state.
+            if (_jobHandle != IntPtr.Zero)
+            {
+                NativeMethods.TerminateJobObject(_jobHandle, 0);
+                System.Diagnostics.Debug.WriteLine("[ConPtyTerminal] Terminated job object (entire process tree)");
+            }
+            else if (_processHandle != IntPtr.Zero)
+            {
+                // Fallback: no job object, terminate just the immediate child
+                uint exitCode;
+                if (NativeMethods.GetExitCodeProcess(_processHandle, out exitCode) && exitCode == NativeMethods.STILL_ACTIVE)
+                {
+                    NativeMethods.TerminateProcess(_processHandle, 0);
+                }
+            }
+
+            // === Join _processWaitThread BEFORE closing handles ===
+            // Now that the process is dead, WaitForSingleObject will return and the thread
+            // can exit. We MUST join it before closing _processHandle / _pseudoConsoleHandle
+            // to prevent handle-use-after-close (which can corrupt the console driver).
+            if (_processWaitThread != null && _processWaitThread.IsAlive)
+            {
+                _processWaitThread.Join(2000);
+            }
+            _processWaitThread = null;
+
+            // Close pseudo console (safe now — _processWaitThread is done)
+            if (_pseudoConsoleHandle != IntPtr.Zero)
+            {
+                NativeMethods.ClosePseudoConsole(_pseudoConsoleHandle);
+                _pseudoConsoleHandle = IntPtr.Zero;
+            }
+
             // Close streams
             try { _inputWriter?.Dispose(); } catch { }
             try { _outputReader?.Dispose(); } catch { }
@@ -636,21 +748,9 @@ namespace MultiTerminal.Terminal
             _outputReadSide = null;
             _outputWriteSide = null;
 
-            // Close pseudo console
-            if (_pseudoConsoleHandle != IntPtr.Zero)
-            {
-                NativeMethods.ClosePseudoConsole(_pseudoConsoleHandle);
-                _pseudoConsoleHandle = IntPtr.Zero;
-            }
-
-            // Terminate process if still running
+            // Close process and thread handles (safe now — all threads are done)
             if (_processHandle != IntPtr.Zero)
             {
-                uint exitCode;
-                if (NativeMethods.GetExitCodeProcess(_processHandle, out exitCode) && exitCode == NativeMethods.STILL_ACTIVE)
-                {
-                    NativeMethods.TerminateProcess(_processHandle, 0);
-                }
                 NativeMethods.CloseHandle(_processHandle);
                 _processHandle = IntPtr.Zero;
             }
@@ -659,6 +759,13 @@ namespace MultiTerminal.Terminal
             {
                 NativeMethods.CloseHandle(_threadHandle);
                 _threadHandle = IntPtr.Zero;
+            }
+
+            // Close job handle
+            if (_jobHandle != IntPtr.Zero)
+            {
+                NativeMethods.CloseHandle(_jobHandle);
+                _jobHandle = IntPtr.Zero;
             }
 
             // Clean up attribute list

@@ -29,6 +29,7 @@
     <nav>
       <div class="nav-section-title">Getting Started</div>
       <a href="getting-started.html" class="nav-link active">Getting Started</a>
+      <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
 
       <div class="nav-section-title">Reference</div>
       <a href="features.html" class="nav-link">Features</a>
@@ -37,6 +38,7 @@
 
       <div class="nav-section-title">Technical</div>
       <a href="architecture.html" class="nav-link">Architecture</a>
+      <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
       <a href="distribution.html" class="nav-link">Distribution</a>
       <a href="deployment.html" class="nav-link">Deployment</a>
 
@@ -93,11 +95,21 @@
       </div>
 
       <div class="tip">
-        <p>If WebView2 is not installed, download it from <code>https://developer.microsoft.com/en-us/microsoft-edge/webview2/</code>.</p>
+        <p>If WebView2 is not installed, download it from <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/" target="_blank" rel="noopener">developer.microsoft.com</a>.</p>
       </div>
 
       <!-- Installation -->
       <h2>Installation</h2>
+
+      <h3>Option A: Installer (Recommended)</h3>
+      <p>MultiTerminal includes an Inno Setup installer (v1.3.0+) that handles file placement, MCP server registration, and post-install configuration:</p>
+      <ol>
+        <li><strong>Download</strong> the latest MultiTerminal installer (<code>MultiTerminal-Setup.exe</code>).</li>
+        <li><strong>Run the installer</strong> and follow the prompts to choose an installation directory.</li>
+        <li><strong>Launch</strong> MultiTerminal from the Start Menu or desktop shortcut.</li>
+      </ol>
+
+      <h3>Option B: Portable (Manual)</h3>
       <ol>
         <li><strong>Download</strong> the latest MultiTerminal release archive.</li>
         <li><strong>Extract</strong> the archive to a folder of your choice (e.g., <code>C:\MultiTerminal</code>).</li>
@@ -105,7 +117,7 @@
       </ol>
 
       <div class="note">
-        <p>No installer is required. MultiTerminal is a portable application &mdash; just extract and run. Configuration is stored in <code>%APPDATA%\MultiTerminal</code>.</p>
+        <p>Both installation methods store user data and databases in <code>%APPDATA%\MultiTerminal</code>. The portable option requires manual MCP server registration (see <a href="deployment.html">Deployment Guide</a>).</p>
       </div>
 
       <!-- First Launch -->
@@ -131,6 +143,7 @@
         <li><strong>Projects</strong> &mdash; Project registry with paths, agents, and MCP servers</li>
         <li><strong>Launcher</strong> &mdash; Quick-launch terminals with pre-configured settings</li>
         <li><strong>Agents</strong> &mdash; Monitor and manage spawned team agents</li>
+        <li><strong>File Preview</strong> &mdash; WebView2-based panel for previewing files</li>
       </ul>
 
       <!-- Key Concepts -->
@@ -140,7 +153,7 @@
       <p>Each terminal tab hosts a ConPTY-based shell rendered via WebView2. Terminals can register with the MultiTerminal system to gain an identity (name) for messaging and task management. A registered terminal appears in the team roster and can send/receive messages.</p>
 
       <h3>Kanban Board</h3>
-      <p>The built-in task tracker uses a kanban workflow: <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>review</code> &rarr; <code>done</code>. Tasks support checklists (with per-item status tracking), plans, continuation notes, and helper assignments. All data is stored in SQLite (<code>tasks.db</code>).</p>
+      <p>The built-in task tracker uses a kanban workflow: <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>review</code> &rarr; <code>done</code>. Tasks support checklists (with per-item status tracking), plans, continuation notes, and helper assignments. All data is stored in SQLite (<code>multiterminal.db</code>).</p>
 
       <h3>Messaging</h3>
       <p>The MessageBroker routes messages between terminals. Messages can be direct (one-to-one) or broadcast (one-to-all). Claude Code agents use MCP tools to send and receive messages, enabling multi-agent collaboration.</p>

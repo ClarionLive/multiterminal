@@ -1,11 +1,13 @@
 ---
 name: session-summarizer
 description: "Generates concise session recaps from raw session messages. Spawned at session start when no cached summary exists. Saves the summary to SQLite for future sessions."
-model: haiku
+model: opus
 tools:
   - Read
-  - Grep
   - Glob
+  - mcp__multiterminal__search_code
+  - mcp__multiterminal__update_session_summary
+  - mcp__multiterminal__get_task_detail
 ---
 
 # Session Summarizer

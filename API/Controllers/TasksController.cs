@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
+using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 
@@ -50,6 +52,49 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Get the active in-progress task for a specific agent.
+        /// Returns full task detail with checklist summary, same format as /detail.
+        /// </summary>
+        [HttpGet("active/{agentName}")]
+        public IActionResult GetMyActiveTask(string agentName)
+        {
+            if (string.IsNullOrEmpty(agentName))
+                return BadRequest(new { error = "agentName is required" });
+
+            var task = _broker.GetMyActiveTask(agentName);
+            if (task == null)
+                return NotFound(new { error = $"No active task for {agentName}" });
+
+            // Load helpers
+            var helpers = _taskDb.LoadTaskHelpers(task.Id);
+            task.Helpers = helpers.ConvertAll(h => h.HelperName);
+
+            // Parse and normalize checklist
+            var checklist = task.GetChecklist();
+
+            // Build checklist summary
+            var totalItems = checklist.Count;
+            var doneItems = checklist.Count(i => i.Status == "done");
+            var codingItems = checklist.Count(i => i.Status == "coding");
+            var testingItems = checklist.Count(i => i.Status == "testing");
+            var pendingItems = checklist.Count(i => i.Status == "pending");
+
+            return Ok(new
+            {
+                task,
+                checklistSummary = new
+                {
+                    total = totalItems,
+                    done = doneItems,
+                    coding = codingItems,
+                    testing = testingItems,
+                    pending = pendingItems
+                },
+                checklist
+            });
+        }
+
+        /// <summary>
         /// Create a new task
         /// </summary>
         [HttpPost]
@@ -60,7 +105,8 @@ namespace MultiTerminal.API.Controllers
                 request.Description,
                 request.CreatedBy,
                 request.Status ?? "todo",
-                request.Priority ?? "normal"
+                request.Priority ?? "normal",
+                request.ProjectId
             );
 
             if (!result.Success)
@@ -240,6 +286,64 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Get tasks relevant to a specific agent: their assigned tasks + unassigned todo tasks.
+        /// Returns a compact summary (no full descriptions, plans, or checklist JSON).
+        /// </summary>
+        [HttpGet("pickable/{agentName}")]
+        public IActionResult GetPickableTasks(string agentName)
+        {
+            if (string.IsNullOrEmpty(agentName))
+                return BadRequest(new { error = "agentName is required" });
+
+            var allTasks = _broker.GetTasks(projectId: null);
+
+            var results = new List<object>();
+            foreach (var task in allTasks)
+            {
+                // Skip done and suggestion tasks
+                if (task.Status == "done" || task.Status == "suggestion")
+                    continue;
+
+                bool isAssignedToMe = task.Assignee != null &&
+                    task.Assignee.Equals(agentName, StringComparison.OrdinalIgnoreCase);
+                bool isUnassignedTodo = task.Status == "todo" &&
+                    string.IsNullOrEmpty(task.Assignee);
+                bool isHelper = task.Helpers != null &&
+                    task.Helpers.Any(h => h.Equals(agentName, StringComparison.OrdinalIgnoreCase));
+
+                if (!isAssignedToMe && !isUnassignedTodo && !isHelper)
+                    continue;
+
+                // Build compact checklist summary
+                var checklist = task.GetChecklist();
+                var checklistSummary = checklist.Count > 0 ? new
+                {
+                    total = checklist.Count,
+                    done = checklist.Count(i => i.Status == "done"),
+                    coding = checklist.Count(i => i.Status == "coding"),
+                    testing = checklist.Count(i => i.Status == "testing"),
+                    pending = checklist.Count(i => i.Status == "pending")
+                } : null;
+
+                string relation = isAssignedToMe ? "assigned" : isHelper ? "helper" : "available";
+
+                results.Add(new
+                {
+                    id = task.Id,
+                    title = task.Title,
+                    status = task.Status,
+                    subStatus = task.SubStatus,
+                    assignee = task.Assignee,
+                    priority = task.Priority ?? "normal",
+                    relation,
+                    checklistSummary
+                });
+            }
+
+            return Ok(new { agentName, tasks = results, count = results.Count });
+        }
+
+        /// <summary>
         /// Get full task detail with checklist and notes history.
         /// </summary>
         [HttpGet("{taskId}/detail")]
@@ -263,6 +367,14 @@ namespace MultiTerminal.API.Controllers
             var testingItems = checklist.Count(i => i.Status == "testing");
             var pendingItems = checklist.Count(i => i.Status == "pending");
 
+            // Load relationships
+            var relationships = _broker.GetRelationships(taskId);
+            var relationshipList = relationships.Success ? relationships.Relationships : new List<TaskRelationship>();
+
+            // Load file links
+            var fileLinks = _broker.GetTaskFiles(taskId);
+            var fileLinkList = fileLinks.Success ? fileLinks.Files : new List<TaskFileLink>();
+
             return Ok(new
             {
                 task,
@@ -274,8 +386,199 @@ namespace MultiTerminal.API.Controllers
                     testing = testingItems,
                     pending = pendingItems
                 },
-                checklist
+                checklist,
+                relationships = relationshipList,
+                fileLinks = fileLinkList
             });
+        }
+
+        // =============================================
+        // Relationship Endpoints
+        // =============================================
+
+        /// <summary>
+        /// Add a relationship between two tasks.
+        /// </summary>
+        [HttpPost("{taskId}/relationships")]
+        public IActionResult AddRelationship(string taskId, [FromBody] AddRelationshipRequest request)
+        {
+            var result = _broker.AddRelationship(taskId, request.TargetTaskId, request.Type, request.CreatedBy);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
+        /// Remove a relationship between two tasks (removes both directions).
+        /// </summary>
+        [HttpDelete("{taskId}/relationships/{relatedTaskId}")]
+        public IActionResult RemoveRelationship(string taskId, string relatedTaskId)
+        {
+            var result = _broker.RemoveRelationship(taskId, relatedTaskId);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
+        /// Get all relationships for a task (from this task's perspective).
+        /// </summary>
+        [HttpGet("{taskId}/relationships")]
+        public IActionResult GetRelationships(string taskId)
+        {
+            var result = _broker.GetRelationships(taskId);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true, relationships = result.Relationships });
+        }
+
+        // =============================================
+        // File Link Endpoints
+        // =============================================
+
+        /// <summary>
+        /// Link a file to a task.
+        /// </summary>
+        [HttpPost("{taskId}/files")]
+        public IActionResult LinkFile(string taskId, [FromBody] LinkFileRequest request)
+        {
+            var result = _broker.LinkFile(taskId, request.FilePath, request.Description, request.LineStart, request.LineEnd, request.AddedBy);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true, fileCount = result.FileCount });
+        }
+
+        /// <summary>
+        /// Unlink a file from a task.
+        /// </summary>
+        [HttpPost("{taskId}/files/unlink")]
+        public IActionResult UnlinkFile(string taskId, [FromBody] UnlinkFileRequest request)
+        {
+            var result = _broker.UnlinkFile(taskId, request.FilePath);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
+        /// Get all files linked to a task.
+        /// </summary>
+        [HttpGet("{taskId}/files")]
+        public IActionResult GetTaskFiles(string taskId)
+        {
+            var result = _broker.GetTaskFiles(taskId);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true, files = result.Files });
+        }
+
+        // =============================================
+        // Code Review Endpoints
+        // =============================================
+
+        /// <summary>
+        /// Get code review diff data for all linked files in a task.
+        /// Returns file list with git diff output for each.
+        /// </summary>
+        [HttpGet("{taskId}/code-review")]
+        public IActionResult GetCodeReview(string taskId)
+        {
+            var filesResult = _broker.GetTaskFiles(taskId);
+            if (!filesResult.Success)
+                return BadRequest(new { error = filesResult.Error });
+
+            var files = new System.Collections.Generic.List<object>();
+            foreach (var fileLink in filesResult.Files)
+            {
+                var diff = GetGitDiffForFile(fileLink.FilePath);
+                files.Add(new
+                {
+                    filePath = fileLink.FilePath,
+                    description = fileLink.Description,
+                    lineStart = fileLink.LineStart,
+                    lineEnd = fileLink.LineEnd,
+                    addedBy = fileLink.AddedBy,
+                    hasDiff = !string.IsNullOrEmpty(diff),
+                    diff = diff ?? ""
+                });
+            }
+
+            return Ok(new { taskId, fileCount = files.Count, files });
+        }
+
+        private string GetGitDiffForFile(string filePath)
+        {
+            try
+            {
+                // Try git diff for uncommitted changes first, then HEAD~1 diff
+                var repoRoot = FindGitRoot(filePath);
+                if (repoRoot == null) return null;
+
+                // Validate file is within repo root (prevent path traversal)
+                var canonicalPath = System.IO.Path.GetFullPath(filePath);
+                var canonicalRoot = System.IO.Path.GetFullPath(repoRoot);
+                if (!canonicalPath.StartsWith(canonicalRoot, System.StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                // Get relative path from repo root
+                var relativePath = System.IO.Path.GetRelativePath(repoRoot, filePath).Replace('\\', '/');
+
+                // Try unstaged + staged changes first
+                var diff = RunGitDiff(repoRoot, relativePath, "");
+                if (string.IsNullOrWhiteSpace(diff))
+                {
+                    // Try diff against last commit
+                    diff = RunGitDiff(repoRoot, relativePath, "HEAD~1");
+                }
+                return diff;
+            }
+            catch (System.Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CodeReview] Git diff failed for {filePath}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private string FindGitRoot(string filePath)
+        {
+            var dir = System.IO.Path.GetDirectoryName(filePath);
+            while (!string.IsNullOrEmpty(dir))
+            {
+                if (System.IO.Directory.Exists(System.IO.Path.Combine(dir, ".git")))
+                    return dir;
+                dir = System.IO.Path.GetDirectoryName(dir);
+            }
+            return null;
+        }
+
+        private string RunGitDiff(string repoRoot, string relativePath, string baseRef)
+        {
+            var args = string.IsNullOrEmpty(baseRef)
+                ? $"diff -- \"{relativePath}\""
+                : $"diff {baseRef} -- \"{relativePath}\"";
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = args,
+                WorkingDirectory = repoRoot,
+                RedirectStandardOutput = true,
+                RedirectStandardError = false,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return null;
+            var output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+            return output;
         }
 
         // =============================================
@@ -429,6 +732,7 @@ namespace MultiTerminal.API.Controllers
         public string CreatedBy { get; set; }
         public string Status { get; set; }
         public string Priority { get; set; }
+        public string ProjectId { get; set; }
     }
 
     public class UpdateStatusRequest
@@ -501,6 +805,27 @@ namespace MultiTerminal.API.Controllers
         public string MimeType { get; set; }
         public string Base64Data { get; set; }
         public string AddedBy { get; set; }
+    }
+
+    public class AddRelationshipRequest
+    {
+        public string TargetTaskId { get; set; }
+        public string Type { get; set; }
+        public string CreatedBy { get; set; }
+    }
+
+    public class LinkFileRequest
+    {
+        public string FilePath { get; set; }
+        public string Description { get; set; }
+        public int? LineStart { get; set; }
+        public int? LineEnd { get; set; }
+        public string AddedBy { get; set; }
+    }
+
+    public class UnlinkFileRequest
+    {
+        public string FilePath { get; set; }
     }
 }
 

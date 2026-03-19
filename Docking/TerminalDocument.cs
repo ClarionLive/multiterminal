@@ -136,6 +136,12 @@ namespace MultiTerminal.Docking
         public event EventHandler StartScreenNewProjectRequested;
 
         /// <summary>
+        /// Forwarded from StartScreenControl: user clicked "Just Claude".
+        /// MainForm launches Claude Code with no project, no skills, just MT config flags.
+        /// </summary>
+        public event EventHandler StartScreenJustClaudeRequested;
+
+        /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
         /// Set by MainForm to provide identity list.
         /// </summary>
@@ -591,6 +597,7 @@ namespace MultiTerminal.Docking
             _startScreen.ProjectLaunched += (s, e) => ProjectLaunched?.Invoke(this, e);
             _startScreen.OpenPowerShellRequested += (s, e) => StartScreenOpenPowerShellRequested?.Invoke(this, e);
             _startScreen.NewProjectRequested += (s, e) => StartScreenNewProjectRequested?.Invoke(this, e);
+            _startScreen.JustClaudeRequested += (s, e) => StartScreenJustClaudeRequested?.Invoke(this, e);
             Controls.Add(_startScreen);
             _startScreen.BringToFront();
             _isStartScreenVisible = true;
@@ -1616,6 +1623,33 @@ namespace MultiTerminal.Docking
                 _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: _messageBroker is null, updating with name only: {terminalName}");
             }
 
+            // Look up project by working directory path
+            string projectName = null;
+            string projectDescription = null;
+            if (_messageBroker?.ProjectService != null)
+            {
+                string workDir = GetWorkingDirectory();
+                if (!string.IsNullOrEmpty(workDir))
+                {
+                    try
+                    {
+                        var projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
+                        var matchedEntry = projects.FirstOrDefault(p =>
+                            !string.IsNullOrEmpty(p.Path) &&
+                            string.Equals(p.Path.TrimEnd('\\', '/'), workDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+                        if (matchedEntry != null)
+                        {
+                            projectName = matchedEntry.Name;
+                            // Load full project for description
+                            var fullProject = _messageBroker.ProjectService.LoadProject(matchedEntry.Path);
+                            if (fullProject != null)
+                                projectDescription = fullProject.Description;
+                        }
+                    }
+                    catch { /* Non-critical — fall back to no project info */ }
+                }
+            }
+
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
             _debugLogService?.Trace("TerminalDocument", $"  - terminalName: '{terminalName}'");
             _debugLogService?.Trace("TerminalDocument", $"  - avatarUrl: '{avatarUrl}'");
@@ -1623,8 +1657,9 @@ namespace MultiTerminal.Docking
             _debugLogService?.Trace("TerminalDocument", $"  - taskTitle: '{taskTitle}'");
             _debugLogService?.Trace("TerminalDocument", $"  - taskId: '{taskId}'");
             _debugLogService?.Trace("TerminalDocument", $"  - status: '{status}'");
+            _debugLogService?.Trace("TerminalDocument", $"  - projectName: '{projectName}'");
 
-            _statusBar.UpdateStatus(terminalName, avatarUrl, activityDescription, taskTitle, taskId, status);
+            _statusBar.UpdateStatus(terminalName, avatarUrl, activityDescription, taskTitle, taskId, status, projectName, projectDescription);
 
             _debugLogService?.Trace("TerminalDocument", "_statusBar.UpdateStatus call completed");
         }

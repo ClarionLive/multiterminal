@@ -148,7 +148,7 @@ $activityHookContent = @"
 const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(process.env.APPDATA || '', 'multiterminal', 'tasks.db');
+const DB_PATH = path.join(process.env.APPDATA || '', 'multiterminal', 'multiterminal.db');
 
 function requireBetterSqlite3() {
   const possiblePaths = [
@@ -421,7 +421,7 @@ function getPlanContext() {
     const Database = requireBetterSqlite3();
     if (!Database) return null;
 
-    const dbPath = path.join(process.env.APPDATA || '', 'multiterminal', 'tasks.db');
+    const dbPath = path.join(process.env.APPDATA || '', 'multiterminal', 'multiterminal.db');
     if (!fs.existsSync(dbPath)) return null;
 
     const db = new Database(dbPath, { readonly: true });
@@ -687,7 +687,7 @@ if ($allValid) {
     Write-Host "Configuration:" -ForegroundColor Yellow
     Write-Host "  Hooks:       $HooksDir"
     Write-Host "  MCP Config:  $mcpServersPath"
-    Write-Host "  Database:    $DataDir\tasks.db"
+    Write-Host "  Database:    $DataDir\multiterminal.db"
 } else {
     Write-Host "=== Installation Failed ===" -ForegroundColor Red
     Write-Host ""

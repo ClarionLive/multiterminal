@@ -28,6 +28,36 @@ namespace MultiTerminal.TasksPanel
         private ActivityService _activityService;
         private DebugLogService _debugLogService;
         private string _selectedProjectId;
+
+        // Side-channel for WebView2 → WinForms drag-and-drop
+        // (WebView2 doesn't reliably pass HTML5 dataTransfer to OLE drag-drop)
+        private static readonly object _dragLock = new object();
+        private static string _pendingDragTaskId;
+        private static string _pendingDragTitle;
+
+        /// <summary>
+        /// Try to get the current drag data set by the kanban board.
+        /// Returns true if a kanban drag is in progress.
+        /// </summary>
+        public static bool TryGetPendingDragData(out string taskId, out string title)
+        {
+            lock (_dragLock)
+            {
+                taskId = _pendingDragTaskId;
+                title = _pendingDragTitle;
+                return !string.IsNullOrEmpty(taskId);
+            }
+        }
+
+        /// <summary>Clear pending drag data (called on drag end or drop).</summary>
+        public static void ClearPendingDragData()
+        {
+            lock (_dragLock)
+            {
+                _pendingDragTaskId = null;
+                _pendingDragTitle = null;
+            }
+        }
         private bool _isDarkTheme = true;
         private double _pendingZoom = 1.0;
 
@@ -118,6 +148,7 @@ namespace MultiTerminal.TasksPanel
             _broker.TerminalDisconnected += OnTerminalChanged;
             _broker.HelperSessionUpdated += OnHelperSessionUpdated;
             _broker.ProjectsUpdated += OnProjectsUpdated;
+            _broker.ReportSaved += OnReportSaved;
 
             _initializePending = true;
 
@@ -271,11 +302,60 @@ namespace MultiTerminal.TasksPanel
                         OnPanelReady();
                         break;
 
+                    case "task_drag_start":
+                        {
+                            var dragTaskId = root.TryGetProperty("taskId", out var dtid) ? dtid.GetString() : null;
+                            var dragTitle = root.TryGetProperty("title", out var dtt) ? dtt.GetString() : "";
+                            if (!string.IsNullOrEmpty(dragTaskId))
+                            {
+                                lock (_dragLock)
+                                {
+                                    _pendingDragTaskId = dragTaskId;
+                                    _pendingDragTitle = dragTitle;
+                                }
+                                DebugLog($"Drag started: task={dragTaskId}");
+
+                                // Bridge WebView2 HTML5 drag → WinForms OLE drag.
+                                // HTML5 drag events don't cross the WebView2 boundary, so we
+                                // start a proper OLE DoDragDrop while the mouse button is still held.
+                                var payload = JsonSerializer.Serialize(new { taskId = dragTaskId, title = dragTitle, source = "multiterminal-kanban" });
+                                var dataObj = new DataObject(DataFormats.Text, payload);
+                                BeginInvoke(new Action(() =>
+                                {
+                                    _webView.DoDragDrop(dataObj, DragDropEffects.Move | DragDropEffects.Copy);
+                                    // OLE drag ended (user released mouse) — clear side-channel
+                                    ClearPendingDragData();
+                                }));
+                            }
+                        }
+                        break;
+
+                    case "task_drag_end":
+                        ClearPendingDragData();
+                        DebugLog("Drag ended");
+                        break;
+
                     case "open_lifecycle_board":
                         if (root.TryGetProperty("taskId", out var lifecycleTaskIdEl))
                         {
                             var taskId = lifecycleTaskIdEl.GetString();
                             TaskLifecycleBoard.TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme);
+                        }
+                        break;
+
+                    case "code_review_verdict":
+                        if (root.TryGetProperty("taskId", out var crTaskIdEl) &&
+                            root.TryGetProperty("verdict", out var crVerdictEl))
+                        {
+                            var crTaskId = crTaskIdEl.GetString();
+                            var crVerdict = crVerdictEl.GetString();
+                            // Check for inline review notes (submit notes flow)
+                            string reviewNotesJson = null;
+                            if (root.TryGetProperty("reviewNotes", out var reviewNotesEl))
+                            {
+                                reviewNotesJson = reviewNotesEl.GetRawText();
+                            }
+                            HandleCodeReviewVerdict(crTaskId, crVerdict, reviewNotesJson);
                         }
                         break;
 
@@ -294,16 +374,12 @@ namespace MultiTerminal.TasksPanel
                             var checklistJson = root.TryGetProperty("checklistJson", out var createChecklistJsonEl)
                                 ? createChecklistJsonEl.GetString() : "[]";
 
-                            var result = _broker?.CreateTask(titleEl.GetString(), description, createdByEl.GetString(), status, priority);
+                            var result = _broker?.CreateTask(titleEl.GetString(), description, createdByEl.GetString(), status, priority, projectId);
 
-                            // If creation succeeded and we have projectId, checklistJson, or helpers, update the task
+                            // If creation succeeded and we have checklistJson or helpers, update the task
                             if (result?.Success == true)
                             {
                                 var taskId = result.TaskId;
-                                if (!string.IsNullOrEmpty(projectId))
-                                {
-                                    _broker?.UpdateTaskProject(taskId, projectId);
-                                }
                                 if (checklistJson != "[]")
                                 {
                                     _broker?.UpdateTaskChecklist(taskId, checklistJson);
@@ -709,6 +785,20 @@ namespace MultiTerminal.TasksPanel
             SendProjectsToWebView();
         }
 
+        private void OnReportSaved(object sender, ReportSavedEventArgs e)
+        {
+            if (!_isInitialized)
+                return;
+
+            if (InvokeRequired)
+            {
+                Invoke(new Action(() => OnReportSaved(sender, e)));
+                return;
+            }
+
+            PostMessage($"{{\"type\":\"task_reports_updated\",\"taskId\":\"{EscapeJson(e.TaskId)}\",\"agentName\":\"{EscapeJson(e.AgentName)}\",\"verdict\":\"{EscapeJson(e.Verdict)}\"}}");
+        }
+
         /// <summary>
         /// Send current tasks to the WebView.
         /// </summary>
@@ -869,12 +959,110 @@ namespace MultiTerminal.TasksPanel
                     _broker.TerminalDisconnected -= OnTerminalChanged;
                     _broker.HelperSessionUpdated -= OnHelperSessionUpdated;
                     _broker.ProjectsUpdated -= OnProjectsUpdated;
+                    _broker.ReportSaved -= OnReportSaved;
                 }
 
                 _webView?.Dispose();
             }
 
             base.Dispose(disposing);
+        }
+
+        private void HandleCodeReviewVerdict(string taskId, string verdict, string reviewNotesJson = null)
+        {
+            if (_broker == null) return;
+
+            // Get the task to find checklist items in testing status
+            var task = _broker.GetTask(taskId);
+            if (task == null || string.IsNullOrEmpty(task.ChecklistJson)) return;
+
+            try
+            {
+                // If submitting notes (fail with inline comments), persist them on the task
+                if (verdict == "fail" && !string.IsNullOrEmpty(reviewNotesJson))
+                {
+                    task.ReviewNotes = reviewNotesJson;
+                    _broker.SaveTask(task);
+                }
+                else if (verdict == "pass")
+                {
+                    // Clear any previous review notes on pass
+                    task.ReviewNotes = null;
+                    _broker.SaveTask(task);
+                }
+
+                using var doc = JsonDocument.Parse(task.ChecklistJson);
+                var items = doc.RootElement;
+                var targetStatus = verdict == "pass" ? "done" : "coding";
+
+                // Build transition notes — include formatted review notes summary for agents
+                string notes;
+                if (verdict == "pass")
+                {
+                    notes = "Human code review passed";
+                }
+                else if (!string.IsNullOrEmpty(reviewNotesJson))
+                {
+                    notes = FormatReviewNotesForAgent(reviewNotesJson);
+                }
+                else
+                {
+                    notes = "Human code review failed — needs fixes";
+                }
+
+                for (int i = 0; i < items.GetArrayLength(); i++)
+                {
+                    var item = items[i];
+                    if (item.TryGetProperty("status", out var statusEl) &&
+                        string.Equals(statusEl.GetString(), "testing", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _broker.TransitionChecklistItem(taskId, i, targetStatus, notes, "CodeReview");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TasksPanel] Code review verdict error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Format review notes JSON into agent-readable text for checklist transition notes.
+        /// Produces: [SEVERITY] file:line — "comment"
+        /// </summary>
+        private static string FormatReviewNotesForAgent(string reviewNotesJson)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(reviewNotesJson);
+                var notes = doc.RootElement;
+                if (notes.GetArrayLength() == 0) return "Human code review failed — needs fixes";
+
+                var lines = new System.Text.StringBuilder();
+                lines.AppendLine("Human code review — inline notes:");
+                foreach (var note in notes.EnumerateArray())
+                {
+                    var severity = note.TryGetProperty("severity", out var sev) ? sev.GetString() : "SUGGESTION";
+                    var file = note.TryGetProperty("file", out var f) ? f.GetString() : "unknown";
+                    var line = "?";
+                    if (note.TryGetProperty("line", out var l))
+                    {
+                        line = l.ValueKind == System.Text.Json.JsonValueKind.Number
+                            ? l.GetInt32().ToString()
+                            : l.GetString() ?? "?";
+                    }
+                    var comment = note.TryGetProperty("comment", out var c) ? c.GetString() : "";
+                    // Use short path (last 2 segments)
+                    var parts = file.Split(new[] { '/', '\\' });
+                    var shortPath = parts.Length >= 2 ? parts[parts.Length - 2] + "/" + parts[parts.Length - 1] : file;
+                    lines.AppendLine($"[{severity}] {shortPath}:{line} — \"{comment}\"");
+                }
+                return lines.ToString().TrimEnd();
+            }
+            catch
+            {
+                return "Human code review failed — inline notes attached (see task.ReviewNotes)";
+            }
         }
     }
 }

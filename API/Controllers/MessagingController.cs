@@ -34,7 +34,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("send")]
         public async Task<IActionResult> SendMessage([FromBody] SendMessageRequest request)
         {
-            var result = await _broker.SendMessage(request.FromTerminalId, request.To, request.Message);
+            var result = await _broker.SendMessage(request.FromTerminalId, request.To, request.Message, request.Priority);
             return Ok(result);
         }
 
@@ -94,6 +94,10 @@ namespace MultiTerminal.API.Controllers
         public string FromTerminalId { get; set; }
         public string To { get; set; }
         public string Message { get; set; }
+        /// <summary>
+        /// Message priority: "low", "normal" (default), "high", "critical".
+        /// </summary>
+        public string Priority { get; set; }
     }
 
     public class BroadcastRequest

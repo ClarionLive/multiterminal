@@ -68,6 +68,7 @@ namespace MultiTerminal.Services
         }
 
         private const string LastDirectoryKey = "LastDirectory";
+        private const string DefaultWorkingDirectoryKey = "DefaultWorkingDirectory";
         private const string RecentDirectoriesKey = "RecentDirectories";
         private const int MaxRecentDirectories = 10;
 
@@ -139,7 +140,7 @@ namespace MultiTerminal.Services
         private const double DefaultHudSplitRatio = 0.60;
         private const double MinSplitRatio = 0.2;
         private const double MaxSplitRatio = 0.95;
-        private const double MaxHudSplitRatio = 0.95; // Physical Panel2MinSize (80px) is the real constraint
+        private const double MaxHudSplitRatio = 0.90; // Ensures HUD always gets at least 10% of container height
 
         // Claude commands settings
         private const string ClaudeCommandsKey = "ClaudeCommands";
@@ -805,6 +806,26 @@ namespace MultiTerminal.Services
                 Remove(SessionLayoutKey);
             else
                 Set(SessionLayoutKey, layoutPreset);
+        }
+
+        /// <summary>
+        /// Gets the default working directory for "Just Claude" sessions.
+        /// Falls back to user profile directory if not set or path doesn't exist.
+        /// </summary>
+        public string GetDefaultWorkingDirectory()
+        {
+            string path = Get(DefaultWorkingDirectoryKey);
+            if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
+                return path;
+            return null;
+        }
+
+        /// <summary>
+        /// Sets the default working directory for "Just Claude" sessions.
+        /// </summary>
+        public void SetDefaultWorkingDirectory(string path)
+        {
+            Set(DefaultWorkingDirectoryKey, path ?? "");
         }
 
         /// <summary>

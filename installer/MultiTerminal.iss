@@ -1,9 +1,9 @@
 ; MultiTerminal Inno Setup Script
-; Requires Inno Setup 6.x+
+; Requires Inno Setup 6.1+ (for Excludes support)
 ; https://jrsoftware.org/isinfo.php
 
 #define AppName "MultiTerminal"
-#define AppVersion "1.0.0"
+#define AppVersion "1.3.0"
 #define AppPublisher "MultiTerminal"
 #define AppExeName "MultiTerminal.exe"
 #define AppURL "https://github.com/peterparker57"
@@ -11,9 +11,20 @@
 ; Source directories - adjust these for your build machine
 #define PublishDir "..\bin\Release\net8.0-windows\win-x64\publish"
 #define McpServerDir GetEnv("APPDATA") + "\multiterminal\mcp"
+#define McpGatewayPublishDir "..\..\McpGateway\bin\publish\win-x64"
+#define ClaudeRemotePublishDir "H:\DevLaptop\Projects\ClaudeRemote\bin\Release\net8.0\publish"
 #define HooksDir GetEnv("USERPROFILE") + "\.claude\hooks"
 #define SkillsDir GetEnv("USERPROFILE") + "\.claude\skills"
 #define ClaudeProjectDir "..\.claude"
+#define ToolsDir "..\tools"
+#define DocsDir "..\docs\html"
+
+; Optional MCP server source directories
+#define McpMssqlDir "H:\Dev\MCP\mssql-mcp-server"
+#define McpSqliteDir "H:\Dev\MCP\custom-sqlite-mcp"
+#define McpBuildRunnerDir "H:\Dev\MCP\windows-build-runner"
+#define McpSnapItDir "H:\Dev\MCP\WindowsSnapIt-MCP"
+#define McpEverythingDir "H:\Dev\MCP\everything-mcp-server"
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -52,34 +63,248 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 
 [Components]
 Name: "main"; Description: "MultiTerminal Application"; Types: full app custom; Flags: fixed
+Name: "tools"; Description: "Bundled tools (ripgrep)"; Types: full app custom; Flags: fixed
+Name: "docs"; Description: "HTML Documentation"; Types: full
 Name: "claude"; Description: "Claude Code Integration"; Types: full
-Name: "claude\mcp"; Description: "MCP Server (agent tool interface)"; Types: full
+Name: "claude\mcp"; Description: "MCP Servers (agent tools + gateway)"; Types: full
 Name: "claude\hooks"; Description: "Session hooks (activity tracking, status)"; Types: full
-Name: "claude\skills"; Description: "Skills (/kanban-task, /multiterminal-addproject, /profile)"; Types: full
+Name: "claude\skills"; Description: "Skills — 13 workflow skills (/kanban-task, /pipeline, /review, /audit, etc.)"; Types: full
+Name: "claude\agents"; Description: "Specialist agents (9 definitions incl. verifier, debugger, security auditor, code reviewer)"; Types: full
+Name: "clauderemote"; Description: "ClaudeRemote — Mobile access via phone (PWA)"; Types: full custom
 
 ; ============================================================
 ; FILES
 ; ============================================================
 [Files]
-; --- Main Application ---
-Source: "{#PublishDir}\*"; DestDir: "{app}"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; ============================================================
+; --- Main Application: Non-DLL files (always install) ---
+; ============================================================
+Source: "{#PublishDir}\MultiTerminal.exe"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\MultiTerminal.deps.json"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\MultiTerminal.runtimeconfig.json"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\MultiTerminal.dll.config"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PublishDir}\*.xml"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+
+; ============================================================
+; --- App-specific DLLs (always install — NuGet packages) ---
+; ============================================================
+Source: "{#PublishDir}\MultiTerminal.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\WeifenLuo.WinFormsUI.Docking.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\WeifenLuo.WinFormsUI.Docking.ThemeVS2015.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Microsoft.Web.WebView2.Core.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Microsoft.Web.WebView2.WinForms.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Microsoft.Web.WebView2.Wpf.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\SQLite.Interop.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\System.Data.SQLite.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\WebView2Loader.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+
+; ============================================================
+; --- App content directories (HTML panels, Terminal) ---
+; ============================================================
+Source: "{#PublishDir}\ActivityPanel\*"; DestDir: "{app}\ActivityPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\ChatPanel\*"; DestDir: "{app}\ChatPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\Controls\*"; DestDir: "{app}\Controls"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\InboxPanel\*"; DestDir: "{app}\InboxPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\OfficePanel\*"; DestDir: "{app}\OfficePanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\ProfilePanel\*"; DestDir: "{app}\ProfilePanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\ProjectPanel\*"; DestDir: "{app}\ProjectPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\TaskLifecycleBoard\*"; DestDir: "{app}\TaskLifecycleBoard"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\TasksPanel\*"; DestDir: "{app}\TasksPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\Terminal\*"; DestDir: "{app}\Terminal"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\AgentPanel\*"; DestDir: "{app}\AgentPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\StartScreen\*"; DestDir: "{app}\StartScreen"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\FilePreviewPanel\*"; DestDir: "{app}\FilePreviewPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; ============================================================
+; --- .NET Runtime: Managed DLLs (skip if .NET 8 installed) ---
+; ============================================================
+Source: "{#PublishDir}\Microsoft.AspNetCore.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.AspNetCore.*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.CSharp.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.Extensions.*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.JSInterop*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.Net.*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.VisualBasic*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.Win32.*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\Microsoft.Bcl.*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+; System.dll base assembly (wildcard below doesn't match it)
+Source: "{#PublishDir}\System.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+; System.* DLLs EXCEPT our NuGet package System.Data.SQLite.dll
+Source: "{#PublishDir}\System.*.dll"; Excludes: "System.Data.SQLite.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\mscorlib.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\netstandard.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\WindowsBase.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+
+; ============================================================
+; --- .NET Runtime: WPF/WinForms managed DLLs (skip if .NET 8) ---
+; ============================================================
+Source: "{#PublishDir}\Accessibility.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\DirectWriteForwarder.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\PresentationCore.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\PresentationFramework*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\PresentationUI.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\ReachFramework.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\WindowsFormsIntegration.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\UIAutomation*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+
+; ============================================================
+; --- .NET Runtime: Native binaries (skip if .NET 8) ---
+; ============================================================
+Source: "{#PublishDir}\coreclr.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\clrjit.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\clrgc.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\clretwrc.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\hostfxr.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\hostpolicy.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\createdump.exe"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\mscordaccore.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\mscordaccore_amd64_amd64_*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\mscordbi.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\mscorrc.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\msquic.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\D3DCompiler_47_cor3.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\PenImc_cor3.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\PresentationNative_cor3.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\wpfgfx_cor3.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\aspnetcorev2_inprocess.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\vcruntime140_cor3.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+
+; ============================================================
+; --- .NET Runtime: Locale resource directories (skip if .NET 8) ---
+; ============================================================
+Source: "{#PublishDir}\cs\*"; DestDir: "{app}\cs"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\de\*"; DestDir: "{app}\de"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\es\*"; DestDir: "{app}\es"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\fr\*"; DestDir: "{app}\fr"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\it\*"; DestDir: "{app}\it"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\ja\*"; DestDir: "{app}\ja"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\ko\*"; DestDir: "{app}\ko"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\pl\*"; DestDir: "{app}\pl"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\pt-BR\*"; DestDir: "{app}\pt-BR"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\ru\*"; DestDir: "{app}\ru"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\tr\*"; DestDir: "{app}\tr"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\zh-Hans\*"; DestDir: "{app}\zh-Hans"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+Source: "{#PublishDir}\zh-Hant\*"; DestDir: "{app}\zh-Hant"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+
+; ============================================================
+; --- .NET Runtime: Native shims directory (skip if .NET 8) ---
+; ============================================================
+Source: "{#PublishDir}\runtimes\*"; DestDir: "{app}\runtimes"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Check: ShouldInstallRuntimeFiles
+
+; ============================================================
+; --- Bundled Tools (ripgrep for search_code MCP tool) ---
+; ============================================================
+Source: "{#ToolsDir}\rg.exe"; DestDir: "{app}\tools"; Components: tools; Flags: ignoreversion
+Source: "{#ToolsDir}\rg-UNLICENSE.txt"; DestDir: "{app}\tools"; Components: tools; Flags: ignoreversion
+
+; ============================================================
+; --- HTML Documentation ---
+; ============================================================
+Source: "{#DocsDir}\*"; DestDir: "{app}\docs\html"; Components: docs; Flags: ignoreversion
+
+; ============================================================
 ; --- Project .claude folder ---
+; ============================================================
 Source: "{#ClaudeProjectDir}\CLAUDE.md"; DestDir: "{app}\.claude"; Components: main; Flags: ignoreversion
 
+; --- Project-level hooks (to {app}\.claude\hooks) ---
+Source: "{#ClaudeProjectDir}\hooks\inbox-check-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\task-to-agent-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\subagent-office-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\project-context-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\safety-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\session-status-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\pipeline-trigger-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\active-context-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\hooks\notification-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+
+; --- Specialist agent definitions (to {app}\.claude\agents) ---
+Source: "{#ClaudeProjectDir}\agents\session-summarizer.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\verifier.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\security-auditor.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\debugger.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\test-designer.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\devils-advocate.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\session-distiller.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\code-reviewer.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+Source: "{#ClaudeProjectDir}\agents\report-template.html"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
+
+; --- Project-level skills (to {app}\.claude\skills) ---
+Source: "{#ClaudeProjectDir}\skills\verifier-multiterminal\*"; DestDir: "{app}\.claude\skills\verifier-multiterminal"; Components: claude\agents; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; ============================================================
 ; --- MCP Server (to %APPDATA%\multiterminal\mcp) ---
+; ============================================================
 Source: "{#McpServerDir}\*"; DestDir: "{userappdata}\multiterminal\mcp"; Components: claude\mcp; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; --- Hook Scripts (to %USERPROFILE%\.claude\hooks) ---
+; ============================================================
+; --- MCP Gateway (to {app}\mcp-gateway) ---
+; ============================================================
+Source: "{#McpGatewayPublishDir}\*"; DestDir: "{app}\mcp-gateway"; Components: claude\mcp; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; ============================================================
+; --- Optional MCP Servers (to {app}\mcps\<name>) ---
+; --- Selections controlled by custom wizard page ---
+; ============================================================
+Source: "{#McpMssqlDir}\dist\*"; DestDir: "{app}\mcps\mssql\dist"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('mssql')
+Source: "{#McpMssqlDir}\node_modules\*"; DestDir: "{app}\mcps\mssql\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('mssql')
+Source: "{#McpMssqlDir}\package.json"; DestDir: "{app}\mcps\mssql"; Flags: ignoreversion; Check: IsMcpSelected('mssql')
+
+Source: "{#McpSqliteDir}\custom-sqlite-mcp-server.js"; DestDir: "{app}\mcps\sqlite"; Flags: ignoreversion; Check: IsMcpSelected('sqlite')
+Source: "{#McpSqliteDir}\node_modules\*"; DestDir: "{app}\mcps\sqlite\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('sqlite')
+Source: "{#McpSqliteDir}\package.json"; DestDir: "{app}\mcps\sqlite"; Flags: ignoreversion; Check: IsMcpSelected('sqlite')
+
+Source: "{#McpBuildRunnerDir}\build\*"; DestDir: "{app}\mcps\windows-build-runner\build"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('windows-build-runner')
+Source: "{#McpBuildRunnerDir}\node_modules\*"; DestDir: "{app}\mcps\windows-build-runner\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('windows-build-runner')
+Source: "{#McpBuildRunnerDir}\package.json"; DestDir: "{app}\mcps\windows-build-runner"; Flags: ignoreversion; Check: IsMcpSelected('windows-build-runner')
+
+Source: "{#McpSnapItDir}\index.js"; DestDir: "{app}\mcps\windowssnapit"; Flags: ignoreversion; Check: IsMcpSelected('windowssnapit')
+Source: "{#McpSnapItDir}\Programs\*"; DestDir: "{app}\mcps\windowssnapit\Programs"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('windowssnapit')
+Source: "{#McpSnapItDir}\node_modules\*"; DestDir: "{app}\mcps\windowssnapit\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('windowssnapit')
+Source: "{#McpSnapItDir}\package.json"; DestDir: "{app}\mcps\windowssnapit"; Flags: ignoreversion; Check: IsMcpSelected('windowssnapit')
+
+Source: "{#McpEverythingDir}\build\*"; DestDir: "{app}\mcps\everything-search\build"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('everything-search')
+Source: "{#McpEverythingDir}\node_modules\*"; DestDir: "{app}\mcps\everything-search\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('everything-search')
+Source: "{#McpEverythingDir}\package.json"; DestDir: "{app}\mcps\everything-search"; Flags: ignoreversion; Check: IsMcpSelected('everything-search')
+
+; ============================================================
+; --- Global Hook Scripts (to %USERPROFILE%\.claude\hooks) ---
+; ============================================================
 Source: "{#HooksDir}\session-status-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
 Source: "{#HooksDir}\activity-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
 Source: "{#HooksDir}\pool-context.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
 Source: "{#HooksDir}\profile-status-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
+Source: "{#HooksDir}\session-import-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
 
+; ============================================================
 ; --- Skills (to %USERPROFILE%\.claude\skills) ---
+; ============================================================
 Source: "{#SkillsDir}\kanban-task\*"; DestDir: "{%USERPROFILE}\.claude\skills\kanban-task"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SkillsDir}\multiterminal-addproject\*"; DestDir: "{%USERPROFILE}\.claude\skills\multiterminal-addproject"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SkillsDir}\profile\*"; DestDir: "{%USERPROFILE}\.claude\skills\profile"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\new-project\*"; DestDir: "{%USERPROFILE}\.claude\skills\new-project"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\project-management\*"; DestDir: "{%USERPROFILE}\.claude\skills\project-management"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\session-start\*"; DestDir: "{%USERPROFILE}\.claude\skills\session-start"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\pipeline\*"; DestDir: "{%USERPROFILE}\.claude\skills\pipeline"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\review\*"; DestDir: "{%USERPROFILE}\.claude\skills\review"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\audit\*"; DestDir: "{%USERPROFILE}\.claude\skills\audit"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\diagnose\*"; DestDir: "{%USERPROFILE}\.claude\skills\diagnose"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\reload-context\*"; DestDir: "{%USERPROFILE}\.claude\skills\reload-context"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\start-servers\*"; DestDir: "{%USERPROFILE}\.claude\skills\start-servers"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SkillsDir}\snapshot-agents\*"; DestDir: "{%USERPROFILE}\.claude\skills\snapshot-agents"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; ============================================================
+; --- ClaudeRemote (PWA mobile access) ---
+; ============================================================
+Source: "{#ClaudeRemotePublishDir}\*"; DestDir: "{app}\claude-remote"; Components: clauderemote; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#ClaudeRemotePublishDir}\wwwroot\*"; DestDir: "{app}\claude-remote\wwwroot"; Components: clauderemote; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "H:\DevLaptop\Projects\ClaudeRemote\THIRD-PARTY-NOTICES.md"; DestDir: "{app}\claude-remote"; Components: clauderemote; Flags: ignoreversion
+Source: "H:\DevLaptop\Projects\ClaudeRemote\Documentation\ClaudeRemote-UserGuide.html"; DestDir: "{app}\claude-remote\docs"; Components: clauderemote; Flags: ignoreversion
+Source: "H:\DevLaptop\Projects\ClaudeRemote\README.md"; DestDir: "{app}\claude-remote"; Components: clauderemote; Flags: ignoreversion
+
+; --- ClaudeRemote global hook (commentary for mobile feed) ---
+Source: "{#HooksDir}\commentary-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: clauderemote; Flags: ignoreversion
 
 ; --- Post-install/uninstall scripts (temp) ---
 Source: "post-install.js"; DestDir: "{tmp}"; Flags: deleteafterinstall
@@ -92,13 +317,15 @@ Source: "post-uninstall.js"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+Name: "{group}\{#AppName} Documentation"; Filename: "{app}\docs\html\index.html"; Components: docs
+Name: "{group}\ClaudeRemote"; Filename: "{app}\claude-remote\ClaudeRemote.exe"; IconFilename: "{app}\claude-remote\wwwroot\img\ClaudeRemote.ico"; Components: clauderemote
 
 ; ============================================================
 ; POST-INSTALL: Configure Claude Code integration
 ; ============================================================
 [Run]
-; Run post-install script to merge hooks into settings.json and generate mcp.json
-Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"""; \
+; Run post-install script to merge hooks into settings.json and generate configs
+Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps}"; \
   StatusMsg: "Configuring Claude Code integration..."; \
   Components: claude; Flags: runhidden waituntilterminated
 
@@ -116,14 +343,173 @@ Filename: "node"; Parameters: """{app}\post-uninstall.js"" ""{app}"" ""{userappd
 [UninstallDelete]
 ; Clean up generated config files
 Type: files; Name: "{app}\.claude\project.json"
+Type: files; Name: "{app}\.claude\settings.local.json"
+; Note: MCP servers are registered in ~/.claude.json — cleaned up by post-uninstall.js
+Type: dirifempty; Name: "{app}\.claude\hooks"
+Type: dirifempty; Name: "{app}\.claude\agents"
+Type: dirifempty; Name: "{app}\.claude\skills\verifier-multiterminal"
+Type: dirifempty; Name: "{app}\.claude\skills"
 Type: dirifempty; Name: "{app}\.claude"
+Type: filesandordirs; Name: "{app}\claude-remote"
+Type: filesandordirs; Name: "{app}\mcp-gateway"
+Type: filesandordirs; Name: "{app}\mcps"
 
 ; ============================================================
-; PASCAL SCRIPT - Prerequisite checks & uninstall prompts
+; PASCAL SCRIPT - .NET detection, prerequisite checks, uninstall
 ; ============================================================
 [Code]
 var
   DeleteUserData: Boolean;
+  DotNet8Detected: Boolean;
+  McpPage: TInputOptionWizardPage;
+
+// Check if .NET 8 Desktop Runtime is installed (includes WinForms + WPF + NETCore)
+function IsDotNet8DesktopInstalled: Boolean;
+var
+  Names: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  if RegGetValueNames(HKLM,
+    'SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App',
+    Names) then
+  begin
+    for I := 0 to GetArrayLength(Names) - 1 do
+    begin
+      if Pos('8.', Names[I]) = 1 then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
+  end;
+end;
+
+// Check if ASP.NET Core 8 Runtime is installed
+function IsDotNet8AspNetInstalled: Boolean;
+var
+  Names: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  if RegGetValueNames(HKLM,
+    'SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.AspNetCore.App',
+    Names) then
+  begin
+    for I := 0 to GetArrayLength(Names) - 1 do
+    begin
+      if Pos('8.', Names[I]) = 1 then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
+  end;
+end;
+
+// Returns True when runtime DLLs should be installed (i.e., .NET 8 is NOT fully present)
+function ShouldInstallRuntimeFiles: Boolean;
+begin
+  Result := not (IsDotNet8DesktopInstalled and IsDotNet8AspNetInstalled);
+end;
+
+// Returns flag string for post-install.js to know which mode we're in
+function GetDotNetFlag(Param: String): String;
+begin
+  if IsDotNet8DesktopInstalled and IsDotNet8AspNetInstalled then
+    Result := '--framework-dependent'
+  else
+    Result := '--self-contained';
+end;
+
+// ============================================================
+// Recommended MCP Servers - custom wizard page
+// ============================================================
+
+// Create the MCP recommendation page (called from InitializeWizard)
+procedure CreateMcpPage;
+begin
+  McpPage := CreateInputOptionPage(wpSelectComponents,
+    'Recommended MCP Servers',
+    'We recommend the following MCP servers be installed alongside MultiTerminal.',
+    'The servers checked below will be installed and registered with the MCP Gateway.' + #13#10 +
+    'You can change these later via the MCP Gateway configuration.',
+    False, False);
+
+  // Index 0: MSSQL
+  McpPage.Add('MSSQL — Microsoft SQL Server query and schema tools');
+  McpPage.Values[0] := True;
+
+  // Index 1: SQLite
+  McpPage.Add('SQLite — Local SQLite database query and management tools');
+  McpPage.Values[1] := True;
+
+  // Index 2: Windows Build Runner
+  McpPage.Add('Windows Build Runner — MSBuild/dotnet build execution tools');
+  McpPage.Values[2] := True;
+
+  // Index 3: Windows SnapIt
+  McpPage.Add('Windows SnapIt — Window screenshot capture tools');
+  McpPage.Values[3] := True;
+
+  // Index 4: Everything Search
+  McpPage.Add('Everything Search — Instant file search via voidtools Everything');
+  McpPage.Values[4] := True;
+end;
+
+procedure InitializeWizard;
+begin
+  CreateMcpPage;
+end;
+
+// Check function used by [Files] entries to conditionally install MCP files
+function IsMcpSelected(McpName: String): Boolean;
+begin
+  Result := False;
+  if McpPage = nil then Exit;
+
+  if McpName = 'mssql' then
+    Result := McpPage.Values[0]
+  else if McpName = 'sqlite' then
+    Result := McpPage.Values[1]
+  else if McpName = 'windows-build-runner' then
+    Result := McpPage.Values[2]
+  else if McpName = 'windowssnapit' then
+    Result := McpPage.Values[3]
+  else if McpName = 'everything-search' then
+    Result := McpPage.Values[4];
+end;
+
+// Returns comma-separated list of selected MCPs for post-install.js
+function GetSelectedMcps(Param: String): String;
+begin
+  Result := '--mcps=';
+  if (McpPage <> nil) then
+  begin
+    if McpPage.Values[0] then Result := Result + 'mssql,';
+    if McpPage.Values[1] then Result := Result + 'sqlite,';
+    if McpPage.Values[2] then Result := Result + 'windows-build-runner,';
+    if McpPage.Values[3] then Result := Result + 'windowssnapit,';
+    if McpPage.Values[4] then Result := Result + 'everything-search,';
+  end;
+  // Remove trailing comma
+  if Result[Length(Result)] = ',' then
+    Result := Copy(Result, 1, Length(Result) - 1);
+  // If nothing selected, return empty flag
+  if Result = '--mcps=' then
+    Result := '--mcps=none';
+end;
+
+// Check if Claude Code CLI is installed (required for MCP integration)
+function IsClaudeCodeInstalled: Boolean;
+var
+  ClaudeJsonPath: String;
+begin
+  // Claude Code stores its config in %USERPROFILE%\.claude.json
+  // If this file exists, Claude Code has been run at least once
+  ClaudeJsonPath := ExpandConstant('{%USERPROFILE}\.claude.json');
+  Result := FileExists(ClaudeJsonPath);
+end;
 
 function IsNodeInstalled: Boolean;
 var
@@ -154,9 +540,44 @@ end;
 
 function InitializeSetup: Boolean;
 var
-  NodeMsg, WV2Msg: String;
+  NodeMsg, WV2Msg, DotNetMsg: String;
 begin
   Result := True;
+
+  // Detect .NET 8 and cache the result
+  DotNet8Detected := IsDotNet8DesktopInstalled and IsDotNet8AspNetInstalled;
+
+  // Show .NET detection status
+  if DotNet8Detected then
+    Log('.NET 8 Desktop + ASP.NET Core Runtime detected. Runtime DLLs will be skipped (~380 files).')
+  else
+  begin
+    DotNetMsg := '.NET 8 Desktop Runtime was not detected on this system.' + #13#10 + #13#10 +
+                 'The installer will include the full .NET runtime (~380 additional files).' + #13#10 +
+                 'To reduce install size, install the .NET 8 Desktop Runtime first:' + #13#10 +
+                 '  https://dotnet.microsoft.com/download/dotnet/8.0' + #13#10 + #13#10 +
+                 'Continue with full (self-contained) installation?';
+    if MsgBox(DotNetMsg, mbConfirmation, MB_YESNO) = IDNO then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+
+  // Check Claude Code (required - MCP servers need it)
+  if not IsClaudeCodeInstalled then
+  begin
+    MsgBox('Claude Code was not detected on this system.' + #13#10 + #13#10 +
+           'Claude Code must be installed and run at least once before' + #13#10 +
+           'installing MultiTerminal. The MCP servers and hooks require' + #13#10 +
+           'Claude Code''s configuration file (~/.claude.json) to exist.' + #13#10 + #13#10 +
+           'Please install Claude Code first:' + #13#10 +
+           '  npm install -g @anthropic-ai/claude-code' + #13#10 + #13#10 +
+           'Then run "claude" once to initialize, and re-run this installer.',
+           mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
 
   // Check Node.js
   if not IsNodeInstalled then
@@ -205,7 +626,7 @@ begin
       DeleteUserData := MsgBox(
         'Do you want to delete your MultiTerminal user data?' + #13#10 + #13#10 +
         'This includes:' + #13#10 +
-        '  - Task database (tasks.db)' + #13#10 +
+        '  - Task database (multiterminal.db)' + #13#10 +
         '  - Session history (sessions.db)' + #13#10 +
         '  - Message queue (messages.db)' + #13#10 +
         '  - Settings and prompts' + #13#10 + #13#10 +

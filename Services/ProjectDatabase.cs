@@ -10,7 +10,7 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// SQLite database service for persisting Projects.
-    /// Uses the same database as TaskDatabase at %APPDATA%\multiterminal\tasks.db
+    /// Uses the same database as TaskDatabase at %APPDATA%\multiterminal\multiterminal.db
     ///
     /// Supports two Project models:
     ///  - MCPServer.Models.Project  (lightweight, used by MessageBroker cache)
@@ -55,7 +55,9 @@ namespace MultiTerminal.Services
             // Run migrations for schema changes (additive, non-destructive)
             MigrateAddNewProjectColumns();
             MigrateAddAssociationTables();
-            MigrateAddMcpRegistry();
+
+            // Drop the mcp_registry table — gateway is now the source of truth for server catalog
+            MigrateDropMcpRegistry();
         }
 
         private void CreateSchema()
@@ -508,6 +510,9 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveRichProject(MultiTerminal.Models.Project project)
         {
+            // COALESCE preserves existing non-null values when the incoming project has nulls.
+            // This prevents code paths that load from project.json (which lacks SQLite-only
+            // fields like team_lead, icon, project_type, etc.) from wiping those values.
             const string sql = @"
                 INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at,
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
@@ -520,27 +525,27 @@ namespace MultiTerminal.Services
                        @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
                        @teamLead)
                 ON CONFLICT(id) DO UPDATE SET
-                    name = @name,
-                    description = @description,
-                    path = @path,
+                    name = COALESCE(@name, projects.name),
+                    description = COALESCE(@description, projects.description),
+                    path = COALESCE(@path, projects.path),
                     updated_at = @updatedAt,
-                    source_path = @sourcePath,
-                    deploy_path = @deployPath,
-                    build_output_path = @buildOutputPath,
-                    build_command = @buildCommand,
-                    deploy_command = @deployCommand,
-                    launch_command = @launchCommand,
-                    project_type = @projectType,
-                    current_version = @currentVersion,
-                    change_log = @changeLog,
+                    source_path = COALESCE(@sourcePath, projects.source_path),
+                    deploy_path = COALESCE(@deployPath, projects.deploy_path),
+                    build_output_path = COALESCE(@buildOutputPath, projects.build_output_path),
+                    build_command = COALESCE(@buildCommand, projects.build_command),
+                    deploy_command = COALESCE(@deployCommand, projects.deploy_command),
+                    launch_command = COALESCE(@launchCommand, projects.launch_command),
+                    project_type = COALESCE(@projectType, projects.project_type),
+                    current_version = COALESCE(@currentVersion, projects.current_version),
+                    change_log = COALESCE(@changeLog, projects.change_log),
                     is_pinned = @isPinned,
-                    icon = @icon,
-                    icon_color = @iconColor,
-                    last_opened_at = @lastOpenedAt,
-                    git_repo_url = @gitRepoUrl,
-                    git_default_branch = @gitDefaultBranch,
+                    icon = COALESCE(@icon, projects.icon),
+                    icon_color = COALESCE(@iconColor, projects.icon_color),
+                    last_opened_at = COALESCE(@lastOpenedAt, projects.last_opened_at),
+                    git_repo_url = COALESCE(@gitRepoUrl, projects.git_repo_url),
+                    git_default_branch = COALESCE(@gitDefaultBranch, projects.git_default_branch),
                     git_auto_commit = @gitAutoCommit,
-                    team_lead = @teamLead
+                    team_lead = COALESCE(@teamLead, projects.team_lead)
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -607,7 +612,7 @@ namespace MultiTerminal.Services
         /// Get all team member profiles that have is_team_lead = 1.
         /// Returns a list of lightweight profile summaries (id, displayName, avatarUrl)
         /// for populating the team lead dropdown in the Project Panel.
-        /// ProjectDatabase shares the same tasks.db file as TaskDatabase, so it can
+        /// ProjectDatabase shares the same multiterminal.db file as TaskDatabase, so it can
         /// query team_member_profiles directly.
         /// </summary>
         public List<(string Id, string DisplayName, string AvatarUrl)> GetTeamLeadProfiles()
@@ -791,6 +796,18 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Update only the is_enabled flag on an existing MCP server row by its id.
+        /// </summary>
+        public bool UpdateMcpServerEnabled(int id, bool isEnabled)
+        {
+            const string sql = "UPDATE project_mcp_servers SET is_enabled = @isEnabled WHERE id = @id";
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@id", id);
+            command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
+            return command.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
         /// Delete an MCP server from a project.
         /// </summary>
         public bool DeleteProjectMcpServer(string projectId, string serverName)
@@ -859,6 +876,18 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@isEnabled", specialist.IsEnabled ? 1 : 0);
             command.Parameters.AddWithValue("@customPrompt", (object)specialist.CustomPrompt ?? DBNull.Value);
             command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Update only the is_enabled flag on an existing specialist agent row by its id.
+        /// </summary>
+        public bool UpdateSpecialistAgentEnabled(int id, bool isEnabled)
+        {
+            const string sql = "UPDATE project_specialist_agents SET is_enabled = @isEnabled WHERE id = @id";
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@id", id);
+            command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
+            return command.ExecuteNonQuery() > 0;
         }
 
         /// <summary>
@@ -1048,165 +1077,28 @@ namespace MultiTerminal.Services
 
         #endregion
 
-        #region MCP Registry
+        #region MCP Registry (removed — gateway is source of truth)
 
         /// <summary>
-        /// Migration: creates the mcp_registry table if it does not yet exist.
-        /// Safe to run on every startup — uses CREATE TABLE IF NOT EXISTS.
+        /// Migration: drops the mcp_registry table if it still exists from a previous version.
+        /// The gateway database (gateway.db) is now the authoritative server catalog.
+        /// project_mcp_servers (per-project enablement preferences) is kept intact.
         /// </summary>
-        private void MigrateAddMcpRegistry()
+        private void MigrateDropMcpRegistry()
         {
-            const string sql = @"
-                -- Global catalog of all known MCP servers
-                CREATE TABLE IF NOT EXISTS mcp_registry (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_name     TEXT    NOT NULL UNIQUE,
-                    display_name    TEXT    NOT NULL,
-                    description     TEXT,
-                    config_json     TEXT,
-                    tier            TEXT    NOT NULL DEFAULT 'optional',
-                    transport_type  TEXT    NOT NULL DEFAULT 'stdio',
-                    command         TEXT,
-                    created_at      DATETIME NOT NULL,
-                    updated_at      DATETIME NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_mcp_registry_server_name ON mcp_registry(server_name);
-                CREATE INDEX IF NOT EXISTS idx_mcp_registry_tier ON mcp_registry(tier);
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.ExecuteNonQuery();
-        }
-
-        /// <summary>
-        /// Get all entries in the MCP registry, ordered by tier then server name.
-        /// </summary>
-        public List<MultiTerminal.Models.McpRegistryEntry> GetAllMcpRegistryEntries()
-        {
-            var entries = new List<MultiTerminal.Models.McpRegistryEntry>();
-
-            const string sql = @"
-                SELECT id, server_name, display_name, description, config_json,
-                       tier, transport_type, command, created_at, updated_at
-                FROM mcp_registry
-                ORDER BY
-                    CASE tier
-                        WHEN 'multiterminal' THEN 0
-                        WHEN 'global'        THEN 1
-                        ELSE                      2
-                    END,
-                    server_name
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
-            {
-                entries.Add(ReadMcpRegistryEntry(reader));
-            }
-
-            return entries;
-        }
-
-        /// <summary>
-        /// Get an MCP registry entry by server name. Returns null if not found.
-        /// </summary>
-        public MultiTerminal.Models.McpRegistryEntry GetMcpRegistryEntry(string serverName)
-        {
-            const string sql = @"
-                SELECT id, server_name, display_name, description, config_json,
-                       tier, transport_type, command, created_at, updated_at
-                FROM mcp_registry
-                WHERE server_name = @serverName
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@serverName", serverName);
-            using var reader = command.ExecuteReader();
-
-            return reader.Read() ? ReadMcpRegistryEntry(reader) : null;
-        }
-
-        /// <summary>
-        /// Get all MCP registry entries for a specific tier.
-        /// Tier values: "multiterminal", "global", "optional".
-        /// </summary>
-        public List<MultiTerminal.Models.McpRegistryEntry> GetMcpRegistryEntriesByTier(string tier)
-        {
-            var entries = new List<MultiTerminal.Models.McpRegistryEntry>();
-
-            const string sql = @"
-                SELECT id, server_name, display_name, description, config_json,
-                       tier, transport_type, command, created_at, updated_at
-                FROM mcp_registry
-                WHERE tier = @tier
-                ORDER BY server_name
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@tier", tier);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
-            {
-                entries.Add(ReadMcpRegistryEntry(reader));
-            }
-
-            return entries;
-        }
-
-        /// <summary>
-        /// Save (upsert) an MCP registry entry.
-        /// Uses server_name as the conflict key — if a server with the same name exists, it is updated.
-        /// </summary>
-        public void SaveMcpRegistryEntry(MultiTerminal.Models.McpRegistryEntry entry)
-        {
-            const string sql = @"
-                INSERT INTO mcp_registry
-                    (server_name, display_name, description, config_json, tier, transport_type, command, created_at, updated_at)
-                VALUES
-                    (@serverName, @displayName, @description, @configJson, @tier, @transportType, @command, @createdAt, @updatedAt)
-                ON CONFLICT(server_name) DO UPDATE SET
-                    display_name   = @displayName,
-                    description    = @description,
-                    config_json    = @configJson,
-                    tier           = @tier,
-                    transport_type = @transportType,
-                    command        = @command,
-                    updated_at     = @updatedAt
-            ";
-
-            var now = DateTime.UtcNow;
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@serverName",    entry.ServerName);
-            command.Parameters.AddWithValue("@displayName",   entry.DisplayName ?? entry.ServerName);
-            command.Parameters.AddWithValue("@description",   (object)entry.Description  ?? DBNull.Value);
-            command.Parameters.AddWithValue("@configJson",    (object)entry.ConfigJson    ?? DBNull.Value);
-            command.Parameters.AddWithValue("@tier",          entry.Tier ?? "optional");
-            command.Parameters.AddWithValue("@transportType", entry.TransportType ?? "stdio");
-            command.Parameters.AddWithValue("@command",       (object)entry.Command ?? DBNull.Value);
-            command.Parameters.AddWithValue("@createdAt",     entry.CreatedAt == default ? now : entry.CreatedAt);
-            command.Parameters.AddWithValue("@updatedAt",     now);
-            command.ExecuteNonQuery();
-        }
-
-        /// <summary>
-        /// Delete an MCP registry entry by server name.
-        /// </summary>
-        /// <returns>True if a row was deleted; false if not found.</returns>
-        public bool DeleteMcpRegistryEntry(string serverName)
-        {
-            const string sql = "DELETE FROM mcp_registry WHERE server_name = @serverName";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@serverName", serverName);
-            return command.ExecuteNonQuery() > 0;
+            // Drop indexes first (SQLite auto-drops them with the table, but be explicit)
+            using (var cmd = new SQLiteCommand("DROP INDEX IF EXISTS idx_mcp_registry_server_name", _connection))
+                cmd.ExecuteNonQuery();
+            using (var cmd = new SQLiteCommand("DROP INDEX IF EXISTS idx_mcp_registry_tier", _connection))
+                cmd.ExecuteNonQuery();
+            using (var cmd = new SQLiteCommand("DROP TABLE IF EXISTS mcp_registry", _connection))
+                cmd.ExecuteNonQuery();
         }
 
         /// <summary>
         /// Get the set of server_names explicitly enabled in project_mcp_servers for a project.
-        /// Used by the MCP picker to pre-check optional servers that are already enabled.
+        /// Used by GatewayIntegrationService.SyncProjectProfile to determine which gateway servers
+        /// to include in the project's gateway profile.
         /// </summary>
         public HashSet<string> GetEnabledMcpServerNamesForProject(string projectId)
         {
@@ -1225,23 +1117,6 @@ namespace MultiTerminal.Services
                 result.Add(reader.GetString(0));
 
             return result;
-        }
-
-        private MultiTerminal.Models.McpRegistryEntry ReadMcpRegistryEntry(SQLiteDataReader reader)
-        {
-            return new MultiTerminal.Models.McpRegistryEntry
-            {
-                Id            = reader.GetInt32(0),
-                ServerName    = reader.GetString(1),
-                DisplayName   = reader.GetString(2),
-                Description   = reader.IsDBNull(3)  ? null : reader.GetString(3),
-                ConfigJson    = reader.IsDBNull(4)  ? null : reader.GetString(4),
-                Tier          = reader.GetString(5),
-                TransportType = reader.GetString(6),
-                Command       = reader.IsDBNull(7)  ? null : reader.GetString(7),
-                CreatedAt     = reader.GetDateTime(8),
-                UpdatedAt     = reader.GetDateTime(9)
-            };
         }
 
         #endregion
@@ -1297,6 +1172,18 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@skillName", skill.SkillName);
             command.Parameters.AddWithValue("@isEnabled", skill.IsEnabled ? 1 : 0);
             command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Update only the is_enabled flag on an existing skill row by its id.
+        /// </summary>
+        public bool UpdateSkillEnabled(int id, bool isEnabled)
+        {
+            const string sql = "UPDATE project_skills SET is_enabled = @isEnabled WHERE id = @id";
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@id", id);
+            command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
+            return command.ExecuteNonQuery() > 0;
         }
 
         /// <summary>

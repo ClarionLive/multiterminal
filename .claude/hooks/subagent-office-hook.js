@@ -219,11 +219,8 @@ async function main() {
       await callApi('/api/agent-panels/close', 'POST', { transcriptPath });
     }
 
-    // Clean up tracking entry
-    if (tracking[agentId]) {
-      delete tracking[agentId];
-      saveTracking(tracking);
-    }
+    // Don't delete tracking entry here — TeamWatcher may not have read it yet.
+    // Ghost cleanup on SubagentStart (session ID check) handles stale entries.
 
   } else if (hookType === 'TeammateIdle') {
     // TeammateIdle fires when a teammate/subagent goes idle (including cancellation).

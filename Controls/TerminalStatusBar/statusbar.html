@@ -162,6 +162,57 @@
             color: var(--text-muted);
         }
 
+        /* HUD slide toggle */
+        .hud-toggle {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .hud-toggle-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .hud-toggle.active .hud-toggle-label {
+            color: var(--text-secondary);
+        }
+
+        .hud-toggle-track {
+            width: 30px;
+            height: 16px;
+            border-radius: 8px;
+            background: var(--border-color);
+            position: relative;
+            transition: background 0.2s ease;
+        }
+
+        .hud-toggle.active .hud-toggle-track {
+            background: #6366f1;
+        }
+
+        .hud-toggle-thumb {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.2s ease, background 0.2s ease;
+        }
+
+        .hud-toggle.active .hud-toggle-thumb {
+            transform: translateX(14px);
+            background: white;
+        }
+
         .home-button {
             flex-shrink: 0;
             width: 28px;
@@ -399,6 +450,12 @@
                     <span class="task-label">Ready to work</span>
                 </div>
             </div>
+            <div class="hud-toggle active" id="hud-toggle" title="Show/Hide Task HUD" onclick="onHudToggleClick()">
+                <span class="hud-toggle-label">HUD</span>
+                <div class="hud-toggle-track">
+                    <div class="hud-toggle-thumb"></div>
+                </div>
+            </div>
             <button class="home-button" id="home-button" title="Return to Start Screen (Ctrl+Shift+H)" onclick="onHomeClick()">
                 <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
             </button>
@@ -443,6 +500,16 @@
             postMessage('home', {});
         }
 
+        function onHudToggleClick() {
+            postMessage('hudToggle', {});
+        }
+
+        function setHudToggleState(isActive) {
+            var el = document.getElementById('hud-toggle');
+            if (isActive) el.classList.add('active');
+            else el.classList.remove('active');
+        }
+
         function onOpenFolderClick() {
             var path = document.getElementById('folder-path').getAttribute('data-path') || '';
             if (path) {
@@ -467,10 +534,14 @@
             var taskId = data.taskId;
             var status = data.status;
 
-            // Update name
-            document.getElementById('terminal-name').textContent = name || 'Terminal';
+            var projectName = data.projectName;
+            var projectDescription = data.projectDescription;
 
-            // Update avatar
+            // Update display name: show project name if available, otherwise agent name
+            var displayName = (projectName && projectName.trim() !== '') ? projectName : (name || 'Terminal');
+            document.getElementById('terminal-name').textContent = displayName;
+
+            // Update avatar (still based on agent name)
             var avatarEl = document.getElementById('avatar');
             var initialsEl = document.getElementById('avatar-initials');
             var imageEl = document.getElementById('avatar-image');
@@ -486,9 +557,11 @@
                 imageEl.style.display = 'none';
             }
 
-            // Update task/activity
+            // Update subtitle: show project description if available, otherwise task/activity/status
             var taskEl = document.getElementById('current-task');
-            if (activityDescription && activityDescription.trim() !== '') {
+            if (projectDescription && projectDescription.trim() !== '') {
+                taskEl.innerHTML = escapeHtml(projectDescription);
+            } else if (activityDescription && activityDescription.trim() !== '') {
                 taskEl.innerHTML = escapeHtml(activityDescription);
             } else if (taskTitle && taskTitle.trim() !== '') {
                 taskEl.innerHTML = '<span class="task-label">Task:</span> ' + escapeHtml(taskTitle);
@@ -621,6 +694,8 @@
                         updateStatus(JSON.parse(data.substring(7)));
                     } else if (data.startsWith('statusline:')) {
                         updateStatusLine(JSON.parse(data.substring(11)));
+                    } else if (data.startsWith('hudState:')) {
+                        setHudToggleState(data.split(':')[1] === 'true');
                     }
                 }
             });

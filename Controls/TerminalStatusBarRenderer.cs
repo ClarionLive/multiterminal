@@ -42,6 +42,11 @@ namespace MultiTerminal.Controls
         public event EventHandler<string> OpenFolderRequested;
 
         /// <summary>
+        /// Event fired when the user clicks the HUD toggle switch.
+        /// </summary>
+        public event EventHandler HudToggleRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -197,6 +202,11 @@ namespace MultiTerminal.Controls
                         _debugLogService?.Trace("TerminalStatusBar", "Home button clicked");
                         HomeRequested?.Invoke(this, EventArgs.Empty);
                     }
+                    else if (type == "hudToggle")
+                    {
+                        _debugLogService?.Trace("TerminalStatusBar", "HUD toggle clicked");
+                        HudToggleRequested?.Invoke(this, EventArgs.Empty);
+                    }
                     else if (type == "openFolder")
                     {
                         if (root.TryGetProperty("path", out var pathEl))
@@ -223,7 +233,9 @@ namespace MultiTerminal.Controls
         /// <param name="taskTitle">Current task title</param>
         /// <param name="taskId">Current task ID</param>
         /// <param name="status">Activity status (active, idle, offline)</param>
-        public void UpdateStatus(string name, string avatarUrl, string activityDescription, string taskTitle, string taskId, string status)
+        /// <param name="projectName">Project name (or null if no project matched)</param>
+        /// <param name="projectDescription">Project description (or null)</param>
+        public void UpdateStatus(string name, string avatarUrl, string activityDescription, string taskTitle, string taskId, string status, string projectName = null, string projectDescription = null)
         {
             _debugLogService?.Trace("TerminalStatusBar", $"UpdateStatus called:");
             _debugLogService?.Trace("TerminalStatusBar", $"  - name: '{name}'");
@@ -232,6 +244,7 @@ namespace MultiTerminal.Controls
             _debugLogService?.Trace("TerminalStatusBar", $"  - taskTitle: '{taskTitle}'");
             _debugLogService?.Trace("TerminalStatusBar", $"  - taskId: '{taskId}'");
             _debugLogService?.Trace("TerminalStatusBar", $"  - status: '{status}'");
+            _debugLogService?.Trace("TerminalStatusBar", $"  - projectName: '{projectName}'");
             _debugLogService?.Trace("TerminalStatusBar", $"  - _isInitialized: {_isInitialized}");
 
             var data = new
@@ -241,7 +254,9 @@ namespace MultiTerminal.Controls
                 activityDescription = activityDescription ?? "",
                 taskTitle = taskTitle ?? "",
                 taskId = taskId ?? "",
-                status = status ?? "idle"
+                status = status ?? "idle",
+                projectName = projectName ?? "",
+                projectDescription = projectDescription ?? ""
             };
 
             string json = JsonSerializer.Serialize(data);
@@ -284,6 +299,17 @@ namespace MultiTerminal.Controls
             else
             {
                 _pendingStatusLineJson = json;
+            }
+        }
+
+        /// <summary>
+        /// Updates the HUD toggle visual state in the status bar.
+        /// </summary>
+        public void SetHudToggleState(bool isVisible)
+        {
+            if (_isInitialized)
+            {
+                SendMessage($"hudState:{(isVisible ? "true" : "false")}");
             }
         }
 

@@ -86,35 +86,7 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler WriteMcpJsonRequested;
 
         /// <summary>
-        /// Raised when JS requests MCP registry data (all entries for the registry management UI).
-        /// </summary>
-        public event EventHandler McpRegistryRequested;
-
-        /// <summary>
-        /// Raised when JS requests a registry entry save (add or update).
-        /// Arg is the raw JSON of the McpRegistryEntry fields.
-        /// </summary>
-        public event EventHandler<string> McpRegistrySaveRequested;
-
-        /// <summary>
-        /// Raised when JS requests a registry entry delete.
-        /// Arg is the server_name to delete.
-        /// </summary>
-        public event EventHandler<string> McpRegistryDeleteRequested;
-
-        /// <summary>
-        /// Raised when JS requests to import servers from a .mcp.json file.
-        /// Arg is the file path selected by the user.
-        /// </summary>
-        public event EventHandler<string> ImportMcpJsonRequested;
-
-        /// <summary>
-        /// Raised when JS requests regeneration of all MCP config files (global + all projects).
-        /// </summary>
-        public event EventHandler RegenerateAllMcpConfigsRequested;
-
-        /// <summary>
-        /// Raised when JS requests the available MCP servers list (registry entries)
+        /// Raised when JS requests the available MCP servers list (from gateway)
         /// for the picker popup — e.g., when the picker was opened before the cache was populated.
         /// </summary>
         public event EventHandler AvailableMcpServersRequested;
@@ -128,6 +100,34 @@ namespace MultiTerminal.ProjectPanel
         /// Raised when JS requests the available specialist agents list for the picker popup.
         /// </summary>
         public event EventHandler AvailableSpecialistAgentsRequested;
+
+        /// <summary>
+        /// Raised when the user selects a project from the in-panel project selector.
+        /// Carries the project ID.
+        /// </summary>
+        public event EventHandler<string> SelectProjectRequested;
+
+        /// <summary>
+        /// Raised when the user clicks the "+" (new project) button in the WebView2 panel.
+        /// </summary>
+        public event EventHandler NewProjectRequested;
+
+        /// <summary>
+        /// Raised when JS needs the project list to populate the selector popup.
+        /// </summary>
+        public event EventHandler ProjectListRequested;
+
+        /// <summary>
+        /// Raised when JS requests the contents of a directory for the file explorer.
+        /// Carries the directory path.
+        /// </summary>
+        public event EventHandler<string> ListDirectoryRequested;
+
+        /// <summary>
+        /// Raised when JS requests the content of a file for the file viewer.
+        /// Carries the file path.
+        /// </summary>
+        public event EventHandler<string> ReadFileRequested;
 
         /// <summary>
         /// Gets whether the renderer is initialized.
@@ -297,16 +297,8 @@ namespace MultiTerminal.ProjectPanel
                         WriteMcpJsonRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
-                    case "getMcpRegistry":
-                        McpRegistryRequested?.Invoke(this, EventArgs.Empty);
-                        break;
-
-                    case "regenerateAllMcpConfigs":
-                        RegenerateAllMcpConfigsRequested?.Invoke(this, EventArgs.Empty);
-                        break;
-
                     case "getAvailableMcpServers":
-                        // JS requests registry data for the picker popup (e.g., on first open before cache is warm).
+                        // JS requests gateway server list for the picker popup (e.g., on first open before cache is warm).
                         AvailableMcpServersRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
@@ -318,16 +310,24 @@ namespace MultiTerminal.ProjectPanel
                         AvailableSpecialistAgentsRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
-                    case "saveMcpRegistryEntry":
-                        McpRegistrySaveRequested?.Invoke(this, message.ItemJson ?? "{}");
+                    case "selectProject":
+                        SelectProjectRequested?.Invoke(this, message.Value);
                         break;
 
-                    case "deleteMcpRegistryEntry":
-                        McpRegistryDeleteRequested?.Invoke(this, message.Value ?? "");
+                    case "newProject":
+                        NewProjectRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
-                    case "importMcpJson":
-                        ImportMcpJsonRequested?.Invoke(this, message.Path ?? "");
+                    case "getProjectList":
+                        ProjectListRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "listDirectory":
+                        ListDirectoryRequested?.Invoke(this, message.Path);
+                        break;
+
+                    case "readFile":
+                        ReadFileRequested?.Invoke(this, message.Path);
                         break;
                 }
             }
@@ -739,10 +739,10 @@ namespace MultiTerminal.ProjectPanel
         }
 
         /// <summary>
-        /// Send all MCP registry entries to the WebView2 for the MCP server picker popup.
-        /// Sends "availableMcpServers:[{\"serverName\":\"...\",\"displayName\":\"...\",\"description\":\"...\",\"tier\":\"...\",\"transportType\":\"...\"},...]"
+        /// Send all gateway server entries to the WebView2 for the MCP server picker popup.
+        /// Sends "availableMcpServers:[{\"serverName\":\"...\",\"displayName\":\"...\",\"description\":\"...\",\"enabled\":true,\"connected\":false,\"toolCount\":0},...]"
         /// </summary>
-        public void SendAvailableMcpServers(List<MultiTerminal.Models.McpRegistryEntry> entries)
+        public void SendAvailableMcpServers(List<MultiTerminal.Services.GatewayServerDto> entries)
         {
             var sb = new StringBuilder();
             sb.Append("[");
@@ -751,11 +751,12 @@ namespace MultiTerminal.ProjectPanel
                 var e = entries[i];
                 if (i > 0) sb.Append(",");
                 sb.Append("{");
-                sb.Append($"\"serverName\":\"{EscapeJson(e.ServerName ?? "")}\",");
-                sb.Append($"\"displayName\":\"{EscapeJson(e.DisplayName ?? e.ServerName ?? "")}\",");
+                sb.Append($"\"serverName\":\"{EscapeJson(e.Name ?? "")}\",");
+                sb.Append($"\"displayName\":\"{EscapeJson(e.DisplayName ?? e.Name ?? "")}\",");
                 sb.Append($"\"description\":\"{EscapeJson(e.Description ?? "")}\",");
-                sb.Append($"\"tier\":\"{EscapeJson(e.Tier ?? "optional")}\",");
-                sb.Append($"\"transportType\":\"{EscapeJson(e.TransportType ?? "stdio")}\"");
+                sb.Append($"\"enabled\":{(e.Enabled ? "true" : "false")},");
+                sb.Append($"\"connected\":{(e.Connected ? "true" : "false")},");
+                sb.Append($"\"toolCount\":{e.ToolCount}");
                 sb.Append("}");
             }
             sb.Append("]");
@@ -823,74 +824,69 @@ namespace MultiTerminal.ProjectPanel
         }
 
         /// <summary>
-        /// Notify JS of the result of a full MCP config regeneration (global via CLI + project files).
+        /// Send the contents of a directory to the WebView2 panel for the file explorer tree.
         /// </summary>
-        public void SendMcpRegenResult(bool success, int globalCount = 0, int projectCount = 0, string error = null)
-        {
-            var errorPart = (!success && !string.IsNullOrEmpty(error))
-                ? $",\"error\":\"{EscapeJson(error)}\""
-                : "";
-            SendMessage($"mcpRegenResult:{{\"success\":{(success ? "true" : "false")},\"globalCount\":{globalCount},\"projectCount\":{projectCount}{errorPart}}}");
-        }
-
-        /// <summary>
-        /// Send all MCP registry entries to the WebView2 for the registry management UI.
-        /// Sends "mcpRegistry:[{...},...]"
-        /// </summary>
-        public void SendMcpRegistryEntries(List<MultiTerminal.Models.McpRegistryEntry> entries)
+        public void SendDirectoryListing(string requestedPath, List<(string Name, string FullPath, bool IsDirectory, long Size)> entries)
         {
             var sb = new StringBuilder();
-            sb.Append("[");
+            sb.Append("{\"path\":\"");
+            sb.Append(EscapeJson(requestedPath ?? ""));
+            sb.Append("\",\"entries\":[");
             for (int i = 0; i < entries.Count; i++)
             {
                 var e = entries[i];
                 if (i > 0) sb.Append(",");
                 sb.Append("{");
-                sb.Append($"\"id\":{e.Id},");
-                sb.Append($"\"serverName\":\"{EscapeJson(e.ServerName ?? "")}\",");
-                sb.Append($"\"displayName\":\"{EscapeJson(e.DisplayName ?? "")}\",");
-                sb.Append($"\"description\":\"{EscapeJson(e.Description ?? "")}\",");
-                sb.Append($"\"configJson\":\"{EscapeJson(e.ConfigJson ?? "")}\",");
-                sb.Append($"\"tier\":\"{EscapeJson(e.Tier ?? "optional")}\",");
-                sb.Append($"\"transportType\":\"{EscapeJson(e.TransportType ?? "stdio")}\",");
-                sb.Append($"\"command\":\"{EscapeJson(e.Command ?? "")}\"");
+                sb.Append($"\"name\":\"{EscapeJson(e.Name ?? "")}\",");
+                sb.Append($"\"path\":\"{EscapeJson(e.FullPath ?? "")}\",");
+                sb.Append($"\"isDir\":{(e.IsDirectory ? "true" : "false")},");
+                sb.Append($"\"size\":{e.Size}");
                 sb.Append("}");
             }
-            sb.Append("]");
-            SendMessage($"mcpRegistry:{sb}");
+            sb.Append("]}");
+            SendMessage($"directoryListing:{sb}");
         }
 
         /// <summary>
-        /// Notify JS of a registry entry save result.
-        /// Sends "mcpRegistrySaved:{\"success\":true}" or with "error" on failure.
+        /// Send file content to the WebView2 panel for the file viewer.
         /// </summary>
-        public void SendMcpRegistrySaved(bool success, string error = null)
+        public void SendFileContent(string filePath, string content, bool isBinary)
         {
-            var errorPart = (!success && !string.IsNullOrEmpty(error))
-                ? $",\"error\":\"{EscapeJson(error)}\""
-                : "";
-            SendMessage($"mcpRegistrySaved:{{\"success\":{(success ? "true" : "false")}{errorPart}}}");
+            var sb = new StringBuilder();
+            sb.Append("{\"path\":\"");
+            sb.Append(EscapeJson(filePath ?? ""));
+            sb.Append("\",\"isBinary\":");
+            sb.Append(isBinary ? "true" : "false");
+            sb.Append(",\"content\":\"");
+            sb.Append(EscapeJson(content ?? ""));
+            sb.Append("\"}");
+            SendMessage($"fileContent:{sb}");
         }
 
         /// <summary>
-        /// Notify JS of a registry entry delete result.
-        /// Sends "mcpRegistryDeleted:{\"success\":true}"
+        /// Send the list of all registered projects to the WebView2 panel for the project selector popup.
         /// </summary>
-        public void SendMcpRegistryDeleted(bool success)
+        public void SendProjectList(List<(string Id, string Name, string Description, string Path, string Icon, string IconColor)> projects, string currentProjectId)
         {
-            SendMessage($"mcpRegistryDeleted:{{\"success\":{(success ? "true" : "false")}}}");
-        }
-
-        /// <summary>
-        /// Notify JS of an import-from-file result (how many entries were imported).
-        /// Sends "mcpImportResult:{\"success\":true,\"count\":5}"
-        /// </summary>
-        public void SendMcpImportResult(bool success, int count = 0, string error = null)
-        {
-            var errorPart = (!success && !string.IsNullOrEmpty(error))
-                ? $",\"error\":\"{EscapeJson(error)}\""
-                : "";
-            SendMessage($"mcpImportResult:{{\"success\":{(success ? "true" : "false")},\"count\":{count}{errorPart}}}");
+            var sb = new StringBuilder();
+            sb.Append("{\"currentProjectId\":\"");
+            sb.Append(EscapeJson(currentProjectId ?? ""));
+            sb.Append("\",\"projects\":[");
+            for (int i = 0; i < projects.Count; i++)
+            {
+                var p = projects[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":\"{EscapeJson(p.Id ?? "")}\",");
+                sb.Append($"\"name\":\"{EscapeJson(p.Name ?? "")}\",");
+                sb.Append($"\"description\":\"{EscapeJson(p.Description ?? "")}\",");
+                sb.Append($"\"path\":\"{EscapeJson(p.Path ?? "")}\",");
+                sb.Append($"\"icon\":\"{EscapeJson(p.Icon ?? "")}\",");
+                sb.Append($"\"iconColor\":\"{EscapeJson(p.IconColor ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("]}");
+            SendMessage($"projectList:{sb}");
         }
 
         /// <summary>

@@ -1,0 +1,223 @@
+<!--
+  Agent Report HTML Template
+
+  Use this as a starting point when rendering reports via open_browser_tab.
+  Replace {{PLACEHOLDERS}} with actual values.
+
+  Agents: verifier, code-reviewer, security-auditor, devils-advocate, debugger, test-designer
+  Pipeline skill uses a combined version of this template.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{REPORT_TITLE}}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e; color: #e0e0e0; padding: 20px;
+    line-height: 1.5;
+  }
+
+  /* Header */
+  .report-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 20px; border-radius: 12px; margin-bottom: 20px;
+  }
+  .header-pass { background: linear-gradient(135deg, #1b4332, #2d6a4f); }
+  .header-warn { background: linear-gradient(135deg, #5c4813, #7c6a1f); }
+  .header-fail { background: linear-gradient(135deg, #4a1520, #7a2030); }
+
+  .report-header h1 { font-size: 1.4em; flex: 1; }
+
+  /* Verdict badge */
+  .verdict-badge {
+    display: inline-block; padding: 6px 16px; border-radius: 20px;
+    font-weight: 700; font-size: 0.9em; text-transform: uppercase;
+  }
+  .badge-pass { background: #2d6a4f; color: #b7e4c7; }
+  .badge-warn { background: #7c6a1f; color: #fde68a; }
+  .badge-fail { background: #7a2030; color: #fca5a5; }
+  .badge-info { background: #1e3a5f; color: #93c5fd; }
+
+  /* Score circle */
+  .score-circle {
+    width: 64px; height: 64px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.3em; font-weight: 700; flex-shrink: 0;
+  }
+  .score-high { background: #2d6a4f; color: #b7e4c7; }
+  .score-mid { background: #7c6a1f; color: #fde68a; }
+  .score-low { background: #7a2030; color: #fca5a5; }
+
+  /* Cards */
+  .card {
+    background: #16213e; border-radius: 8px; padding: 16px;
+    margin-bottom: 12px; border-left: 4px solid #334155;
+  }
+  .card-critical { border-left-color: #ef4444; }
+  .card-high { border-left-color: #f97316; }
+  .card-major { border-left-color: #f97316; }
+  .card-medium { border-left-color: #eab308; }
+  .card-minor { border-left-color: #3b82f6; }
+  .card-low { border-left-color: #3b82f6; }
+  .card-nit { border-left-color: #6b7280; }
+  .card-pass { border-left-color: #22c55e; }
+
+  .card h3 { font-size: 1em; margin-bottom: 8px; }
+  .card p { font-size: 0.9em; color: #a0aec0; }
+  .card code {
+    background: #0d1117; padding: 2px 6px; border-radius: 4px;
+    font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85em;
+  }
+  .card pre {
+    background: #0d1117; padding: 12px; border-radius: 6px;
+    overflow-x: auto; margin: 8px 0; font-size: 0.85em;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+  }
+
+  /* Severity tags */
+  .severity {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.75em; font-weight: 700; text-transform: uppercase;
+    margin-right: 8px;
+  }
+  .sev-critical { background: #7f1d1d; color: #fca5a5; }
+  .sev-high { background: #7c2d12; color: #fed7aa; }
+  .sev-major { background: #7c2d12; color: #fed7aa; }
+  .sev-medium { background: #713f12; color: #fde68a; }
+  .sev-minor { background: #1e3a5f; color: #93c5fd; }
+  .sev-low { background: #1e3a5f; color: #93c5fd; }
+  .sev-nit { background: #374151; color: #9ca3af; }
+
+  /* Score table */
+  table {
+    width: 100%; border-collapse: collapse; margin: 12px 0;
+  }
+  th, td {
+    padding: 8px 12px; text-align: left; border-bottom: 1px solid #334155;
+  }
+  th { color: #94a3b8; font-size: 0.85em; text-transform: uppercase; }
+
+  /* Summary stats */
+  .stats-row {
+    display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;
+  }
+  .stat-box {
+    background: #16213e; padding: 12px 20px; border-radius: 8px;
+    text-align: center; min-width: 100px;
+  }
+  .stat-box .number { font-size: 1.6em; font-weight: 700; }
+  .stat-box .label { font-size: 0.75em; color: #94a3b8; text-transform: uppercase; }
+
+  /* Collapsible sections */
+  details { margin-bottom: 8px; }
+  summary {
+    cursor: pointer; padding: 8px 12px; background: #16213e;
+    border-radius: 6px; font-weight: 600;
+  }
+  summary:hover { background: #1e293b; }
+  details[open] summary { border-radius: 6px 6px 0 0; }
+  details .detail-content {
+    padding: 12px; background: #0f172a; border-radius: 0 0 6px 6px;
+  }
+
+  /* File path */
+  .file-path {
+    color: #60a5fa; font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.85em;
+  }
+
+  /* Sections */
+  .section { margin-bottom: 24px; }
+  .section h2 {
+    font-size: 1.1em; color: #e2e8f0; margin-bottom: 12px;
+    padding-bottom: 8px; border-bottom: 1px solid #334155;
+  }
+
+  /* Footer */
+  .footer {
+    margin-top: 24px; padding-top: 12px; border-top: 1px solid #334155;
+    font-size: 0.8em; color: #64748b; text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER: Change class to header-pass, header-warn, or header-fail -->
+<div class="report-header header-pass">
+  <div>
+    <h1>{{REPORT_TITLE}}</h1>
+    <span class="verdict-badge badge-pass">{{VERDICT}}</span>
+  </div>
+  <!-- Optional: Score circle for code-reviewer / devils-advocate -->
+  <div class="score-circle score-high">{{SCORE}}</div>
+</div>
+
+<!-- SUMMARY STATS -->
+<div class="stats-row">
+  <div class="stat-box">
+    <div class="number">{{FILES_COUNT}}</div>
+    <div class="label">Files Reviewed</div>
+  </div>
+  <div class="stat-box">
+    <div class="number" style="color: #f97316;">{{ISSUES_COUNT}}</div>
+    <div class="label">Issues Found</div>
+  </div>
+  <div class="stat-box">
+    <div class="number" style="color: #22c55e;">{{PASSED_COUNT}}</div>
+    <div class="label">Checks Passed</div>
+  </div>
+</div>
+
+<!-- FINDINGS SECTION -->
+<div class="section">
+  <h2>Findings</h2>
+
+  <!-- Repeat this card for each finding -->
+  <div class="card card-major">
+    <h3><span class="severity sev-major">MAJOR</span> {{FINDING_TITLE}}</h3>
+    <p class="file-path">{{FILE_PATH}}:{{LINE}}</p>
+    <p>{{FINDING_DESCRIPTION}}</p>
+    <pre>{{CODE_SNIPPET}}</pre>
+    <p><strong>Suggestion:</strong> {{SUGGESTION}}</p>
+  </div>
+
+</div>
+
+<!-- SCORE TABLE (for code-reviewer / devils-advocate) -->
+<div class="section">
+  <h2>Score Breakdown</h2>
+  <table>
+    <tr><th>Category</th><th>Weight</th><th>Score</th><th>Notes</th></tr>
+    <tr><td>{{CATEGORY}}</td><td>{{WEIGHT}}%</td><td>{{SCORE}}</td><td>{{NOTES}}</td></tr>
+  </table>
+</div>
+
+<!-- PIPELINE COMBINED VIEW (for /pipeline skill) -->
+<!--
+<div class="section">
+  <h2>Pipeline Gates</h2>
+  <div class="card card-pass">
+    <h3>Gate 1: Verifier — PASS</h3>
+    <p>Build clean. All files verified. Implementation matches plan.</p>
+  </div>
+  <div class="card card-pass">
+    <h3>Gate 2: Code Review — PASS (85/100)</h3>
+    <p>0 major, 2 minor, 1 nit</p>
+  </div>
+  <div class="card card-pass">
+    <h3>Gate 3: Security Audit — PASS</h3>
+    <p>0 critical, 0 high, 1 medium, 0 low</p>
+  </div>
+</div>
+-->
+
+<div class="footer">
+  Generated by {{AGENT_NAME}} &middot; {{TIMESTAMP}}
+</div>
+
+</body>
+</html>

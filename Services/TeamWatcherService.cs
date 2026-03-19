@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using MultiTerminal.Models;
 
 namespace MultiTerminal.Services
@@ -19,6 +21,30 @@ namespace MultiTerminal.Services
         public string SpawnerName { get; set; }
         public string TaskDescription { get; set; }
         public string SubagentType { get; set; }
+        /// <summary>
+        /// The team lead's working directory, used as fallback for spawner
+        /// resolution when SpawnerName is null (match against terminal cwds).
+        /// </summary>
+        public string LeadCwd { get; set; }
+        /// <summary>
+        /// The parent session ID extracted from the subagent's transcript path.
+        /// Used to resolve the spawner terminal when SpawnerName is unknown.
+        /// </summary>
+        public string ParentSessionId { get; set; }
+    }
+
+    /// <summary>
+    /// Event args for when a native Claude Code team is removed/deleted.
+    /// </summary>
+    public class TeamRemovedEventArgs : EventArgs
+    {
+        public string TeamName { get; set; }
+        public List<string> MemberNames { get; set; } = new();
+        /// <summary>
+        /// All transcript paths that were tracked for this team's agents.
+        /// Used by MainForm to find and clean up orphan panels by transcript path match.
+        /// </summary>
+        public List<string> TranscriptPaths { get; set; } = new();
     }
 
     /// <summary>
@@ -38,6 +64,7 @@ namespace MultiTerminal.Services
         private readonly string _projectDir;
         private readonly Dictionary<string, TeamState> _activeTeams = new Dictionary<string, TeamState>();
         private FileSystemWatcher _teamsRootWatcher;
+
         private bool _disposed;
 
         // Project-level subagent watching (non-team agents)
@@ -46,11 +73,15 @@ namespace MultiTerminal.Services
         private readonly List<FileSystemWatcher> _projectWatchers = new List<FileSystemWatcher>();
         private readonly HashSet<string> _watchedProjectDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Track agent names from recently-deleted teams to prevent orphan watcher from
+        // creating stale panels. Entries auto-expire after 60 seconds.
+        private readonly ConcurrentDictionary<string, DateTime> _retiredTeamAgentNames = new(StringComparer.OrdinalIgnoreCase);
+
         public event EventHandler<TeammateDiscoveredEventArgs> TeammateDiscovered;
-        public event EventHandler<string> TeamRemoved;
+        public event EventHandler<TeamRemovedEventArgs> TeamRemoved;
         public event EventHandler<(string TeamName, string MemberName)> MemberRemoved;
         public event EventHandler<TeammateDiscoveredEventArgs> SubagentDiscovered;
-        public event EventHandler<(string TeamName, string MemberName, AgentMessage Message)> TeamMessageSent;
+        public event EventHandler<(string TeamName, string MemberName, AgentMessage Message, string SpawnerName)> TeamMessageSent;
 
         /// <summary>
         /// Optional debug log service for MCP-visible logging.
@@ -140,6 +171,7 @@ namespace MultiTerminal.Services
 
             LogInfo($"Started watching: {_teamsDir}");
 
+
             // Never restore old agent panels from previous sessions.
             // Only react to NEW team directories created during this session via the FileSystemWatcher.
         }
@@ -150,9 +182,13 @@ namespace MultiTerminal.Services
             string teamName = Path.GetFileName(e.FullPath);
             LogInfo($"New team directory detected: {teamName}");
 
-            // Small delay to let config.json be written
-            System.Threading.Thread.Sleep(200);
-            ProcessTeamDirectory(teamName);
+            // Async delay to let config.json be written, without blocking FSW thread
+            Task.Run(async () =>
+            {
+                await Task.Delay(200);
+                if (_disposed) return;
+                ProcessTeamDirectory(teamName);
+            });
         }
 
         private void OnTeamDirectoryDeleted(object sender, FileSystemEventArgs e)
@@ -166,6 +202,7 @@ namespace MultiTerminal.Services
                 _activeTeams.Remove(teamName);
             }
         }
+
 
         /// <summary>
         /// Process a team directory: read config.json, discover members, create tailers.
@@ -206,8 +243,12 @@ namespace MultiTerminal.Services
                         if ((now - state.LastConfigChange).TotalMilliseconds < 500) return;
                         state.LastConfigChange = now;
 
-                        System.Threading.Thread.Sleep(100);
-                        ReadAndProcessConfig(teamName, configPath);
+                        Task.Run(async () =>
+                        {
+                            await Task.Delay(100);
+                            if (_disposed) return;
+                            ReadAndProcessConfig(teamName, configPath);
+                        });
                     };
                 }
             }
@@ -231,8 +272,12 @@ namespace MultiTerminal.Services
             watcher.Created += (s, e) =>
             {
                 watcher.Dispose();
-                System.Threading.Thread.Sleep(100);
-                ProcessTeamDirectory(teamName);
+                Task.Run(async () =>
+                {
+                    await Task.Delay(100);
+                    if (_disposed) return;
+                    ProcessTeamDirectory(teamName);
+                });
             };
         }
 
@@ -282,6 +327,7 @@ namespace MultiTerminal.Services
                         string leadCwd = member.TryGetProperty("cwd", out var cwdProp) ? cwdProp.GetString() : null;
                         if (!string.IsNullOrEmpty(leadCwd))
                         {
+                            state.LeadCwd = leadCwd;
                             string leadSlug = GetClaudeProjectSlug(leadCwd);
                             string userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
                             projectDir = Path.Combine(userHome, ".claude", "projects", leadSlug);
@@ -293,6 +339,15 @@ namespace MultiTerminal.Services
                         }
                         break;
                     }
+                }
+
+                // Resolve and cache the spawner terminal name once for the team.
+                // Used by CreateTailerForMember and message routing.
+                if (string.IsNullOrEmpty(state.SpawnerName))
+                {
+                    state.SpawnerName = LookupTeamSpawner(teamName);
+                    if (!string.IsNullOrEmpty(state.SpawnerName))
+                        LogInfo($"Cached spawner for team '{teamName}': {state.SpawnerName}");
                 }
 
                 // Collect ALL non-lead members into state.KnownMembers (for watcher closure)
@@ -340,10 +395,49 @@ namespace MultiTerminal.Services
                     // Sort new members by joinedAt to match with files in order
                     newMembers.Sort((a, b) => a.joinedAt.CompareTo(b.joinedAt));
 
+                    // PRE-CLAIM: Lock all recent JSONL files in the subagents dir BEFORE
+                    // the orphan watcher's sync scan can grab them. The orphan watcher checks
+                    // _trackedSubagentFiles and skips claimed files. We'll release unclaimed
+                    // files after matching if they don't belong to any team member.
+                    var preClaimedFiles = new List<string>();
                     if (Directory.Exists(subagentsDir))
                     {
+                        var cutoff = DateTime.UtcNow.AddSeconds(-30);
+                        try
+                        {
+                            foreach (var file in Directory.GetFiles(subagentsDir, "agent-*.jsonl"))
+                            {
+                                var fi = new FileInfo(file);
+                                if (fi.CreationTimeUtc > cutoff)
+                                {
+                                    lock (_trackedSubagentFiles)
+                                    {
+                                        if (_trackedSubagentFiles.Add(file))
+                                            preClaimedFiles.Add(file);
+                                    }
+                                }
+                            }
+                            if (preClaimedFiles.Count > 0)
+                                Log($" Pre-claimed {preClaimedFiles.Count} recent JSONL file(s) to block orphan watcher");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($" Pre-claim scan error: {ex.Message}");
+                        }
+
                         // Try to match existing files to new members
                         MatchExistingTranscripts(teamName, subagentsDir, newMembers, state);
+                    }
+
+                    // Release pre-claimed files that weren't matched to any team member,
+                    // so orphan watcher can adopt them (e.g., Explore/Plan subagents).
+                    foreach (var file in preClaimedFiles)
+                    {
+                        if (!state.MatchedTranscripts.Contains(file))
+                        {
+                            lock (_trackedSubagentFiles) { _trackedSubagentFiles.Remove(file); }
+                            Log($" Released unmatched pre-claim: {Path.GetFileName(file)}");
+                        }
                     }
                 }
 
@@ -418,7 +512,37 @@ namespace MultiTerminal.Services
                 string parentDir = Path.GetDirectoryName(subagentsDir);
                 if (parentDir != null && !Directory.Exists(parentDir))
                 {
-                    Log($" Session dir not yet created: {parentDir}");
+                    // Session dir doesn't exist yet — watch the project dir (grandparent)
+                    // for it to appear, then chain into the subagents watcher.
+                    // Without this, the orphan watcher races us and creates a panel
+                    // with a generic "Subagent {hash}" name instead of the team member name.
+                    string grandparentDir = Path.GetDirectoryName(parentDir);
+                    string sessionDirName = Path.GetFileName(parentDir);
+                    if (grandparentDir != null && Directory.Exists(grandparentDir))
+                    {
+                        Log($" Session dir not yet created: {parentDir} — watching {grandparentDir} for '{sessionDirName}'");
+                        var sessionDirWatcher = new FileSystemWatcher(grandparentDir)
+                        {
+                            Filter = sessionDirName,
+                            NotifyFilter = NotifyFilters.DirectoryName,
+                            EnableRaisingEvents = true
+                        };
+                        state.Watchers.Add(sessionDirWatcher);
+                        sessionDirWatcher.Created += (s, e) =>
+                        {
+                            Task.Run(async () =>
+                            {
+                                await Task.Delay(100);
+                                if (_disposed) return;
+                                LogInfo($"Session dir appeared: {e.FullPath} — chaining to subagents watcher");
+                                WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                            });
+                        };
+                    }
+                    else
+                    {
+                        Log($" Session dir not yet created: {parentDir} (no valid grandparent to watch)");
+                    }
                     return;
                 }
 
@@ -433,8 +557,12 @@ namespace MultiTerminal.Services
                     state.Watchers.Add(dirWatcher);
                     dirWatcher.Created += (s, e) =>
                     {
-                        System.Threading.Thread.Sleep(100);
-                        WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                        Task.Run(async () =>
+                        {
+                            await Task.Delay(100);
+                            if (_disposed) return;
+                            WatchForNewTranscripts(teamName, subagentsDir, newMembers, state);
+                        });
                     };
                     return;
                 }
@@ -444,7 +572,18 @@ namespace MultiTerminal.Services
             // Don't add duplicate watchers for the same directory
             if (state.HasSubagentsDirWatcher)
             {
-                Log($" Subagents dir watcher already running for team '{teamName}'");
+                // Watcher already running, but scan for files that may have been created
+                // before the watcher started (e.g., directory and file created simultaneously).
+                // This closes the race where WatchForNewTranscripts re-enters after dir creation
+                // but the transcript file already exists, so the FSW never fires Created.
+                var untrackedMembers = state.KnownMembers
+                    .Where(m => !state.TrackedMembers.Contains(m.name))
+                    .ToList();
+                if (untrackedMembers.Count > 0)
+                {
+                    LogInfo($"Re-scanning for {untrackedMembers.Count} untracked member(s) in team '{teamName}'");
+                    MatchExistingTranscripts(teamName, subagentsDir, untrackedMembers, state);
+                }
                 return;
             }
 
@@ -459,10 +598,19 @@ namespace MultiTerminal.Services
 
             watcher.Created += (s, e) =>
             {
-                // Small delay to let the file be initialized with at least the first line
-                System.Threading.Thread.Sleep(500);
+                var fullPath = e.FullPath;
 
-                if (state.MatchedTranscripts.Contains(e.FullPath))
+                // Immediately claim the file BEFORE async work, so orphan watcher
+                // can't race us and create a duplicate panel.
+                lock (_trackedSubagentFiles) { _trackedSubagentFiles.Add(fullPath); }
+
+                // Async delay to let file be initialized, without blocking FSW thread
+                Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    if (_disposed) return;
+
+                if (state.MatchedTranscripts.Contains(fullPath))
                     return;
 
                 // First: try to match to an untracked member from the latest config
@@ -472,40 +620,42 @@ namespace MultiTerminal.Services
                 if (nextMember.name != null)
                 {
                     var memberJoinedUtc = DateTimeOffset.FromUnixTimeMilliseconds(nextMember.joinedAt).UtcDateTime;
-                    var fileCreatedUtc = new FileInfo(e.FullPath).CreationTimeUtc;
+                    var fileCreatedUtc = new FileInfo(fullPath).CreationTimeUtc;
                     var timingDelta = Math.Abs((fileCreatedUtc - memberJoinedUtc).TotalSeconds);
 
                     if (timingDelta < 30)
                     {
-                        LogInfo($"Watcher matched new file to untracked member '{nextMember.name}': {Path.GetFileName(e.FullPath)} (delta={timingDelta:F1}s)");
-                        state.MatchedTranscripts.Add(e.FullPath);
-                        CreateTailerForMember(teamName, nextMember.name, e.FullPath, state);
+                        LogInfo($"Watcher matched new file to untracked member '{nextMember.name}': {Path.GetFileName(fullPath)} (delta={timingDelta:F1}s)");
+                        state.MatchedTranscripts.Add(fullPath);
+                        CreateTailerForMember(teamName, nextMember.name, fullPath, state);
                         return;
                     }
                     else
                     {
-                        Log($"Timing mismatch for untracked member '{nextMember.name}': delta={timingDelta:F1}s, skipping greedy match for {Path.GetFileName(e.FullPath)}");
+                        Log($"Timing mismatch for untracked member '{nextMember.name}': delta={timingDelta:F1}s, skipping greedy match for {Path.GetFileName(fullPath)}");
                     }
                 }
 
                 // All members already tracked (or timing didn't match) — check if this
                 // is actually a team agent transcript before trying heuristic matching.
                 // Non-team subagents (Explore, Plan) won't have teammate-message markers.
-                if (!LooksLikeTeamTranscript(e.FullPath))
+                if (!LooksLikeTeamTranscript(fullPath))
                 {
-                    Log($"Non-team subagent transcript (no team markers): {Path.GetFileName(e.FullPath)}");
+                    // Not a team transcript — release our early claim so orphan watcher can adopt it
+                    lock (_trackedSubagentFiles) { _trackedSubagentFiles.Remove(fullPath); }
+                    Log($"Non-team subagent transcript (no team markers), released claim: {Path.GetFileName(fullPath)}");
                     return;
                 }
 
                 // This is a subsequent wake-up file for a team agent.
                 // Identify which member it belongs to and add to their existing tailer.
-                string ownerName = IdentifyFileOwner(e.FullPath, state);
+                string ownerName = IdentifyFileOwner(fullPath, state);
 
                 // Fallback: if content matching failed, try inbox-based matching.
                 // The agent that just woke up is the one whose inbox was most recently modified.
                 if (ownerName == null)
                 {
-                    ownerName = IdentifyByInboxTiming(e.FullPath, teamName, state);
+                    ownerName = IdentifyByInboxTiming(fullPath, teamName, state);
                 }
 
                 // Fallback: if only one member recently sent a message via Agent Panel,
@@ -517,18 +667,33 @@ namespace MultiTerminal.Services
 
                 if (ownerName != null && state.MemberTailers.TryGetValue(ownerName, out var existingTailer))
                 {
-                    state.MatchedTranscripts.Add(e.FullPath);
-                    existingTailer.AddTranscriptFile(e.FullPath);
-                    LogInfo($"Added subsequent transcript to {ownerName}: {Path.GetFileName(e.FullPath)}");
+                    state.MatchedTranscripts.Add(fullPath);
+                    // _trackedSubagentFiles already added synchronously before Task.Run
+                    existingTailer.AddTranscriptFile(fullPath);
+                    LogInfo($"Added subsequent transcript to {ownerName}: {Path.GetFileName(fullPath)}");
                 }
                 else
                 {
-                    // Has team markers but couldn't identify owner — log for debugging
-                    Log($"Unmatched team transcript: {Path.GetFileName(e.FullPath)}");
+                    // Has team markers but couldn't identify owner — log for debugging.
+                    // File already claimed in _trackedSubagentFiles (pre-Task.Run), so orphan watcher is blocked.
+                    state.MatchedTranscripts.Add(fullPath);
+                    Log($"Unmatched team transcript (blocked orphan adoption): {Path.GetFileName(fullPath)}");
                 }
+                }); // end Task.Run
             };
 
             Log($" Watching for new transcripts in: {subagentsDir}");
+
+            // Scan existing files that may have been created before the watcher started.
+            // This closes the race where the subagents/ dir and agent-*.jsonl file are created
+            // nearly simultaneously, so the FSW never fires Created for the already-existing file.
+            var untrackedAfterSetup = state.KnownMembers
+                .Where(m => !state.TrackedMembers.Contains(m.name))
+                .ToList();
+            if (untrackedAfterSetup.Count > 0)
+            {
+                MatchExistingTranscripts(teamName, subagentsDir, untrackedAfterSetup, state);
+            }
         }
 
         /// <summary>
@@ -840,6 +1005,11 @@ namespace MultiTerminal.Services
         {
             try
             {
+                // Reclaim from orphan watcher: if an orphan tailer already exists for this
+                // transcript file, dispose it so the orphan panel is auto-removed from MainForm.
+                // This happens when the orphan watcher's sync scan beats the team watcher.
+                ReclaimFromOrphan(transcriptPath);
+
                 // Claude Code uses dashes in inbox filenames (e.g. "Agent-Alpha.json" not "Agent Alpha.json")
                 string inboxFileName = memberName.Replace(" ", "-") + ".json";
                 string inboxPath = Path.Combine(_teamsDir, teamName, "inboxes", inboxFileName);
@@ -860,20 +1030,38 @@ namespace MultiTerminal.Services
                 // Bridge team agent SendMessage calls to ChatPanel
                 tailer.TeamMessageSent += (s, msg) =>
                 {
-                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg));
+                    TeamMessageSent?.Invoke(this, (teamName, memberName, msg, state.SpawnerName));
                 };
 
                 // Look up spawner and task metadata from the office hook tracking file
                 var tracking = LookupFromTrackingByPath(transcriptPath);
+
+                // Resolve spawner with cascading fallbacks:
+                // 1. Cached spawner from TeamState (resolved once in ReadAndProcessConfig)
+                // 2. Tracking file by path (mt-office-agents.json)
+                // 3. Team spawner mapping (mt-team-spawners.json)
+                string resolvedSpawner = state.SpawnerName;
+                if (string.IsNullOrEmpty(resolvedSpawner))
+                    resolvedSpawner = tracking.SpawnerName;
+                if (string.IsNullOrEmpty(resolvedSpawner))
+                {
+                    resolvedSpawner = LookupTeamSpawner(teamName);
+                    if (!string.IsNullOrEmpty(resolvedSpawner))
+                    {
+                        state.SpawnerName = resolvedSpawner;
+                        LogInfo($"Resolved spawner for team '{teamName}' via team-spawner mapping: {resolvedSpawner}");
+                    }
+                }
 
                 TeammateDiscovered?.Invoke(this, new TeammateDiscoveredEventArgs
                 {
                     TeamName = teamName,
                     MemberName = memberName,
                     Tailer = tailer,
-                    SpawnerName = tracking.SpawnerName,
+                    SpawnerName = resolvedSpawner,
                     TaskDescription = tracking.TaskDescription,
-                    SubagentType = tracking.SubagentType
+                    SubagentType = tracking.SubagentType,
+                    LeadCwd = state.LeadCwd
                 });
             }
             catch (Exception ex)
@@ -939,19 +1127,25 @@ namespace MultiTerminal.Services
 
                     globalWatcher.Created += (s, e) =>
                     {
-                        // Delay to let team watcher claim files first (same as per-project watchers)
-                        System.Threading.Thread.Sleep(2000);
-
-                        if (IsFileClaimedByTeam(e.FullPath)) return;
-
-                        lock (_trackedSubagentFiles)
+                        // Async delay to let team watcher claim files first, without blocking
+                        // the FileSystemWatcher thread pool thread.
+                        var fullPath = e.FullPath;
+                        Task.Run(async () =>
                         {
-                            if (_trackedSubagentFiles.Contains(e.FullPath)) return;
-                            _trackedSubagentFiles.Add(e.FullPath);
-                        }
+                            await Task.Delay(2000);
+                            if (_disposed) return;
 
-                        LogInfo($"Global watcher caught orphan subagent: {Path.GetFileName(e.FullPath)}");
-                        CreateOrphanSubagentPanel(e.FullPath);
+                            if (IsFileClaimedByTeam(fullPath)) return;
+
+                            lock (_trackedSubagentFiles)
+                            {
+                                if (_trackedSubagentFiles.Contains(fullPath)) return;
+                                _trackedSubagentFiles.Add(fullPath);
+                            }
+
+                            LogInfo($"Global watcher caught orphan subagent: {Path.GetFileName(fullPath)}");
+                            CreateOrphanSubagentPanel(fullPath);
+                        });
                     };
 
                     Log($" Global subagent watcher started on: {projectsRoot}");
@@ -1026,9 +1220,13 @@ namespace MultiTerminal.Services
             _projectWatchers.Add(sessionDirWatcher);
             sessionDirWatcher.Created += (s, e) =>
             {
-                // New session directory created — watch its subagents/ dir
-                System.Threading.Thread.Sleep(300);
-                WatchSessionSubagentsDir(e.FullPath);
+                var fullPath = e.FullPath;
+                Task.Run(async () =>
+                {
+                    await Task.Delay(300);
+                    if (_disposed) return;
+                    WatchSessionSubagentsDir(fullPath);
+                });
             };
 
             // Scan recent session directories on startup (most recently modified first, limit to 3)
@@ -1069,8 +1267,13 @@ namespace MultiTerminal.Services
                     _projectWatchers.Add(dirWatcher);
                     dirWatcher.Created += (s, e) =>
                     {
-                        System.Threading.Thread.Sleep(200);
-                        WatchSubagentsForOrphans(e.FullPath);
+                        var fullPath = e.FullPath;
+                        Task.Run(async () =>
+                        {
+                            await Task.Delay(200);
+                            if (_disposed) return;
+                            WatchSubagentsForOrphans(fullPath);
+                        });
                     };
                 }
                 catch (Exception ex)
@@ -1111,20 +1314,25 @@ namespace MultiTerminal.Services
 
                 watcher.Created += (s, e) =>
                 {
-                    // Longer delay than team watcher (500ms) to give teams time to claim files first.
-                    // Without this, both watchers race and create duplicate panels.
-                    System.Threading.Thread.Sleep(2000);
-
-                    // Skip if already tracked by a team or already tracked as orphan
-                    if (IsFileClaimedByTeam(e.FullPath)) return;
-
-                    lock (_trackedSubagentFiles)
+                    // Async delay to let team watcher claim files first, without blocking
+                    // the FileSystemWatcher thread pool thread.
+                    var fullPath = e.FullPath;
+                    Task.Run(async () =>
                     {
-                        if (_trackedSubagentFiles.Contains(e.FullPath)) return;
-                        _trackedSubagentFiles.Add(e.FullPath);
-                    }
+                        await Task.Delay(2000);
+                        if (_disposed) return;
 
-                    CreateOrphanSubagentPanel(e.FullPath);
+                        // Skip if already tracked by a team or already tracked as orphan
+                        if (IsFileClaimedByTeam(fullPath)) return;
+
+                        lock (_trackedSubagentFiles)
+                        {
+                            if (_trackedSubagentFiles.Contains(fullPath)) return;
+                            _trackedSubagentFiles.Add(fullPath);
+                        }
+
+                        CreateOrphanSubagentPanel(fullPath);
+                    });
                 };
 
                 Log($" Watching for orphan subagents in: {subagentsDir}");
@@ -1173,6 +1381,30 @@ namespace MultiTerminal.Services
             {
                 if (state.MatchedTranscripts.Contains(filePath))
                     return true;
+
+                // Also check if any active team has unmatched members whose joinedAt
+                // timing matches this file. This prevents the orphan watcher from racing
+                // the team watcher when the session dir appears after the team config.
+                var untrackedMembers = state.KnownMembers
+                    .Where(m => !state.TrackedMembers.Contains(m.name))
+                    .ToList();
+                if (untrackedMembers.Count > 0)
+                {
+                    try
+                    {
+                        var fileCreatedUtc = new FileInfo(filePath).CreationTimeUtc;
+                        foreach (var member in untrackedMembers)
+                        {
+                            var memberJoinedUtc = DateTimeOffset.FromUnixTimeMilliseconds(member.joinedAt).UtcDateTime;
+                            if (Math.Abs((fileCreatedUtc - memberJoinedUtc).TotalSeconds) < 30)
+                            {
+                                Log($" IsFileClaimedByTeam: deferring '{Path.GetFileName(filePath)}' — likely belongs to unmatched team member '{member.name}'");
+                                return true;
+                            }
+                        }
+                    }
+                    catch { /* file may not exist yet */ }
+                }
             }
             return false;
         }
@@ -1267,8 +1499,18 @@ namespace MultiTerminal.Services
                 string fileName = Path.GetFileNameWithoutExtension(transcriptPath); // "agent-a1ea2e03..."
                 string shortHash = fileName.Length > 12 ? fileName.Substring(6, 8) : fileName;
 
-                // Look up spawner terminal and task metadata from the office hook tracking file
+                // Look up spawner terminal and task metadata from the office hook tracking file.
+                // The subagent-office-hook.js writes an entry for every agent spawned from a
+                // MultiTerminal-tracked terminal. If there's NO entry, this subagent was spawned
+                // by an external Claude instance (e.g., Clarion IDE addin) and should not appear
+                // in MultiTerminal's Agent Panel.
                 var tracking = LookupFromTracking(fileName);
+                if (string.IsNullOrEmpty(tracking.SpawnerName) && string.IsNullOrEmpty(tracking.AgentName)
+                    && string.IsNullOrEmpty(tracking.TaskDescription))
+                {
+                    Log($"Skipping external subagent (no tracking entry): {Path.GetFileName(transcriptPath)}");
+                    return;
+                }
 
                 // Prefer the Task tool's name parameter if recorded; fall back to hex-based name
                 string displayName;
@@ -1276,6 +1518,21 @@ namespace MultiTerminal.Services
                     displayName = tracking.AgentName;
                 else
                     displayName = $"Subagent {shortHash}";
+
+                // Filter out agents from recently-deleted teams (prevents orphan panel
+                // from being created after TeamDelete when agent wakes for shutdown)
+                if (_retiredTeamAgentNames.ContainsKey(displayName))
+                {
+                    LogInfo($"Skipping retired team agent: {displayName}");
+                    return;
+                }
+
+                // Filter out background agents (name starts with '_')
+                if (displayName.StartsWith("_"))
+                {
+                    LogInfo($"Skipping background agent (underscore prefix): {displayName}");
+                    return;
+                }
 
                 // No inbox path — read-only panel
                 var tailer = new TranscriptTailer(transcriptPath, null, displayName);
@@ -1289,6 +1546,21 @@ namespace MultiTerminal.Services
 
                 LogInfo($"Orphan subagent detected: {displayName} ({Path.GetFileName(transcriptPath)}), spawner: {tracking.SpawnerName ?? "(unknown)"}, desc: \"{tracking.TaskDescription ?? ""}\"");
 
+                // Extract parent session ID from transcript path:
+                // .../projects/<project-hash>/<session-id>/subagents/agent-xxx.jsonl
+                string parentSessionId = null;
+                try
+                {
+                    var subagentsDir = Path.GetDirectoryName(transcriptPath); // .../subagents
+                    if (subagentsDir != null)
+                    {
+                        var sessionDir = Path.GetDirectoryName(subagentsDir); // .../<session-id>
+                        if (sessionDir != null)
+                            parentSessionId = Path.GetFileName(sessionDir);
+                    }
+                }
+                catch { /* best effort */ }
+
                 SubagentDiscovered?.Invoke(this, new TeammateDiscoveredEventArgs
                 {
                     TeamName = null,
@@ -1296,7 +1568,8 @@ namespace MultiTerminal.Services
                     Tailer = tailer,
                     SpawnerName = tracking.SpawnerName,
                     TaskDescription = tracking.TaskDescription,
-                    SubagentType = tracking.SubagentType
+                    SubagentType = tracking.SubagentType,
+                    ParentSessionId = parentSessionId
                 });
             }
             catch (Exception ex)
@@ -1418,6 +1691,67 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Look up which terminal (spawner name) created a given team.
+        /// Reads the mt-team-spawners.json mapping file written by task-to-agent-hook.js.
+        /// </summary>
+        private string LookupTeamSpawner(string teamName)
+        {
+            try
+            {
+                string mappingPath = Path.Combine(Path.GetTempPath(), "mt-team-spawners.json");
+                if (!File.Exists(mappingPath)) return null;
+
+                string json = File.ReadAllText(mappingPath);
+                using var doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.TryGetProperty(teamName, out var entry) &&
+                    entry.ValueKind == JsonValueKind.Object)
+                {
+                    if (entry.TryGetProperty("spawnerName", out var spawner))
+                    {
+                        string name = spawner.GetString();
+                        if (!string.IsNullOrEmpty(name) && name != "Claude")
+                            return name;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error reading team-spawner mapping: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Reclaim a transcript file from the orphan watcher. If an orphan tailer already owns
+        /// this file, dispose it so the orphan panel is auto-removed from MainForm (via the
+        /// Stopped event → HandleEmbeddedStopped closure). The team watcher then creates its
+        /// own tailer and panel with the correct team-keyed name.
+        /// This fixes the race where the orphan watcher's sync scan claims a team agent's
+        /// transcript before the team watcher can match it to a member.
+        /// </summary>
+        private void ReclaimFromOrphan(string transcriptPath)
+        {
+            string normalizedPath = NormalizeTranscriptPath(transcriptPath);
+            TranscriptTailer orphanTailer = null;
+
+            lock (_trackedSubagentFiles)
+            {
+                if (_orphanTailers.TryGetValue(normalizedPath, out orphanTailer))
+                {
+                    _orphanTailers.Remove(normalizedPath);
+                }
+            }
+
+            if (orphanTailer != null)
+            {
+                LogInfo($"Reclaiming orphan tailer for team: {orphanTailer.AgentName} ({Path.GetFileName(transcriptPath)})");
+                try { orphanTailer.Dispose(); } catch { }
+            }
+        }
+
+        /// <summary>
         /// Stop a specific orphan subagent tailer by transcript path, triggering its Stopped event
         /// which causes the auto-close logic in MainForm to close the agent panel.
         /// Called from the REST API when the SubagentStop hook fires.
@@ -1473,6 +1807,7 @@ namespace MultiTerminal.Services
             _teamsRootWatcher?.Dispose();
             _teamsRootWatcher = null;
 
+
             // Clean up project-level watchers and orphan tailers
             foreach (var watcher in _projectWatchers)
             {
@@ -1490,11 +1825,58 @@ namespace MultiTerminal.Services
 
         private void CleanupTeam(string teamName, TeamState state)
         {
+            // Collect member names before disposal for panel cleanup and orphan prevention
+            var memberNames = state.KnownMembers.Select(m => m.name).ToList();
+
+            // Add transcript paths to tracked set so orphan watchers skip them
+            lock (_trackedSubagentFiles)
+            {
+                foreach (var path in state.MatchedTranscripts)
+                    _trackedSubagentFiles.Add(path);
+            }
+
+            // Add agent names to retired set so CreateOrphanSubagentPanel skips them
+            var now = DateTime.UtcNow;
+            foreach (var name in memberNames)
+                _retiredTeamAgentNames[name] = now;
+
             foreach (var tailer in state.MemberTailers.Values)
             {
                 try { tailer.Dispose(); } catch { }
             }
             state.MemberTailers.Clear();
+
+            // Also stop any orphan tailers that share this team's transcript paths
+            // (catches orphan panels created before the team watcher claimed the file)
+            lock (_trackedSubagentFiles)
+            {
+                var orphansToRemove = new List<string>();
+                foreach (var kvp in _orphanTailers)
+                {
+                    if (state.MatchedTranscripts.Any(p =>
+                        string.Equals(NormalizeTranscriptPath(p), kvp.Key, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        orphansToRemove.Add(kvp.Key);
+                    }
+                }
+                // Also match orphans by agent name (catches name-based duplicates)
+                foreach (var kvp in _orphanTailers)
+                {
+                    if (!orphansToRemove.Contains(kvp.Key) &&
+                        memberNames.Any(name => string.Equals(kvp.Value.AgentName, name, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        orphansToRemove.Add(kvp.Key);
+                    }
+                }
+                foreach (var key in orphansToRemove)
+                {
+                    if (_orphanTailers.Remove(key, out var orphanTailer))
+                    {
+                        LogInfo($"Stopping orphan tailer for team agent: {orphanTailer.AgentName}");
+                        try { orphanTailer.Dispose(); } catch { }
+                    }
+                }
+            }
 
             state.ConfigWatcher?.Dispose();
             state.ConfigWatcher = null;
@@ -1505,7 +1887,20 @@ namespace MultiTerminal.Services
             }
             state.Watchers.Clear();
 
-            TeamRemoved?.Invoke(this, teamName);
+            TeamRemoved?.Invoke(this, new TeamRemovedEventArgs
+            {
+                TeamName = teamName,
+                MemberNames = memberNames,
+                TranscriptPaths = state.MatchedTranscripts.ToList()
+            });
+
+            // Prune expired retired names (older than 60 seconds)
+            var cutoff = now.AddSeconds(-60);
+            foreach (var kvp in _retiredTeamAgentNames)
+            {
+                if (kvp.Value < cutoff)
+                    _retiredTeamAgentNames.TryRemove(kvp.Key, out _);
+            }
         }
 
         public void Dispose()
@@ -1555,6 +1950,8 @@ namespace MultiTerminal.Services
         {
             public string TeamName;
             public string LeadSessionId;
+            public string SpawnerName;
+            public string LeadCwd;
             public HashSet<string> TrackedMembers = new HashSet<string>();
             public HashSet<string> MatchedTranscripts = new HashSet<string>();
             public List<(string name, long joinedAt)> KnownMembers = new List<(string name, long joinedAt)>();

@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebMCP Demo</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface2: #1c2333;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --accent2: #3fb950;
+            --accent3: #d2a8ff;
+            --accent4: #f0883e;
+            --danger: #f85149;
+            --glow: rgba(88, 166, 255, 0.15);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 20px;
+            line-height: 1.5;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+            padding: 20px;
+            background: linear-gradient(135deg, rgba(88,166,255,0.08), rgba(210,168,255,0.08));
+            border: 1px solid var(--border);
+            border-radius: 12px;
+        }
+
+        .header h1 {
+            font-size: 1.6em;
+            background: linear-gradient(135deg, var(--accent), var(--accent3));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 4px;
+        }
+
+        .header .subtitle {
+            color: var(--text-muted);
+            font-size: 0.9em;
+        }
+
+        .header .spec-badge {
+            display: inline-block;
+            margin-top: 8px;
+            padding: 2px 10px;
+            background: rgba(63,185,80,0.15);
+            border: 1px solid rgba(63,185,80,0.3);
+            border-radius: 12px;
+            font-size: 0.75em;
+            color: var(--accent2);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: var(--surface2);
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .panel-header .icon { font-size: 1.1em; }
+        .panel-header .count {
+            margin-left: auto;
+            padding: 1px 8px;
+            background: rgba(88,166,255,0.15);
+            border-radius: 10px;
+            font-size: 0.8em;
+            color: var(--accent);
+        }
+
+        .panel-body {
+            padding: 12px;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+
+        .panel-body::-webkit-scrollbar { width: 6px; }
+        .panel-body::-webkit-scrollbar-track { background: transparent; }
+        .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        .tool-card {
+            padding: 10px 12px;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+
+        .tool-card.highlight {
+            border-color: var(--accent);
+            box-shadow: 0 0 12px var(--glow);
+        }
+
+        .tool-name {
+            font-weight: 600;
+            color: var(--accent);
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.9em;
+        }
+
+        .tool-desc {
+            color: var(--text-muted);
+            font-size: 0.8em;
+            margin-top: 2px;
+        }
+
+        .tool-schema {
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 4px;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.72em;
+            color: var(--accent3);
+            overflow-x: auto;
+            white-space: pre;
+        }
+
+        .log-entry {
+            padding: 8px 10px;
+            border-left: 3px solid var(--border);
+            margin-bottom: 6px;
+            font-size: 0.8em;
+            border-radius: 0 6px 6px 0;
+            background: rgba(0,0,0,0.2);
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-8px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .log-entry.invoke { border-left-color: var(--accent); }
+        .log-entry.result { border-left-color: var(--accent2); }
+        .log-entry.error { border-left-color: var(--danger); }
+        .log-entry.register { border-left-color: var(--accent3); }
+
+        .log-time {
+            color: var(--text-muted);
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.85em;
+        }
+
+        .log-label {
+            display: inline-block;
+            padding: 0 6px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: 600;
+            margin: 0 4px;
+        }
+
+        .log-label.invoke { background: rgba(88,166,255,0.2); color: var(--accent); }
+        .log-label.result { background: rgba(63,185,80,0.2); color: var(--accent2); }
+        .log-label.error { background: rgba(248,81,73,0.2); color: var(--danger); }
+        .log-label.register { background: rgba(210,168,255,0.2); color: var(--accent3); }
+
+        .log-detail {
+            margin-top: 4px;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 0.9em;
+            color: var(--text);
+            word-break: break-word;
+        }
+
+        .full-width { grid-column: 1 / -1; }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 10px 16px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font-size: 0.8em;
+        }
+
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--accent2);
+            box-shadow: 0 0 6px rgba(63,185,80,0.5);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-muted);
+        }
+
+        .status-item strong { color: var(--text); }
+
+        .empty-state {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 20px;
+            font-size: 0.85em;
+        }
+
+        .flash {
+            animation: flash 0.6s ease;
+        }
+
+        @keyframes flash {
+            0% { background: rgba(88,166,255,0.3); }
+            100% { background: transparent; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>WebMCP Interactive Demo</h1>
+    <div class="subtitle">W3C Web Model Context Protocol &mdash; Structured AI-to-Page Tool Invocation</div>
+    <div class="spec-badge">navigator.modelContext polyfill active</div>
+</div>
+
+<div class="status-bar" id="statusBar">
+    <div class="status-dot"></div>
+    <div class="status-item">Polyfill: <strong id="polyfillStatus">checking...</strong></div>
+    <div class="status-item">Tools: <strong id="toolCount">0</strong></div>
+    <div class="status-item">Invocations: <strong id="invokeCount">0</strong></div>
+</div>
+
+<div class="grid" style="margin-top: 16px;">
+    <div class="panel">
+        <div class="panel-header">
+            <span class="icon">&#x1F527;</span> Registered Tools
+            <span class="count" id="toolCountBadge">0</span>
+        </div>
+        <div class="panel-body" id="toolRegistry">
+            <div class="empty-state">Tools will appear here when registered...</div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-header">
+            <span class="icon">&#x1F4CB;</span> Invocation Log
+            <span class="count" id="logCountBadge">0</span>
+        </div>
+        <div class="panel-body" id="invocationLog">
+            <div class="empty-state">Agent tool invocations will appear here...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    // State
+    let invokeCount = 0;
+    let logCount = 0;
+    const registeredAt = new Date();
+
+    // UI helpers
+    function $(id) { return document.getElementById(id); }
+
+    function timeStr() {
+        return new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function addLog(type, label, detail) {
+        logCount++;
+        $('logCountBadge').textContent = logCount;
+        const log = $('invocationLog');
+        if (log.querySelector('.empty-state')) log.innerHTML = '';
+
+        const entry = document.createElement('div');
+        entry.className = 'log-entry ' + type;
+        entry.innerHTML = `<span class="log-time">${timeStr()}</span> <span class="log-label ${type}">${label}</span><div class="log-detail">${escapeHtml(detail)}</div>`;
+        log.prepend(entry);
+    }
+
+    function escapeHtml(str) {
+        const d = document.createElement('div');
+        d.textContent = typeof str === 'object' ? JSON.stringify(str, null, 2) : String(str);
+        return d.innerHTML;
+    }
+
+    function highlightTool(name) {
+        const card = document.querySelector(`[data-tool="${name}"]`);
+        if (card) {
+            card.classList.add('highlight', 'flash');
+            setTimeout(() => card.classList.remove('highlight', 'flash'), 1500);
+        }
+    }
+
+    function updateToolRegistry() {
+        const tools = [];
+        if (window.__webmcpRegistry) {
+            window.__webmcpRegistry.forEach(t => tools.push(t));
+        }
+        const count = tools.length;
+        $('toolCount').textContent = count;
+        $('toolCountBadge').textContent = count;
+
+        const container = $('toolRegistry');
+        if (count === 0) {
+            container.innerHTML = '<div class="empty-state">No tools registered</div>';
+            return;
+        }
+
+        container.innerHTML = tools.map(t => `
+            <div class="tool-card" data-tool="${t.name}">
+                <div class="tool-name">${t.name}</div>
+                <div class="tool-desc">${t.description}</div>
+                ${t.inputSchema ? `<div class="tool-schema">${JSON.stringify(t.inputSchema, null, 2)}</div>` : ''}
+            </div>
+        `).join('');
+    }
+
+    // Intercept __webmcpInvoke to show invocations in the log
+    const origInvoke = window.__webmcpInvoke;
+    if (origInvoke) {
+        window.__webmcpInvoke = function(name, input) {
+            invokeCount++;
+            $('invokeCount').textContent = invokeCount;
+            addLog('invoke', 'INVOKE', `${name}(${JSON.stringify(input || {})})`);
+            highlightTool(name);
+
+            return origInvoke(name, input).then(function(result) {
+                addLog('result', 'RESULT', `${name} => ${result}`);
+                return result;
+            }).catch(function(err) {
+                addLog('error', 'ERROR', `${name}: ${err.message}`);
+                throw err;
+            });
+        };
+    }
+
+    // Wait for polyfill, then register demo tools
+    function init() {
+        if (!navigator.modelContext) {
+            $('polyfillStatus').textContent = 'not loaded';
+            $('polyfillStatus').style.color = '#f85149';
+            setTimeout(init, 200);
+            return;
+        }
+
+        $('polyfillStatus').textContent = 'active';
+        $('polyfillStatus').style.color = '#3fb950';
+
+        // === DEMO TOOL 1: Data Lookup ===
+        navigator.modelContext.registerTool({
+            name: "lookup_employee",
+            description: "Look up employee information by name or department. Returns employee details including role, department, and contact info.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    query: { type: "string", description: "Employee name or department to search" }
+                },
+                required: ["query"]
+            },
+            execute: async (input) => {
+                const employees = [
+                    { name: "Alice Chen", role: "Senior Engineer", dept: "Platform", email: "alice@example.com", projects: 12 },
+                    { name: "Bob Martinez", role: "Tech Lead", dept: "Infrastructure", email: "bob@example.com", projects: 8 },
+                    { name: "Carol Singh", role: "Staff Engineer", dept: "Platform", email: "carol@example.com", projects: 15 },
+                    { name: "Diana Kowalski", role: "Engineering Manager", dept: "AI/ML", email: "diana@example.com", projects: 6 },
+                    { name: "Eve Thompson", role: "DevOps Engineer", dept: "Infrastructure", email: "eve@example.com", projects: 10 }
+                ];
+                const q = (input.query || "").toLowerCase();
+                const results = employees.filter(e =>
+                    e.name.toLowerCase().includes(q) ||
+                    e.dept.toLowerCase().includes(q) ||
+                    e.role.toLowerCase().includes(q)
+                );
+                return { matches: results.length, employees: results };
+            }
+        });
+        addLog('register', 'REGISTERED', 'lookup_employee — search employee database');
+
+        // === DEMO TOOL 2: Calculator ===
+        navigator.modelContext.registerTool({
+            name: "calculate",
+            description: "Perform mathematical calculations. Supports basic arithmetic, percentages, and common functions (sqrt, pow, abs, round, ceil, floor).",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    expression: { type: "string", description: "Math expression to evaluate, e.g. '(150 * 0.85) + 42' or 'sqrt(144)'" }
+                },
+                required: ["expression"]
+            },
+            execute: async (input) => {
+                try {
+                    // Safe math evaluation with allowed functions
+                    const expr = input.expression
+                        .replace(/sqrt/g, 'Math.sqrt')
+                        .replace(/pow/g, 'Math.pow')
+                        .replace(/abs/g, 'Math.abs')
+                        .replace(/round/g, 'Math.round')
+                        .replace(/ceil/g, 'Math.ceil')
+                        .replace(/floor/g, 'Math.floor')
+                        .replace(/PI/g, 'Math.PI')
+                        .replace(/min/g, 'Math.min')
+                        .replace(/max/g, 'Math.max');
+                    const result = Function('"use strict"; return (' + expr + ')')();
+                    return { expression: input.expression, result: result };
+                } catch (e) {
+                    return { error: "Invalid expression: " + e.message };
+                }
+            }
+        });
+        addLog('register', 'REGISTERED', 'calculate — math expression evaluator');
+
+        // === DEMO TOOL 3: Theme Control ===
+        navigator.modelContext.registerTool({
+            name: "set_theme",
+            description: "Change the visual theme of this page. Demonstrates WebMCP tools that modify page state with visual feedback.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    theme: { type: "string", enum: ["dark", "light", "cyberpunk", "ocean"], description: "Theme name to apply" }
+                },
+                required: ["theme"]
+            },
+            execute: async (input) => {
+                const themes = {
+                    dark: { '--bg': '#0d1117', '--surface': '#161b22', '--surface2': '#1c2333', '--border': '#30363d', '--text': '#e6edf3', '--text-muted': '#8b949e', '--accent': '#58a6ff' },
+                    light: { '--bg': '#ffffff', '--surface': '#f6f8fa', '--surface2': '#eef1f5', '--border': '#d0d7de', '--text': '#1f2328', '--text-muted': '#656d76', '--accent': '#0969da' },
+                    cyberpunk: { '--bg': '#0a0014', '--surface': '#1a0033', '--surface2': '#220044', '--border': '#6e1fff', '--text': '#f0e0ff', '--text-muted': '#a080cc', '--accent': '#ff2dff' },
+                    ocean: { '--bg': '#001524', '--surface': '#002a42', '--surface2': '#003355', '--border': '#006688', '--text': '#d0f0ff', '--text-muted': '#70aabb', '--accent': '#00ccff' }
+                };
+                const t = themes[input.theme];
+                if (!t) return { error: "Unknown theme. Available: " + Object.keys(themes).join(", ") };
+                Object.entries(t).forEach(([k, v]) => document.documentElement.style.setProperty(k, v));
+                return { applied: input.theme, message: "Theme changed to " + input.theme };
+            }
+        });
+        addLog('register', 'REGISTERED', 'set_theme — visual theme control');
+
+        // === DEMO TOOL 4: System Dashboard ===
+        navigator.modelContext.registerTool({
+            name: "get_system_stats",
+            description: "Get real-time system statistics from this page including memory usage, page performance metrics, and WebMCP registry status.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    include: { type: "string", enum: ["all", "memory", "performance", "webmcp"], description: "Which stats to include (default: all)" }
+                }
+            },
+            execute: async (input) => {
+                const section = input.include || "all";
+                const stats = {};
+
+                if (section === "all" || section === "memory") {
+                    if (performance.memory) {
+                        stats.memory = {
+                            usedJSHeapSize: (performance.memory.usedJSHeapSize / 1048576).toFixed(1) + " MB",
+                            totalJSHeapSize: (performance.memory.totalJSHeapSize / 1048576).toFixed(1) + " MB",
+                            heapUtilization: ((performance.memory.usedJSHeapSize / performance.memory.totalJSHeapSize) * 100).toFixed(1) + "%"
+                        };
+                    } else {
+                        stats.memory = { note: "performance.memory not available in this context" };
+                    }
+                }
+                if (section === "all" || section === "performance") {
+                    const nav = performance.getEntriesByType("navigation")[0];
+                    stats.performance = {
+                        pageLoadTime: nav ? (nav.loadEventEnd - nav.startTime).toFixed(0) + " ms" : "N/A",
+                        domContentLoaded: nav ? (nav.domContentLoadedEventEnd - nav.startTime).toFixed(0) + " ms" : "N/A",
+                        resourceCount: performance.getEntriesByType("resource").length,
+                        uptime: ((Date.now() - registeredAt.getTime()) / 1000).toFixed(0) + " seconds"
+                    };
+                }
+                if (section === "all" || section === "webmcp") {
+                    const toolNames = [];
+                    window.__webmcpRegistry.forEach(t => toolNames.push(t.name));
+                    stats.webmcp = {
+                        polyfillActive: true,
+                        registeredTools: toolNames.length,
+                        toolNames: toolNames,
+                        totalInvocations: invokeCount
+                    };
+                }
+                return stats;
+            }
+        });
+        addLog('register', 'REGISTERED', 'get_system_stats — live system metrics');
+
+        updateToolRegistry();
+    }
+
+    // Kick off — small delay to let polyfill inject
+    setTimeout(init, 100);
+})();
+</script>
+
+</body>
+</html>

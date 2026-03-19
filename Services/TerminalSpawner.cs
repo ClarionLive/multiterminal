@@ -92,14 +92,57 @@ namespace MultiTerminal.Services
         /// <param name="workingDir">Working directory for the terminal (defaults to current)</param>
         /// <param name="initialPrompt">Optional prompt to send after registration</param>
         /// <returns>SpawnedTeammate with DocId for tracking</returns>
+        /// <summary>
+        /// Sanitizes a string for safe interpolation into a PowerShell single-quoted string.
+        /// Escapes single quotes by doubling them (' → '').
+        /// </summary>
+        private static string SanitizeForPowerShell(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            return value.Replace("'", "''");
+        }
+
+        /// <summary>
+        /// Validates that an agent name contains only safe characters (alphanumeric, spaces, hyphens, underscores).
+        /// </summary>
+        private static void ValidateAgentName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new ArgumentException("Agent name cannot be empty", nameof(name));
+
+            foreach (char c in name)
+            {
+                if (!char.IsLetterOrDigit(c) && c != ' ' && c != '-' && c != '_')
+                    throw new ArgumentException(
+                        $"Agent name contains invalid character '{c}'. Only letters, digits, spaces, hyphens, and underscores are allowed.",
+                        nameof(name));
+            }
+        }
+
+        /// <summary>
+        /// Validates that a working directory path is safe (rooted, no UNC, exists).
+        /// </summary>
+        private static void ValidateWorkingDir(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+
+            if (!Path.IsPathRooted(path))
+                throw new ArgumentException("Working directory must be an absolute path", nameof(path));
+
+            if (path.StartsWith(@"\\"))
+                throw new ArgumentException("UNC paths are not allowed for working directory", nameof(path));
+
+            if (!Directory.Exists(path))
+                throw new ArgumentException($"Working directory does not exist: {path}", nameof(path));
+        }
+
         public SpawnedTeammate SpawnTerminal(
             string agentName,
             string agentType,
             string workingDir = null,
             string initialPrompt = null)
         {
-            if (string.IsNullOrWhiteSpace(agentName))
-                throw new ArgumentException("Agent name cannot be empty", nameof(agentName));
+            ValidateAgentName(agentName);
 
             if (string.IsNullOrWhiteSpace(agentType))
                 throw new ArgumentException("Agent type cannot be empty", nameof(agentType));
@@ -108,17 +151,25 @@ namespace MultiTerminal.Services
             if (string.IsNullOrWhiteSpace(workingDir))
                 workingDir = Directory.GetCurrentDirectory();
 
+            ValidateWorkingDir(workingDir);
+
             // Generate unique 8-character doc ID (hex format, like existing system)
             string docId = Guid.NewGuid().ToString("N").Substring(0, 8);
+
+            // Sanitize all values for safe PowerShell single-quote interpolation
+            string safeName = SanitizeForPowerShell(agentName);
+            string safeDocId = SanitizeForPowerShell(docId);
+            string safeType = SanitizeForPowerShell(agentType);
+            string safeDir = SanitizeForPowerShell(workingDir);
 
             // Build PowerShell command that sets environment variables and launches Claude Code
             // The startup hook will detect these variables and auto-register
             string command = $@"
-$env:MULTITERMINAL_NAME='{agentName}';
-$env:MULTITERMINAL_DOC_ID='{docId}';
-$env:MULTITERMINAL_ROLE='{agentType}';
-cd '{workingDir}';
-Write-Host '🤖 Spawning as {agentName} ({agentType})...' -ForegroundColor Cyan;
+$env:MULTITERMINAL_NAME='{safeName}';
+$env:MULTITERMINAL_DOC_ID='{safeDocId}';
+$env:MULTITERMINAL_ROLE='{safeType}';
+cd '{safeDir}';
+Write-Host '🤖 Spawning as {safeName} ({safeType})...' -ForegroundColor Cyan;
 claude
 ".Trim();
 

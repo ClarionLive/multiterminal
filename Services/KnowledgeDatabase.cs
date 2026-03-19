@@ -7,7 +7,7 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// CRUD and search operations for knowledge_entries and code_digests tables.
-    /// Shares the SQLite connection from TaskDatabase (same tasks.db file, same WAL handle).
+    /// Shares the SQLite connection from TaskDatabase (same multiterminal.db file, same WAL handle).
     /// FTS5 full-text search is used when available; falls back to LIKE queries otherwise.
     /// </summary>
     public class KnowledgeDatabase
@@ -181,6 +181,10 @@ namespace MultiTerminal.Services
             int limit = 20,
             bool includeDeprecated = false)
         {
+            // Treat wildcard-only or whitespace-only queries as "list all" (no text filter)
+            if (query != null && query.Trim().TrimStart('*').TrimEnd('*').Length == 0)
+                query = null;
+
             if (!string.IsNullOrWhiteSpace(query) && _fts5Available)
             {
                 // Guard: clamp query to prevent oversized FTS5 expressions
@@ -316,14 +320,28 @@ namespace MultiTerminal.Services
         /// </summary>
         public CodeDigest GetCodeDigest(string projectId, string filePath)
         {
-            const string sql = @"
-                SELECT id, project_id, file_path, file_hash, purpose, key_classes, key_methods,
-                       patterns, gotchas, dependencies, line_count, digest_model, created_at, updated_at
-                FROM code_digests
-                WHERE project_id = @projectId AND file_path = @filePath";
+            string sql;
+            if (string.IsNullOrWhiteSpace(projectId))
+            {
+                sql = @"
+                    SELECT id, project_id, file_path, file_hash, purpose, key_classes, key_methods,
+                           patterns, gotchas, dependencies, line_count, digest_model, created_at, updated_at
+                    FROM code_digests
+                    WHERE file_path = @filePath
+                    LIMIT 1";
+            }
+            else
+            {
+                sql = @"
+                    SELECT id, project_id, file_path, file_hash, purpose, key_classes, key_methods,
+                           patterns, gotchas, dependencies, line_count, digest_model, created_at, updated_at
+                    FROM code_digests
+                    WHERE project_id = @projectId AND file_path = @filePath";
+            }
 
             using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@projectId", (object)projectId ?? DBNull.Value);
+            if (!string.IsNullOrWhiteSpace(projectId))
+                cmd.Parameters.AddWithValue("@projectId", projectId);
             cmd.Parameters.AddWithValue("@filePath", filePath ?? string.Empty);
 
             using var reader = cmd.ExecuteReader();
