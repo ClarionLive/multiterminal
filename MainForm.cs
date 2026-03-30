@@ -33,7 +33,8 @@ namespace MultiTerminal
     public partial class MainForm : Form
     {
         private DockPanel _dockPanel;
-        private ToolStrip _toolStrip;
+        private ToolStrip _toolStrip; // Legacy — kept for fallback, replaced by _dashboardHeader
+        private DashboardHeader.DashboardHeaderControl _dashboardHeader;
         private SettingsService _settings;
         private GridLayoutManager _gridManager;
         private TerminalTheme _currentTheme = TerminalTheme.Dark;
@@ -93,6 +94,12 @@ namespace MultiTerminal
         // Gateway integration service — syncs MCP servers to the gateway's SQLite DB
         private Services.GatewayIntegrationService _gatewayService;
 
+        // Oracle — on-demand advisory agent (no project, no coding)
+        private OracleService _oracleService;
+        private string _oracleTerminalId;
+        private TerminalDocument _oracleTerminalDoc;
+        private volatile bool _oracleSpawning; // Guard against concurrent spawn from thread pool
+
         // Anti-reentrance: throttle nudges per terminal (5-second cooldown)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastNudgeTime = new();
         private static readonly TimeSpan NudgeThrottle = TimeSpan.FromSeconds(5);
@@ -125,11 +132,16 @@ namespace MultiTerminal
         /// </summary>
         public event EventHandler LoadingComplete;
 
+        /// <summary>
+        /// Event fired when the dashboard header WebView2 is fully loaded and ready to display.
+        /// </summary>
+        public event EventHandler DashboardContentReady;
+
         public MainForm()
         {
             InitializeComponent();
             InitializeDockPanel();
-            InitializeToolbar();
+            InitializeDashboardHeader();
             LoadSettings();
             ApplyTheme(isInitialLoad: true);
 
@@ -318,6 +330,13 @@ namespace MultiTerminal
                 // Inject SessionLineageService into ProjectPanel (replaces old SessionDatabase dependency)
                 _projectPanel.SetSessionLineageService(_mcpServer.Broker.SessionLineageService);
 
+                // Set DefaultInboxRecipient from owner profile (so inbox notifications go to the actual user, not a hardcoded name)
+                var ownerProfile = _ownerProfileService?.GetProfile();
+                if (ownerProfile?.FullName != null)
+                {
+                    _mcpServer.Broker.DefaultInboxRecipient = ownerProfile.FullName.Split(' ')[0]; // First name
+                }
+
                 // Wire up KnowledgeDatabase — institutional memory (shares multiterminal.db via TaskDatabase)
                 _mcpServer.Broker.KnowledgeDb = new Services.KnowledgeDatabase(_mcpServer.Broker.TaskDb);
 
@@ -407,6 +426,10 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Initializing inbox panel");
                 _inboxPanel.Initialize(_mcpServer.Broker);
 
+                // Initialize dashboard header alongside other panels (not deferred — deferring
+                // caused the header to never appear if RestoreSession hit any issue)
+                _dashboardHeader?.Initialize(_mcpServer.Broker);
+
                 // Persist chat messages to database
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 14: Wiring MessageSent event");
                 _mcpServer.Broker.MessageSent += OnChatMessageSent;
@@ -447,6 +470,9 @@ namespace MultiTerminal
 
                 // Start inbox file monitor for nudging idle terminals
                 InitializeInboxMonitor();
+
+                // Initialize Oracle advisory agent (on-demand — registers terminal but doesn't spawn yet)
+                InitializeOracle();
 
                 // Start MCP server in background
                 Task.Run(async () =>
@@ -863,13 +889,12 @@ namespace MultiTerminal
                         t.TabText.Equals(e.Name, StringComparison.OrdinalIgnoreCase));
             }
 
-            // Last resort fallback — only if the last active terminal is still "Unassigned"
-            // (avoids external processes like ClarionIDE hijacking a named terminal's tab)
-            if (targetDoc == null && _lastActiveTerminal != null &&
-                (string.IsNullOrEmpty(_lastActiveTerminal.CustomTitle) ||
-                 _lastActiveTerminal.CustomTitle.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)))
+            // No last-resort fallback — DocId and name-match are the only reliable mapping paths.
+            // The old _lastActiveTerminal fallback caused misrouting when two terminals registered
+            // in quick succession and _lastActiveTerminal pointed to the wrong tab.
+            if (targetDoc == null)
             {
-                targetDoc = _lastActiveTerminal;
+                System.Diagnostics.Debug.WriteLine($"[MainForm] Terminal '{e.Name}' (id={e.Id}, docId={e.DocId}) could not be mapped to any TerminalDocument — channel/inbox delivery still works.");
             }
 
             if (targetDoc != null)
@@ -1130,13 +1155,61 @@ namespace MultiTerminal
                 }
             }
 
-            // File-based delivery for ALL terminals — write to inbox file
-            // instead of unreliable terminal paste injection. Hook scripts
-            // (inbox-check-hook.js) read these files and inject messages
-            // into Claude's context via additionalContext.
-            // Resolve terminal name from ID — hook uses MULTITERMINAL_NAME (the name, not ID)
             var recipientTerminal = _mcpServer.Broker.GetTerminal(recipientId);
             string recipientName = recipientTerminal?.Name ?? recipientId;
+
+            // ORACLE: On-demand spawn — if Oracle isn't running, spawn its terminal then deliver via channel.
+            // If Oracle IS running, reset idle timer and let the normal channel delivery path handle it.
+            if (_oracleService != null && string.Equals(recipientName, OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!_oracleService.IsRunning && !_oracleSpawning)
+                {
+                    _oracleSpawning = true;
+                    _debugLogService?.Info("MainForm", $"Oracle not running — spawning for message {messageId} from {sender}");
+                    _ = SpawnOracleAndDeliverAsync(messageId, sender, message);
+                    return true; // We're handling delivery asynchronously
+                }
+
+                if (_oracleService.IsRunning)
+                {
+                    // Oracle is running — reset idle timer and fall through to normal channel delivery
+                    _oracleService.ResetIdleTimer();
+                    _debugLogService?.Trace("MainForm", $"Oracle running — channel delivery for message {messageId}");
+                }
+                else
+                {
+                    // Oracle is spawning (another message arrived during spawn) — let broker retry later
+                    _debugLogService?.Info("MainForm", $"Oracle spawning — message {messageId} will retry via broker queue");
+                    return false;
+                }
+            }
+
+            // PRIMARY: Channel delivery — POST to recipient's Claude Code Channel HTTP port.
+            // This pushes a <channel> event directly into the Claude Code session (instant, no polling).
+            if (recipientTerminal?.ChannelPort != null)
+            {
+                try
+                {
+                    bool channelDelivery = await DeliverViaChannel(recipientTerminal.ChannelPort.Value, sender, message, "normal");
+                    if (channelDelivery)
+                    {
+                        _debugLogService.Info("MainForm", $"Channel delivery SUCCESS for message {messageId} to {recipientName} (port {recipientTerminal.ChannelPort})");
+                        lock (_deduplicationLock)
+                        {
+                            _deliveredMessageCache[messageId] = DateTime.Now;
+                        }
+                        return true;
+                    }
+                    _debugLogService.Warning("MainForm", $"Channel delivery FAILED for message {messageId}, falling back to inbox file");
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService.Warning("MainForm", $"Channel delivery EXCEPTION for message {messageId}: {ex.Message}, falling back to inbox file");
+                }
+            }
+
+            // FALLBACK: File-based delivery (legacy) — write to inbox file.
+            // Used when the recipient doesn't have a channel port (not launched with --channels).
             bool fileDelivery = InboxFileWriter.WriteMessage(recipientName, messageId, sender, message);
             if (fileDelivery)
             {
@@ -1183,6 +1256,42 @@ namespace MultiTerminal
             }
 
             return await completionSource.Task;
+        }
+
+        /// <summary>
+        /// Shared HttpClient for channel message delivery. Reused across calls to avoid
+        /// socket exhaustion (TIME_WAIT buildup from per-request HttpClient instances).
+        /// </summary>
+        private static readonly System.Net.Http.HttpClient _channelHttpClient = new System.Net.Http.HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+
+        /// <summary>
+        /// Delivers a message to a terminal's Claude Code Channel via HTTP POST.
+        /// The channel server pushes it as a native <channel> event into the Claude Code session.
+        /// </summary>
+        private async Task<bool> DeliverViaChannel(int channelPort, string sender, string message, string priority)
+        {
+            try
+            {
+                var payload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    from = sender,
+                    message = message,
+                    priority = priority ?? "normal",
+                    timestamp = DateTime.UtcNow.ToString("o")
+                });
+
+                var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+                var response = await _channelHttpClient.PostAsync($"http://127.0.0.1:{channelPort}/message", content);
+                return response.IsSuccessStatusCode;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService.Warning("MainForm", $"DeliverViaChannel failed (port {channelPort}): {ex.Message}");
+                return false;
+            }
         }
 
         private void ProcessNextMessage()
@@ -1284,6 +1393,121 @@ namespace MultiTerminal
             });
         }
 
+        private void InitializeDashboardHeader()
+        {
+            _dashboardHeader = new DashboardHeader.DashboardHeaderControl();
+
+            // Wire action events to existing MainForm methods
+            _dashboardHeader.NewTerminalRequested += () => AddNewTerminal();
+            _dashboardHeader.ToggleThemeRequested += () => ToggleTheme();
+            _dashboardHeader.SettingsRequested += () => ShowSettingsDialog();
+            _dashboardHeader.AboutRequested += () => ShowAboutDialog();
+            _dashboardHeader.ShowChatHistoryRequested += () => ShowChatHistoryDialog();
+            _dashboardHeader.ExitRequested += () => Close();
+
+            _dashboardHeader.DocsRequested += () =>
+            {
+                var docsPath = System.IO.Path.Combine(Application.StartupPath, "docs", "html", "index.html");
+                if (System.IO.File.Exists(docsPath))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = docsPath,
+                        UseShellExecute = true
+                    });
+                }
+            };
+
+            _dashboardHeader.TogglePanelRequested += (panel) =>
+            {
+                switch (panel)
+                {
+                    case "tasks": ToggleTasksPanel(); break;
+                    case "chat": ToggleChatPanel(); break;
+                    case "activity": ToggleActivityPanel(); break;
+                    case "office": ToggleOfficePanel(); break;
+                    case "profiles": ToggleProfilePanel(); break;
+                    case "inbox": ToggleInboxPanel(); break;
+                    case "debug": ToggleDebugPanel(); break;
+                    case "preview": ToggleFilePreviewPanel(); break;
+                    case "projects": ToggleProjectPanel(); break;
+                }
+            };
+
+            _dashboardHeader.GridLayoutRequested += (layout) =>
+            {
+                switch (layout)
+                {
+                    case "2x2": ApplyGridLayout(GridLayoutManager.GridPreset.Grid2x2); break;
+                    case "2x3": ApplyGridLayout(GridLayoutManager.GridPreset.Grid2x3); break;
+                    case "3x2": ApplyGridLayout(GridLayoutManager.GridPreset.Grid3x2); break;
+                    case "h2": ApplyGridLayout(GridLayoutManager.GridPreset.Horizontal2); break;
+                    case "v2": ApplyGridLayout(GridLayoutManager.GridPreset.Vertical2); break;
+                    case "h3": ApplyGridLayout(GridLayoutManager.GridPreset.Horizontal3); break;
+                    case "v3": ApplyGridLayout(GridLayoutManager.GridPreset.Vertical3); break;
+                    case "reset": _gridManager.ResetToTabs(); break;
+                }
+            };
+
+            _dashboardHeader.SwitchTerminalRequested += (name) =>
+            {
+                // Find the terminal by name and activate it
+                var terminal = _gridManager.GetTerminalDocuments()
+                    .FirstOrDefault(t => string.Equals(t.TabText, name, StringComparison.OrdinalIgnoreCase));
+                if (terminal != null)
+                {
+                    terminal.Activate();
+                }
+            };
+
+            _dashboardHeader.DashboardReady += () =>
+            {
+                DashboardContentReady?.Invoke(this, EventArgs.Empty);
+            };
+
+            Controls.Add(_dashboardHeader);
+        }
+
+        private void RefreshDashboardProjectInfo()
+        {
+            if (_dashboardHeader == null) return;
+
+            var projectName = _currentProject?.Name ?? "MultiTerminal";
+            var branch = "—";
+
+            try
+            {
+                // Get git branch from the working directory
+                var workingDir = _currentProject?.SourcePath ?? _currentProject?.Path
+                    ?? AppDomain.CurrentDomain.BaseDirectory;
+
+                if (System.IO.Directory.Exists(workingDir))
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "git",
+                        Arguments = "branch --show-current",
+                        WorkingDirectory = workingDir,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using var proc = System.Diagnostics.Process.Start(psi);
+                    if (proc != null)
+                    {
+                        branch = proc.StandardOutput.ReadToEnd().Trim();
+                        proc.WaitForExit(2000);
+                        if (string.IsNullOrEmpty(branch)) branch = "—";
+                    }
+                }
+            }
+            catch { /* git not available — leave as "—" */ }
+
+            _dashboardHeader.UpdateProjectInfo(projectName, branch);
+        }
+
+        // Legacy toolbar — kept for reference during transition
         private void InitializeToolbar()
         {
             _toolStrip = new ToolStrip
@@ -1604,8 +1828,9 @@ namespace MultiTerminal
 
         private void ApplySettingsFromDialog(SettingsWpfDialog dialog)
         {
-            // Apply toolbar font
-            _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, dialog.ToolbarFontSize);
+            // Apply toolbar font (legacy toolstrip)
+            if (_toolStrip != null)
+                _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, dialog.ToolbarFontSize);
 
             // Apply terminal font to all open terminals
             foreach (var doc in _gridManager.GetTerminalDocuments())
@@ -1672,9 +1897,10 @@ namespace MultiTerminal
                 // MCP server now initialized earlier in constructor (before RestoreSession)
             };
 
-            // Apply toolbar font size
+            // Apply toolbar font size (legacy toolstrip)
             float toolbarFontSize = _settings.GetToolbarFontSize();
-            _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, toolbarFontSize);
+            if (_toolStrip != null)
+                _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, toolbarFontSize);
 
             // Restore panel font sizes
             float projectFontSize = _settings.GetPromptsFontSize();
@@ -1720,10 +1946,6 @@ namespace MultiTerminal
             if (_currentTheme.IsDark)
             {
                 BackColor = Color.FromArgb(30, 30, 30);
-                _toolStrip.BackColor = Color.FromArgb(45, 45, 48);
-                _toolStrip.Renderer = new DarkToolStripRenderer();
-                _themeButton.Text = "\u2600"; // Sun - click to switch to light
-                _themeButton.ToolTipText = "Switch to Light Theme";
 
                 // Only set DockPanel theme on initial load (before any documents are open)
                 if (isInitialLoad)
@@ -1734,10 +1956,6 @@ namespace MultiTerminal
             else
             {
                 BackColor = Color.FromArgb(240, 240, 240);
-                _toolStrip.BackColor = Color.FromArgb(230, 236, 242);
-                _toolStrip.Renderer = new LightToolStripRenderer();
-                _themeButton.Text = "\u263E"; // Moon - click to switch to dark
-                _themeButton.ToolTipText = "Switch to Dark Theme";
 
                 // Only set DockPanel theme on initial load (before any documents are open)
                 if (isInitialLoad)
@@ -1746,30 +1964,17 @@ namespace MultiTerminal
                 }
             }
 
-            // Update toolbar item colors
-            Color textColor = _currentTheme.IsDark ? Color.White : Color.FromArgb(30, 30, 30);
-            foreach (ToolStripItem item in _toolStrip.Items)
-            {
-                item.ForeColor = textColor;
-            }
+            // Update dashboard header theme
+            _dashboardHeader?.ApplyTheme(_currentTheme.IsDark);
 
-            // Update dropdown menu item colors
-            if (_gridDropdown != null)
+            // Legacy toolstrip theming (kept for fallback)
+            if (_toolStrip != null)
             {
-                foreach (ToolStripItem item in _gridDropdown.DropDownItems)
-                {
+                Color textColor = _currentTheme.IsDark ? Color.White : Color.FromArgb(30, 30, 30);
+                _toolStrip.BackColor = _currentTheme.IsDark ? Color.FromArgb(45, 45, 48) : Color.FromArgb(230, 236, 242);
+                _toolStrip.Renderer = _currentTheme.IsDark ? (ToolStripRenderer)new DarkToolStripRenderer() : new LightToolStripRenderer();
+                foreach (ToolStripItem item in _toolStrip.Items)
                     item.ForeColor = textColor;
-                }
-            }
-
-            // Update settings and about button colors
-            if (_settingsButton != null)
-            {
-                _settingsButton.ForeColor = textColor;
-            }
-            if (_aboutButton != null)
-            {
-                _aboutButton.ForeColor = textColor;
             }
 
             // Update all terminal themes
@@ -1806,11 +2011,6 @@ namespace MultiTerminal
             // Update all open lifecycle board windows
             TaskLifecycleBoardForm.ApplyThemeToAll(_currentTheme.IsDark);
 
-            // Update panel toggle button colors
-            if (_projectPanelButton != null)
-                _projectPanelButton.ForeColor = textColor;
-            if (_filePreviewPanelButton != null)
-                _filePreviewPanelButton.ForeColor = textColor;
         }
 
         private void ToggleTheme()
@@ -2154,20 +2354,37 @@ namespace MultiTerminal
 
             try
             {
-                string terminalName = null;
-                if (_mcpServer?.Broker != null)
-                {
-                    terminalName = "Unassigned";
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
-                }
-
-                // Use LaunchCommandBuilder to get MT config flags (--add-dir, --mcp-config, etc.)
+                // Use LaunchCommandBuilder to get MT config flags (--mcp-config, channel)
                 var launch = Services.LaunchCommandBuilder.BuildClaudeCommand(null);
 
-                // Use configurable default working directory from Settings, fallback to user profile
-                string workingDir = _settings?.GetDefaultWorkingDirectory() ?? launch.WorkingDirectory;
+                // Default working directory from Settings, fallback to user profile
+                string defaultFolder = _settings?.GetDefaultWorkingDirectory() ?? launch.WorkingDirectory;
+                var recentFolders = _settings?.GetRecentDirectories() ?? new List<string>();
 
-                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand);
+                // Show identity + folder picker
+                var identities = GetAvailableIdentities(defaultFolder);
+                using var picker = new Dialogs.IdentityPickerDialog(
+                    null, identities, _currentTheme,
+                    isSelectionMode: true,
+                    defaultFolder: defaultFolder,
+                    recentFolders: recentFolders);
+
+                if (picker.ShowDialog(this) != DialogResult.OK)
+                    return; // User cancelled
+
+                string terminalName = picker.SelectedIdentity;
+                string workingDir = picker.SelectedFolder ?? defaultFolder;
+                bool isTeamLead = true;
+
+                // Track the selected folder as a recent directory
+                _settings?.AddRecentDirectory(workingDir);
+
+                if (_mcpServer?.Broker != null)
+                {
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
+                }
+
+                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 doc.SetFontSize(terminalFontSize);
@@ -2690,10 +2907,18 @@ namespace MultiTerminal
                     {
                         _lastActiveTerminal = doc;
 
-                        // Project panel refresh is handled by:
-                        // - OnProjectFileChanged (FileSystemWatcher for project.json changes)
-                        // - OnTerminalDirectoryChanged (when terminal changes directories)
-                        // No need to refresh on every click - it causes layout thrashing
+                        // Update focus borders — ActiveDocumentChanged doesn't fire reliably
+                        // with WebView2, so we must update borders directly on click
+                        SuspendLayout();
+                        foreach (var termDoc in _gridManager.GetTerminalDocuments())
+                        {
+                            termDoc.SetFocusBorder(termDoc == doc);
+                        }
+                        ResumeLayout(true);
+
+                        // Update dashboard header active session chip
+                        _dashboardHeader?.SetActiveSession(doc.TabText);
+
                         break;
                     }
                 }
@@ -2723,6 +2948,7 @@ namespace MultiTerminal
                         System.Diagnostics.Trace.WriteLine("[OnTerminalDirectoryChanged] Refreshing project panel...");
                         _currentProject = project;
                         _projectPanel?.RefreshForProject(project);
+                        RefreshDashboardProjectInfo();
                     }
                 }
                 else
@@ -2730,6 +2956,7 @@ namespace MultiTerminal
                     // Not a project directory - clear project and show path-based prompts
                     _currentProject = null;
                     RefreshProjectPanel();
+                    RefreshDashboardProjectInfo();
                 }
 
                 // Index sessions for this project directory in the background
@@ -3012,20 +3239,40 @@ namespace MultiTerminal
 
         private void OnActiveDocumentChanged(object sender, EventArgs e)
         {
-            if (_dockPanel.ActiveDocument is TerminalDocument doc)
+            try
             {
-                // Focus the terminal when switching
-                doc.FocusTerminal();
-            }
+                var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
-            // Force all panes to refresh their tab strips to show correct active state
-            var refreshedPanes = new HashSet<object>();
-            foreach (var termDoc in _gridManager.GetTerminalDocuments())
-            {
-                if (termDoc.Pane?.TabStripControl != null && refreshedPanes.Add(termDoc.Pane))
+                // Update focus borders on all terminals
+                SuspendLayout();
+                foreach (var termDoc in _gridManager.GetTerminalDocuments())
                 {
-                    termDoc.Pane.TabStripControl.Refresh();
+                    termDoc.SetFocusBorder(termDoc == activeDoc);
                 }
+                ResumeLayout(true);
+
+                if (activeDoc != null)
+                {
+                    // Focus the terminal when switching
+                    activeDoc.FocusTerminal();
+
+                    // Update dashboard header active session chip
+                    _dashboardHeader?.SetActiveSession(activeDoc.TabText);
+                }
+
+                // Force all panes to refresh their tab strips to show correct active state
+                var refreshedPanes = new HashSet<object>();
+                foreach (var termDoc in _gridManager.GetTerminalDocuments())
+                {
+                    if (termDoc.Pane?.TabStripControl != null && refreshedPanes.Add(termDoc.Pane))
+                    {
+                        termDoc.Pane.TabStripControl.Refresh();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] OnActiveDocumentChanged error: {ex.Message}");
             }
         }
 
@@ -3077,7 +3324,7 @@ namespace MultiTerminal
             // Just launch claude - let the user choose to resume or start fresh
             // Using plain "claude" lets Claude prompt about resuming recent sessions
             // TODO: Make --dangerously-skip-permissions configurable in settings
-            string autoRunCommand = "claude --dangerously-skip-permissions";
+            string autoRunCommand = "claude --dangerously-skip-permissions --dangerously-load-development-channels server:multiterminal-channel";
 
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
@@ -3090,8 +3337,44 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine($"[MainForm.OnLaunchAsIdentityRequested] Terminal restarted for {terminalName}, waiting for Claude Code detection to auto-inject");
         }
 
-        private void OnFormClosing(object sender, FormClosingEventArgs e)
+        private bool _sessionSaveCompleted;
+
+        private async void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            // Save session context for all active terminals before closing
+            if (!_sessionSaveCompleted)
+            {
+                _sessionSaveCompleted = true; // Set before await to prevent re-entrancy on double-click
+                e.Cancel = true;
+                Text += " \u2014 Saving session state...";
+
+                try
+                {
+                    // Mechanical save — fast, guaranteed (<1 sec per terminal)
+                    var terminals = _dockPanel.Documents.OfType<TerminalDocument>()
+                        .Where(d => d.Terminal?.ConPty != null && d.Terminal.IsRunning)
+                        .ToList();
+
+                    // Save context for each registered terminal
+                    foreach (var doc in terminals)
+                    {
+                        string name = doc.CustomTitle;
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            await Services.SessionContextWriter.WriteContextAsync(name);
+                            break; // Write once with the active terminal's perspective
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MainForm] Session save failed: {ex.Message}");
+                }
+
+                Close(); // Re-trigger close, this time _sessionSaveCompleted is true so it proceeds
+                return;
+            }
+
             // Freeze all terminal splitter layouts FIRST to prevent bogus ratio saves
             // during the shutdown resize/layout cascade
             foreach (var doc in _dockPanel.Documents.OfType<TerminalDocument>())
@@ -3159,6 +3442,20 @@ namespace MultiTerminal
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop webhook service: {ex.Message}");
+                }
+            }
+
+            // Stop Oracle advisory agent — close terminal first, then dispose service
+            if (_oracleService != null)
+            {
+                try
+                {
+                    CloseOracleTerminal();
+                    _oracleService.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to dispose Oracle: {ex.Message}");
                 }
             }
 
@@ -3479,6 +3776,9 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine("[RestoreSession] Invoking LoadingComplete event...");
             LoadingComplete?.Invoke(this, EventArgs.Empty);
             System.Diagnostics.Trace.WriteLine("[RestoreSession] LoadingComplete event invoked");
+
+            // Refresh dashboard with project info now that session is restored
+            RefreshDashboardProjectInfo();
 
             // Index sessions for vector search (session sync is handled by
             // SessionLineageService in InitializeMcpServerAndChatPanel — the old
@@ -4370,6 +4670,195 @@ namespace MultiTerminal
         }
 
         /// <summary>
+        /// Initialize the Oracle advisory agent service.
+        /// Registers "Oracle" as a terminal (always visible in terminal list) but doesn't
+        /// spawn the terminal until someone sends Oracle a message (on-demand lifecycle).
+        /// Oracle runs as a real ConPTY terminal — same as every other agent — so auth,
+        /// channels, and MCP tools all work through the standard path.
+        /// </summary>
+        private void InitializeOracle()
+        {
+            try
+            {
+                // Register Oracle as a terminal so it's always visible
+                string oracleDocId = $"oracle-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+
+                _oracleService = new OracleService(
+                    log: (source, msg) => _debugLogService?.Info(source, msg));
+                var regResult = _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, oracleDocId);
+                _oracleTerminalId = regResult?.TerminalId ?? oracleDocId;
+
+                // On idle timeout, close Oracle's terminal from the UI thread
+                // Guard: timer callback may fire during app shutdown after form is disposed
+                _oracleService.IdleTimeout += (s, e) =>
+                {
+                    if (IsDisposed) return;
+                    if (InvokeRequired)
+                        BeginInvoke(new Action(CloseOracleTerminal));
+                    else
+                        CloseOracleTerminal();
+                };
+
+                _debugLogService?.Info("MainForm", $"Oracle registered as terminal '{OracleService.OracleName}' (ID: {_oracleTerminalId}) — on-demand, will spawn on first message");
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"Failed to initialize Oracle: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Create and dock Oracle's ConPTY terminal. Called on-demand when Oracle
+        /// receives its first message (or after idle shutdown + new message).
+        /// </summary>
+        private void CreateOracleTerminal()
+        {
+            if (_oracleTerminalDoc != null)
+                return; // Already running
+
+            try
+            {
+                var doc = new Docking.TerminalDocument();
+                doc.Terminal.SetDebugLogService(_debugLogService);
+                doc.SetDebugLogService(_debugLogService);
+                doc.SetTheme(_currentTheme);
+                doc.SetMessageBroker(_mcpServer?.Broker);
+
+                string autoRunCommand = _oracleService.BuildAutoRunCommand();
+                string workingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+                doc.StartTerminal(
+                    workingDirectory: workingDir,
+                    terminalName: OracleService.OracleName,
+                    autoRunCommand: autoRunCommand);
+
+                // Dock alongside other terminal tabs
+                doc.Show(_dockPanel, DockState.Document);
+
+                // Clean up when Oracle's terminal exits (idle timeout, manual close, or Claude exit)
+                // Guard: CloseOracleTerminal may have already nulled the reference
+                doc.TerminalExited += (s, e) =>
+                {
+                    if (_oracleTerminalDoc == null) return;
+                    _oracleTerminalDoc = null;
+                    _oracleService.NotifyStopped();
+                    _debugLogService?.Info("MainForm", "Oracle terminal exited");
+                };
+
+                _oracleTerminalDoc = doc;
+                _oracleService.NotifyStarted();
+                _debugLogService?.Info("MainForm", "Oracle terminal created and docked");
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"Failed to create Oracle terminal: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Close Oracle's terminal (called on idle timeout or app shutdown).
+        /// </summary>
+        private void CloseOracleTerminal()
+        {
+            try
+            {
+                var doc = _oracleTerminalDoc;
+                if (doc != null)
+                {
+                    _oracleTerminalDoc = null;
+                    _oracleService?.NotifyStopped();
+                    doc.Close();
+                    _debugLogService?.Info("MainForm", "Oracle terminal closed");
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"Failed to close Oracle terminal: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Spawn Oracle's terminal and deliver a queued message after the channel is ready.
+        /// Called from OnMcpMessageDelivery when Oracle isn't running and a message arrives.
+        /// </summary>
+        private async System.Threading.Tasks.Task SpawnOracleAndDeliverAsync(string messageId, string sender, string message)
+        {
+            try
+            {
+                // Create Oracle terminal on UI thread
+                if (InvokeRequired)
+                    Invoke(new Action(CreateOracleTerminal));
+                else
+                    CreateOracleTerminal();
+
+                // Wait for Oracle's channel server to register its port with the broker.
+                // IMPORTANT: Verify via /health that the port actually belongs to Oracle,
+                // not another terminal — registration races can cause stale ports.
+                for (int i = 0; i < 120; i++) // Up to 60 seconds
+                {
+                    await System.Threading.Tasks.Task.Delay(500);
+                    var oracleTerminal = _mcpServer?.Broker?.GetTerminal(OracleService.OracleName);
+                    if (oracleTerminal?.ChannelPort > 0)
+                    {
+                        int port = oracleTerminal.ChannelPort.Value;
+
+                        // Verify the port belongs to Oracle by checking the channel health endpoint
+                        bool portVerified = false;
+                        try
+                        {
+                            var healthResponse = await _channelHttpClient.GetAsync($"http://127.0.0.1:{port}/health");
+                            if (healthResponse.IsSuccessStatusCode)
+                            {
+                                var healthJson = await healthResponse.Content.ReadAsStringAsync();
+                                var healthDoc = System.Text.Json.JsonDocument.Parse(healthJson);
+                                var agentName = healthDoc.RootElement.GetProperty("agent").GetString();
+                                portVerified = string.Equals(agentName, OracleService.OracleName, StringComparison.OrdinalIgnoreCase);
+                                if (!portVerified)
+                                {
+                                    _debugLogService?.Warning("MainForm", $"Oracle port {port} health check returned agent '{agentName}' — wrong terminal, will keep polling");
+                                    continue; // Port belongs to someone else, keep waiting
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            continue; // Port not responding yet, keep waiting
+                        }
+
+                        if (!portVerified)
+                            continue;
+
+                        // Channel verified as Oracle — deliver message
+                        bool delivered = await DeliverViaChannel(port, sender, message, "normal");
+                        if (delivered)
+                        {
+                            lock (_deduplicationLock)
+                            {
+                                _deliveredMessageCache[messageId] = DateTime.Now;
+                            }
+                            _debugLogService?.Info("MainForm", $"Delivered queued message {messageId} to Oracle via channel (port {port}, verified)");
+                        }
+                        else
+                        {
+                            _debugLogService?.Warning("MainForm", $"Channel delivery failed for queued Oracle message {messageId}");
+                        }
+                        return;
+                    }
+                }
+
+                _debugLogService?.Warning("MainForm", $"Oracle channel did not register in 60s — message {messageId} from {sender} was NOT delivered");
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"SpawnOracleAndDeliverAsync failed: {ex.Message}");
+            }
+            finally
+            {
+                _oracleSpawning = false;
+            }
+        }
+
+        /// <summary>
         /// Inject a nudge prompt into a terminal's ConPTY input to wake it up.
         /// This triggers the UserPromptSubmit hook which runs inbox-check-hook.js.
         /// </summary>
@@ -5176,6 +5665,7 @@ namespace MultiTerminal
                 _mcpServer?.Dispose();
                 _mcpServer = null;
                 _dockPanel?.Dispose();
+                _dashboardHeader?.Dispose();
                 _toolStrip?.Dispose();
             }
             base.Dispose(disposing);

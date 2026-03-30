@@ -6,12 +6,9 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// Builds the Claude Code CLI launch command for a project.
-    /// Constructs the full 'claude' command string with MT config flags (--add-dir, --settings, --mcp-config)
-    /// derived dynamically from the assembly location. Returns a LaunchCommand object
-    /// consumed by TerminalDocument to start ConPtyTerminal with the correct working directory
-    /// and auto-run command.
-    /// MCP servers are loaded from %APPDATA%\multiterminal\.mcp.json via --mcp-config flag,
-    /// giving MultiTerminal full control over MCP registration (not ~/.claude.json).
+    /// Uses --plugin-dir to load the MultiTerminal plugin (hooks, skills, agents, CLAUDE.md)
+    /// and --mcp-config for centralized MCP server registration.
+    /// The MT plugin is NOT enabled globally — only MT-spawned terminals get it via --plugin-dir.
     /// </summary>
     public static class LaunchCommandBuilder
     {
@@ -22,21 +19,15 @@ namespace MultiTerminal.Services
         /// Builds the Claude Code launch command for the given project.
         /// </summary>
         /// <param name="project">Project to launch Claude Code for. May be null (launches in user profile dir).</param>
-        /// <param name="terminalName">Optional terminal display name (passed as env var by ConPtyTerminal).</param>
-        /// <param name="docId">Optional terminal doc ID (passed as env var by ConPtyTerminal).</param>
         /// <returns>LaunchCommand with WorkingDirectory and AutoRunCommand ready for ConPtyTerminal.Start().</returns>
         public static LaunchCommand BuildClaudeCommand(Models.Project project)
         {
-            string mtSourcePath = GetMtSourcePath();
             string workingDir = ResolveWorkingDirectory(project);
 
-            // Build the claude CLI flags
-            string flags = BuildFlags(mtSourcePath);
+            // Build the claude CLI flags (just --mcp-config now — plugin handles hooks, CLAUDE.md, agents, skills)
+            string flags = BuildFlags();
 
-            // The autoRunCommand is injected into a PowerShell -Command "..." string by ConPtyTerminal.
-            // Single quotes in flag values must be doubled ('') because they appear inside PS single-quoted strings.
-            // E.g.: claude --add-dir 'C:\path\to\dir' --settings 'C:\path\.claude\settings.local.json' ...
-            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
+            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions --dangerously-load-development-channels server:multiterminal-channel; exit";
 
             return new LaunchCommand
             {
@@ -47,28 +38,21 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Builds the optional CLI flags string. Returns empty string if MT source path is unavailable.
-        /// Skips --settings flag if the file doesn't exist on disk.
-        /// All path values have single quotes doubled for PowerShell single-quoted string safety.
-        /// Adds --mcp-config pointing to %APPDATA%\multiterminal\.mcp.json for centralized MCP registration.
+        /// Builds the CLI flags string.
+        /// --plugin-dir loads the MultiTerminal plugin for this session.
+        /// --mcp-config loads centralized MCP server registration.
         /// </summary>
-        private static string BuildFlags(string mtSourcePath)
+        private static string BuildFlags()
         {
-            if (string.IsNullOrEmpty(mtSourcePath))
-                return string.Empty;
-
             var flags = string.Empty;
 
-            // --add-dir: Adds MT's CLAUDE.md alongside the project's own CLAUDE.md
-            string safeMtPath = EscapeSingleQuotes(mtSourcePath);
-            flags += $" --add-dir '{safeMtPath}'";
-
-            // --settings: MT's local settings (only if file exists)
-            string settingsPath = Path.Combine(mtSourcePath, ".claude", "settings.local.json");
-            if (File.Exists(settingsPath))
+            // --plugin-dir: Load the MultiTerminal plugin (hooks, skills, agents, CLAUDE.md)
+            // The MT plugin is NOT in global enabledPlugins — only MT terminals get it.
+            string pluginDir = GetMtPluginPath();
+            if (pluginDir != null)
             {
-                string safeSettingsPath = EscapeSingleQuotes(settingsPath);
-                flags += $" --settings '{safeSettingsPath}'";
+                string safePluginDir = EscapeSingleQuotes(pluginDir);
+                flags += $" --plugin-dir '{safePluginDir}'";
             }
 
             // --mcp-config: Centralized MCP server config at %APPDATA%\multiterminal\.mcp.json
@@ -80,6 +64,18 @@ namespace MultiTerminal.Services
             }
 
             return flags;
+        }
+
+        /// <summary>
+        /// Returns the path to the MultiTerminal plugin directory if it exists.
+        /// Location: ~/.claude/plugins/marketplaces/multiterminal-marketplace/plugins/multiterminal
+        /// </summary>
+        private static string GetMtPluginPath()
+        {
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string pluginDir = Path.Combine(userProfile, ".claude", "plugins", "marketplaces",
+                "multiterminal-marketplace", "plugins", "multiterminal");
+            return Directory.Exists(pluginDir) ? pluginDir : null;
         }
 
         /// <summary>
@@ -114,6 +110,7 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Finds the MT source directory by walking up from the assembly location
         /// until a directory containing .claude/CLAUDE.md is found.
+        /// Used by TerminalSpawner to locate multiterminal-rules.md.
         /// Caches the result after first successful discovery.
         /// </summary>
         public static string GetMtSourcePath()
@@ -144,7 +141,6 @@ namespace MultiTerminal.Services
                 System.Diagnostics.Debug.WriteLine($"[LaunchCommandBuilder] Failed to locate MT source path: {ex.Message}");
             }
 
-            // Return null — BuildFlags will skip optional flags gracefully
             return null;
         }
 
