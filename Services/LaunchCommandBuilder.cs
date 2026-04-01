@@ -27,7 +27,7 @@ namespace MultiTerminal.Services
             // Build the claude CLI flags (just --mcp-config now — plugin handles hooks, CLAUDE.md, agents, skills)
             string flags = BuildFlags();
 
-            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions --dangerously-load-development-channels server:multiterminal-channel; exit";
+            string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
 
             return new LaunchCommand
             {
@@ -63,6 +63,15 @@ namespace MultiTerminal.Services
                 flags += $" --mcp-config '{safeMcpPath}'";
             }
 
+            // --dangerously-load-development-channels: Authorize the plugin's channel server.
+            // Plugins loaded via --plugin-dir get the sentinel marketplace "inline" (not the
+            // actual marketplace directory name). Claude Code sets source to "name@inline".
+            if (pluginDir != null && Directory.Exists(Path.Combine(pluginDir, "server")))
+            {
+                string pluginName = Path.GetFileName(pluginDir);
+                flags += $" --dangerously-load-development-channels plugin:{pluginName}@inline";
+            }
+
             return flags;
         }
 
@@ -70,7 +79,7 @@ namespace MultiTerminal.Services
         /// Returns the path to the MultiTerminal plugin directory if it exists.
         /// Location: ~/.claude/plugins/marketplaces/multiterminal-marketplace/plugins/multiterminal
         /// </summary>
-        private static string GetMtPluginPath()
+        public static string GetMtPluginPath()
         {
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             string pluginDir = Path.Combine(userProfile, ".claude", "plugins", "marketplaces",
