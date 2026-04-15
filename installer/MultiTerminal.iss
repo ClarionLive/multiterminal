@@ -500,6 +500,30 @@ begin
     Result := '--mcps=none';
 end;
 
+// Install Claude Code via winget, then run 'claude --version' to initialize config
+function InstallClaudeCode: Boolean;
+var
+  ResultCode: Integer;
+  ClaudeJsonPath: String;
+begin
+  Result := False;
+
+  // Run winget install
+  if not Exec('cmd', '/c winget install -e --id Anthropic.ClaudeCode --accept-source-agreements --accept-package-agreements', '',
+              SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+
+  if ResultCode <> 0 then
+    Exit;
+
+  // Run 'claude --version' to initialize ~/.claude.json
+  Exec('cmd', '/c claude --version', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // Check if config file now exists
+  ClaudeJsonPath := ExpandConstant('{%USERPROFILE}\.claude.json');
+  Result := FileExists(ClaudeJsonPath);
+end;
+
 // Check if Claude Code CLI is installed (required for MCP integration)
 function IsClaudeCodeInstalled: Boolean;
 var
@@ -567,16 +591,37 @@ begin
   // Check Claude Code (required - MCP servers need it)
   if not IsClaudeCodeInstalled then
   begin
-    MsgBox('Claude Code was not detected on this system.' + #13#10 + #13#10 +
-           'Claude Code must be installed and run at least once before' + #13#10 +
-           'installing MultiTerminal. The MCP servers and hooks require' + #13#10 +
-           'Claude Code''s configuration file (~/.claude.json) to exist.' + #13#10 + #13#10 +
-           'Please install Claude Code first:' + #13#10 +
-           '  npm install -g @anthropic-ai/claude-code' + #13#10 + #13#10 +
-           'Then run "claude" once to initialize, and re-run this installer.',
-           mbError, MB_OK);
-    Result := False;
-    Exit;
+    if MsgBox('Claude Code was not detected on this system.' + #13#10 + #13#10 +
+              'MultiTerminal requires Claude Code for MCP servers and hooks.' + #13#10 + #13#10 +
+              'Would you like to install Claude Code now using winget?' + #13#10 +
+              '(This requires an internet connection and may take a minute)',
+              mbConfirmation, MB_YESNO) = IDYES then
+    begin
+      // Install Claude Code via winget
+      if not InstallClaudeCode then
+      begin
+        MsgBox('Claude Code installation did not complete successfully.' + #13#10 + #13#10 +
+               'You can install it manually later:' + #13#10 +
+               '  winget install -e --id Anthropic.ClaudeCode' + #13#10 + #13#10 +
+               'Then run "claude" once to initialize.' + #13#10 + #13#10 +
+               'Installation will continue, but Claude Code integration' + #13#10 +
+               'will not work until Claude Code is installed and run once.',
+               mbInformation, MB_OK);
+      end;
+    end
+    else
+    begin
+      if MsgBox('Continue without Claude Code?' + #13#10 + #13#10 +
+                'MultiTerminal will install, but Claude Code integration' + #13#10 +
+                '(MCP servers, hooks, skills) will not work until you install' + #13#10 +
+                'Claude Code and run it once.' + #13#10 + #13#10 +
+                'To install later:  winget install -e --id Anthropic.ClaudeCode',
+                mbConfirmation, MB_YESNO) = IDNO then
+      begin
+        Result := False;
+        Exit;
+      end;
+    end;
   end;
 
   // Check Node.js

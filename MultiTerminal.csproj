@@ -41,6 +41,8 @@
     <PackageReference Include="DockPanelSuite" Version="3.1.1" />
     <PackageReference Include="DockPanelSuite.ThemeVS2015" Version="3.1.1" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3800.47" />
+    <PackageReference Include="SmartComponents.LocalEmbeddings" Version="0.1.0-preview10148" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.119" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
@@ -89,6 +91,27 @@
     <Content Include="FilePreviewPanel\file-preview.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="DashboardHeader\dashboard.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Controls\HudDashboardPanel\hud-dashboard.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Controls\HudNotesPanel\hud-notes.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Controls\HudKnowledgePanel\hud-knowledge.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Controls\HudSessionsPanel\hud-sessions.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="shared\markdown-renderer.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="shared\markdown-renderer.css">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
@@ -100,8 +123,8 @@
     </Content>
   </ItemGroup>
 
-  <!-- Auto-copy build output to staged/ folder after every Release build -->
-  <Target Name="CopyToStaged" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+  <!-- Auto-copy build output to staged/ folder after every build (any configuration) -->
+  <Target Name="CopyToStaged" AfterTargets="Build">
     <Message Importance="high" Text="Copying build output to staged/ ..." />
     <Exec Command="robocopy $(OutputPath) $(ProjectDir)staged /MIR /XD runtimes /NFL /NDL /NJH /NJS" IgnoreExitCode="true" />
     <Message Importance="high" Text="Build output copied to staged/" />

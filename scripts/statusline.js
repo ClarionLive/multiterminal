@@ -25,6 +25,45 @@ process.stdin.on('end', () => {
         const model = normalizeModel(data.model);
         const contextPct = data.context_window?.used_percentage ?? null;
 
+        // Extract rate limits for quota pacing (Claude Code v2.1.80+)
+        const rateLimits = data.rate_limits || null;
+        let quota5h = null, quota7d = null, pace5h = null, pace7d = null;
+        let resetIn5h = null;
+
+        if (rateLimits) {
+            if (rateLimits.five_hour) {
+                quota5h = Math.floor(rateLimits.five_hour.used_percentage ?? 0);
+                const resetsAt = rateLimits.five_hour.resets_at;
+                if (resetsAt) {
+                    const minutesRemaining = Math.max(0, Math.floor((new Date(resetsAt) - Date.now()) / 60000));
+                    const windowMinutes = 300; // 5 hours
+                    if (minutesRemaining <= windowMinutes) {
+                        pace5h = Math.round(((windowMinutes - minutesRemaining) * 100 / windowMinutes) - quota5h);
+                    }
+                    // Reset countdown (e.g. "2h 15m")
+                    if (minutesRemaining > 0) {
+                        const h = Math.floor(minutesRemaining / 60);
+                        const m = minutesRemaining % 60;
+                        resetIn5h = h > 0 ? `${h}h ${m}m` : `${m}m`;
+                    }
+                }
+            }
+            if (rateLimits.seven_day) {
+                quota7d = Math.floor(rateLimits.seven_day.used_percentage ?? 0);
+                const resetsAt = rateLimits.seven_day.resets_at;
+                if (resetsAt) {
+                    const minutesRemaining = Math.max(0, Math.floor((new Date(resetsAt) - Date.now()) / 60000));
+                    const windowMinutes = 10080; // 7 days
+                    if (minutesRemaining <= windowMinutes) {
+                        pace7d = Math.round(((windowMinutes - minutesRemaining) * 100 / windowMinutes) - quota7d);
+                    }
+                }
+            }
+        }
+
+        // Off-peak detection: peak = UTC 12:00-18:00 weekdays (5 AM-11 AM Pacific)
+        const isOffPeak = getIsOffPeak();
+
         // Query git status from the working directory
         const git = getGitInfo(cwd);
 
@@ -34,6 +73,12 @@ process.stdin.on('end', () => {
             folder: cwd,
             folderName: cwd ? path.basename(cwd) : '',
             contextPct,
+            quota5h,
+            quota7d,
+            pace5h,
+            pace7d,
+            resetIn5h,
+            isOffPeak,
             gitBranch: git.branch,
             gitStatus: git.status,
             gitDirty: git.dirty,
@@ -43,6 +88,33 @@ process.stdin.on('end', () => {
         // Write to temp file keyed by terminal name
         const outPath = path.join(os.tmpdir(), `mt-statusline-${terminalName}.json`);
         fs.writeFileSync(outPath, JSON.stringify(output), 'utf8');
+
+        // Write account-level quota data to a shared file so all terminals
+        // see the same 5h/7d usage stats. Only overwrite if our data is newer.
+        if (rateLimits) {
+            const sharedPath = path.join(os.tmpdir(), 'mt-statusline-quota.json');
+            const sharedData = {
+                quota5h, quota7d, pace5h, pace7d, resetIn5h, isOffPeak,
+                timestamp: Date.now(),
+                updatedBy: terminalName
+            };
+            try {
+                // Read existing shared file to check timestamp
+                let shouldWrite = true;
+                if (fs.existsSync(sharedPath)) {
+                    const existing = JSON.parse(fs.readFileSync(sharedPath, 'utf8'));
+                    // Only skip if existing data is newer (within 500ms tolerance for near-simultaneous writes)
+                    if (existing.timestamp && existing.timestamp > sharedData.timestamp + 500) {
+                        shouldWrite = false;
+                    }
+                }
+                if (shouldWrite) {
+                    fs.writeFileSync(sharedPath, JSON.stringify(sharedData), 'utf8');
+                }
+            } catch (e) {
+                // Silently fail — shared file is best-effort
+            }
+        }
     } catch (e) {
         // Silently fail — don't break Claude Code
     }
@@ -55,6 +127,14 @@ function normalizeModel(model) {
     name = name.replace(/^claude-/, '').replace(/-\d{8}$/, '');
     if (name.length > 12) name = name.substring(0, 12);
     return name;
+}
+
+function getIsOffPeak() {
+    const now = new Date();
+    const day = now.getUTCDay(); // 0=Sun, 6=Sat
+    if (day === 0 || day === 6) return true; // weekends are off-peak
+    const hour = now.getUTCHours();
+    return hour < 12 || hour >= 18; // peak = UTC 12:00-18:00
 }
 
 function getGitInfo(cwd) {

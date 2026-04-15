@@ -220,6 +220,7 @@ namespace MultiTerminal.Controls
         {
             // Reset Claude Code detection so the event fires again for this new session
             _claudeCodeDetectedThisSession = false;
+            _devChannelWarningHandled = false;
             _outputBuffer.Clear();
 
             // Use size from renderer
@@ -588,13 +589,18 @@ namespace MultiTerminal.Controls
         public event EventHandler ClaudeCodeDetected;
 
         private bool _claudeCodeDetectedThisSession = false;
+        private bool _devChannelWarningHandled = false;
         private StringBuilder _outputBuffer = new StringBuilder();
 
         // Slash command interception: buffer user input to detect commands like /clear
         private readonly StringBuilder _inputLineBuffer = new StringBuilder();
+        private bool _inEscapeSequence; // true immediately after ESC, before we know the sequence type
+        private bool _inCsiSequence;    // true inside a CSI sequence (ESC[ ... final_byte)
 
         /// <summary>
         /// Buffers user input characters and checks for slash commands on Enter.
+        /// Skips CSI escape sequences (e.g. mouse tracking: ESC[&lt;35;27;15M) so they
+        /// don't pollute the buffer and break slash command matching.
         /// </summary>
         private void BufferInputForSlashDetection(byte[] data)
         {
@@ -603,6 +609,26 @@ namespace MultiTerminal.Controls
                 for (int i = 0; i < data.Length; i++)
                 {
                     byte b = data[i];
+
+                    // While inside a CSI sequence (ESC[...), consume until final byte (0x40-0x7E)
+                    if (_inCsiSequence)
+                    {
+                        if (b >= 0x40 && b <= 0x7E) // Final byte terminates CSI
+                            _inCsiSequence = false;
+                        continue;
+                    }
+
+                    // After ESC, determine sequence type
+                    if (_inEscapeSequence)
+                    {
+                        _inEscapeSequence = false;
+                        if (b == 0x5B) // '[' — CSI introducer, enter CSI mode
+                        {
+                            _inCsiSequence = true;
+                            continue;
+                        }
+                        continue; // Two-byte escape (e.g., ESC O), just skip
+                    }
 
                     if (b == 0x0D) // Enter (CR)
                     {
@@ -619,7 +645,12 @@ namespace MultiTerminal.Controls
                         if (_inputLineBuffer.Length > 0)
                             _inputLineBuffer.Length--;
                     }
-                    else if (b == 0x03 || b == 0x1B) // Ctrl+C or ESC — reset buffer
+                    else if (b == 0x1B) // ESC — start of escape sequence
+                    {
+                        _inEscapeSequence = true;
+                        _inputLineBuffer.Clear();
+                    }
+                    else if (b == 0x03) // Ctrl+C — reset buffer
                     {
                         _inputLineBuffer.Clear();
                     }
@@ -639,19 +670,81 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Called when user types /clear. Waits for the CLI to process it, then injects /project-management.
+        /// Called when user types /clear. Flushes session memory, then re-injects session-start.
         /// </summary>
         private async void OnSlashClearDetected()
         {
-            LogTrace("Detected /clear — will inject /project-management after delay");
+            LogTrace("Detected /clear — flushing session memory and re-injecting startup");
+
+            // Flush session memory for this project (old session file is now frozen)
+            FlushSessionMemoryAsync();
+
+            // Also sync the old session into session_lineage immediately
+            // (don't wait 30 seconds for the periodic timer)
+            SyncSessionLineageAsync();
 
             // Wait for Claude Code to process /clear (it's instant, but give the UI a moment)
             await Task.Delay(1500);
 
             if (_isDisposed || _terminal == null || !_terminal.IsRunning) return;
 
-            LogTrace("Injecting /project-management after /clear");
-            TypeInput("/project-management", "cr", 20);
+            LogTrace("Injecting 'initializing...' after /clear to trigger session-start");
+            TypeInput("initializing...", "cr", 20);
+        }
+
+        /// <summary>
+        /// Calls the REST API to index session memory for this terminal's project.
+        /// Fire-and-forget — does not block the /clear flow.
+        /// </summary>
+        private async void FlushSessionMemoryAsync()
+        {
+            if (string.IsNullOrEmpty(_pendingWorkingDir)) return;
+
+            try
+            {
+                using var client = new System.Net.Http.HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(30);
+                var json = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    projectPath = _pendingWorkingDir,
+                    terminalName = _pendingTerminalName ?? "Unknown"
+                });
+                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                var response = await client.PostAsync("http://localhost:5050/api/session-memory/index-project", content);
+                LogTrace($"Session memory flush after /clear: {(int)response.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"Session memory flush failed (non-fatal): {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Calls the REST API to sync session lineage for this terminal's project.
+        /// Fire-and-forget — ensures the previous session's lineage record is imported
+        /// before the new session's session-start skill queries for it.
+        /// </summary>
+        private async void SyncSessionLineageAsync()
+        {
+            if (string.IsNullOrEmpty(_pendingWorkingDir)) return;
+
+            try
+            {
+                using var client = new System.Net.Http.HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(30);
+                var json = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    projectPath = _pendingWorkingDir,
+                    terminalName = _pendingTerminalName ?? "Unknown"
+                });
+                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                var response = await client.PostAsync("http://localhost:5050/api/session-lineage/sync-project", content);
+                LogTrace($"Session lineage sync after /clear: {(int)response.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"Session lineage sync failed (non-fatal): {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -697,6 +790,31 @@ namespace MultiTerminal.Controls
                         _claudeCodeDetectedThisSession = true;
                         _outputBuffer.Clear();
                         ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
+                    }
+                }
+                catch { }
+            }
+
+            // Auto-accept the dev channel warning dialog by sending "1".
+            // The dialog shows numbered options; "1" selects
+            // "I am using this for local development" without needing Enter.
+            if (!_devChannelWarningHandled)
+            {
+                try
+                {
+                    string text = System.Text.Encoding.UTF8.GetString(data);
+                    if (text.Contains("Loading development channels") || text.Contains("Enter to confirm"))
+                    {
+                        _devChannelWarningHandled = true;
+                        // Small delay to ensure the dialog is fully rendered before sending input.
+                        // Uses TypeInput via xterm.js — raw pipe Write("\r") doesn't work
+                        // with Claude Code's interactive prompts.
+                        System.Threading.Tasks.Task.Run(async () =>
+                        {
+                            await System.Threading.Tasks.Task.Delay(500);
+                            if (!_isDisposed)
+                                BeginInvoke(new Action(() => TypeInput("1", "none")));
+                        });
                     }
                 }
                 catch { }

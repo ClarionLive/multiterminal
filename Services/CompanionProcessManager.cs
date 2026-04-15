@@ -237,10 +237,10 @@ namespace MultiTerminal.Services
                 {
                     if (!kvp.Value.HasExited)
                     {
-                        Debug.WriteLine($"[CompanionManager] Stopping '{kvp.Key}' (PID: {kvp.Value.Id})...");
+                        Debug.WriteLine($"[CompanionManager] Killing '{kvp.Key}' (PID: {kvp.Value.Id})...");
                         kvp.Value.Kill();
-                        kvp.Value.WaitForExit(3000);
-                        Debug.WriteLine($"[CompanionManager] '{kvp.Key}' stopped.");
+                        // Don't WaitForExit — Kill() sends the signal, process exit
+                        // failsafe handles cleanup. This was blocking 3s per companion.
                     }
                 }
                 catch (Exception ex)

@@ -71,7 +71,8 @@ namespace MultiTerminal.MCPServer.Services
             {
                 _cancellationTokenSource.Cancel();
                 _listener.Stop();
-                _listenerTask?.Wait(TimeSpan.FromSeconds(2));
+                // Don't block waiting for the listener task — cancellation + Stop()
+                // is sufficient. The process exit failsafe handles any stragglers.
                 System.Diagnostics.Trace.WriteLine("[HttpWebhookService] Stopped");
             }
         }

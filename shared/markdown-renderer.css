@@ -1,0 +1,229 @@
+/*
+ * MultiTerminal Shared Markdown Renderer — Styles
+ *
+ * Works with both dark (default) and light themes.
+ * Host pages toggle light mode via body.light class.
+ *
+ * Shiki-rendered code blocks carry inline styles and need minimal CSS.
+ * These styles cover the fallback code blocks and general markdown elements.
+ */
+
+/* ── CSS Variables (defaults — host page can override) ── */
+
+:root {
+    --md-bg-code: #1e1e30;
+    --md-bg-code-inline: rgba(130, 140, 180, 0.15);
+    --md-border-code: #2a2a4a;
+    --md-text: #e0e0e0;
+    --md-text-secondary: #a0a0b8;
+    --md-text-muted: #707088;
+    --md-accent: #89b4fa;
+    --md-blockquote-border: #89b4fa;
+    --md-blockquote-bg: rgba(137, 180, 250, 0.06);
+    --md-hr-color: #2a2a4a;
+    --md-table-border: #2a2a4a;
+    --md-table-stripe: rgba(255, 255, 255, 0.03);
+    --md-link: #89b4fa;
+}
+
+body.light {
+    --md-bg-code: #f0f0f4;
+    --md-bg-code-inline: rgba(100, 100, 140, 0.1);
+    --md-border-code: #dcdcdc;
+    --md-text: #333333;
+    --md-text-secondary: #666666;
+    --md-text-muted: #999999;
+    --md-accent: #1e66f5;
+    --md-blockquote-border: #1e66f5;
+    --md-blockquote-bg: rgba(30, 102, 245, 0.05);
+    --md-hr-color: #dcdcdc;
+    --md-table-border: #dcdcdc;
+    --md-table-stripe: rgba(0, 0, 0, 0.025);
+    --md-link: #1e66f5;
+}
+
+/* ── Code blocks (fallback — Shiki uses inline styles) ── */
+
+pre.md-code-block {
+    background: var(--md-bg-code);
+    border: 1px solid var(--md-border-code);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--md-text);
+}
+
+pre.md-code-block code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    color: inherit;
+}
+
+/* Shiki-rendered blocks: normalise padding/margin to match */
+pre.shiki {
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+/* ── Inline code ── */
+
+code.md-inline-code {
+    background: var(--md-bg-code-inline);
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-size: 0.9em;
+    color: var(--md-text);
+}
+
+/* ── Headings (scoped to .md-content) ── */
+
+.md-content h1, .md-content h2, .md-content h3, .md-content h4 {
+    margin-top: 14px;
+    margin-bottom: 6px;
+    color: var(--md-text);
+    line-height: 1.3;
+}
+
+.md-content h1 { font-size: 1.5em; }
+.md-content h2 { font-size: 1.3em; }
+.md-content h3 { font-size: 1.15em; }
+.md-content h4 { font-size: 1.05em; }
+
+/* ── Blockquotes ── */
+
+.md-content blockquote {
+    border-left: 3px solid var(--md-blockquote-border);
+    background: var(--md-blockquote-bg);
+    margin: 8px 0;
+    padding: 6px 12px;
+    color: var(--md-text-secondary);
+    border-radius: 0 4px 4px 0;
+}
+
+.md-content blockquote p { margin: 2px 0; }
+
+/* ── Lists ── */
+
+.md-content ul, .md-content ol {
+    margin: 6px 0;
+    padding-left: 22px;
+}
+
+.md-content li {
+    margin: 2px 0;
+    line-height: 1.5;
+}
+
+/* ── Links ── */
+
+.md-content a {
+    color: var(--md-link);
+    text-decoration: none;
+}
+
+.md-content a:hover {
+    text-decoration: underline;
+}
+
+/* ── Horizontal rules ── */
+
+.md-content hr {
+    border: none;
+    border-top: 1px solid var(--md-hr-color);
+    margin: 12px 0;
+}
+
+/* ── Tables ── */
+
+.md-content table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    width: 100%;
+    font-size: 12px;
+}
+
+.md-content th, .md-content td {
+    border: 1px solid var(--md-table-border);
+    padding: 5px 10px;
+    text-align: left;
+}
+
+.md-content th {
+    background: var(--md-bg-code);
+    font-weight: 600;
+}
+
+.md-content tr:nth-child(even) {
+    background: var(--md-table-stripe);
+}
+
+/* ── Paragraphs ── */
+
+.md-content p {
+    margin: 4px 0;
+    line-height: 1.5;
+}
+
+/* ── Strong / Emphasis ── */
+
+.md-content strong { font-weight: 600; }
+.md-content em { font-style: italic; }
+
+/* ── Mermaid diagrams ── */
+
+.mermaid {
+    margin: 10px 0;
+    text-align: center;
+}
+
+.mermaid svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.mermaid-error {
+    border: 1px dashed var(--md-hr-color);
+    border-radius: 6px;
+    padding: 8px;
+}
+
+.mermaid-error-msg {
+    font-size: 10px;
+    color: var(--md-text-muted);
+    margin-top: 4px;
+    text-align: center;
+    font-style: italic;
+}
+
+/* ── Scrollbar (for code blocks) ── */
+
+.md-content pre::-webkit-scrollbar,
+pre.md-code-block::-webkit-scrollbar,
+pre.shiki::-webkit-scrollbar {
+    height: 4px;
+}
+
+.md-content pre::-webkit-scrollbar-track,
+pre.md-code-block::-webkit-scrollbar-track,
+pre.shiki::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.md-content pre::-webkit-scrollbar-thumb,
+pre.md-code-block::-webkit-scrollbar-thumb,
+pre.shiki::-webkit-scrollbar-thumb {
+    background: var(--md-border-code);
+    border-radius: 2px;
+}

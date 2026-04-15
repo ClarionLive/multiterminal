@@ -11,7 +11,7 @@ VALUES
   (
     lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))),
     'Windows Bash: never use $env:VARNAME or %VARNAME% in Bash tool',
-    'When running commands in the Bash tool on Windows, environment variable syntax ($env:VARNAME or %VARNAME%) gets mangled. Hardcode known paths instead. APPDATA = C:\Users\John Hickey\AppData\Roaming. Always prefer Glob/Grep/Read over PowerShell for file operations. MCP location: C:\Users\John Hickey\AppData\Roaming\multiterminal\mcp',
+    'When running commands in the Bash tool on Windows, environment variable syntax ($env:VARNAME or %VARNAME%) gets mangled. Hardcode known paths instead. APPDATA = %APPDATA% (resolve at runtime). Always prefer Glob/Grep/Read over PowerShell for file operations. MCP location: %APPDATA%\multiterminal\mcp',
     'gotcha',
     NULL,
     'manual',
@@ -36,8 +36,8 @@ VALUES
   ),
   (
     lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))),
-    'Build & Deploy: Alice builds, John deploys — never copy to Deploy folder',
-    'Running app is at H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe (the live binary we are working on). Alice can run build_project to compile. Alice CANNOT copy files to Deploy. Deploy workflow (John only): John closes app -> runs deploy.ps1 -> relaunches MultiTerminal. After successful build, tell John to exit + run deploy.ps1 + relaunch.',
+    'Build & Deploy: agents build, owner deploys — never copy to Deploy folder',
+    'Running app is at the Deploy folder (the live binary). Agents can run build_project to compile. Agents CANNOT copy files to Deploy. Deploy workflow (owner only): owner closes app -> runs deploy.ps1 -> relaunches MultiTerminal. After successful build, tell the owner to exit + run deploy.ps1 + relaunch.',
     'pattern',
     NULL,
     'manual',
@@ -115,11 +115,11 @@ VALUES
   (
     lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))),
     'Testing workflow: complete ALL testing before any coding fixes',
-    'John''s testing workflow: set checklist items to testing, present ONE at a time, John replies pass or fail (with details if fail). Pass -> done. Fail -> coding with failure reason in notes. Complete ALL testing before ANY coding fixes. Fix all failed items (use subagents for parallel fixes), then re-test.',
+    'PM/tester testing workflow: set checklist items to testing, present ONE at a time, PM replies pass or fail (with details if fail). Pass -> done. Fail -> coding with failure reason in notes. Complete ALL testing before ANY coding fixes. Fix all failed items (use subagents for parallel fixes), then re-test.',
     'pattern',
     NULL,
     'manual',
-    'testing,workflow,john,checklist,kanban',
+    'testing,workflow,checklist,kanban',
     'confirmed',
     datetime('now'),
     datetime('now'),

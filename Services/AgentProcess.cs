@@ -95,12 +95,16 @@ namespace MultiTerminal.Services
         /// <param name="mcpConfigPath">Optional path to MCP config file (--mcp-config flag).</param>
         /// <param name="sessionId">Optional session ID to resume (--resume flag).</param>
         /// <param name="permissionMode">Optional permission mode (--permission-mode flag). Defaults to bypass for headless agents.</param>
+        /// <param name="extraArgs">Optional additional CLI arguments (e.g. --bare, --disallowedTools).</param>
+        /// <param name="environmentVars">Optional environment variables to set on the spawned process.</param>
         public async Task SpawnAsync(
             string prompt = null,
             string workingDir = null,
             string mcpConfigPath = null,
             string sessionId = null,
-            string permissionMode = "bypassPermissions")
+            string permissionMode = "bypassPermissions",
+            string[] extraArgs = null,
+            Dictionary<string, string> environmentVars = null)
         {
             if (_process != null)
                 throw new InvalidOperationException("AgentProcess is already running. Call StopAsync() first.");
@@ -136,6 +140,19 @@ namespace MultiTerminal.Services
                 args.Add(permissionMode);
             }
 
+            // Append any extra CLI arguments (e.g. --bare, --disallowedTools for Oracle)
+            if (extraArgs != null)
+            {
+                args.AddRange(extraArgs);
+            }
+
+            // Quote any argument that contains spaces (path safety for cmd.exe shell parsing)
+            for (int i = 0; i < args.Count; i++)
+            {
+                if (args[i].Contains(' ') && !args[i].StartsWith("\""))
+                    args[i] = $"\"{args[i]}\"";
+            }
+
             var psi = new ProcessStartInfo
             {
                 FileName = "cmd.exe",
@@ -149,6 +166,16 @@ namespace MultiTerminal.Services
                 StandardErrorEncoding = Encoding.UTF8,
                 WorkingDirectory = workingDir ?? Directory.GetCurrentDirectory()
             };
+
+            // Enable flicker-free alternate-screen renderer for Claude Code
+            psi.Environment["CLAUDE_CODE_NO_FLICKER"] = "1";
+
+            // Set any custom environment variables (e.g. MULTITERMINAL_NAME for channel identity)
+            if (environmentVars != null)
+            {
+                foreach (var kvp in environmentVars)
+                    psi.Environment[kvp.Key] = kvp.Value;
+            }
 
             _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
             _process.Exited += OnProcessExited;

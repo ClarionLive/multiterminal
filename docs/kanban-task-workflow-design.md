@@ -2,7 +2,7 @@
 
 > **Authors:** Diana (backend/architecture) + Alice (skill/UX)
 > **Date:** 2026-02-09
-> **Status:** Awaiting John's approval
+> **Status:** Awaiting PM approval
 
 ---
 
@@ -91,7 +91,7 @@ Following our "explore before coding" principle, we found significant infrastruc
         "text": "Added field to model + migration. Verified build clean. Field persists in DB."
       },
       {
-        "by": "John",
+        "by": "PM",
         "at": "2026-02-09T11:00Z",
         "transition": "testing → coding",
         "text": "Field shows in UI but truncates at 500 chars. Needs to handle longer text. Also add a scrollbar."
@@ -103,7 +103,7 @@ Following our "explore before coding" principle, we found significant infrastruc
         "text": "Changed to TEXT type (no length limit). Added scrollbar to UI panel. Verified with 2000+ char input."
       },
       {
-        "by": "John",
+        "by": "PM",
         "at": "2026-02-09T13:00Z",
         "transition": "testing → done",
         "text": "Works perfectly. Scrollbar is smooth, long text preserved."
@@ -133,7 +133,7 @@ pending ──→ coding ──→ testing ──→ done      │
               │            │                  │
               └────────────┘                  │
               (needs more work,               │
-               John adds notes)               │
+               PM/tester adds notes)               │
 ```
 
 #### Transitions and Ownership
@@ -142,12 +142,12 @@ pending ──→ coding ──→ testing ──→ done      │
 |------------|-----|----------|---------------|
 | `pending → coding` | Agent | — | Agent starts work |
 | `coding → testing` | Agent | **Notes required** | What was coded, what to test, what changed |
-| `testing → coding` | John | **Notes required** | What failed, improvement suggestions, what to fix |
-| `testing → done` | John | **Notes required** | Confirmation it works, any final comments |
+| `testing → coding` | PM/tester | **Notes required** | What failed, improvement suggestions, what to fix |
+| `testing → done` | PM/tester | **Notes required** | Confirmation it works, any final comments |
 
 **Rules:**
 - Agent can move: `pending → coding` and `coding → testing`
-- John can move: `testing → coding` and `testing → done`
+- PM/tester can move: `testing → coding` and `testing → done`
 - Every `coding → testing` transition MUST include notes (what was done)
 - Every `testing → coding` transition MUST include notes (what needs fixing)
 - Every `testing → done` transition MUST include notes (confirmation)
@@ -160,7 +160,7 @@ The notes trail serves multiple purposes:
 1. **Handoff context** - If context runs out mid-cycle, the next session reads the notes to understand the current state
 2. **Accountability** - Clear record of who did what and why
 3. **Learning** - Agents can see patterns in what gets sent back (common issues to avoid)
-4. **Review** - John can see the full history of each item at a glance
+4. **Review** - PM can see the full history of each item at a glance
 
 #### Task-Level Status (unchanged)
 ```
@@ -216,16 +216,16 @@ This prevents agents from juggling multiple tasks.
 | Rule | Enforcement |
 |------|-------------|
 | Can't move item to `testing` unless it's been in `coding` | State machine - no skipping |
-| Can't move item to `done` unless it's in `testing` | Only John can approve from testing |
+| Can't move item to `done` unless it's in `testing` | Only PM/tester can approve from testing |
 | Every `coding → testing` transition requires notes from agent | Mandatory notes gate |
-| Every `testing → coding` transition requires notes from John | Mandatory notes gate |
-| Every `testing → done` transition requires notes from John | Mandatory notes gate |
+| Every `testing → coding` transition requires notes from PM/tester | Mandatory notes gate |
+| Every `testing → done` transition requires notes from PM/tester | Mandatory notes gate |
 | Can't mark task `complete` if ANY checklist item isn't `done` | Completion gate |
 | Can't set a new task `active` without pausing current | Auto-handled by "set active" endpoint |
-| Agents can't move items from `testing` → `done` | Only John can approve |
-| Agents can't move items from `testing` → `coding` | Only John sends items back |
+| Agents can't move items from `testing` → `done` | Only PM/tester can approve |
+| Agents can't move items from `testing` → `coding` | Only PM/tester sends items back |
 | Item bounces coding↔testing 4+ times | Auto-escalation flag + inbox notification |
-| John can add/edit checklist items anytime | PM override - not restricted to planning phase |
+| PM can add/edit checklist items anytime | PM override - not restricted to planning phase |
 | Task claimer assigns helpers to specific items | Helper sees only their assigned items |
 
 ### 6. Session Startup Automation
@@ -264,7 +264,7 @@ Create task → Claim → Plan (write checklist) → Work items → Complete
                                                     │  ┌──────────────────────────┐
                                                     │  │ coding (agent works)     │
                                                     │  │   ↓ (agent adds notes)   │
-                                                    │  │ testing (John tests)     │
+                                                    │  │ testing (PM/tester tests)     │
                                                     │  │   ↓ pass? → done         │
                                                     │  │   ↓ fail? → coding again │
                                                     │  └──────────────────────────┘
@@ -301,8 +301,8 @@ Create task → Claim → Plan (write checklist) → Work items → Complete
 - [ ] Auto-detect state logic (active task? paused? nothing?)
 - [ ] Gate enforcement for each sub-command
 - [ ] Cyclical state machine validation (coding→testing→coding→testing→done)
-- [ ] Mandatory notes prompting at every transition ("What did you code? What should John test?")
-- [ ] Helpful progress display ("Item 3/7: in testing - 2 cycles so far, last note from John: 'fix regex'")
+- [ ] Mandatory notes prompting at every transition ("What did you code? What should the tester verify?")
+- [ ] Helpful progress display ("Item 3/7: in testing - 2 cycles so far, last note from PM: 'fix regex'")
 - [ ] Completion gate: verify ALL items `done` before allowing task completion
 
 ### Layer 3: Hooks (Together)
@@ -337,31 +337,31 @@ The enhanced `ChecklistJson` format is backwards-compatible:
 
 ---
 
-## John's Decisions
+## Design Decisions
 
 1. **Checklist granularity** → Agent's judgment. No minimum enforced.
 2. **Notification preferences** → Yes, notify - via a new **User Inbox system** (see below).
 3. **Multi-agent on same task** → Task claimer assigns helpers to specific checklist items.
 4. **Priority of implementation** → Layer 1 first (data & API), so the skill has APIs to call.
-5. **Who creates checklist items?** → Both. Agents create during planning, John can add/edit anytime as PM.
+5. **Who creates checklist items?** → Both. Agents create during planning, PM can add/edit anytime.
 6. **Max cycles before escalation?** → 4 cycles. After 4 coding↔testing bounces, flag for discussion.
 
 ---
 
 ## New Feature: User Inbox System
 
-> Added based on John's feedback on notification preferences.
+> Added based on PM feedback on notification preferences.
 
 ### Concept
 
-A notification inbox for **project managers / human users** (not agents). When something needs John's attention, a short note lands in his Inbox - similar to receiving email.
+A notification inbox for **project managers / human users** (not agents). When something needs the PM's attention, a short note lands in their Inbox - similar to receiving email.
 
 ### User Model
 
 | Field | Type | Purpose |
 |-------|------|---------|
 | `Id` | string | Unique user identifier |
-| `Name` | string | Display name (e.g., "John") |
+| `Name` | string | Display name (e.g., "Owner") |
 | `Role` | string | `"project_manager"`, `"developer"`, etc. |
 | `ProjectIds` | list | Projects this user is assigned to |
 
@@ -377,7 +377,7 @@ A notification inbox for **project managers / human users** (not agents). When s
 | `Summary` | text | Short note: what was done, what needs review |
 | `CreatedAt` | datetime | When the notification was created |
 | `CreatedBy` | string | Who triggered it (agent name) |
-| `ReadAt` | datetime? | When John read it (null = unread) |
+| `ReadAt` | datetime? | When PM/owner read it (null = unread) |
 
 ### Auto-Generated Inbox Messages
 

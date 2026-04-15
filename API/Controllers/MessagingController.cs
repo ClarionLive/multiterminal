@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
+using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace MultiTerminal.API.Controllers
@@ -21,7 +24,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("register")]
         public IActionResult RegisterTerminal([FromBody] RegisterTerminalRequest request)
         {
-            var result = _broker.RegisterTerminal(request.Name, request.DocId);
+            var result = _broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort);
             if (!result.Success)
                 return BadRequest(new { error = result.Error });
 
@@ -80,6 +83,63 @@ namespace MultiTerminal.API.Controllers
             _broker.DisconnectTerminalByName(request.Name);
             return Ok(new { success = true, name = request.Name });
         }
+
+        /// <summary>
+        /// Upload a batch of images for use in chat messages. Returns a batch ID
+        /// that can be referenced in the message text as [ref:batchId].
+        /// </summary>
+        [HttpPost("images")]
+        public IActionResult UploadMessageImages([FromBody] UploadMessageImagesRequest request)
+        {
+            if (request?.Images == null || request.Images.Count == 0)
+                return BadRequest(new { error = "At least one image is required." });
+
+            if (request.Images.Count > 10)
+                return BadRequest(new { error = "Maximum 10 images per batch." });
+
+            var inputs = new List<MessageImageInput>();
+            foreach (var img in request.Images)
+            {
+                if (string.IsNullOrEmpty(img.Base64Data))
+                    return BadRequest(new { error = $"Image '{img.FileName}' has no data." });
+
+                if (string.IsNullOrEmpty(img.MimeType) || !img.MimeType.StartsWith("image/"))
+                    return BadRequest(new { error = $"Invalid MIME type for '{img.FileName}': {img.MimeType}" });
+
+                inputs.Add(new MessageImageInput
+                {
+                    FileName = img.FileName ?? "image",
+                    MimeType = img.MimeType,
+                    Base64Data = img.Base64Data,
+                    FileSizeBytes = img.Base64Data.Length * 3 / 4 // approximate decoded size
+                });
+            }
+
+            var batchId = _broker.SaveMessageImages(inputs);
+            return Ok(new { batchId, imageCount = inputs.Count });
+        }
+
+        /// <summary>
+        /// Retrieve all images in a batch by batch ID.
+        /// </summary>
+        [HttpGet("images/{batchId}")]
+        public IActionResult GetMessageImages(string batchId)
+        {
+            var images = _broker.GetMessageImages(batchId);
+            if (images == null || images.Count == 0)
+                return NotFound(new { error = $"No images found for batch '{batchId}'." });
+
+            return Ok(images.Select(i => new
+            {
+                i.Id,
+                i.BatchId,
+                i.FileName,
+                i.MimeType,
+                i.Base64Data,
+                i.FileSizeBytes,
+                i.CreatedAt
+            }));
+        }
     }
 
     // Request models
@@ -87,6 +147,11 @@ namespace MultiTerminal.API.Controllers
     {
         public string Name { get; set; }
         public string DocId { get; set; }
+        /// <summary>
+        /// HTTP port for this terminal's Claude Code Channel server.
+        /// When provided, messages are delivered via channel instead of inbox files.
+        /// </summary>
+        public int? ChannelPort { get; set; }
     }
 
     public class SendMessageRequest
@@ -109,5 +174,17 @@ namespace MultiTerminal.API.Controllers
     public class DisconnectTerminalRequest
     {
         public string Name { get; set; }
+    }
+
+    public class UploadMessageImagesRequest
+    {
+        public List<MessageImageUpload> Images { get; set; }
+    }
+
+    public class MessageImageUpload
+    {
+        public string FileName { get; set; }
+        public string MimeType { get; set; }
+        public string Base64Data { get; set; }
     }
 }

@@ -61,6 +61,10 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(request.AgentName))
                 return BadRequest(new { success = false, error = "agentName is required" });
 
+            // Oracle is always-on — managed by OracleService, not spawnable via API
+            if (request.AgentName.Equals(OracleService.OracleName, System.StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { success = false, error = "Oracle is always-on and managed by OracleService. Send messages to Oracle directly." });
+
             string workingDir = request.WorkingDir;
 
             // If projectId provided, look up project source path

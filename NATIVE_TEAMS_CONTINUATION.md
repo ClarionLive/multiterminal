@@ -18,7 +18,7 @@ Successfully debugged and fixed grid cell spawning for Native Teams. Alice can n
    - **Location:** Test Spawn button in toolbar
 
 3. **Auto-Registration Hook System**
-   - **Created:** `C:\Users\John Hickey\.claude\hooks\multiterminal-registration.ps1`
+   - **Created:** `%USERPROFILE%\.claude\hooks\multiterminal-registration.ps1`
    - **Purpose:** Detects `MULTITERMINAL_NAME` and `MULTITERMINAL_DOC_ID` env vars at session start
    - **Updated:** Global `settings.json` SessionStart hook to call this script
    - **Status:** Hook runs and logs to `hook-debug.log`, but output is hidden (Claude Code clears terminal)
@@ -31,7 +31,7 @@ Successfully debugged and fixed grid cell spawning for Native Teams. Alice can n
 5. **MCP Server Connection (THE KEY FIX!)**
    - **Problem:** Spawned terminals couldn't access MultiTerminal MCP server
    - **Root Cause:** Deploy project had empty `mcpServers: {}` in `.claude.json`
-   - **Solution:** Added multiterminal server config to Deploy project entry in `C:\Users\John Hickey\.claude.json`
+   - **Solution:** Added multiterminal server config to Deploy project entry in `%USERPROFILE%\.claude.json`
    - **Format:**
      ```json
      "mcpServers": {
@@ -79,15 +79,15 @@ Successfully debugged and fixed grid cell spawning for Native Teams. Alice can n
 - `MainForm.cs` - Window bounds fix, made AddNewTerminal public
 - `TestSpawnForm.cs` - Updated to spawn grid cells with proper command
 - `ConPtyTerminal.cs` - Added cd command before autoRunCommand, debug logging
-- `C:\Users\John Hickey\.claude.json` - Added multiterminal MCP server to Deploy project
-- `C:\Users\John Hickey\.claude\hooks\multiterminal-registration.ps1` - Auto-registration hook
+- `%USERPROFILE%\.claude.json` - Added multiterminal MCP server to Deploy project
+- `%USERPROFILE%\.claude\hooks\multiterminal-registration.ps1` - Auto-registration hook
 - `Deploy\.claude\CLAUDE.md` - Auto-registration instructions for spawned agents
 
 ### MCP Configuration Discovery
 - **Wrong:** `mcp.json` files (for stdio-based servers)
 - **Correct:** `.claude.json` per-project configuration
 - **Format:** HTTP servers use `"type": "http"` with URL endpoint
-- **Location:** `C:\Users\John Hickey\.claude.json` → projects → Deploy → mcpServers
+- **Location:** `%USERPROFILE%\.claude.json` → projects → Deploy → mcpServers
 
 ## Next Steps
 
@@ -118,12 +118,12 @@ Successfully debugged and fixed grid cell spawning for Native Teams. Alice can n
 
 ## Files to Reference
 - Test spawn: Click "🚀 Test Spawn" button in toolbar
-- Config: `C:\Users\John Hickey\.claude.json` (line 3088+)
-- Hook: `C:\Users\John Hickey\.claude\hooks\multiterminal-registration.ps1`
+- Config: `%USERPROFILE%\.claude.json` (line 3088+)
+- Hook: `%USERPROFILE%\.claude\hooks\multiterminal-registration.ps1`
 - Deploy config: `H:\DevLaptop\ClarionPowerShell\Deploy\.claude\CLAUDE.md`
 - Debug logs:
-  - `C:\Users\John Hickey\.claude\hooks\hook-debug.log`
-  - `C:\Users\John Hickey\.claude\hooks\spawn-debug.log`
+  - `%USERPROFILE%\.claude\hooks\hook-debug.log`
+  - `%USERPROFILE%\.claude\hooks\spawn-debug.log`
 
 ---
 

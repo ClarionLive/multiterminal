@@ -15,8 +15,8 @@ namespace MultiTerminal.Controls
 {
     /// <summary>
     /// WebView2-based HUD panel that shows the active task checklist for a terminal.
-    /// Docks to the bottom of a terminal window. Visible only when the terminal
-    /// has an active in_progress task with checklist items.
+    /// Always visible as a tab in HudTabContainer. Shows an empty state with
+    /// available tasks when no active task is assigned.
     /// </summary>
     public class TaskHudRenderer : UserControl
     {
@@ -88,7 +88,7 @@ namespace MultiTerminal.Controls
 
             BackColor = System.Drawing.Color.FromArgb(30, 30, 30);
             Name = "TaskHudRenderer";
-            Visible = false;
+            Visible = false; // HudTabContainer manages visibility via SwitchToTab
 
             _webView = new WebView2
             {
@@ -336,7 +336,7 @@ namespace MultiTerminal.Controls
 
         /// <summary>
         /// Finds the active task for this terminal and sends it to the WebView2 HUD.
-        /// Auto-shows HUD when a task with checklist items is found; auto-hides otherwise.
+        /// Always-on: shows task checklist when active, or empty state with available tasks.
         /// </summary>
         private void RefreshTask()
         {
@@ -350,49 +350,55 @@ namespace MultiTerminal.Controls
 
             if (task == null || IsTaskTerminal(task))
             {
-                // No active task or task is done/removed — hide HUD
-                _debugLogService?.Trace("TaskHud", $"RefreshTask: NO task found (null={task == null}, terminal={task != null && IsTaskTerminal(task)}) → hiding");
-                if (Visible)
-                {
-                    HudVisibilityRequested?.Invoke(this, false);
-                    Visible = false;
-                    if (_isInitialized)
-                    {
-                        PostJsonMessage(new { type = "clear" });
-                    }
-                }
+                // No active task — show empty state with available tasks
+                _debugLogService?.Trace("TaskHud", $"RefreshTask: NO active task → showing empty state with available tasks");
+                SendEmptyState();
                 return;
             }
 
             var checklist = task.GetChecklist();
             if (checklist == null || checklist.Count == 0)
             {
-                // Task has no checklist — hide HUD
-                _debugLogService?.Trace("TaskHud", $"RefreshTask: Task '{task.Title}' has NO checklist → hiding");
-                if (Visible)
-                {
-                    HudVisibilityRequested?.Invoke(this, false);
-                    Visible = false;
-                    if (_isInitialized)
-                    {
-                        PostJsonMessage(new { type = "clear" });
-                    }
-                }
+                // Task has no checklist — show task info but with empty checklist
+                _debugLogService?.Trace("TaskHud", $"RefreshTask: Task '{task.Title}' has NO checklist → showing task without items");
+                SendTaskData(task);
                 return;
             }
 
-            // Task found with checklist — show HUD and send data
+            // Task found with checklist — show full data
             _debugLogService?.Info("TaskHud", $"RefreshTask: SHOW '{task.Title}' with {checklist.Count} items for terminal '{_terminalName}'");
-            if (!Visible)
-            {
-                // Fire event BEFORE setting Visible so TerminalDocument can
-                // uncollapse Panel2 first — otherwise VisibleChanged won't fire
-                // because the collapsed panel keeps the control effectively hidden.
-                HudVisibilityRequested?.Invoke(this, true);
-                Visible = true;
-            }
-
             SendTaskData(task);
+        }
+
+        /// <summary>
+        /// Sends an empty state message to the HUD with a list of available todo tasks.
+        /// </summary>
+        private void SendEmptyState()
+        {
+            var allTasks = _broker.GetTasks();
+            var todoTasks = allTasks?
+                .Where(t => t.Status == "todo" && string.IsNullOrEmpty(t.Assignee))
+                .Take(5)
+                .Select(t => new { id = t.Id, title = t.Title, priority = t.Priority })
+                .ToArray() ?? Array.Empty<object>();
+
+            var payload = new
+            {
+                type = "empty_state",
+                terminalName = _terminalName,
+                availableTasks = todoTasks
+            };
+
+            string json = JsonSerializer.Serialize(payload);
+
+            if (_isInitialized)
+            {
+                PostRawJson(json);
+            }
+            else
+            {
+                _pendingMessageJson = json;
+            }
         }
 
         /// <summary>

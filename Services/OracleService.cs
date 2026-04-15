@@ -76,7 +76,7 @@ namespace MultiTerminal.Services
                 _form.TerminalExited += OnTerminalExited;
 
                 string autoRunCommand = BuildAutoRunCommand();
-                string workingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                string workingDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal");
 
                 _form.StartTerminal(workingDir, _registeredDocId, autoRunCommand);
 
@@ -254,6 +254,16 @@ namespace MultiTerminal.Services
             var form = _form;
             if (form != null && !form.IsDisposed)
                 form.ApplyTheme(isDark);
+        }
+
+        /// <summary>
+        /// Sets the terminal font size for Oracle's popup form.
+        /// </summary>
+        public void SetFontSize(float size)
+        {
+            var form = _form;
+            if (form != null && !form.IsDisposed)
+                form.SetFontSize(size);
         }
 
         /// <summary>

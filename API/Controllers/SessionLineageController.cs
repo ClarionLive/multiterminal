@@ -143,6 +143,36 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// On-demand sync for a project by filesystem path (resolves to Claude project folder).
+        /// Called by /clear handler to ensure the previous session's lineage is imported
+        /// before the new session queries for it.
+        /// </summary>
+        [HttpPost("sync-project")]
+        public IActionResult SyncProject([FromBody] SyncProjectRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request?.ProjectPath))
+                return BadRequest(new { error = "projectPath is required" });
+
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            string claudeFolder = SessionLineageService.GetClaudeProjectFolder(request.ProjectPath);
+            if (claudeFolder == null)
+                return NotFound(new { error = "Claude project folder not found for the given path" });
+
+            var result = service.SyncNewSessions(claudeFolder, request.TerminalName ?? "Unknown");
+            return Ok(new
+            {
+                success = true,
+                imported = result.Imported,
+                skipped = result.Skipped,
+                failed = result.Failed,
+                total = result.Total
+            });
+        }
+
+        /// <summary>
         /// Returns the most recent session for a project folder.
         /// If the session has no cached summary, also returns the last 10 assistant messages
         /// so the caller can generate a summary lazily.
@@ -150,7 +180,9 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("latest")]
         public IActionResult GetLatestSession(
             [FromQuery] string projectPath,
-            [FromQuery] string agentName = null)
+            [FromQuery] string agentName = null,
+            [FromQuery] string excludeSessionId = null,
+            [FromQuery] int skip = 0)
         {
             if (string.IsNullOrWhiteSpace(projectPath))
                 return BadRequest(new { error = "projectPath is required" });
@@ -159,7 +191,7 @@ namespace MultiTerminal.API.Controllers
             if (service == null)
                 return ServiceUnavailable();
 
-            var session = service.GetMostRecentSessionForProject(projectPath, agentName);
+            var session = service.GetMostRecentSessionForProject(projectPath, agentName, excludeSessionId, skip);
             if (session == null)
                 return NotFound(new { error = "No session found for the given project path" });
 
@@ -258,6 +290,74 @@ namespace MultiTerminal.API.Controllers
                 totalCount = results.Count
             });
         }
+
+        /// <summary>
+        /// Backfills heuristic summaries for all sessions that have no summary.
+        /// </summary>
+        [HttpPost("backfill-summaries")]
+        public IActionResult BackfillSummaries()
+        {
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            int updated = service.BackfillSummaries();
+            return Ok(new { success = true, updated });
+        }
+
+        /// <summary>
+        /// Registers a new session as 'open' in the lifecycle pipeline.
+        /// Also closes any previous 'open' sessions for the same agent+project.
+        /// Call this at session start before any JSONL processing.
+        /// </summary>
+        [HttpPost("register")]
+        public IActionResult RegisterSession([FromBody] RegisterSessionRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request?.SessionId))
+                return BadRequest(new { error = "sessionId is required" });
+            if (string.IsNullOrWhiteSpace(request?.AgentName))
+                return BadRequest(new { error = "agentName is required" });
+
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            var record = service.RegisterSession(request.SessionId, request.AgentName, request.ProjectPath);
+            if (record == null)
+                return StatusCode(500, new { error = "Failed to register session" });
+
+            return Ok(new
+            {
+                success = true,
+                sessionId = record.SessionId,
+                processingStatus = record.ProcessingStatus,
+                message = "Session registered as 'open'. Previous sessions for this agent closed."
+            });
+        }
+
+        /// <summary>
+        /// Drives a session through the processing pipeline to 'complete'.
+        /// Checks the current processing_status and runs remaining steps on demand.
+        /// Returns the fully processed session record with summary.
+        /// </summary>
+        [HttpPost("{sessionId}/ensure-ready")]
+        public IActionResult EnsureSessionReady(string sessionId)
+        {
+            var service = GetService();
+            if (service == null)
+                return ServiceUnavailable();
+
+            var record = service.EnsureSessionReady(sessionId, _broker.SessionMemoryDb);
+            if (record == null)
+                return NotFound(new { error = $"Session '{sessionId}' not found" });
+
+            return Ok(new
+            {
+                session = record,
+                summary = record.Summary,
+                processingStatus = record.ProcessingStatus
+            });
+        }
     }
 
     // Request models
@@ -283,5 +383,18 @@ namespace MultiTerminal.API.Controllers
     public class UpdateSessionSummaryRequest
     {
         public string Summary { get; set; }
+    }
+
+    public class SyncProjectRequest
+    {
+        public string ProjectPath { get; set; }
+        public string TerminalName { get; set; }
+    }
+
+    public class RegisterSessionRequest
+    {
+        public string SessionId { get; set; }
+        public string AgentName { get; set; }
+        public string ProjectPath { get; set; }
     }
 }

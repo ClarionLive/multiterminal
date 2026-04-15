@@ -449,6 +449,40 @@
         <!-- =========================================== -->
         <h2 id="institutional-memory">7. Institutional Memory</h2>
 
+        <p>MultiTerminal implements a <strong>host-controlled memory</strong> system that replaces the traditional agent-controlled approach to context management.</p>
+
+        <h3>Why Host-Controlled?</h3>
+        <div class="card">
+          <p>In a standard Claude Code setup, context comes from two agent-controlled sources:</p>
+          <ul>
+            <li><strong>CLAUDE.md</strong> &mdash; a static file the agent reads every session, same content regardless of relevance</li>
+            <li><strong>memory.md</strong> &mdash; Claude's built-in memory where the agent decides what to store and recall</li>
+          </ul>
+          <p>This has three problems: (1) static content wastes tokens on irrelevant knowledge, (2) the agent chooses what to remember rather than what's proven useful, and (3) every agent sees the same global context regardless of role.</p>
+          <p>MultiTerminal inverts this. The <strong>desktop host</strong> &mdash; via hooks that run before the agent sees any prompt &mdash; controls three things the agent used to control:</p>
+          <table>
+            <thead><tr><th>What</th><th>Before (Agent-Controlled)</th><th>Now (Host-Controlled)</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>Knowledge in context</strong></td>
+                <td>Agent reads static CLAUDE.md every session</td>
+                <td>Hook queries SQLite, ranks by attention decay, injects top entries dynamically</td>
+              </tr>
+              <tr>
+                <td><strong>Rules each agent sees</strong></td>
+                <td>One global CLAUDE.md for all agents</td>
+                <td>Per-agent system prompt file tailored to role (<code>--system-prompt-file</code>)</td>
+              </tr>
+              <tr>
+                <td><strong>Hooks &amp; settings</strong></td>
+                <td>All agents inherit user-level hooks and settings</td>
+                <td>Spawned agents scoped to project+local only (<code>--setting-sources project,local</code>)</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>The primary terminal (e.g., Alice) still uses CLAUDE.md for project-specific instructions, but knowledge injection and session continuity are handled by hooks. Spawned team agents bypass CLAUDE.md entirely and receive only their generated system prompt.</p>
+        </div>
+
         <h3>Knowledge Base</h3>
         <p>The knowledge base stores reusable insights organized into 6 semantic categories:</p>
         <table>
@@ -471,6 +505,25 @@
           <li><strong>deprecated:</strong> Superseded by newer knowledge</li>
         </ul>
 
+        <h3>Attention Decay</h3>
+        <p>Knowledge entries that are actively referenced stay prominent; stale entries fade out. Each entry tracks:</p>
+        <ul>
+          <li><strong>reference_count</strong> &mdash; incremented every time the entry is returned by a search or injected at session start</li>
+          <li><strong>last_referenced</strong> &mdash; timestamp of most recent access</li>
+        </ul>
+        <p>At session start, the <code>session-status-hook.js</code> ranks all knowledge entries using the decay formula:</p>
+        <pre><code>score = (reference_count + 1) / (days_since_last_referenced + 1)</code></pre>
+        <p>Injection is tiered by rank:</p>
+        <table>
+          <thead><tr><th>Tier</th><th>Rank</th><th>Injection</th></tr></thead>
+          <tbody>
+            <tr><td>Full</td><td>Top 10</td><td>Title + 200-character content preview</td></tr>
+            <tr><td>Title-only</td><td>Next 5</td><td>Title only (use <code>query_knowledge</code> for details)</td></tr>
+            <tr><td>Available</td><td>Rest</td><td>Not injected &mdash; queryable on demand via MCP tool</td></tr>
+          </tbody>
+        </table>
+        <p>This ensures frequently-used knowledge stays in context while rarely-accessed entries don't waste tokens. Old entries that are still actively referenced retain high scores.</p>
+
         <h3>Code Digests</h3>
         <p>Compressed summaries of codebase structure that agents can query to understand the project without reading every file. Digests capture file purposes, key classes, and relationships.</p>
 
@@ -478,7 +531,7 @@
         <p>Tracks the chain of Claude Code sessions for a terminal identity, enabling agents to understand the history of work done on a project across multiple sessions.</p>
 
         <h3>Full-Text Search</h3>
-        <p>The knowledge database supports full-text search across all entries, enabling agents to query institutional memory with natural language.</p>
+        <p>The knowledge database supports full-text search across all entries, enabling agents to query institutional memory with natural language. Searches automatically bump the <code>reference_count</code> and <code>last_referenced</code> timestamp of returned entries, feeding the attention decay system.</p>
 
         <!-- =========================================== -->
         <!-- 8. SETTINGS & THEME -->

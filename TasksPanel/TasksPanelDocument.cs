@@ -63,10 +63,10 @@ namespace MultiTerminal.TasksPanel
         /// <summary>
         /// Initialize the tasks panel with the MessageBroker for task operations.
         /// </summary>
-        public void Initialize(MessageBroker broker, ActivityService activityService = null)
+        public void Initialize(MessageBroker broker, ActivityService activityService = null, SettingsService settings = null)
         {
             _broker = broker;
-            _control?.Initialize(broker, activityService);
+            _control?.Initialize(broker, activityService, settings);
         }
 
         /// <summary>

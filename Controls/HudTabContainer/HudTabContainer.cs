@@ -8,8 +8,9 @@ using MultiTerminal.Controls;
 namespace MultiTerminal.Controls
 {
     /// <summary>
-    /// Tab container that hosts TaskHudRenderer as permanent Tab 0 and supports
-    /// additional browser tabs. Tab strip is hidden when only 1 tab exists.
+    /// Tab container that hosts multiple permanent tabs (Dashboard, Tasks, Notes, etc.)
+    /// and supports additional dynamic browser tabs. Tab strip is always visible when
+    /// there are 2+ tabs (permanent or dynamic).
     /// </summary>
     public class HudTabContainer : UserControl
     {
@@ -42,9 +43,14 @@ namespace MultiTerminal.Controls
         public TaskHudRenderer TaskHud => _taskHud;
 
         /// <summary>
-        /// Number of browser tabs (excludes the permanent Task HUD tab).
+        /// Number of browser tabs (excludes permanent tabs).
         /// </summary>
-        public int BrowserTabCount => _tabs.Count - 1;
+        public int BrowserTabCount => _tabs.Count(t => !t.IsPermanent);
+
+        /// <summary>
+        /// Total number of permanent tabs (Task HUD + any added via AddPermanentTab).
+        /// </summary>
+        public int PermanentTabCount => _tabs.Count(t => t.IsPermanent);
 
         public HudTabContainer(TaskHudRenderer taskHudRenderer)
         {
@@ -74,45 +80,125 @@ namespace MultiTerminal.Controls
 
             ResumeLayout(false);
 
-            // Install TaskHudRenderer as permanent Tab 0
+            // Install TaskHudRenderer as permanent "Tasks" tab
             _taskHud.Dock = DockStyle.Fill;
             var hudEntry = new TabEntry
             {
-                Id = "__task_hud__",
-                Title = "Task HUD",
+                Id = "__tasks__",
+                Title = "\ud83d\udccb Tasks",
                 Control = _taskHud,
                 IsPermanent = true
             };
             _tabs.Add(hudEntry);
             _contentArea.Controls.Add(_taskHud);
             _activeTabIndex = 0;
+            _taskHud.Visible = true; // Active tab starts visible
 
-            // Forward HUD visibility requests, but don't let the TaskHud
-            // stomp on an active browser tab's visibility.
+            // HUD is always visible now — forward visibility requests to keep
+            // Panel2 expanded, but don't hide/show based on task presence.
             _taskHud.HudVisibilityRequested += (s, show) =>
             {
-                if (show && BrowserTabCount > 0 && _activeTabIndex != 0)
+                // Always keep the container visible regardless of task state.
+                // If another tab is active, just update TaskHud data silently.
+                if (_activeTabIndex != GetTabIndex("__tasks__"))
                 {
-                    // A browser tab is active — keep it visible, just ensure
-                    // Panel2 is expanded (VisibilityRequested=true) and update
-                    // TaskHud data silently without switching tabs.
                     _taskHud.Visible = false;
-                    VisibilityRequested?.Invoke(this, true);
                     return;
                 }
-                VisibilityRequested?.Invoke(this, show);
+                VisibilityRequested?.Invoke(this, true);
             };
 
             // Prevent TaskHudRenderer from setting Visible=true directly when
-            // a browser tab is the active tab — that would overlay the HUD on
-            // top of the browser content.
+            // a different tab is active — that would overlay the HUD on
+            // top of the other tab's content.
             _taskHud.VisibleChanged += (s, ev) =>
             {
-                if (_taskHud.Visible && _activeTabIndex != 0)
+                if (_taskHud.Visible && _activeTabIndex != GetTabIndex("__tasks__"))
                 {
                     _taskHud.Visible = false;
                 }
             };
+        }
+
+        /// <summary>
+        /// Adds a permanent tab (not closable) with an existing control.
+        /// Permanent tabs stay in the tab strip and cannot be removed by the user.
+        /// Insert position is after existing permanent tabs but before dynamic tabs.
+        /// </summary>
+        public void AddPermanentTab(string tabId, string title, Control control)
+        {
+            // Check if tab already exists
+            var existing = _tabs.FirstOrDefault(t => t.Id == tabId);
+            if (existing != null) return;
+
+            control.Dock = DockStyle.Fill;
+            control.Visible = false; // SwitchToTab manages visibility
+
+            var entry = new TabEntry
+            {
+                Id = tabId,
+                Title = title,
+                Control = control,
+                IsPermanent = true
+            };
+
+            // Insert after existing permanent tabs
+            int insertIndex = _tabs.Count(t => t.IsPermanent);
+            _tabs.Insert(insertIndex, entry);
+            _contentArea.Controls.Add(control);
+
+            UpdateTabStripVisibility();
+        }
+
+        /// <summary>
+        /// Reorders permanent tabs to match the specified ID order.
+        /// Dynamic (non-permanent) tabs keep their relative order after permanents.
+        /// Call after all permanent tabs have been added.
+        /// </summary>
+        public void ReorderPermanentTabs(params string[] tabIdOrder)
+        {
+            var permanentTabs = _tabs.Where(t => t.IsPermanent).ToList();
+            var dynamicTabs = _tabs.Where(t => !t.IsPermanent).ToList();
+
+            var ordered = new List<TabEntry>();
+            foreach (var id in tabIdOrder)
+            {
+                var tab = permanentTabs.FirstOrDefault(t => t.Id == id);
+                if (tab != null)
+                {
+                    ordered.Add(tab);
+                    permanentTabs.Remove(tab);
+                }
+            }
+            // Append any permanents not in the order list
+            ordered.AddRange(permanentTabs);
+            // Append dynamic tabs
+            ordered.AddRange(dynamicTabs);
+
+            _tabs.Clear();
+            _tabs.AddRange(ordered);
+            _activeTabIndex = 0;
+            SwitchToTab(0);
+            UpdateTabStripVisibility();
+        }
+
+        /// <summary>
+        /// Gets the index of a tab by its ID, or -1 if not found.
+        /// </summary>
+        public int GetTabIndex(string tabId)
+        {
+            for (int i = 0; i < _tabs.Count; i++)
+                if (_tabs[i].Id == tabId) return i;
+            return -1;
+        }
+
+        /// <summary>
+        /// Switches to the tab with the given ID.
+        /// </summary>
+        public void SwitchToTabById(string tabId)
+        {
+            int index = GetTabIndex(tabId);
+            if (index >= 0) SwitchToTab(index);
         }
 
         /// <summary>
@@ -190,11 +276,7 @@ namespace MultiTerminal.Controls
             SwitchToTab(_activeTabIndex);
             UpdateTabStripVisibility();
 
-            // If only Task HUD remains and it's not visible, hide container
-            if (BrowserTabCount == 0 && !_taskHud.Visible)
-            {
-                VisibilityRequested?.Invoke(this, false);
-            }
+            // HUD is always-on — never hide the container when dynamic tabs close
 
             TabClosed?.Invoke(this, tabId);
         }
@@ -247,6 +329,14 @@ namespace MultiTerminal.Controls
             {
                 if (tab.Control is BrowserTabPage page)
                     page.ApplyTheme(isDark);
+                else if (tab.Control is HudDashboardRenderer dashboard)
+                    dashboard.ApplyTheme(isDark);
+                else if (tab.Control is HudNotesRenderer notes)
+                    notes.ApplyTheme(isDark);
+                else if (tab.Control is HudKnowledgeRenderer knowledge)
+                    knowledge.ApplyTheme(isDark);
+                else if (tab.Control is HudSessionsRenderer sessions)
+                    sessions.ApplyTheme(isDark);
             }
             _tabStrip.Invalidate();
         }
@@ -261,6 +351,14 @@ namespace MultiTerminal.Controls
             {
                 if (tab.Control is BrowserTabPage page)
                     page.SetZoomFactor(zoom);
+                else if (tab.Control is HudDashboardRenderer dashboard)
+                    dashboard.SetZoomFactor(zoom);
+                else if (tab.Control is HudNotesRenderer notes)
+                    notes.SetZoomFactor(zoom);
+                else if (tab.Control is HudKnowledgeRenderer knowledge)
+                    knowledge.SetZoomFactor(zoom);
+                else if (tab.Control is HudSessionsRenderer sessions)
+                    sessions.SetZoomFactor(zoom);
             }
         }
 
@@ -281,6 +379,7 @@ namespace MultiTerminal.Controls
 
         private void UpdateTabStripVisibility()
         {
+            // Always show tab strip when there are 2+ tabs (permanent or dynamic)
             bool shouldShow = _tabs.Count > 1;
             if (_tabStrip.Visible != shouldShow)
             {
@@ -332,8 +431,8 @@ namespace MultiTerminal.Controls
                         var closeRect = new Rectangle(x + tabWidth - CloseButtonWidth - 2, 5, CloseButtonWidth - 4, TabStripHeight - 10);
                         tab.CloseButtonBounds = closeRect;
                         using (var closeFont = new Font("Segoe UI", 8f))
+                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
                         {
-                            var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
                             g.DrawString("\u2715", closeFont, closeBrush, closeRect, sf);
                         }
                     }

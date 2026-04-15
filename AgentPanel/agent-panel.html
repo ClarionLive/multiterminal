@@ -964,6 +964,10 @@
             height: 8px;
         }
     </style>
+    <link rel="stylesheet" href="../shared/markdown-renderer.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script src="../shared/markdown-renderer.js"></script>
 </head>
 <body>
     <!-- Header -->
@@ -1132,6 +1136,7 @@
             } else {
                 document.body.classList.remove('light');
             }
+            if (window.MarkdownRenderer) MarkdownRenderer.setTheme(theme !== 'light');
         }
 
         // ===== Status =====
@@ -1317,6 +1322,7 @@
             } else {
                 bubble.className = 'bubble md-content';
                 bubble.innerHTML = renderMarkdown(content);
+                postProcessMarkdown(bubble);
             }
 
             el.appendChild(bubble);
@@ -1391,6 +1397,7 @@
             } else {
                 bubble.className = 'bubble md-content';
                 bubble.innerHTML = renderMarkdown(content);
+                postProcessMarkdown(bubble);
             }
 
             el.appendChild(bubble);
@@ -1441,6 +1448,7 @@
                     const bubble = document.createElement('div');
                     bubble.className = 'bubble md-content sent-message';
                     bubble.innerHTML = renderMarkdown(content);
+                    postProcessMarkdown(bubble);
                     el.appendChild(label);
                     el.appendChild(bubble);
                     appendTimestamp(el, msg.timestamp);
@@ -1671,8 +1679,9 @@
 
             if (AgentState.currentStreamElement) {
                 AgentState.currentStreamElement.classList.remove('streaming-cursor');
-                // Re-render final markdown
+                // Re-render final markdown + post-process Mermaid diagrams
                 AgentState.currentStreamElement.innerHTML = renderMarkdown(AgentState.currentStreamText);
+                postProcessMarkdown(AgentState.currentStreamElement);
             }
 
             // Track streamed text for deduplication of subsequent full message objects
@@ -1950,63 +1959,31 @@
             emptyState.style.display = 'flex';
         }
 
-        // ===== Markdown Renderer =====
+        // ===== Markdown Renderer — delegates to shared/markdown-renderer.js =====
+        let mdRendererInited = false;
+        function ensureMarkdownRenderer() {
+            if (mdRendererInited) return;
+            mdRendererInited = true;
+            const isDark = !document.body.classList.contains('light');
+            if (window.MarkdownRenderer) {
+                MarkdownRenderer.init({ isDark });
+            }
+        }
+
         function renderMarkdown(text) {
             if (!text) return '';
-
-            let html = escapeHtml(text);
-
-            // Code blocks (``` ... ```)
-            html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
-                const langClass = lang ? ` class="language-${lang}"` : '';
-                return `<pre><code${langClass}>${code.trim()}</code></pre>`;
-            });
-
-            // Inline code (` ... `)
-            html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-            // Headers
-            html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-            html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-            html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-
-            // Bold
-            html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-
-            // Italic (single * not preceded/followed by space for content)
-            html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
-
-            // Links
-            html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-
-            // Unordered lists (- items)
-            html = html.replace(/^((?:- .+\n?)+)/gm, (match) => {
-                const items = match.trim().split('\n').map(line => {
-                    const content = line.replace(/^- /, '');
-                    return `<li>${content}</li>`;
-                }).join('');
-                return `<ul>${items}</ul>`;
-            });
-
-            // Ordered lists (1. items)
-            html = html.replace(/^((?:\d+\. .+\n?)+)/gm, (match) => {
-                const items = match.trim().split('\n').map(line => {
-                    const content = line.replace(/^\d+\. /, '');
-                    return `<li>${content}</li>`;
-                }).join('');
-                return `<ol>${items}</ol>`;
-            });
-
-            // Line breaks (double newline = paragraph, single = br)
-            html = html.replace(/\n\n/g, '</p><p>');
-            html = html.replace(/\n/g, '<br>');
-
-            // Wrap in paragraph if not already wrapped
-            if (!html.startsWith('<h') && !html.startsWith('<pre') && !html.startsWith('<ul') && !html.startsWith('<ol')) {
-                html = '<p>' + html + '</p>';
+            ensureMarkdownRenderer();
+            if (window.MarkdownRenderer) {
+                return MarkdownRenderer.render(text);
             }
+            // Ultimate fallback
+            return escapeHtml(text).replace(/\n/g, '<br>');
+        }
 
-            return html;
+        function postProcessMarkdown(container) {
+            if (window.MarkdownRenderer && container) {
+                MarkdownRenderer.postProcess(container);
+            }
         }
 
         // ===== Auto-Scroll =====

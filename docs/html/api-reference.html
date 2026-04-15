@@ -256,7 +256,7 @@
     "description": "Implement dark mode theme switching",
     "status": "in_progress",
     "assignee": "Alice",
-    "createdBy": "John",
+    "createdBy": "Alice",
     "createdAt": "2026-03-05T08:00:00Z",
     "priority": "normal",
     "subStatus": "active",
@@ -562,7 +562,7 @@
   "messages": [
     {
       "id": "abc12345",
-      "userId": "john",
+      "userId": "Owner",
       "taskId": "c0ce8037",
       "taskTitle": "Add dark mode",
       "checklistItemIndex": 2,
@@ -581,7 +581,7 @@
 }</code></pre>
   <p><strong>Message types:</strong> <code>ready_for_testing</code>, <code>escalation</code>, <code>task_complete</code>, <code>helper_request</code></p>
   <h4>curl</h4>
-  <pre><code>curl "http://localhost:5050/api/tasks/inbox/john?unreadOnly=true"</code></pre>
+  <pre><code>curl "http://localhost:5050/api/tasks/inbox/Owner?unreadOnly=true"</code></pre>
 
   <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/tasks/inbox/{messageId}/read</code>
@@ -599,7 +599,7 @@
   <h4>Response</h4>
   <pre><code>{ "success": true }</code></pre>
   <h4>curl</h4>
-  <pre><code>curl -X POST http://localhost:5050/api/tasks/inbox/john/read-all</code></pre>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/inbox/Owner/read-all</code></pre>
 
   <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/tasks/inbox/{messageId}/reply</code>
@@ -621,7 +621,7 @@
   <h4>Response</h4>
   <pre><code>{ "count": 5 }</code></pre>
   <h4>curl</h4>
-  <pre><code>curl http://localhost:5050/api/tasks/inbox/john/unread-count</code></pre>
+  <pre><code>curl http://localhost:5050/api/tasks/inbox/Owner/unread-count</code></pre>
 
   <!-- ================================================================== -->
   <h2 id="attachments">Attachments</h2>
@@ -647,7 +647,7 @@
     "checklistItemIndex": 0,
     "fileName": "screenshot.png",
     "mimeType": "image/png",
-    "addedBy": "John",
+    "addedBy": "Alice",
     "addedAt": "2026-03-05T10:00:00Z"
   }
 ]</code></pre>
@@ -686,14 +686,14 @@
   "fileName": "bug-screenshot.png",
   "mimeType": "image/png",
   "base64Data": "iVBORw0KGgoAAAANSUhEUgAA...",
-  "addedBy": "John"
+  "addedBy": "Alice"
 }</code></pre>
   <h4>Response</h4>
   <pre><code>{ "attachmentId": "att-67890" }</code></pre>
   <h4>curl</h4>
   <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/attachments \
   -H "Content-Type: application/json" \
-  -d '{"checklistItemIndex":0,"fileName":"bug.png","mimeType":"image/png","base64Data":"...","addedBy":"John"}'</code></pre>
+  -d '{"checklistItemIndex":0,"fileName":"bug.png","mimeType":"image/png","base64Data":"...","addedBy":"Alice"}'</code></pre>
 
   <div class="endpoint-block">
     <span class="method delete">DELETE</span> <code>/api/tasks/attachments/{attachmentId}</code>
@@ -716,14 +716,14 @@
   <h4>Request Body</h4>
   <pre><code>{
   "name": "Alice",
-  "spawnedBy": "John"
+  "spawnedBy": "Owner"
 }</code></pre>
   <h4>Response</h4>
   <pre><code>{ "success": true, "agentName": "Alice" }</code></pre>
   <h4>curl</h4>
   <pre><code>curl -X POST http://localhost:5050/api/office/agents \
   -H "Content-Type: application/json" \
-  -d '{"name":"Alice","spawnedBy":"John"}'</code></pre>
+  -d '{"name":"Alice","spawnedBy":"Owner"}'</code></pre>
 
   <div class="endpoint-block">
     <span class="method delete">DELETE</span> <code>/api/office/agents/{name}</code>
@@ -740,7 +740,7 @@
   <p>List all currently active office agents.</p>
   <h4>Response</h4>
   <pre><code>[
-  { "name": "Alice", "spawnedBy": "John", "spawnedAt": "2026-03-05T10:00:00Z" },
+  { "name": "Alice", "spawnedBy": "Owner", "spawnedAt": "2026-03-05T10:00:00Z" },
   { "name": "Bob", "spawnedBy": "Alice", "spawnedAt": "2026-03-05T10:05:00Z" }
 ]</code></pre>
   <h4>curl</h4>
@@ -792,8 +792,8 @@
   "agentName": "Agent Alice",
   "workingDir": "H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
   "initialPrompt": "Implement the dark mode feature",
-  "mcpConfigPath": "C:\\Users\\John\\.claude\\mcp-config.json",
-  "spawnerName": "John",
+  "mcpConfigPath": "C:\\Users\\&lt;username&gt;\\.claude\\mcp-config.json",
+  "spawnerName": "Owner",
   "taskDescription": "Add dark mode toggle to the settings panel",
   "subagentType": "coder"
 }</code></pre>
@@ -819,7 +819,7 @@
   <h4>curl</h4>
   <pre><code>curl -X POST http://localhost:5050/api/spawn/agent \
   -H "Content-Type: application/json" \
-  -d '{"agentName":"Agent Alice","workingDir":"H:\\DevLaptop\\MyProject","initialPrompt":"Fix the bug","spawnerName":"John"}'</code></pre>
+  -d '{"agentName":"Agent Alice","workingDir":"H:\\DevLaptop\\MyProject","initialPrompt":"Fix the bug","spawnerName":"Owner"}'</code></pre>
 
   <!-- ================================================================== -->
   <h2 id="agent-panels">Agent Panels</h2>
@@ -831,17 +831,17 @@
   <p>Close an agent panel by transcript path. Called by the SubagentStop hook when a subagent finishes.</p>
   <h4>Request Body</h4>
   <pre><code>{
-  "transcriptPath": "C:\\Users\\John\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"
+  "transcriptPath": "C:\\Users\\&lt;username&gt;\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"
 }</code></pre>
   <h4>Response</h4>
   <pre><code>{
   "success": true,
-  "transcriptPath": "C:\\Users\\John\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"
+  "transcriptPath": "C:\\Users\\&lt;username&gt;\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"
 }</code></pre>
   <h4>curl</h4>
   <pre><code>curl -X POST http://localhost:5050/api/agent-panels/close \
   -H "Content-Type: application/json" \
-  -d '{"transcriptPath":"C:\\Users\\John\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"}'</code></pre>
+  -d '{"transcriptPath":"C:\\Users\\&lt;username&gt;\\.claude\\teams\\my-team\\Agent Alice\\transcript.jsonl"}'</code></pre>
 
   <!-- ================================================================== -->
   <h2 id="knowledge">Knowledge Base</h2>
@@ -1021,7 +1021,7 @@
   <p>Import a Claude Code session JSONL file and link it to a kanban task. Extracts messages and indexes them with FTS5 for full-text search.</p>
   <h4>Request Body</h4>
   <pre><code>{
-  "sessionFilePath": "C:\\Users\\John\\.claude\\projects\\...\\sessions\\abc123.jsonl",
+  "sessionFilePath": "C:\\Users\\&lt;username&gt;\\.claude\\projects\\...\\sessions\\abc123.jsonl",
   "taskId": "c0ce8037",
   "agentName": "Alice",
   "parentSessionId": "prev-session-id",
@@ -1046,7 +1046,7 @@
   <h4>curl</h4>
   <pre><code>curl -X POST http://localhost:5050/api/session-lineage/import \
   -H "Content-Type: application/json" \
-  -d '{"sessionFilePath":"C:\\Users\\John\\.claude\\...\\abc123.jsonl","taskId":"c0ce8037","agentName":"Alice"}'</code></pre>
+  -d '{"sessionFilePath":"C:\\Users\\&lt;username&gt;\\.claude\\...\\abc123.jsonl","taskId":"c0ce8037","agentName":"Alice"}'</code></pre>
 
   <div class="endpoint-block">
     <span class="method get">GET</span> <code>/api/session-lineage/task/{taskId}/sessions</code>
@@ -1086,7 +1086,7 @@
   <p>Incrementally sync sessions from a Claude project folder. Skips already-imported sessions.</p>
   <h4>Request Body</h4>
   <pre><code>{
-  "claudeProjectPath": "C:\\Users\\John\\.claude\\projects\\H--DevLaptop-...",
+  "claudeProjectPath": "C:\\Users\\&lt;username&gt;\\.claude\\projects\\H--DevLaptop-...",
   "agentName": "Alice",
   "taskId": "c0ce8037"
 }</code></pre>
@@ -1101,7 +1101,7 @@
   <h4>curl</h4>
   <pre><code>curl -X POST http://localhost:5050/api/session-lineage/sync \
   -H "Content-Type: application/json" \
-  -d '{"claudeProjectPath":"C:\\Users\\John\\.claude\\projects\\...","agentName":"Alice"}'</code></pre>
+  -d '{"claudeProjectPath":"C:\\Users\\&lt;username&gt;\\.claude\\projects\\...","agentName":"Alice"}'</code></pre>
 
   <div class="endpoint-block">
     <span class="method get">GET</span> <code>/api/session-lineage/latest</code>
@@ -1202,7 +1202,7 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
     "gitRepoUrl": "...",
     "gitDefaultBranch": "main",
     "isPinned": true,
-    "teamLead": "John"
+    "teamLead": "Owner"
   },
   "agents": [
     { "agentName": "Alice", "role": "backend", "preferredModel": "sonnet" }
@@ -1808,8 +1808,8 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <h4>Response</h4>
   <pre><code>{
   "configured": true,
-  "fullName": "John Hickey",
-  "email": "john@example.com",
+  "fullName": "Jane Smith",
+  "email": "user@example.com",
   "gitHubUsername": "jhickey",
   "hasGitHubToken": true,
   "createdAt": "2026-02-01T10:00:00Z",

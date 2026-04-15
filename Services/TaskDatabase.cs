@@ -96,6 +96,10 @@ namespace MultiTerminal.Services
             MigrateAddAgentInvocations();
             MigrateAddTaskReports();
             MigrateAddNotificationEvents();
+            MigrateAddMessageImages();
+            MigrateAddKnowledgeQueryHash();
+            MigrateAddKnowledgeAttentionDecay();
+            MigrateAddSessionLifecycleStatus();
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -359,6 +363,27 @@ namespace MultiTerminal.Services
                     UNIQUE(task_id, file_path)
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_file_links(task_id);
+
+                CREATE TABLE IF NOT EXISTS project_notes (
+                    id TEXT PRIMARY KEY,
+                    project_path TEXT NOT NULL,
+                    content TEXT DEFAULT '',
+                    updated_at DATETIME DEFAULT (datetime('now')),
+                    updated_by TEXT,
+                    UNIQUE(project_path)
+                );
+
+                CREATE TABLE IF NOT EXISTS project_note_tabs (
+                    id TEXT PRIMARY KEY,
+                    project_path TEXT NOT NULL,
+                    tab_name TEXT NOT NULL,
+                    content TEXT DEFAULT '',
+                    tab_order INTEGER NOT NULL DEFAULT 0,
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME DEFAULT (datetime('now')),
+                    updated_at DATETIME DEFAULT (datetime('now')),
+                    UNIQUE(project_path, tab_name)
+                );
             ";
 
             using var command = new SQLiteCommand(schema, _connection);
@@ -3497,18 +3522,24 @@ namespace MultiTerminal.Services
         {
             const string sql = @"
                 INSERT INTO session_lineage
-                    (session_id, parent_session_id, task_id, agent_name, session_type, summary, session_file_path, started_at, ended_at, created_at)
+                    (session_id, parent_session_id, task_id, agent_name, session_type, summary, session_file_path, started_at, ended_at, created_at,
+                     processing_status, project_path, indexed_at, summarized_at)
                 VALUES
-                    (@sessionId, @parentSessionId, @taskId, @agentName, @sessionType, @summary, @sessionFilePath, @startedAt, @endedAt, @createdAt)
+                    (@sessionId, @parentSessionId, @taskId, @agentName, @sessionType, @summary, @sessionFilePath, @startedAt, @endedAt, @createdAt,
+                     COALESCE(@processingStatus, 'complete'), @projectPath, @indexedAt, @summarizedAt)
                 ON CONFLICT(session_id) DO UPDATE SET
                     parent_session_id = @parentSessionId,
                     task_id           = COALESCE(@taskId, task_id),
                     agent_name        = @agentName,
                     session_type      = @sessionType,
-                    summary           = COALESCE(@summary, summary),
+                    summary           = CASE WHEN summary IS NOT NULL AND summary != '' THEN summary ELSE COALESCE(@summary, summary) END,
                     session_file_path = COALESCE(@sessionFilePath, session_file_path),
                     started_at        = COALESCE(@startedAt, started_at),
-                    ended_at          = COALESCE(@endedAt, ended_at)
+                    ended_at          = COALESCE(@endedAt, ended_at),
+                    processing_status = CASE WHEN @processingStatus IS NOT NULL THEN @processingStatus ELSE processing_status END,
+                    project_path      = COALESCE(@projectPath, project_path),
+                    indexed_at        = COALESCE(@indexedAt, indexed_at),
+                    summarized_at     = COALESCE(@summarizedAt, summarized_at)
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -3522,6 +3553,10 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@startedAt", (object)record.StartedAt ?? DBNull.Value);
             command.Parameters.AddWithValue("@endedAt", (object)record.EndedAt ?? DBNull.Value);
             command.Parameters.AddWithValue("@createdAt", record.CreatedAt ?? DateTime.UtcNow.ToString("O"));
+            command.Parameters.AddWithValue("@processingStatus", (object)record.ProcessingStatus ?? DBNull.Value);
+            command.Parameters.AddWithValue("@projectPath", (object)record.ProjectPath ?? DBNull.Value);
+            command.Parameters.AddWithValue("@indexedAt", (object)record.IndexedAt ?? DBNull.Value);
+            command.Parameters.AddWithValue("@summarizedAt", (object)record.SummarizedAt ?? DBNull.Value);
 
             command.ExecuteNonQuery();
         }
@@ -3572,6 +3607,23 @@ namespace MultiTerminal.Services
                 ids.Add(reader.GetString(0));
             }
             return ids;
+        }
+
+        /// <summary>
+        /// Marks stale active sessions as inactive. Sessions that have been "active" for more than
+        /// 24 hours are clearly abandoned — their terminal closed without properly deactivating.
+        /// Returns the number of rows cleaned up.
+        /// </summary>
+        public int CleanupStaleActiveSessions()
+        {
+            const string sql = @"
+                UPDATE session_agent_map
+                SET is_active = 0
+                WHERE is_active = 1
+                  AND started_at < datetime('now', '-24 hours')
+            ";
+            using var command = new SQLiteCommand(sql, _connection);
+            return command.ExecuteNonQuery();
         }
 
         /// <summary>
@@ -3756,7 +3808,8 @@ namespace MultiTerminal.Services
                 // causes a SQLiteException. Catch and retry via the LIKE path.
                 try
                 {
-                    return ExecuteFts5Search(query, sessionId, taskId, role, agentName, limit);
+                    string ftsQuery = SanitizeFts5Query(query);
+                    return ExecuteFts5Search(ftsQuery, sessionId, taskId, role, agentName, limit);
                 }
                 catch (Exception ex)
                 {
@@ -3839,33 +3892,76 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Sanitize a natural-language query for FTS5.
+        /// Splits into keywords, removes noise words and punctuation, joins with OR
+        /// so any keyword can match (not just exact phrases).
+        /// </summary>
+        private static string SanitizeFts5Query(string query)
+        {
+            if (string.IsNullOrWhiteSpace(query)) return "\"\"";
+
+            var cleaned = query.Replace("\"", " ").Replace("*", " ").Replace("(", " ")
+                               .Replace(")", " ").Replace(":", " ").Replace("^", " ")
+                               .Replace("'", " ").Replace("\u2019", " ");
+
+            var noiseWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+                "in", "on", "at", "to", "for", "of", "with", "by", "from", "and",
+                "or", "not", "no", "but", "if", "then", "than", "that", "this",
+                "it", "its", "i", "we", "you", "they", "he", "she", "my", "your",
+                "do", "did", "didn", "t", "don", "does", "has", "have", "had",
+                "will", "would", "could", "should", "can", "may", "might"
+            };
+
+            var words = cleaned.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var keywords = new List<string>();
+            foreach (var w in words)
+            {
+                if (w.Length >= 2 && !noiseWords.Contains(w))
+                    keywords.Add("\"" + w + "\"");
+            }
+
+            if (keywords.Count == 0) return "\"" + query.Replace("\"", " ") + "\"";
+
+            return string.Join(" OR ", keywords);
+        }
+
+        /// <summary>
         /// Returns the most recent session lineage record whose session_file_path starts with
         /// the given folder prefix. Ordered by ended_at DESC, then created_at DESC.
         /// Returns null if no matching record is found.
         /// </summary>
-        public SessionLineageRecord GetMostRecentSessionByFolder(string claudeProjectFolder, string agentName = null)
+        public SessionLineageRecord GetMostRecentSessionByFolder(string claudeProjectFolder, string agentName = null, string excludeSessionId = null, int skip = 0)
         {
             // Normalize: ensure trailing separator so we don't match sibling folders sharing a prefix
             string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
 
             string sql = @"
                 SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
-                       summary, session_file_path, started_at, ended_at, created_at
+                       summary, session_file_path, started_at, ended_at, created_at,
+                       processing_status, project_path, indexed_at, summarized_at
                 FROM session_lineage
-                WHERE session_file_path LIKE @folder || '%'
+                WHERE (session_file_path LIKE @folder || '%' OR project_path = @projectPath)
                   AND session_type != 'subagent'";
 
             if (!string.IsNullOrEmpty(agentName))
                 sql += " AND agent_name = @agentName";
 
-            sql += @"
+            if (!string.IsNullOrEmpty(excludeSessionId))
+                sql += " AND session_id != @excludeSessionId";
+
+            sql += $@"
                 ORDER BY ended_at DESC, created_at DESC
-                LIMIT 1";
+                LIMIT 1 OFFSET {Math.Max(0, skip)}";
 
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@folder", folderPrefix);
+            command.Parameters.AddWithValue("@projectPath", claudeProjectFolder.TrimEnd('\\', '/'));
             if (!string.IsNullOrEmpty(agentName))
                 command.Parameters.AddWithValue("@agentName", agentName);
+            if (!string.IsNullOrEmpty(excludeSessionId))
+                command.Parameters.AddWithValue("@excludeSessionId", excludeSessionId);
             using var reader = command.ExecuteReader();
 
             return reader.Read() ? ReadSessionLineageFromReader(reader) : null;
@@ -3921,6 +4017,86 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@summary", (object)summary ?? DBNull.Value);
             command.Parameters.AddWithValue("@sessionId", sessionId);
             return command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Updates the processing_status and optional timestamp for a session lifecycle transition.
+        /// </summary>
+        public int UpdateSessionProcessingStatus(string sessionId, string status, string timestampColumn = null)
+        {
+            string sql = "UPDATE session_lineage SET processing_status = @status";
+            if (!string.IsNullOrEmpty(timestampColumn))
+                sql += $", {timestampColumn} = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+            sql += " WHERE session_id = @sessionId";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@status", status);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            return command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns a single session lineage record by session_id, or null if not found.
+        /// </summary>
+        public SessionLineageRecord GetSessionById(string sessionId)
+        {
+            const string sql = @"
+                SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
+                       summary, session_file_path, started_at, ended_at, created_at,
+                       processing_status, project_path, indexed_at, summarized_at
+                FROM session_lineage
+                WHERE session_id = @sessionId";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@sessionId", sessionId);
+            using var reader = command.ExecuteReader();
+
+            return reader.Read() ? ReadSessionLineageFromReader(reader) : null;
+        }
+
+        /// <summary>
+        /// Closes all 'open' sessions for the given agent and project.
+        /// Sets processing_status='closed' and ended_at to now.
+        /// Optionally excludes a specific session (the current one).
+        /// </summary>
+        public int CloseOpenSessions(string agentName, string projectPath, string excludeSessionId = null)
+        {
+            string sql = @"
+                UPDATE session_lineage
+                SET processing_status = 'closed',
+                    ended_at = COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                WHERE agent_name = @agentName
+                  AND processing_status = 'open'";
+
+            if (!string.IsNullOrEmpty(projectPath))
+                sql += " AND project_path = @projectPath";
+
+            if (!string.IsNullOrEmpty(excludeSessionId))
+                sql += " AND session_id != @excludeSessionId";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@agentName", agentName);
+            if (!string.IsNullOrEmpty(projectPath))
+                command.Parameters.AddWithValue("@projectPath", projectPath);
+            if (!string.IsNullOrEmpty(excludeSessionId))
+                command.Parameters.AddWithValue("@excludeSessionId", excludeSessionId);
+
+            return command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns all session IDs that have no summary (null or empty).
+        /// Used by BackfillSummaries to find sessions needing heuristic summaries.
+        /// </summary>
+        public List<string> GetAllUnsummarizedSessionIds()
+        {
+            var results = new List<string>();
+            const string sql = "SELECT session_id FROM session_lineage WHERE summary IS NULL OR summary = ''";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(reader.GetString(0));
+            return results;
         }
 
         /// <summary>
@@ -3999,7 +4175,7 @@ namespace MultiTerminal.Services
 
         private static SessionLineageRecord ReadSessionLineageFromReader(SQLiteDataReader reader)
         {
-            return new SessionLineageRecord
+            var record = new SessionLineageRecord
             {
                 DbId = reader.GetInt32(0),
                 SessionId = reader.GetString(1),
@@ -4013,6 +4189,37 @@ namespace MultiTerminal.Services
                 EndedAt = reader.IsDBNull(9) ? null : reader.GetString(9),
                 CreatedAt = reader.IsDBNull(10) ? null : reader.GetString(10)
             };
+
+            // Read new lifecycle columns by name (safe for queries that don't SELECT them)
+            try
+            {
+                int ord = reader.GetOrdinal("processing_status");
+                record.ProcessingStatus = reader.IsDBNull(ord) ? "complete" : reader.GetString(ord);
+            }
+            catch { record.ProcessingStatus = "complete"; }
+
+            try
+            {
+                int ord = reader.GetOrdinal("project_path");
+                record.ProjectPath = reader.IsDBNull(ord) ? null : reader.GetString(ord);
+            }
+            catch { }
+
+            try
+            {
+                int ord = reader.GetOrdinal("indexed_at");
+                record.IndexedAt = reader.IsDBNull(ord) ? null : reader.GetString(ord);
+            }
+            catch { }
+
+            try
+            {
+                int ord = reader.GetOrdinal("summarized_at");
+                record.SummarizedAt = reader.IsDBNull(ord) ? null : reader.GetString(ord);
+            }
+            catch { }
+
+            return record;
         }
 
         private static SessionMessageRecord ReadSessionMessageFromReader(SQLiteDataReader reader)
@@ -4242,6 +4449,367 @@ namespace MultiTerminal.Services
             using var createCmd = new SQLiteCommand(createSql, _connection);
             createCmd.ExecuteNonQuery();
         }
+
+        /// <summary>
+        /// Migration to add message_images table for ephemeral images sent via chat messages.
+        /// </summary>
+        private void MigrateAddMessageImages()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='message_images'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS message_images (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    image_data TEXT NOT NULL,
+                    file_size_bytes INTEGER DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_message_images_batch ON message_images(batch_id);
+                CREATE INDEX IF NOT EXISTS idx_message_images_created ON message_images(created_at DESC);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Migration to add query_hash column to knowledge_entries for research cache deduplication.
+        /// </summary>
+        private void MigrateAddKnowledgeQueryHash()
+        {
+            const string checkSql = "PRAGMA table_info(knowledge_entries)";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            using var reader = checkCmd.ExecuteReader();
+            bool hasQueryHash = false;
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), "query_hash", StringComparison.OrdinalIgnoreCase))
+                { hasQueryHash = true; break; }
+            }
+            reader.Close();
+
+            if (!hasQueryHash)
+            {
+                const string sql = "ALTER TABLE knowledge_entries ADD COLUMN query_hash TEXT";
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.ExecuteNonQuery();
+
+                const string idxSql = "CREATE INDEX IF NOT EXISTS idx_knowledge_query_hash ON knowledge_entries(query_hash)";
+                using var idxCmd = new SQLiteCommand(idxSql, _connection);
+                idxCmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Migration to add last_referenced and reference_count columns to knowledge_entries
+        /// for attention decay scoring. Recently-queried knowledge ranks higher in injection.
+        /// </summary>
+        private void MigrateAddKnowledgeAttentionDecay()
+        {
+            const string checkSql = "PRAGMA table_info(knowledge_entries)";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            using var reader = checkCmd.ExecuteReader();
+            bool hasLastReferenced = false;
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), "last_referenced", StringComparison.OrdinalIgnoreCase))
+                { hasLastReferenced = true; break; }
+            }
+            reader.Close();
+
+            if (!hasLastReferenced)
+            {
+                using var cmd1 = new SQLiteCommand(
+                    "ALTER TABLE knowledge_entries ADD COLUMN last_referenced TEXT", _connection);
+                cmd1.ExecuteNonQuery();
+
+                using var cmd2 = new SQLiteCommand(
+                    "ALTER TABLE knowledge_entries ADD COLUMN reference_count INTEGER NOT NULL DEFAULT 0", _connection);
+                cmd2.ExecuteNonQuery();
+
+                // Seed last_referenced from updated_at so existing entries aren't penalized
+                using var seedCmd = new SQLiteCommand(
+                    "UPDATE knowledge_entries SET last_referenced = updated_at WHERE last_referenced IS NULL", _connection);
+                seedCmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Migration: add processing_status lifecycle tracking to session_lineage.
+        /// Enables the session lifecycle state machine: open → closed → imported → indexed → complete.
+        /// Also adds project_path for direct project lookups without parsing session_file_path.
+        /// </summary>
+        private void MigrateAddSessionLifecycleStatus()
+        {
+            const string checkSql = "PRAGMA table_info(session_lineage)";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            using var reader = checkCmd.ExecuteReader();
+            bool hasProcessingStatus = false;
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), "processing_status", StringComparison.OrdinalIgnoreCase))
+                { hasProcessingStatus = true; break; }
+            }
+            reader.Close();
+
+            if (!hasProcessingStatus)
+            {
+                // Existing rows are already fully processed — default them to 'complete'
+                using var cmd1 = new SQLiteCommand(
+                    "ALTER TABLE session_lineage ADD COLUMN processing_status TEXT NOT NULL DEFAULT 'complete'", _connection);
+                cmd1.ExecuteNonQuery();
+
+                using var cmd2 = new SQLiteCommand(
+                    "ALTER TABLE session_lineage ADD COLUMN project_path TEXT", _connection);
+                cmd2.ExecuteNonQuery();
+
+                using var cmd3 = new SQLiteCommand(
+                    "ALTER TABLE session_lineage ADD COLUMN indexed_at TEXT", _connection);
+                cmd3.ExecuteNonQuery();
+
+                using var cmd4 = new SQLiteCommand(
+                    "ALTER TABLE session_lineage ADD COLUMN summarized_at TEXT", _connection);
+                cmd4.ExecuteNonQuery();
+
+                // Add index for fast lookups by project + status
+                using var idxCmd = new SQLiteCommand(
+                    "CREATE INDEX IF NOT EXISTS idx_session_lineage_project_status ON session_lineage(project_path, processing_status)", _connection);
+                idxCmd.ExecuteNonQuery();
+            }
+        }
+
+        #region Project Notes
+
+        /// <summary>
+        /// Gets the notes content for a project by its filesystem path.
+        /// Returns empty string if no notes exist yet.
+        /// </summary>
+        public string GetProjectNotes(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath)) return "";
+            const string sql = "SELECT content FROM project_notes WHERE project_path = @path";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            var result = cmd.ExecuteScalar();
+            return result?.ToString() ?? "";
+        }
+
+        /// <summary>
+        /// Saves notes for a project (upsert). Creates the record if it doesn't exist.
+        /// </summary>
+        public void SaveProjectNotes(string projectPath, string content, string updatedBy = null)
+        {
+            if (string.IsNullOrEmpty(projectPath)) return;
+            const string sql = @"
+                INSERT INTO project_notes (id, project_path, content, updated_at, updated_by)
+                VALUES (@id, @path, @content, datetime('now'), @updatedBy)
+                ON CONFLICT(project_path) DO UPDATE SET
+                    content = @content,
+                    updated_at = datetime('now'),
+                    updated_by = @updatedBy";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@content", content ?? "");
+            cmd.Parameters.AddWithValue("@updatedBy", (object)updatedBy ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        // -- Project Note Tabs (multi-tab notes) --
+
+        /// <summary>
+        /// Get all note tabs for a project, ordered by tab_order.
+        /// Auto-migrates from legacy project_notes if needed.
+        /// </summary>
+        public List<(string Name, string Content, bool IsDefault)> GetProjectNoteTabs(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath)) return new List<(string, string, bool)>();
+
+            var tabs = new List<(string Name, string Content, bool IsDefault)>();
+            const string sql = "SELECT tab_name, content, is_default FROM project_note_tabs WHERE project_path = @path ORDER BY tab_order";
+            using (var cmd = new SQLiteCommand(sql, _connection))
+            {
+                cmd.Parameters.AddWithValue("@path", projectPath);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    tabs.Add((
+                        reader.GetString(0),
+                        reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        reader.GetInt32(2) == 1
+                    ));
+                }
+            }
+
+            if (tabs.Count == 0)
+            {
+                // Migrate from legacy project_notes or create empty default tab
+                string legacyContent = GetProjectNotes(projectPath);
+                SaveNoteTab(projectPath, "General", legacyContent, 0, true);
+                tabs.Add(("General", legacyContent, true));
+            }
+
+            return tabs;
+        }
+
+        /// <summary>
+        /// Save/upsert a single note tab.
+        /// </summary>
+        public void SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
+        {
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return;
+
+            // Get current max tab_order if not specified
+            if (!tabOrder.HasValue)
+            {
+                const string maxSql = "SELECT COALESCE(MAX(tab_order), -1) FROM project_note_tabs WHERE project_path = @path";
+                using var maxCmd = new SQLiteCommand(maxSql, _connection);
+                maxCmd.Parameters.AddWithValue("@path", projectPath);
+                tabOrder = Convert.ToInt32(maxCmd.ExecuteScalar()) + 1;
+            }
+
+            const string sql = @"
+                INSERT INTO project_note_tabs (id, project_path, tab_name, content, tab_order, is_default, created_at, updated_at)
+                VALUES (@id, @path, @name, @content, @order, @isDefault, datetime('now'), datetime('now'))
+                ON CONFLICT(project_path, tab_name) DO UPDATE SET
+                    content = @content,
+                    updated_at = datetime('now')";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", Guid.NewGuid().ToString("N").Substring(0, 8));
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            cmd.Parameters.AddWithValue("@content", content ?? "");
+            cmd.Parameters.AddWithValue("@order", tabOrder.Value);
+            cmd.Parameters.AddWithValue("@isDefault", (isDefault ?? false) ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Delete a note tab (cannot delete default tab).
+        /// </summary>
+        public bool DeleteNoteTab(string projectPath, string tabName)
+        {
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
+            const string sql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND is_default = 0";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@name", tabName);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Rename a note tab.
+        /// </summary>
+        public bool RenameNoteTab(string projectPath, string oldName, string newName)
+        {
+            if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(oldName) || string.IsNullOrEmpty(newName)) return false;
+            const string sql = "UPDATE project_note_tabs SET tab_name = @newName, updated_at = datetime('now') WHERE project_path = @path AND tab_name = @oldName";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@path", projectPath);
+            cmd.Parameters.AddWithValue("@oldName", oldName);
+            cmd.Parameters.AddWithValue("@newName", newName);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Reorder note tabs by setting tab_order based on the provided name sequence.
+        /// </summary>
+        public void ReorderNoteTabs(string projectPath, List<string> tabNames)
+        {
+            if (string.IsNullOrEmpty(projectPath) || tabNames == null) return;
+            const string sql = "UPDATE project_note_tabs SET tab_order = @order WHERE project_path = @path AND tab_name = @name";
+            for (int i = 0; i < tabNames.Count; i++)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@path", projectPath);
+                cmd.Parameters.AddWithValue("@name", tabNames[i]);
+                cmd.Parameters.AddWithValue("@order", i);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        #endregion
+
+        #region Message Images
+
+        /// <summary>
+        /// Save a batch of message images. Returns the batch ID.
+        /// </summary>
+        public string SaveMessageImages(List<MessageImageInput> images)
+        {
+            string batchId = Guid.NewGuid().ToString("N").Substring(0, 12);
+
+            const string sql = @"
+                INSERT INTO message_images (id, batch_id, file_name, mime_type, image_data, file_size_bytes, created_at)
+                VALUES (@id, @batchId, @fileName, @mimeType, @imageData, @fileSizeBytes, datetime('now'))";
+
+            foreach (var image in images)
+            {
+                string id = Guid.NewGuid().ToString("N").Substring(0, 12);
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@id", id);
+                cmd.Parameters.AddWithValue("@batchId", batchId);
+                cmd.Parameters.AddWithValue("@fileName", image.FileName);
+                cmd.Parameters.AddWithValue("@mimeType", image.MimeType);
+                cmd.Parameters.AddWithValue("@imageData", image.Base64Data);
+                cmd.Parameters.AddWithValue("@fileSizeBytes", image.FileSizeBytes);
+                cmd.ExecuteNonQuery();
+            }
+
+            return batchId;
+        }
+
+        /// <summary>
+        /// Get all images in a batch by batch ID.
+        /// </summary>
+        public List<MessageImage> GetMessageImages(string batchId)
+        {
+            var images = new List<MessageImage>();
+
+            const string sql = @"
+                SELECT id, batch_id, file_name, mime_type, image_data, file_size_bytes, created_at
+                FROM message_images
+                WHERE batch_id = @batchId
+                ORDER BY created_at ASC";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@batchId", batchId);
+            using var reader = cmd.ExecuteReader();
+
+            while (reader.Read())
+            {
+                images.Add(new MessageImage
+                {
+                    Id = reader.GetString(0),
+                    BatchId = reader.GetString(1),
+                    FileName = reader.GetString(2),
+                    MimeType = reader.GetString(3),
+                    Base64Data = reader.GetString(4),
+                    FileSizeBytes = reader.GetInt32(5),
+                    CreatedAt = reader.GetDateTime(6)
+                });
+            }
+
+            return images;
+        }
+
+        /// <summary>
+        /// Delete all images in a batch.
+        /// </summary>
+        public bool DeleteMessageImageBatch(string batchId)
+        {
+            const string sql = "DELETE FROM message_images WHERE batch_id = @batchId";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@batchId", batchId);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        #endregion
 
         #region Notification Events
 

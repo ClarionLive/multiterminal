@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Project Notes</title>
+<style>
+body {
+    --bg-primary: #1a1a2e;
+    --bg-editor: #1e1e30;
+    --bg-header: #12122a;
+    --bg-tab: #1e1e30;
+    --bg-tab-active: #2a2a4a;
+    --bg-tab-hover: #252545;
+    --border: #2a2a4a;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0b8;
+    --text-muted: #707088;
+    --accent: #89b4fa;
+    --save-indicator: #a6e3a1;
+    --danger: #f38ba8;
+    --drop-indicator: #89b4fa;
+
+    margin: 0; padding: 0;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 12px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+body.light {
+    --bg-primary: #f5f5f5;
+    --bg-editor: #ffffff;
+    --bg-header: #e8e8e8;
+    --bg-tab: #e0e0e0;
+    --bg-tab-active: #ffffff;
+    --bg-tab-hover: #ebebeb;
+    --border: #dcdcdc;
+    --text-primary: #333333;
+    --text-secondary: #666666;
+    --text-muted: #999999;
+    --accent: #1e66f5;
+    --save-indicator: #40a02b;
+    --danger: #d20f39;
+    --drop-indicator: #1e66f5;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+.notes-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.notes-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.save-status {
+    font-size: 9px;
+    color: var(--text-muted);
+    transition: color 0.3s ease;
+}
+.save-status.saved { color: var(--save-indicator); }
+.save-status.saving { color: var(--accent); }
+
+/* ── Tab bar ── */
+.tab-bar {
+    display: flex;
+    align-items: stretch;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    overflow: hidden;
+    position: relative;
+}
+
+.tab-scroll {
+    display: flex;
+    align-items: stretch;
+    overflow-x: auto;
+    flex: 1;
+    min-width: 0;
+    scrollbar-width: none;
+}
+.tab-scroll::-webkit-scrollbar { display: none; }
+
+.tab-scroll.fade-right::after {
+    content: '';
+    position: absolute;
+    right: 28px;
+    top: 0; bottom: 0;
+    width: 24px;
+    background: linear-gradient(to right, transparent, var(--bg-header));
+    pointer-events: none;
+    z-index: 1;
+}
+
+.tab {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg-tab);
+    border-right: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+    position: relative;
+}
+.tab:hover { background: var(--bg-tab-hover); color: var(--text-secondary); }
+.tab.active { background: var(--bg-tab-active); color: var(--text-primary); font-weight: 600; }
+
+.tab.drag-over-left::before {
+    content: '';
+    position: absolute;
+    left: -1px; top: 4px; bottom: 4px;
+    width: 2px;
+    background: var(--drop-indicator);
+    border-radius: 1px;
+}
+.tab.drag-over-right::after {
+    content: '';
+    position: absolute;
+    right: -1px; top: 4px; bottom: 4px;
+    width: 2px;
+    background: var(--drop-indicator);
+    border-radius: 1px;
+}
+.tab.dragging { opacity: 0.4; }
+
+.tab-label {
+    pointer-events: none;
+}
+
+.tab-label-edit {
+    background: var(--bg-editor);
+    color: var(--text-primary);
+    border: 1px solid var(--accent);
+    border-radius: 2px;
+    font-size: 11px;
+    font-family: inherit;
+    padding: 0 3px;
+    outline: none;
+    width: 80px;
+}
+
+.tab-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    font-size: 9px;
+    color: var(--text-muted);
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.tab:hover .tab-close { opacity: 1; }
+.tab-close:hover { background: var(--danger); color: #fff; opacity: 1; }
+
+.tab-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    flex-shrink: 0;
+    font-size: 14px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-left: 1px solid var(--border);
+    transition: background 0.15s, color 0.15s;
+}
+.tab-add:hover { background: var(--bg-tab-hover); color: var(--accent); }
+
+/* ── Delete confirmation ── */
+.delete-confirm {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background: var(--bg-tab-active);
+    border: 1px solid var(--danger);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 10px;
+    color: var(--text-primary);
+    z-index: 10;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.delete-confirm.visible { display: flex; align-items: center; gap: 6px; }
+.delete-confirm button {
+    padding: 2px 8px;
+    border: none;
+    border-radius: 3px;
+    font-size: 10px;
+    cursor: pointer;
+}
+.delete-confirm .btn-yes { background: var(--danger); color: #fff; }
+.delete-confirm .btn-no { background: var(--border); color: var(--text-primary); }
+
+/* ── Editor ── */
+.editor-container {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+}
+
+textarea {
+    flex: 1;
+    background: var(--bg-editor);
+    color: var(--text-primary);
+    border: none;
+    padding: 10px 14px;
+    font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    overflow-y: auto;
+    tab-size: 4;
+}
+textarea::placeholder { color: var(--text-muted); }
+textarea::-webkit-scrollbar { width: 4px; }
+textarea::-webkit-scrollbar-track { background: var(--bg-primary); }
+textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── No project state ── */
+.no-project {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    gap: 6px;
+}
+.no-project-icon { font-size: 28px; opacity: 0.3; }
+body.no-project-state .notes-header { display: none; }
+body.no-project-state .tab-bar { display: none; }
+body.no-project-state .editor-container { display: none; }
+body.no-project-state .no-project { display: flex; }
+</style>
+</head>
+<body>
+
+<div class="no-project">
+    <div class="no-project-icon">&#128221;</div>
+    <span>Open a project to use notes</span>
+</div>
+
+<div class="notes-header">
+    <span class="notes-title">Project Notes</span>
+    <span class="save-status" id="save-status"></span>
+</div>
+
+<div class="tab-bar">
+    <div class="tab-scroll" id="tab-scroll"></div>
+    <div class="tab-add" id="tab-add" title="New tab (Ctrl+T)">+</div>
+</div>
+
+<div class="editor-container">
+    <textarea id="editor" placeholder="Type your notes here..."></textarea>
+</div>
+
+<script>
+const editor = document.getElementById('editor');
+const saveStatus = document.getElementById('save-status');
+const tabScroll = document.getElementById('tab-scroll');
+const tabAddBtn = document.getElementById('tab-add');
+
+let tabs = [];           // [{name, content, isDefault}]
+let activeTab = null;     // current tab name
+let tabContents = {};     // in-memory content cache per tab
+let lastSavedContent = {};
+let saveTimeout = null;
+let dragSrcName = null;
+let deleteConfirmEl = null;
+
+// ── Tab rendering ──
+
+function renderTabs() {
+    tabScroll.innerHTML = '';
+    tabs.forEach((tab, i) => {
+        const el = document.createElement('div');
+        el.className = 'tab' + (tab.name === activeTab ? ' active' : '');
+        el.dataset.name = tab.name;
+        el.draggable = true;
+
+        const label = document.createElement('span');
+        label.className = 'tab-label';
+        label.textContent = tab.name;
+        el.appendChild(label);
+
+        if (!tab.isDefault) {
+            const close = document.createElement('span');
+            close.className = 'tab-close';
+            close.textContent = '\u2715';
+            close.title = 'Close tab';
+            close.addEventListener('click', (e) => { e.stopPropagation(); showDeleteConfirm(el, tab.name); });
+            el.appendChild(close);
+        }
+
+        el.addEventListener('click', () => switchTab(tab.name));
+        el.addEventListener('dblclick', () => startRename(el, tab.name));
+
+        // Drag events
+        el.addEventListener('dragstart', onDragStart);
+        el.addEventListener('dragover', onDragOver);
+        el.addEventListener('dragleave', onDragLeave);
+        el.addEventListener('drop', onDrop);
+        el.addEventListener('dragend', onDragEnd);
+
+        tabScroll.appendChild(el);
+    });
+    updateScrollFade();
+}
+
+function switchTab(name) {
+    if (activeTab === name) return;
+    // Save current tab content to cache before switching
+    if (activeTab) {
+        tabContents[activeTab] = editor.value;
+        // Flush any pending save
+        if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; saveCurrentTab(); }
+    }
+    activeTab = name;
+    editor.value = tabContents[name] || '';
+    lastSavedContent[name] = tabContents[name] || '';
+    saveStatus.textContent = '';
+    saveStatus.className = 'save-status';
+    renderTabs();
+    editor.focus();
+}
+
+function saveCurrentTab() {
+    if (!activeTab) return;
+    const content = editor.value;
+    if (content === lastSavedContent[activeTab]) return;
+
+    saveStatus.textContent = 'Saving...';
+    saveStatus.className = 'save-status saving';
+
+    tabContents[activeTab] = content;
+
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({
+            type: 'save_tab',
+            tabName: activeTab,
+            content: content
+        });
+    }
+
+    lastSavedContent[activeTab] = content;
+
+    setTimeout(() => {
+        saveStatus.textContent = 'Saved';
+        saveStatus.className = 'save-status saved';
+        setTimeout(() => {
+            if (saveStatus.textContent === 'Saved') {
+                saveStatus.textContent = '';
+                saveStatus.className = 'save-status';
+            }
+        }, 2000);
+    }, 200);
+}
+
+// ── Add tab ──
+
+function addNewTab() {
+    let baseName = 'New Tab';
+    let name = baseName;
+    let counter = 1;
+    const existing = new Set(tabs.map(t => t.name.toLowerCase()));
+    while (existing.has(name.toLowerCase())) {
+        counter++;
+        name = `${baseName} ${counter}`;
+    }
+
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ type: 'add_tab', tabName: name });
+    }
+}
+
+tabAddBtn.addEventListener('click', addNewTab);
+
+// ── Delete tab ──
+
+function showDeleteConfirm(tabEl, name) {
+    hideDeleteConfirm();
+    deleteConfirmEl = document.createElement('div');
+    deleteConfirmEl.className = 'delete-confirm visible';
+    deleteConfirmEl.innerHTML = `Delete?
+        <button class="btn-yes">Yes</button>
+        <button class="btn-no">No</button>`;
+    deleteConfirmEl.querySelector('.btn-yes').addEventListener('click', (e) => {
+        e.stopPropagation();
+        hideDeleteConfirm();
+        if (window.chrome && window.chrome.webview) {
+            window.chrome.webview.postMessage({ type: 'delete_tab', tabName: name });
+        }
+    });
+    deleteConfirmEl.querySelector('.btn-no').addEventListener('click', (e) => {
+        e.stopPropagation();
+        hideDeleteConfirm();
+    });
+    tabEl.appendChild(deleteConfirmEl);
+
+    // Close on outside click
+    setTimeout(() => document.addEventListener('click', hideDeleteConfirm, { once: true }), 0);
+}
+
+function hideDeleteConfirm() {
+    if (deleteConfirmEl) {
+        deleteConfirmEl.remove();
+        deleteConfirmEl = null;
+    }
+}
+
+// ── Rename tab ──
+
+function startRename(tabEl, name) {
+    const label = tabEl.querySelector('.tab-label');
+    if (!label) return;
+
+    const input = document.createElement('input');
+    input.className = 'tab-label-edit';
+    input.type = 'text';
+    input.value = name;
+    input.style.width = Math.max(60, label.offsetWidth + 16) + 'px';
+
+    label.style.display = 'none';
+    tabEl.insertBefore(input, label);
+    tabEl.draggable = false;
+    input.focus();
+    input.select();
+
+    function commit() {
+        const newName = input.value.trim();
+        tabEl.draggable = true;
+        input.remove();
+        label.style.display = '';
+
+        if (newName && newName !== name && !tabs.some(t => t.name.toLowerCase() === newName.toLowerCase())) {
+            if (window.chrome && window.chrome.webview) {
+                window.chrome.webview.postMessage({ type: 'rename_tab', oldName: name, newName: newName });
+            }
+        }
+    }
+
+    function cancel() {
+        tabEl.draggable = true;
+        input.remove();
+        label.style.display = '';
+    }
+
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        if (e.key === 'Escape') { e.preventDefault(); input.removeEventListener('blur', commit); cancel(); }
+    });
+}
+
+// ── Drag & drop reorder ──
+
+function onDragStart(e) {
+    dragSrcName = e.currentTarget.dataset.name;
+    e.currentTarget.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragSrcName);
+}
+
+function onDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const tab = e.currentTarget;
+    if (tab.dataset.name === dragSrcName) return;
+
+    // Determine left/right half
+    const rect = tab.getBoundingClientRect();
+    const midX = rect.left + rect.width / 2;
+    clearDropIndicators();
+    if (e.clientX < midX) {
+        tab.classList.add('drag-over-left');
+    } else {
+        tab.classList.add('drag-over-right');
+    }
+}
+
+function onDragLeave(e) {
+    e.currentTarget.classList.remove('drag-over-left', 'drag-over-right');
+}
+
+function onDrop(e) {
+    e.preventDefault();
+    const targetTab = e.currentTarget;
+    const targetName = targetTab.dataset.name;
+    clearDropIndicators();
+
+    if (!dragSrcName || dragSrcName === targetName) return;
+
+    const srcIdx = tabs.findIndex(t => t.name === dragSrcName);
+    const targetIdx = tabs.findIndex(t => t.name === targetName);
+    if (srcIdx < 0 || targetIdx < 0) return;
+
+    // Determine insert position based on cursor half
+    const rect = targetTab.getBoundingClientRect();
+    const midX = rect.left + rect.width / 2;
+    const insertBefore = e.clientX < midX;
+
+    // Remove source from array
+    const [moved] = tabs.splice(srcIdx, 1);
+
+    // Find new target index (may have shifted after splice)
+    let newIdx = tabs.findIndex(t => t.name === targetName);
+    if (!insertBefore) newIdx++;
+    tabs.splice(newIdx, 0, moved);
+
+    renderTabs();
+
+    // Persist new order
+    const tabNames = tabs.map(t => t.name);
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ type: 'reorder_tabs', tabNames: tabNames });
+    }
+}
+
+function onDragEnd(e) {
+    e.currentTarget.classList.remove('dragging');
+    clearDropIndicators();
+    dragSrcName = null;
+}
+
+function clearDropIndicators() {
+    tabScroll.querySelectorAll('.drag-over-left, .drag-over-right').forEach(el => {
+        el.classList.remove('drag-over-left', 'drag-over-right');
+    });
+}
+
+// ── Scroll fade ──
+
+function updateScrollFade() {
+    const hasOverflow = tabScroll.scrollWidth > tabScroll.clientWidth;
+    const scrolledToEnd = tabScroll.scrollLeft + tabScroll.clientWidth >= tabScroll.scrollWidth - 2;
+    tabScroll.classList.toggle('fade-right', hasOverflow && !scrolledToEnd);
+}
+tabScroll.addEventListener('scroll', updateScrollFade);
+new ResizeObserver(updateScrollFade).observe(tabScroll);
+
+// ── Auto-save ──
+
+editor.addEventListener('input', () => {
+    if (saveTimeout) clearTimeout(saveTimeout);
+    if (activeTab) tabContents[activeTab] = editor.value;
+    saveStatus.textContent = 'Unsaved changes';
+    saveStatus.className = 'save-status';
+    saveTimeout = setTimeout(saveCurrentTab, 1000);
+});
+
+editor.addEventListener('blur', () => {
+    if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; }
+    saveCurrentTab();
+});
+
+// ── Keyboard shortcuts ──
+
+document.addEventListener('keydown', (e) => {
+    // Ctrl+S: save
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; }
+        saveCurrentTab();
+    }
+    // Ctrl+T: new tab
+    if ((e.ctrlKey || e.metaKey) && e.key === 't') {
+        e.preventDefault();
+        addNewTab();
+    }
+    // Ctrl+W: close current tab (if not default)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+        if (activeTab) {
+            const tab = tabs.find(t => t.name === activeTab);
+            if (tab && !tab.isDefault) {
+                e.preventDefault();
+                if (window.chrome && window.chrome.webview) {
+                    window.chrome.webview.postMessage({ type: 'delete_tab', tabName: activeTab });
+                }
+            }
+        }
+    }
+});
+
+// ── WebView2 message protocol ──
+
+function loadAllTabs(data) {
+    document.body.classList.remove('no-project-state');
+    tabs = (data.tabs || []).map(t => ({ name: t.name, content: t.content || '', isDefault: t.isDefault }));
+
+    // Populate content cache
+    tabContents = {};
+    lastSavedContent = {};
+    tabs.forEach(t => {
+        tabContents[t.name] = t.content;
+        lastSavedContent[t.name] = t.content;
+    });
+
+    // If host specified an active tab (e.g. after add), switch to it; otherwise preserve current
+    if (data.activeTab && tabs.some(t => t.name === data.activeTab)) {
+        activeTab = data.activeTab;
+    } else if (!activeTab || !tabs.some(t => t.name === activeTab)) {
+        activeTab = tabs.length > 0 ? tabs[0].name : null;
+    }
+
+    editor.value = activeTab ? (tabContents[activeTab] || '') : '';
+    saveStatus.textContent = '';
+    saveStatus.className = 'save-status';
+    renderTabs();
+}
+
+if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.postMessage({ type: 'ready' });
+
+    window.chrome.webview.addEventListener('message', (event) => {
+        const data = event.data;
+        if (!data || typeof data !== 'object') return;
+
+        switch (data.type) {
+            case 'load_all_tabs':
+                loadAllTabs(data);
+                break;
+            case 'load_notes':
+                // Legacy fallback: treat as single "General" tab
+                loadAllTabs({ tabs: [{ name: 'General', content: data.content || '', isDefault: true }] });
+                break;
+            case 'theme':
+                document.body.classList.toggle('light', !data.isDark);
+                break;
+            case 'no_project':
+                document.body.classList.add('no-project-state');
+                break;
+        }
+    });
+}
+</script>
+</body>
+</html>

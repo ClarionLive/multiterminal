@@ -540,10 +540,122 @@
             padding: var(--spacing-sm);
             border-radius: 6px;
             transition: all var(--transition-fast);
+            cursor: pointer;
+            flex-wrap: wrap;
         }
 
         .feed-item:hover {
             background: var(--bg-card-hover);
+        }
+
+        /* Expanded feed item detail section */
+        .feed-detail {
+            display: none;
+            width: 100%;
+            padding: var(--spacing-sm) var(--spacing-sm) var(--spacing-sm) 40px;
+            margin-top: 4px;
+        }
+
+        .feed-item.expanded .feed-detail {
+            display: block;
+            animation: slideDown 0.2s ease-out;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; max-height: 0; }
+            to { opacity: 1; max-height: 300px; }
+        }
+
+        .feed-detail-content {
+            font-size: var(--font-size-sm);
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-bottom: var(--spacing-sm);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .feed-detail-badges {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .feed-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .feed-badge.type {
+            background: color-mix(in srgb, var(--type-color) 20%, transparent);
+            color: var(--type-color);
+        }
+
+        .feed-badge.severity-info { background: rgba(59,130,246,0.15); color: #60a5fa; }
+        .feed-badge.severity-warning { background: rgba(234,179,8,0.15); color: #eab308; }
+        .feed-badge.severity-error { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+        .feed-detail-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: var(--spacing-sm);
+        }
+
+        .create-task-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: var(--font-size-xs);
+            font-family: var(--font-family);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        .create-task-btn:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+            border-color: var(--type-task);
+        }
+
+        .create-task-btn.success {
+            border-color: var(--type-task);
+            color: var(--type-task);
+        }
+
+        /* Toast notification */
+        .toast {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            padding: 8px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--type-task);
+            border-radius: 8px;
+            color: var(--type-task);
+            font-size: var(--font-size-sm);
+            font-weight: 600;
+            box-shadow: var(--shadow-hover);
+            z-index: 1000;
+            opacity: 0;
+            transition: transform 0.3s ease, opacity 0.3s ease;
+        }
+
+        .toast.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
         }
 
         .feed-item.dimmed {
@@ -1162,6 +1274,27 @@
                         PanelState.metrics = JSON.parse(data);
                         renderMetrics();
                         break;
+                    case 'taskCreated':
+                        console.log('[Task] Created:', data);
+                        if (window._pendingCreateTimeout) clearTimeout(window._pendingCreateTimeout);
+                        if (window._pendingCreateBtn) {
+                            window._pendingCreateBtn.textContent = '✓ Task Created';
+                            window._pendingCreateBtn.classList.add('success');
+                            window._pendingCreateBtn.disabled = false;
+                            window._pendingCreateBtn = null;
+                        }
+                        showToast('Task created successfully');
+                        break;
+                    case 'taskCreateFailed':
+                        console.log('[Task] Failed:', data);
+                        if (window._pendingCreateTimeout) clearTimeout(window._pendingCreateTimeout);
+                        if (window._pendingCreateBtn) {
+                            window._pendingCreateBtn.textContent = '+ Create Task';
+                            window._pendingCreateBtn.disabled = false;
+                            window._pendingCreateBtn = null;
+                        }
+                        showToast('Failed to create task');
+                        break;
                     case 'fontSize':
                         const size = parseFloat(data);
                         if (!isNaN(size)) {
@@ -1293,6 +1426,23 @@
             div.style.setProperty('--member-color', memberColors[memberKey] || 'var(--bg-input)');
             div.style.setProperty('--type-color', typeColors[item.type] || 'var(--border-color)');
 
+            // Store extra data for expansion
+            if (item.details) div.dataset.details = item.details;
+            if (item.severity) div.dataset.severity = item.severity;
+            if (item.activityType) div.dataset.activityType = item.activityType;
+
+            // Build badges HTML for expanded view
+            var badgesHtml = '';
+            if (item.activityType) {
+                badgesHtml += `<span class="feed-badge type">${escapeHtml(item.activityType)}</span>`;
+            }
+            if (item.severity && item.severity !== 'info') {
+                badgesHtml += `<span class="feed-badge severity-${item.severity}">${escapeHtml(item.severity)}</span>`;
+            }
+
+            // Detail content: use details field if available, otherwise show full content
+            var detailText = item.details || item.content || '';
+
             div.innerHTML = `
                 <div class="feed-type-indicator"></div>
                 <div class="feed-avatar">${avatarContent}</div>
@@ -1307,6 +1457,13 @@
                 <div class="feed-actions">
                     <button class="pin-action" title="Pin">📌</button>
                     <button class="pin-action" title="Copy">📋</button>
+                </div>
+                <div class="feed-detail">
+                    ${badgesHtml ? '<div class="feed-detail-badges">' + badgesHtml + '</div>' : ''}
+                    <div class="feed-detail-content">${escapeHtml(detailText)}</div>
+                    <div class="feed-detail-actions">
+                        <button class="create-task-btn" title="Create a kanban task from this item">+ Create Task</button>
+                    </div>
                 </div>
             `;
             return div;
@@ -1328,6 +1485,20 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // Toast notification
+        function showToast(message) {
+            var toast = document.getElementById('toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'toast';
+                toast.className = 'toast';
+                document.body.appendChild(toast);
+            }
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(function() { toast.classList.remove('show'); }, 2500);
         }
 
         // Setup WebView2 listener
@@ -1457,22 +1628,63 @@
             }
         }
 
-        // Wire up pin actions on feed items (event delegation)
+        // Wire up feed item interactions (event delegation)
         document.getElementById('feedList').addEventListener('click', (e) => {
+            // Handle pin/copy actions
             const button = e.target.closest('.pin-action');
-            if (!button) return;
+            if (button) {
+                const feedItem = button.closest('.feed-item');
+                const message = feedItem.querySelector('.feed-message')?.textContent || '';
+                const member = feedItem.querySelector('.feed-meta span')?.textContent || '';
+                const activityId = feedItem.dataset.activityId || Date.now().toString();
 
-            const feedItem = button.closest('.feed-item');
-            const message = feedItem.querySelector('.feed-message')?.textContent || '';
-            const member = feedItem.querySelector('.feed-meta span')?.textContent || '';
-            const activityId = feedItem.dataset.activityId || Date.now().toString();
+                if (button.title === 'Pin') {
+                    pinToTeam(activityId, message, member);
+                } else if (button.title === 'Bookmark') {
+                    pinToPersonal(activityId, message);
+                } else if (button.title === 'Copy') {
+                    copyToClipboard(message, button);
+                }
+                return;
+            }
 
-            if (button.title === 'Pin') {
-                pinToTeam(activityId, message, member);
-            } else if (button.title === 'Bookmark') {
-                pinToPersonal(activityId, message);
-            } else if (button.title === 'Copy') {
-                copyToClipboard(message, button);
+            // Handle Create Task button
+            const createBtn = e.target.closest('.create-task-btn');
+            if (createBtn) {
+                e.stopPropagation();
+                if (createBtn.classList.contains('success')) return; // already created
+                const feedItem = createBtn.closest('.feed-item');
+                const title = feedItem.querySelector('.feed-message')?.textContent || '';
+                const details = feedItem.dataset.details || title;
+                const activityType = feedItem.dataset.activityType || '';
+                const description = (activityType ? `[${activityType}] ` : '') + details;
+
+                createBtn.textContent = 'Creating...';
+                createBtn.disabled = true;
+                sendToHost({ type: 'createTask', title: title, description: description });
+
+                // Store ref for confirmation callback with safety timeout
+                window._pendingCreateBtn = createBtn;
+                window._pendingCreateTimeout = setTimeout(function() {
+                    if (window._pendingCreateBtn === createBtn) {
+                        createBtn.textContent = '+ Create Task';
+                        createBtn.disabled = false;
+                        window._pendingCreateBtn = null;
+                    }
+                }, 10000);
+                return;
+            }
+
+            // Handle tap-to-expand on feed items
+            const feedItem = e.target.closest('.feed-item');
+            if (feedItem) {
+                // Collapse any other expanded item
+                const currentExpanded = document.querySelector('.feed-item.expanded');
+                if (currentExpanded && currentExpanded !== feedItem) {
+                    currentExpanded.classList.remove('expanded');
+                }
+                // Toggle this item
+                feedItem.classList.toggle('expanded');
             }
         });
 
@@ -1665,48 +1877,20 @@
                 return;
             }
 
-            container.innerHTML = items.map((item, index) => {
-                const terminalName = item.terminal || 'Unknown';
-                const memberId = terminalName.toLowerCase();
-                const memberColor = memberColors[memberId] || 'var(--bg-input)';
-                const typeColor = typeColors[item.type] || 'var(--border-color)';
-                const initial = terminalName.charAt(0).toUpperCase();
-                const dimmedClass = PanelState.focusedMember && memberId !== PanelState.focusedMember ? 'dimmed' : '';
-                const newClass = item.isNew ? 'new' : '';
-                const timeAgo = formatTimeAgo(item.timestamp);
-                const activityId = item.id || `activity-${index}`;
-                const pinnedClass = item.isPinned ? 'pinned' : '';
-                const avatarUrl = getAvatarUrl(terminalName);
-                const avatarContent = avatarUrl
-                    ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(terminalName)}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;">`
-                    : initial;
-
-                return `
-                    <div class="feed-item ${dimmedClass} ${newClass} ${pinnedClass}"
-                         data-member="${memberId}"
-                         data-type="${item.type || ''}"
-                         data-activity-id="${activityId}"
-                         role="article"
-                         style="--member-color: ${memberColor}; --type-color: ${typeColor};">
-                        <div class="feed-type-indicator"></div>
-                        <div class="feed-avatar">${avatarContent}</div>
-                        <div class="feed-content">
-                            <div class="feed-message">${escapeHtml(item.content || '')}</div>
-                            <div class="feed-meta">
-                                <span>${escapeHtml(terminalName)}</span>
-                                <span>•</span>
-                                <span>${timeAgo}</span>
-                                ${item.isPinned ? '<span>• 📌</span>' : ''}
-                            </div>
-                        </div>
-                        <div class="feed-actions">
-                            <button class="pin-action" title="Pin" aria-label="Pin to team">📌</button>
-                            <button class="pin-action" title="Bookmark" aria-label="Add bookmark">🔖</button>
-                            <button class="pin-action" title="Copy" aria-label="Copy text">📋</button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
+            // Use createFeedItemElement for consistent rendering (includes expand/detail section)
+            container.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            items.forEach((item, index) => {
+                if (!item.id) item.id = `activity-${index}`;
+                const el = createFeedItemElement(item);
+                const memberId = (item.terminal || '').toLowerCase();
+                if (PanelState.focusedMember && memberId !== PanelState.focusedMember) {
+                    el.classList.add('dimmed');
+                }
+                if (item.isPinned) el.classList.add('pinned');
+                fragment.appendChild(el);
+            });
+            container.appendChild(fragment);
         }
 
         function renderPins() {

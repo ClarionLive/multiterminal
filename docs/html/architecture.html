@@ -271,7 +271,16 @@
     </div>
   </div>
 
-  <h3>Session Sync Pipeline (End-to-End)</h3>
+  <h3>Host-Controlled Memory Architecture</h3>
+  <p>MultiTerminal inverts the standard Claude Code context model. Instead of agents reading static files (CLAUDE.md, memory.md) and deciding what to remember, the <strong>host</strong> controls context injection through three mechanisms:</p>
+  <ul>
+    <li><strong>Session continuity</strong> &mdash; hooks track session&rarr;agent mappings, auto-sync JSONL transcripts, and inject the agent's own last-session recap at startup</li>
+    <li><strong>Knowledge injection</strong> &mdash; hooks query SQLite at session start, rank entries by attention decay, and inject the most relevant knowledge before the agent sees any prompt</li>
+    <li><strong>Subprocess isolation</strong> &mdash; spawned agents receive a per-agent system prompt file and scoped settings, bypassing global CLAUDE.md and user-level hooks entirely</li>
+  </ul>
+  <p>The following sections detail each mechanism.</p>
+
+  <h4>Session Sync Pipeline (End-to-End)</h4>
   <p>Every Claude Code session is automatically tracked and imported into the session database, preserving which agent ran it and providing session continuity across restarts.</p>
 
   <h4>Phase 1: Session Start (Hook)</h4>
@@ -365,12 +374,70 @@
   <table>
     <thead><tr><th>File</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td><code>.claude/hooks/session-status-hook.js</code></td><td>Writes session&rarr;agent mapping on start/end, injects recap</td></tr>
+      <tr><td><code>.claude/hooks/session-status-hook.js</code></td><td>Writes session&rarr;agent mapping on start/end, injects recap + knowledge</td></tr>
       <tr><td><code>Services/SessionLineageService.cs</code></td><td>Sync logic, JSONL parsing, queries</td></tr>
       <tr><td><code>Services/SessionSyncService.cs</code></td><td>Path conversion, JSONL message parsing</td></tr>
       <tr><td><code>Services/TaskDatabase.cs</code></td><td>All session tables + CRUD + FTS5</td></tr>
+      <tr><td><code>Services/KnowledgeDatabase.cs</code></td><td>Knowledge CRUD + attention decay (BumpReference)</td></tr>
       <tr><td><code>API/Controllers/SessionLineageController.cs</code></td><td>REST endpoints for session lineage</td></tr>
       <tr><td><code>MainForm.cs</code> (startup block)</td><td>Triggers auto-sync on app launch</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Host-Controlled Knowledge Injection</h4>
+  <p>At every session start, the <code>session-status-hook.js</code> injects relevant knowledge entries into the agent's context. The host &mdash; not the agent &mdash; decides what gets injected and in what order.</p>
+
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. <code>session-status-hook.js</code> (SessionStart)</div>
+      <div class="flow-detail">Opens SQLite directly, queries <code>knowledge_entries</code> with decay ranking:<br>
+      <code>score = (reference_count + 1) / (days_since_last_referenced + 1)</code></div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. Tiered injection</div>
+      <div class="flow-detail">Top 10 by score &rarr; full inject (title + 200-char content). Next 5 &rarr; title-only. Rest skipped.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. Bump references</div>
+      <div class="flow-detail">All injected entries get <code>reference_count += 1</code> and <code>last_referenced = now</code>, reinforcing their ranking for next session.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">4. Graceful fallback</div>
+      <div class="flow-detail">If decay columns don't exist yet (pre-migration), falls back to simple <code>ORDER BY updated_at DESC</code>.</div>
+    </div>
+  </div>
+
+  <h4>Subprocess Isolation</h4>
+  <p>Spawned team agents receive controlled context to prevent global CLAUDE.md leakage and user-level hook interference.</p>
+
+  <div class="flow-diagram">
+    <div class="flow-step">
+      <div class="flow-label">1. <code>TerminalSpawner.SpawnTerminal()</code></div>
+      <div class="flow-detail">Calls <code>GenerateAgentSystemPrompt(agentName, agentType)</code> to create a per-agent prompt file.</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">2. Prompt file written</div>
+      <div class="flow-detail"><code>%APPDATA%/multiterminal/agent-{name}-prompt.md</code> containing: agent identity, rules from <code>multiterminal-rules.md</code>, and agent constraints (focus on task, no global settings changes).</div>
+    </div>
+    <div class="flow-arrow">&darr;</div>
+    <div class="flow-step">
+      <div class="flow-label">3. Claude launched with isolation flags</div>
+      <div class="flow-detail"><code>--system-prompt-file {prompt.md}</code> &mdash; overrides global CLAUDE.md<br>
+      <code>--setting-sources project,local</code> &mdash; skips user-level settings and hooks<br>
+      <code>--channels server:multiterminal-channel</code> &mdash; MCP messaging</div>
+    </div>
+  </div>
+
+  <h5>Isolation Key Files</h5>
+  <table>
+    <thead><tr><th>File</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>Services/TerminalSpawner.cs</code></td><td>Generates prompt file, passes isolation flags to Claude CLI</td></tr>
+      <tr><td><code>multiterminal-rules.md</code></td><td>Shared rules included in agent prompts</td></tr>
     </tbody>
   </table>
 
@@ -761,6 +828,8 @@
         <tr><td><code>tags</code></td><td>TEXT</td><td>Comma-separated tags</td></tr>
         <tr><td><code>confidence</code></td><td>TEXT</td><td>confirmed, likely, uncertain</td></tr>
         <tr><td><code>superseded_by</code></td><td>INTEGER</td><td>ID of replacement entry</td></tr>
+        <tr><td><code>last_referenced</code></td><td>TEXT</td><td>ISO timestamp of last access (search or injection). Used by attention decay ranking.</td></tr>
+        <tr><td><code>reference_count</code></td><td>INTEGER</td><td>Total access count. Bumped on every search hit and session injection.</td></tr>
       </tbody>
     </table>
   </div>

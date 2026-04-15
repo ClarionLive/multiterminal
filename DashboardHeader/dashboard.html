@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root {
+    --bg: #1e1e2e;
+    --bg-hover: #313244;
+    --bg-active: #45475a;
+    --text: #cdd6f4;
+    --text-dim: #6c7086;
+    --accent: #89b4fa;
+    --green: #a6e3a1;
+    --yellow: #f9e2af;
+    --red: #f38ba8;
+    --blue: #89b4fa;
+    --mauve: #cba6f7;
+    --border: #313244;
+    --surface: #181825;
+  }
+
+  body.light {
+    --bg: #eff1f5;
+    --bg-hover: #ccd0da;
+    --bg-active: #bcc0cc;
+    --text: #4c4f69;
+    --text-dim: #6c6f85;
+    --accent: #1e66f5;
+    --green: #40a02b;
+    --yellow: #df8e1d;
+    --red: #d20f39;
+    --blue: #1e66f5;
+    --mauve: #8839ef;
+    --border: #ccd0da;
+    --surface: #e6e9ef;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .dashboard {
+    display: flex;
+    align-items: center;
+    height: 80px;
+    padding: 0 14px 10px 14px;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--bg) 0%, var(--surface) 100%);
+  }
+
+  /* Logo with dropdown */
+  .logo-container { position: relative; }
+
+  .logo-btn {
+    width: 40px;
+    height: 40px;
+    background: var(--accent);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    color: var(--bg);
+    font-weight: 800;
+    cursor: pointer;
+    border: none;
+    transition: all 0.15s ease;
+  }
+
+  .logo-btn:hover { filter: brightness(1.15); transform: scale(1.05); }
+
+
+  .divider { width: 1px; height: 36px; background: var(--border); flex-shrink: 0; }
+
+  /* New Terminal button */
+  .new-terminal-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .new-terminal-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+
+  /* Panel groups */
+  .panel-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--surface);
+    border-radius: 10px;
+    padding: 3px;
+    border: 1px solid var(--border);
+  }
+
+  .icon-btn {
+    width: 38px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-size: 17px;
+    color: var(--text-dim);
+    background: transparent;
+    border: none;
+    position: relative;
+  }
+
+  .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+  .icon-btn.active { background: var(--bg-active); color: var(--accent); }
+
+  .icon-btn .badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    background: var(--red);
+    border-radius: 50%;
+    font-size: 10px;
+    font-weight: 700;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+
+  .icon-btn .badge.hidden { display: none; }
+
+  /* Dashboard zone */
+  .dashboard-zone {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex: 1;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+
+  .project-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .project-name { font-weight: 600; font-size: 14px; color: var(--text); white-space: nowrap; }
+  .git-branch {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--mauve);
+    background: rgba(203,166,247,0.1); padding: 3px 10px; border-radius: 12px; white-space: nowrap;
+  }
+  body.light .git-branch { background: rgba(136,57,239,0.1); }
+
+  .task-info { display: flex; align-items: center; gap: 10px; min-width: 0; flex-shrink: 1; }
+  .task-title { font-size: 13px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .task-progress { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--green); white-space: nowrap; }
+  .progress-bar { width: 56px; height: 5px; background: var(--bg-active); border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--green); border-radius: 3px; transition: width 0.3s ease; }
+
+  .no-task { font-size: 13px; color: var(--text-dim); font-style: italic; }
+
+  /* Session chips */
+  .sessions-group { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; overflow: hidden; }
+
+  .session-chip {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 16px; font-size: 12px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s ease; white-space: nowrap;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+
+  .session-chip:hover { background: var(--bg-hover); border-color: var(--bg-active); }
+  .session-chip.active { background: rgba(137,180,250,0.15); border-color: var(--accent); }
+  body.light .session-chip.active { background: rgba(30,102,245,0.1); }
+
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.idle { background: var(--yellow); }
+  .status-dot.waiting { background: var(--blue); animation: pulse 2s infinite; }
+  .status-dot.error { background: var(--red); }
+
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .gap-sm { width: 6px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div class="dashboard">
+
+  <!-- Logo button — menu handled natively in C# (HTML dropdown clips at 80px control height) -->
+  <div class="logo-container">
+    <button class="logo-btn" onclick="sendAction('show_menu')">M</button>
+  </div>
+
+  <!-- New Terminal -->
+  <button class="new-terminal-btn" onclick="sendAction('new_terminal')">+ New</button>
+
+  <div class="gap-sm"></div>
+
+  <!-- Primary panel toggles -->
+  <div class="panel-group">
+    <button class="icon-btn" id="btn-projects" title="Projects" onclick="sendAction('toggle_projects')">&#128194;</button>
+    <button class="icon-btn" id="btn-tasks" title="Tasks" onclick="sendAction('toggle_tasks')">&#128203;</button>
+    <button class="icon-btn" id="btn-chat" title="Chat" onclick="sendAction('toggle_chat')">&#128172;</button>
+    <button class="icon-btn" id="btn-activity" title="Activity" onclick="sendAction('toggle_activity')">&#9889;</button>
+    <button class="icon-btn" id="btn-office" title="Office" onclick="sendAction('toggle_office')">&#127970;</button>
+    <button class="icon-btn" id="btn-profiles" title="Profiles" onclick="sendAction('toggle_profiles')">&#128100;</button>
+    <button class="icon-btn" id="btn-inbox" title="Inbox" onclick="sendAction('toggle_inbox')">
+      &#128233;
+      <span class="badge hidden" id="inboxBadge">0</span>
+    </button>
+  </div>
+
+  <div class="gap-sm"></div>
+
+  <!-- Secondary panel toggles -->
+  <div class="panel-group">
+    <button class="icon-btn" id="btn-debug" title="Debug" onclick="sendAction('toggle_debug')">&#128027;</button>
+    <button class="icon-btn" id="btn-preview" title="Preview" onclick="sendAction('toggle_preview')">&#128196;</button>
+    <button class="icon-btn" id="btn-history" title="History" onclick="sendAction('toggle_history')">&#128340;</button>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Dashboard zone -->
+  <div class="dashboard-zone">
+    <div class="project-info">
+      <span class="project-name" id="projectName">—</span>
+      <div class="git-branch" id="gitBranch">
+        <span>&#9741;</span>
+        <span id="branchName">—</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="task-info" id="taskSection">
+      <span class="task-title" id="taskTitle">&#128203; No active task</span>
+      <div class="task-progress" id="taskProgress" style="display:none">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width: 0%"></div></div>
+        <span id="progressText">0/0</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="sessions-group" id="sessionsGroup">
+      <!-- Session chips injected dynamically -->
+    </div>
+  </div>
+</div>
+
+<script>
+  // ============ JS → C# Communication ============
+  function sendAction(action) {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage({ type: 'action', action: action });
+    }
+  }
+
+  function sendTerminalClick(terminalName) {
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage({ type: 'switch_terminal', name: terminalName });
+    }
+  }
+
+  // ============ C# → JS Communication ============
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.addEventListener('message', (event) => {
+      const msg = event.data;
+
+      // String messages
+      if (typeof msg === 'string') {
+        if (msg.startsWith('theme:')) {
+          document.body.classList.toggle('light', msg === 'theme:light');
+        } else if (msg.startsWith('fontSize:')) {
+          document.body.style.fontSize = msg.split(':')[1] + 'px';
+        }
+        return;
+      }
+
+      // JSON messages
+      if (msg.type === 'project') {
+        updateProject(msg);
+      } else if (msg.type === 'task') {
+        updateTask(msg);
+      } else if (msg.type === 'sessions') {
+        updateSessions(msg.sessions);
+      } else if (msg.type === 'inbox_count') {
+        updateInboxBadge(msg.count);
+      } else if (msg.type === 'panel_state') {
+        updatePanelState(msg.panel, msg.visible);
+      } else if (msg.type === 'active_session') {
+        setActiveSession(msg.name);
+      } else if (msg.type === 'version') {
+        document.getElementById('appVersion').textContent = 'MultiTerminal ' + msg.version;
+      }
+    });
+  }
+
+  // ============ Update Functions ============
+  function updateProject(data) {
+    document.getElementById('projectName').textContent = data.name || '—';
+    document.getElementById('branchName').textContent = data.branch || '—';
+  }
+
+  function updateTask(data) {
+    const titleEl = document.getElementById('taskTitle');
+    const progressEl = document.getElementById('taskProgress');
+    const fillEl = document.getElementById('progressFill');
+    const textEl = document.getElementById('progressText');
+
+    if (!data.title) {
+      titleEl.textContent = '\u{1F4CB} No active task';
+      progressEl.style.display = 'none';
+      return;
+    }
+
+    titleEl.textContent = '\u{1F4CB} ' + data.title;
+    titleEl.title = data.title;
+    if (data.total > 0) {
+      progressEl.style.display = 'flex';
+      const pct = Math.round((data.done / data.total) * 100);
+      fillEl.style.width = pct + '%';
+      textEl.textContent = data.done + '/' + data.total;
+    } else {
+      progressEl.style.display = 'none';
+    }
+  }
+
+  function updateSessions(sessions) {
+    const container = document.getElementById('sessionsGroup');
+    container.innerHTML = '';
+
+    if (!sessions || sessions.length === 0) {
+      container.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">No terminals</span>';
+      return;
+    }
+
+    sessions.forEach(s => {
+      const chip = document.createElement('div');
+      chip.className = 'session-chip' + (s.active ? ' active' : '');
+      chip.onclick = () => sendTerminalClick(s.name);
+      chip.innerHTML = '<div class="status-dot ' + escapeHtml(s.status || 'idle') + '"></div>' + escapeHtml(s.name);
+      container.appendChild(chip);
+    });
+  }
+
+  function updateInboxBadge(count) {
+    const badge = document.getElementById('inboxBadge');
+    if (count > 0) {
+      badge.textContent = count > 99 ? '99+' : count;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  function updatePanelState(panel, visible) {
+    const btn = document.getElementById('btn-' + panel);
+    if (btn) {
+      btn.classList.toggle('active', visible);
+    }
+  }
+
+  function setActiveSession(name) {
+    const chips = document.querySelectorAll('.session-chip');
+    chips.forEach(chip => {
+      const chipName = chip.textContent.trim();
+      chip.classList.toggle('active', chipName === name);
+    });
+  }
+
+
+  // ============ Utilities ============
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // ============ Ready Signal ============
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.postMessage({ type: 'ready' });
+  }
+</script>
+</body>
+</html>

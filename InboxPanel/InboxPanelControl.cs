@@ -22,8 +22,9 @@ namespace MultiTerminal.InboxPanel
         private bool _isInitialized;
         private bool _isInitializing;
         private bool _initializePending;
+        private bool _isShuttingDown;
         private MessageBroker _broker;
-        private string _defaultUserId = "John";
+        private string _defaultUserId = "Owner";
 
         /// <summary>
         /// Raised when the user clicks a task link to navigate to that task on the kanban board.
@@ -64,7 +65,7 @@ namespace MultiTerminal.InboxPanel
         /// </summary>
         /// <param name="broker">The MessageBroker instance for inbox operations.</param>
         /// <param name="defaultUserId">The default user ID whose inbox to display.</param>
-        public async void Initialize(MessageBroker broker, string defaultUserId = "John")
+        public async void Initialize(MessageBroker broker, string defaultUserId = "Owner")
         {
             _broker = broker;
             _defaultUserId = defaultUserId;
@@ -84,13 +85,23 @@ namespace MultiTerminal.InboxPanel
 
         private async System.Threading.Tasks.Task InitializeWebView2Async()
         {
-            if (_isInitializing || _isInitialized) return;
+            if (_isInitializing || _isInitialized || _isShuttingDown) return;
             _isInitializing = true;
 
             try
             {
                 var env = await WebView2EnvironmentCache.GetEnvironmentAsync();
                 await _webView.EnsureCoreWebView2Async(env);
+            }
+            catch (OperationCanceledException)
+            {
+                System.Diagnostics.Debug.WriteLine("Inbox panel WebView2 init cancelled (shutdown).");
+                _isInitializing = false;
+            }
+            catch (Exception ex) when (_isShuttingDown || IsDisposed || Disposing)
+            {
+                System.Diagnostics.Debug.WriteLine($"Inbox panel WebView2 init failed during shutdown: {ex.Message}");
+                _isInitializing = false;
             }
             catch (Exception ex)
             {
@@ -103,6 +114,8 @@ namespace MultiTerminal.InboxPanel
         {
             if (!e.IsSuccess)
             {
+                if (_isShuttingDown || IsDisposed || Disposing || !IsHandleCreated)
+                    return;
                 MessageBox.Show($"WebView2 initialization failed: {e.InitializationException?.Message}",
                     "Inbox Panel Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -300,6 +313,8 @@ namespace MultiTerminal.InboxPanel
 
         protected override void Dispose(bool disposing)
         {
+            _isShuttingDown = true;
+
             if (disposing)
             {
                 if (_broker != null)

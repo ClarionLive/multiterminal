@@ -1913,6 +1913,10 @@ body.light .helper-chip {
    ============================================================ */
 .hidden { display: none !important; }
 </style>
+<link rel="stylesheet" href="../shared/markdown-renderer.css">
+<script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="../shared/markdown-renderer.js"></script>
 </head>
 <body>
 
@@ -2207,75 +2211,34 @@ body.light .helper-chip {
     let swimlanesManuallySet = false; // true once user explicitly toggles
 
     // -----------------------------------------------------------
-    // Markdown Renderer (lightweight)
+    // Markdown Renderer — delegates to shared/markdown-renderer.js
     // -----------------------------------------------------------
+    // Initialise on first use (theme is set via handleStringMessage)
+    let mdRendererInited = false;
+    function ensureMarkdownRenderer() {
+        if (mdRendererInited) return;
+        mdRendererInited = true;
+        const isDark = !document.body.classList.contains("light");
+        if (window.MarkdownRenderer) {
+            MarkdownRenderer.init({ isDark: isDark });
+        }
+    }
+
     function renderMarkdown(text) {
         if (!text) return "";
-        var html = text;
+        ensureMarkdownRenderer();
+        if (window.MarkdownRenderer) {
+            return MarkdownRenderer.render(text);
+        }
+        // Ultimate fallback (MarkdownRenderer unavailable)
+        return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+    }
 
-        // Escape HTML entities first
-        html = html.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-        // Code blocks (``` ... ```) — must come before inline processing
-        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function (m, lang, code) {
-            return '<pre><code>' + code.trimEnd() + '</code></pre>';
-        });
-
-        // Inline code (`...`)
-        html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-
-        // Headings
-        html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
-        html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-        html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-        html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-
-        // Horizontal rules
-        html = html.replace(/^---+$/gm, '<hr>');
-
-        // Bold and italic
-        html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-        html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-        // Blockquotes
-        html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-
-        // Unordered lists: convert consecutive "- " lines
-        html = html.replace(/(?:^- .+\n?)+/gm, function (block) {
-            var items = block.trim().split("\n").map(function (line) {
-                return '<li>' + line.replace(/^- /, '') + '</li>';
-            }).join("\n");
-            return '<ul>' + items + '</ul>';
-        });
-
-        // Ordered lists: convert consecutive "N. " lines
-        html = html.replace(/(?:^\d+\. .+\n?)+/gm, function (block) {
-            var items = block.trim().split("\n").map(function (line) {
-                return '<li>' + line.replace(/^\d+\. /, '') + '</li>';
-            }).join("\n");
-            return '<ol>' + items + '</ol>';
-        });
-
-        // Paragraphs: wrap remaining loose text lines
-        // Split by double newlines, wrap non-tag blocks in <p>
-        html = html.split(/\n{2,}/).map(function (block) {
-            block = block.trim();
-            if (!block) return "";
-            // Don't wrap blocks that start with HTML tags
-            if (/^<(h[1-6]|ul|ol|li|pre|blockquote|hr|p)/.test(block)) return block;
-            return '<p>' + block.replace(/\n/g, '<br>') + '</p>';
-        }).join("\n");
-
-        // Clean up: merge adjacent blockquotes
-        html = html.replace(/<\/blockquote>\n<blockquote>/g, '<br>');
-
-        // Defense-in-depth: strip any script tags or event handlers that
-        // could theoretically result from regex edge cases
-        html = html.replace(/<script[\s\S]*?<\/script>/gi, "");
-        html = html.replace(/\bon\w+\s*=/gi, "data-blocked=");
-
-        return html;
+    // Post-process Mermaid diagrams in a container after innerHTML set
+    function postProcessMarkdown(container) {
+        if (window.MarkdownRenderer && container) {
+            MarkdownRenderer.postProcess(container);
+        }
     }
 
     // -----------------------------------------------------------
@@ -2304,8 +2267,10 @@ body.light .helper-chip {
     function handleStringMessage(msg) {
         if (msg === "theme:dark") {
             document.body.classList.remove("light");
+            if (window.MarkdownRenderer) MarkdownRenderer.setTheme(true);
         } else if (msg === "theme:light") {
             document.body.classList.add("light");
+            if (window.MarkdownRenderer) MarkdownRenderer.setTheme(false);
         }
     }
 
@@ -3458,6 +3423,7 @@ body.light .helper-chip {
 
         title.textContent = note.title;
         body.innerHTML = note.text ? renderMarkdown(note.text) : '<span class="notes-rendered-empty">No content</span>';
+        postProcessMarkdown(body);
         body.style.display = "";
         textarea.classList.remove("visible");
         textarea.value = note.text || "";
@@ -3573,6 +3539,7 @@ body.light .helper-chip {
             // Switch back to rendered view, save changes
             var newText = textarea.value;
             body.innerHTML = newText ? renderMarkdown(newText) : '<span class="notes-rendered-empty">No content yet</span>';
+            postProcessMarkdown(body);
             body.style.display = "";
             textarea.classList.remove("visible");
             editBtn.textContent = "Edit";
@@ -3972,9 +3939,11 @@ body.light .helper-chip {
             noteEl.appendChild(header);
 
             if (note.Text) {
-                var textEl = createEl("div", "card-modal-note-text");
-                textEl.textContent = note.Text;
+                var textEl = createEl("div", "card-modal-note-text md-content");
+                ensureMarkdownRenderer();
+                textEl.innerHTML = renderMarkdown(note.Text);
                 noteEl.appendChild(textEl);
+                postProcessMarkdown(textEl);
             }
 
             container.appendChild(noteEl);

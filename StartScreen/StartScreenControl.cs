@@ -41,6 +41,7 @@ namespace MultiTerminal.StartScreen
         // ── Data source ───────────────────────────────────────────────────────
         // Injected by TerminalDocument so we can call GetAllRichProjects().
         private ProjectDatabase _projectDatabase;
+        private ProjectService _projectService;
 
         // ── Public events ─────────────────────────────────────────────────────
 
@@ -91,9 +92,10 @@ namespace MultiTerminal.StartScreen
         /// Initialise the control with a project database instance.
         /// Call this once after the control is created.
         /// </summary>
-        public async void Initialize(ProjectDatabase projectDatabase)
+        public async void Initialize(ProjectDatabase projectDatabase, ProjectService projectService = null)
         {
             _projectDatabase = projectDatabase;
+            _projectService = projectService;
             _initializePending = true;
 
             if (IsHandleCreated && !_isInitializing && !_isInitialized)
@@ -339,11 +341,20 @@ namespace MultiTerminal.StartScreen
 
             try
             {
-                var project = _projectDatabase.GetRichProject(projectId);
-                if (project == null) return;
-
-                project.IsPinned = !project.IsPinned;
-                _projectDatabase.SaveRichProject(project);
+                // Delegate to ProjectService which writes to both SQLite AND project.json.
+                // Without the file write, other code paths that load from project.json
+                // (ChangelogService, VersioningService) would overwrite is_pinned back to false.
+                if (_projectService != null)
+                {
+                    _projectService.ToggleProjectPinned(projectId);
+                }
+                else
+                {
+                    var project = _projectDatabase.GetRichProject(projectId);
+                    if (project == null) return;
+                    project.IsPinned = !project.IsPinned;
+                    _projectDatabase.SaveRichProject(project);
+                }
 
                 // Push refreshed list back to JS
                 SendProjectsToWebView();

@@ -94,11 +94,8 @@ namespace MultiTerminal
         // Gateway integration service — syncs MCP servers to the gateway's SQLite DB
         private Services.GatewayIntegrationService _gatewayService;
 
-        // Oracle — on-demand advisory agent (no project, no coding)
+        // Oracle — always-on advisory agent (no project, no coding)
         private OracleService _oracleService;
-        private string _oracleTerminalId;
-        private TerminalDocument _oracleTerminalDoc;
-        private volatile bool _oracleSpawning; // Guard against concurrent spawn from thread pool
 
         // Anti-reentrance: throttle nudges per terminal (5-second cooldown)
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastNudgeTime = new();
@@ -126,6 +123,9 @@ namespace MultiTerminal
         private System.Windows.Forms.Timer _messageQueueTimer;
         private int _messageQueueCleanupCounter = 0;
         private const int CleanupIntervalTicks = 1800; // Every 1 hour at 2-second intervals (3600/2)
+
+        // Timer for periodic session sync (imports JSONL files into session_lineage)
+        private System.Windows.Forms.Timer _sessionSyncTimer;
 
         /// <summary>
         /// Event fired when all terminals have finished loading.
@@ -340,46 +340,76 @@ namespace MultiTerminal
                 // Wire up KnowledgeDatabase — institutional memory (shares multiterminal.db via TaskDatabase)
                 _mcpServer.Broker.KnowledgeDb = new Services.KnowledgeDatabase(_mcpServer.Broker.TaskDb);
 
-                // DISABLED FOR DISTRIBUTION — re-enable after debugging auto-sync feature
+                // Wire up SessionMemoryDatabase — vector-embedded session chunks for semantic search
+                _mcpServer.Broker.SessionMemoryDb = new Services.SessionMemoryDatabase(_mcpServer.Broker.TaskDb);
+
+                // Wire up CodeGraphDatabase — Roslyn-based C# code indexer
+                var codeGraphDb = new Services.CodeGraphDatabase(_mcpServer.Broker.TaskDb);
+                _mcpServer.Broker.CodeGraphDb = codeGraphDb;
+                _mcpServer.Broker.CodeGraphQuery = new Services.CodeGraphQuery(codeGraphDb);
+
+                // Wire up WikiGeneratorService — produces per-subsystem markdown articles
+                _mcpServer.Broker.WikiGenerator = new Services.WikiGeneratorService(
+                    _mcpServer.Broker.CodeGraphQuery,
+                    _mcpServer.Broker.KnowledgeDb);
+
+                // Note: Session memory crash recovery moved to after _mcpServer.StartAsync()
+                // so that ProjectService is available (it's wired during server startup)
+
+                // Clean up stale session_agent_map entries (sessions stuck as "active" from past crashes)
+                try
+                {
+                    int cleaned = _mcpServer.Broker.TaskDb.CleanupStaleActiveSessions();
+                    if (cleaned > 0)
+                        _debugLogService?.Info("MainForm", $"Cleaned up {cleaned} stale active sessions in session_agent_map");
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MainForm] session_agent_map cleanup failed: {ex.Message}");
+                }
+
                 // Auto-sync Claude Code sessions on startup (background, non-blocking)
                 // Scans all registered projects from SQLite, not just CWD
-                // var lineageService = _mcpServer.Broker.SessionLineageService;
-                // var debugLog = _debugLogService;
-                // var projectDb = _sharedProjectDatabase;
-                // System.Threading.Tasks.Task.Run(() =>
-                // {
-                //     try
-                //     {
-                //         var projects = projectDb?.GetAllProjects();
-                //         if (projects == null || projects.Count == 0)
-                //             return;
-                //
-                //         int totalImported = 0, totalSkipped = 0, totalFailed = 0;
-                //
-                //         foreach (var project in projects)
-                //         {
-                //             if (string.IsNullOrEmpty(project.Path))
-                //                 continue;
-                //
-                //             string claudeFolder = Services.SessionLineageService.GetClaudeProjectFolder(project.Path);
-                //             if (claudeFolder == null)
-                //                 continue;
-                //
-                //             debugLog?.Info("MainForm", $"Session sync [{project.Name}]: scanning {claudeFolder}");
-                //             var result = lineageService.SyncNewSessions(claudeFolder);
-                //             totalImported += result.Imported;
-                //             totalSkipped += result.Skipped;
-                //             totalFailed += result.Failed;
-                //             debugLog?.Info("MainForm", $"Session sync [{project.Name}]: {result.Imported} imported, {result.Skipped} skipped, {result.Failed} failed");
-                //         }
-                //
-                //         debugLog?.Info("MainForm", $"Session sync totals: {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
-                //     }
-                //     catch (Exception ex)
-                //     {
-                //         debugLog?.Error("MainForm", $"Session sync error: {ex.Message}");
-                //     }
-                // });
+                var startupLineageService = _mcpServer.Broker.SessionLineageService;
+                var startupDebugLog = _debugLogService;
+                var startupProjectDb = _sharedProjectDatabase;
+                var startupBroker = _mcpServer.Broker;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        var projects = startupProjectDb?.GetAllProjects();
+                        if (projects == null || projects.Count == 0)
+                            return;
+
+                        int totalImported = 0, totalSkipped = 0, totalFailed = 0;
+
+                        foreach (var project in projects)
+                        {
+                            if (string.IsNullOrEmpty(project.Path))
+                                continue;
+
+                            string claudeFolder = Services.SessionLineageService.GetClaudeProjectFolder(project.Path);
+                            if (claudeFolder == null)
+                                continue;
+
+                            var result = startupLineageService.SyncNewSessions(claudeFolder);
+                            totalImported += result.Imported;
+                            totalSkipped += result.Skipped;
+                            totalFailed += result.Failed;
+                        }
+
+                        if (totalImported > 0)
+                        {
+                            startupDebugLog?.Info("MainForm", $"Session sync (startup): {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
+                            startupBroker.FireSessionLineageUpdated(null);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        startupDebugLog?.Error("MainForm", $"Session sync startup error: {ex.Message}");
+                    }
+                });
 
                 // Note: Profiles are set to offline in MessageBroker constructor before loading
 
@@ -415,7 +445,7 @@ namespace MultiTerminal
                 _chatPanel.ReplyRequested += OnChatReplyRequested;
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 12: Initializing tasks panel");
                 _tasksPanel.SetDebugLogService(_debugLogService);
-                _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService);
+                _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 13: Wiring tasks panel events");
                 _tasksPanel.InjectRequested += OnChatInjectRequested; // Reuse same inject handler
 
@@ -424,7 +454,7 @@ namespace MultiTerminal
                 _chatPanel.ZoomChanged += (s, zoom) => _settings?.SetChatPanelZoom(zoom);
 
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Initializing inbox panel");
-                _inboxPanel.Initialize(_mcpServer.Broker);
+                _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
 
                 // Initialize dashboard header alongside other panels (not deferred — deferring
                 // caused the header to never appear if RestoreSession hit any issue)
@@ -471,7 +501,7 @@ namespace MultiTerminal
                 // Start inbox file monitor for nudging idle terminals
                 InitializeInboxMonitor();
 
-                // Initialize Oracle advisory agent (on-demand — registers terminal but doesn't spawn yet)
+                // Initialize and start Oracle advisory agent (always-on hidden popup)
                 InitializeOracle();
 
                 // Start MCP server in background
@@ -480,6 +510,26 @@ namespace MultiTerminal
                     try
                     {
                         await _mcpServer.StartAsync();
+
+                        // Crash recovery: index any unflushed sessions from previous runs
+                        // Must run after StartAsync so ProjectService is wired
+                        try
+                        {
+                            var sessionMemDb = _mcpServer.Broker.SessionMemoryDb;
+                            var projects = _mcpServer.Broker.ProjectService?.GetAllRegisteredProjects();
+                            if (sessionMemDb != null && projects != null)
+                            {
+                                foreach (var project in projects)
+                                {
+                                    if (!string.IsNullOrEmpty(project.Path))
+                                        sessionMemDb.IndexProjectSessions(project.Path);
+                                }
+                            }
+                        }
+                        catch (Exception crEx)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[MainForm] Session memory crash recovery failed: {crEx.Message}");
+                        }
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -931,6 +981,41 @@ namespace MultiTerminal
                 "Just connected"
             );
             System.Diagnostics.Debug.WriteLine($"[MainForm] Terminal registered: {e.Name}, seeded initial activity");
+
+            // ORACLE BOOTSTRAP: When Oracle registers its channel, send it the digest processing message.
+            // Only send once per app session to avoid duplicate digest tasks on crash restarts.
+            if (!_oracleBootstrapped && string.Equals(e.Name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase) && e.ChannelPort > 0)
+            {
+                _oracleBootstrapped = true;
+                _ = SendOracleBootstrapAsync(e.ChannelPort.Value);
+            }
+        }
+
+        /// <summary>
+        /// Send Oracle its bootstrap message after channel registration.
+        /// Oracle processes the daily digest and creates suggestion tasks.
+        /// </summary>
+        private async Task SendOracleBootstrapAsync(int channelPort)
+        {
+            try
+            {
+                // Small delay to let Oracle's session fully initialize
+                await Task.Delay(3000);
+
+                string bootstrapMessage = "You just started up with MultiTerminal. " +
+                    "Run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel. " +
+                    "Then let the Owner know you're online and ready.";
+
+                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal");
+                if (delivered)
+                    _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
+                else
+                    _debugLogService?.Warning("MainForm", "Oracle bootstrap message delivery failed");
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("MainForm", $"Oracle bootstrap failed: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -946,6 +1031,11 @@ namespace MultiTerminal
             try
             {
                 System.Diagnostics.Debug.WriteLine($"[MainForm] Spawn requested: {agentName} ({agentType}) in {workingDir}");
+
+                // Oracle is always-on — reject spawn requests, it's managed by OracleService
+                if (agentName.Equals(OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
+                    return (false, null, "Oracle is always-on and managed by OracleService. Send messages directly.");
+
                 _debugLogService.Info("MainForm", $"Spawning teammate: {agentName} ({agentType})");
 
                 // Track doc ID from terminal registration
@@ -1158,31 +1248,8 @@ namespace MultiTerminal
             var recipientTerminal = _mcpServer.Broker.GetTerminal(recipientId);
             string recipientName = recipientTerminal?.Name ?? recipientId;
 
-            // ORACLE: On-demand spawn — if Oracle isn't running, spawn its terminal then deliver via channel.
-            // If Oracle IS running, reset idle timer and let the normal channel delivery path handle it.
-            if (_oracleService != null && string.Equals(recipientName, OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
-            {
-                if (!_oracleService.IsRunning && !_oracleSpawning)
-                {
-                    _oracleSpawning = true;
-                    _debugLogService?.Info("MainForm", $"Oracle not running — spawning for message {messageId} from {sender}");
-                    _ = SpawnOracleAndDeliverAsync(messageId, sender, message);
-                    return true; // We're handling delivery asynchronously
-                }
-
-                if (_oracleService.IsRunning)
-                {
-                    // Oracle is running — reset idle timer and fall through to normal channel delivery
-                    _oracleService.ResetIdleTimer();
-                    _debugLogService?.Trace("MainForm", $"Oracle running — channel delivery for message {messageId}");
-                }
-                else
-                {
-                    // Oracle is spawning (another message arrived during spawn) — let broker retry later
-                    _debugLogService?.Info("MainForm", $"Oracle spawning — message {messageId} will retry via broker queue");
-                    return false;
-                }
-            }
+            // ORACLE: Always-on — Oracle's channel delivery is handled by the normal path below.
+            // No special spawn logic needed since Oracle starts with MultiTerminal.
 
             // PRIMARY: Channel delivery — POST to recipient's Claude Code Channel HTTP port.
             // This pushes a <channel> event directly into the Claude Code session (instant, no polling).
@@ -1451,6 +1518,13 @@ namespace MultiTerminal
 
             _dashboardHeader.SwitchTerminalRequested += (name) =>
             {
+                // Oracle click → toggle popup instead of switching to a docked tab
+                if (_oracleService != null && string.Equals(name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
+                {
+                    _oracleService.TogglePopup();
+                    return;
+                }
+
                 // Find the terminal by name and activate it
                 var terminal = _gridManager.GetTerminalDocuments()
                     .FirstOrDefault(t => string.Equals(t.TabText, name, StringComparison.OrdinalIgnoreCase));
@@ -1832,11 +1906,12 @@ namespace MultiTerminal
             if (_toolStrip != null)
                 _toolStrip.Font = new Font(_toolStrip.Font.FontFamily, dialog.ToolbarFontSize);
 
-            // Apply terminal font to all open terminals
+            // Apply terminal font to all open terminals (including Oracle)
             foreach (var doc in _gridManager.GetTerminalDocuments())
             {
                 doc.SetFontSize(dialog.TerminalFontSize);
             }
+            _oracleService?.SetFontSize(dialog.TerminalFontSize);
 
             // Apply project panel font
             _projectPanel?.SetFontSize(dialog.ProjectPanelFontSize);
@@ -2207,7 +2282,7 @@ namespace MultiTerminal
         /// </summary>
         private void WireStartScreenEvents(TerminalDocument doc)
         {
-            doc.SetProjectDatabase(_sharedProjectDatabase);
+            doc.SetProjectDatabase(_sharedProjectDatabase, _projectService);
             doc.ProjectLaunched += OnStartScreenProjectLaunched;
             doc.StartScreenOpenPowerShellRequested += OnStartScreenOpenPowerShell;
             doc.StartScreenJustClaudeRequested += OnStartScreenJustClaude;
@@ -3035,49 +3110,18 @@ namespace MultiTerminal
                 _ = Task.Run(async () => await _sessionIndexingService?.IndexProjectSessionsAsync(workingDir));
             }
 
-            // Auto-initialize Claude Code by injecting "initializing..." to trigger startup hooks
-            // This removes the need for manual input after launching via "Launch as..."
-            if (doc != null)
+            // Auto-initialize Claude Code by injecting "initializing..." to trigger startup hooks.
+            // Uses TypeInput (atomic xterm.js character typing + Enter) instead of the old
+            // two-step InjectInputAsync (ConPTY write + separate JS Enter) which caused
+            // double-injection when the Enter key failed and the retry wrote text again.
+            if (doc != null && doc.IsRendererReady)
             {
                 // Wait for Claude Code to finish showing its banner and prompt before injecting.
                 // Detection fires when "Claude Code" appears in output, but the input prompt
                 // may not be ready yet. Wait 1.5s for the prompt to appear.
                 await Task.Delay(1500);
-                System.Diagnostics.Trace.WriteLine("[MainForm] Post-detection delay complete, injecting 'initializing...'");
-
-                // Try the standard JS-based injection first
-                bool injected = false;
-                for (int attempt = 1; attempt <= 3; attempt++)
-                {
-                    injected = await doc.InjectInputAsync("initializing...");
-                    if (injected)
-                    {
-                        System.Diagnostics.Trace.WriteLine($"[MainForm] Auto-injected 'initializing...' to trigger startup hooks (attempt {attempt})");
-                        break;
-                    }
-                    else
-                    {
-                        System.Diagnostics.Trace.WriteLine($"[MainForm] Injection attempt {attempt} failed, retrying...");
-                        await Task.Delay(500);
-                    }
-                }
-
-                // Fallback: write directly to ConPTY if JS-based injection failed
-                if (!injected)
-                {
-                    System.Diagnostics.Trace.WriteLine("[MainForm] JS injection failed, falling back to direct ConPTY write");
-                    try
-                    {
-                        doc.Terminal.Write("initializing...\r");
-                        System.Diagnostics.Trace.WriteLine("[MainForm] Direct ConPTY write of 'initializing...' + Enter completed");
-                        _debugLogService.Info("MainForm", "Auto-submitted initializing prompt via direct ConPTY write (fallback)");
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Trace.WriteLine($"[MainForm] Direct ConPTY write failed: {ex.Message}");
-                        _debugLogService.Warning("MainForm", $"All auto-inject methods failed: {ex.Message}");
-                    }
-                }
+                System.Diagnostics.Trace.WriteLine("[MainForm] Post-detection delay complete, injecting 'initializing...' via TypeInput");
+                doc.TypeInput("initializing...", "cr", 20);
             }
         }
 
@@ -3324,7 +3368,9 @@ namespace MultiTerminal
             // Just launch claude - let the user choose to resume or start fresh
             // Using plain "claude" lets Claude prompt about resuming recent sessions
             // TODO: Make --dangerously-skip-permissions configurable in settings
-            string autoRunCommand = "claude --dangerously-skip-permissions --dangerously-load-development-channels server:multiterminal-channel";
+            string pluginDir = LaunchCommandBuilder.GetMtPluginPath();
+            string pluginFlag = pluginDir != null ? $" --plugin-dir '{pluginDir.Replace("'", "''")}'" : "";
+            string autoRunCommand = $"claude --dangerously-skip-permissions{pluginFlag}";
 
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
@@ -3364,6 +3410,31 @@ namespace MultiTerminal
                             await Services.SessionContextWriter.WriteContextAsync(name);
                             break; // Write once with the active terminal's perspective
                         }
+                    }
+
+                    // Flush session memory — index any completed sessions that haven't been embedded yet
+                    var sessionMemDb = _mcpServer?.Broker?.SessionMemoryDb;
+                    if (sessionMemDb != null)
+                    {
+                        await System.Threading.Tasks.Task.Run(() =>
+                        {
+                            var flushedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var doc in terminals)
+                            {
+                                string projectPath = doc.GetWorkingDirectory();
+                                if (!string.IsNullOrEmpty(projectPath) && flushedPaths.Add(projectPath))
+                                {
+                                    try
+                                    {
+                                        sessionMemDb.IndexProjectSessions(projectPath, doc.CustomTitle);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        System.Diagnostics.Debug.WriteLine($"[MainForm] Session memory flush failed for {projectPath}: {ex.Message}");
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
                 catch (Exception ex)
@@ -3431,78 +3502,63 @@ namespace MultiTerminal
                 }
             }
 
-            // Stop HTTP webhook service
-            if (_webhookService != null)
-            {
-                try
-                {
-                    _webhookService.Stop();
-                    _webhookService.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop webhook service: {ex.Message}");
-                }
-            }
+            // --- Fast shutdown: fire-and-forget blocking waits, kill without waiting ---
+            // The Environment.Exit failsafe at the end ensures we never hang.
 
-            // Stop Oracle advisory agent — close terminal first, then dispose service
-            if (_oracleService != null)
+            // Start the failsafe timer FIRST — everything below is best-effort cleanup.
+            _ = Task.Run(async () =>
             {
-                try
-                {
-                    CloseOracleTerminal();
-                    _oracleService.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to dispose Oracle: {ex.Message}");
-                }
-            }
+                await Task.Delay(3000);
+                Environment.Exit(0);
+            });
 
-            // Stop all agent processes before closing terminals
+            // Stop HTTP webhook service (cancel, don't wait for listener task)
+            try
+            {
+                _webhookService?.Stop();
+                _webhookService?.Dispose();
+            }
+            catch { }
+
+            // Stop Oracle advisory agent and digest timer
+            try
+            {
+                _oracleDigestTimer?.Stop();
+                _oracleDigestTimer?.Dispose();
+                _oracleService?.Shutdown();
+                _oracleService?.Dispose();
+            }
+            catch { }
+
+            // Kill all agent processes (Kill is fast, no WaitForExit needed)
             lock (_agentProcessMap)
             {
                 foreach (var kvp in _agentProcessMap)
                 {
-                    try
-                    {
-                        kvp.Value.Dispose();
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to dispose agent process {kvp.Key}: {ex.Message}");
-                    }
+                    try { kvp.Value.Dispose(); } catch { }
                 }
                 _agentProcessMap.Clear();
             }
 
-            // Stop companion processes that have StopOnExit=true
-            try
+            // Kill companion processes — fire-and-forget, no WaitForExit
+            _ = Task.Run(() =>
             {
-                _companionManager?.StopAll();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop companion processes: {ex.Message}");
-            }
+                try { _companionManager?.StopAll(); } catch { }
+            });
 
-            // Stop MCP server synchronously with timeout to ensure Kestrel threads are cleaned up
+            // Stop MCP server — fire-and-forget, no blocking .Wait()
             if (_mcpServer != null)
             {
-                try
+                _ = Task.Run(async () =>
                 {
-                    _mcpServer.StopAsync().Wait(TimeSpan.FromSeconds(3));
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to stop MCP server: {ex.Message}");
-                }
+                    try { await _mcpServer.StopAsync(); } catch { }
+                });
             }
 
-            // Close all terminals
+            // Close all terminals (sends kill signal, doesn't wait for process exit)
             foreach (var doc in _gridManager.GetTerminalDocuments())
             {
-                doc.Terminal?.Stop();
+                try { doc.Terminal?.Stop(); } catch { }
             }
 
             // Explicitly dispose all WebView2 panels to prevent zombie processes.
@@ -3532,14 +3588,6 @@ namespace MultiTerminal
             {
                 try { doc.Dispose(); } catch { }
             }
-
-            // Failsafe: force-exit after a short delay if something is still hanging.
-            // This prevents the zombie process scenario that requires a reboot.
-            Task.Run(async () =>
-            {
-                await Task.Delay(5000);
-                Environment.Exit(0);
-            });
         }
 
         private void DisposePanel(DockContent panel)
@@ -3649,6 +3697,7 @@ namespace MultiTerminal
                 _officePanel.ApplyTheme(isDark);
             if (_filePreviewPanel != null && !_filePreviewPanel.IsDisposed && _filePreviewPanel.Visible)
                 _filePreviewPanel.ApplyTheme(isDark);
+            _oracleService?.ApplyTheme(isDark);
         }
 
         private bool RestoreSinglePanel(string panelKey, DockContent panel, DockState defaultDock)
@@ -3796,13 +3845,19 @@ namespace MultiTerminal
                 }
             });
 
-            // DISABLED FOR DISTRIBUTION — re-enable after debugging auto-sync feature
             // Start message queue polling timer (every 2 seconds)
             _messageQueueTimer = new System.Windows.Forms.Timer();
             _messageQueueTimer.Interval = 2000; // 2 seconds
             _messageQueueTimer.Tick += OnMessageQueueTimerTick;
             _messageQueueTimer.Start();
             System.Diagnostics.Debug.WriteLine("[MainForm] Message queue timer started (2 second interval)");
+
+            // Start session sync timer — imports completed JSONL sessions into session_lineage (every 30 seconds)
+            _sessionSyncTimer = new System.Windows.Forms.Timer();
+            _sessionSyncTimer.Interval = 30000; // 30 seconds
+            _sessionSyncTimer.Tick += OnSessionSyncTimerTick;
+            _sessionSyncTimer.Start();
+            System.Diagnostics.Debug.WriteLine("[MainForm] Session sync timer started (30 second interval)");
         }
 
         /// <summary>
@@ -3856,9 +3911,11 @@ namespace MultiTerminal
                     }
 
                     if (totalImported > 0)
+                    {
                         debugLog?.Info("MainForm", $"Session sync (periodic): {totalImported} imported, {totalSkipped} skipped, {totalFailed} failed across {projects.Count} projects");
-                    else
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Session sync (periodic): no new sessions ({totalSkipped} already imported)");
+                        // Notify HUD Sessions tab to refresh
+                        _mcpServer?.Broker?.FireSessionLineageUpdated(null);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -3962,7 +4019,7 @@ namespace MultiTerminal
                     _tasksPanel.SetDebugLogService(_debugLogService);
                     if (_mcpServer?.Broker != null)
                     {
-                        _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService);
+                        _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
                         _tasksPanel.InjectRequested += OnChatInjectRequested;
                     }
                 }
@@ -3989,7 +4046,7 @@ namespace MultiTerminal
                     _inboxPanel = new InboxPanelDocument();
                     if (_mcpServer?.Broker != null)
                     {
-                        _inboxPanel.Initialize(_mcpServer.Broker);
+                        _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
                     }
                     _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
                 }
@@ -4670,36 +4727,39 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Initialize the Oracle advisory agent service.
-        /// Registers "Oracle" as a terminal (always visible in terminal list) but doesn't
-        /// spawn the terminal until someone sends Oracle a message (on-demand lifecycle).
-        /// Oracle runs as a real ConPTY terminal — same as every other agent — so auth,
-        /// channels, and MCP tools all work through the standard path.
+        /// Initialize and start the Oracle advisory agent.
+        /// Oracle is always-on: launches with MultiTerminal in a hidden popup terminal,
+        /// auto-restarts on crash, only shuts down when MT closes. Clicking Oracle in
+        /// the dashboard header toggles the popup terminal visibility.
         /// </summary>
+        private bool _oracleBootstrapped; // Guard: only send digest bootstrap once per app session
+        private System.Windows.Forms.Timer _oracleDigestTimer; // Recurring digest trigger
+
         private void InitializeOracle()
         {
             try
             {
-                // Register Oracle as a terminal so it's always visible
-                string oracleDocId = $"oracle-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
-
                 _oracleService = new OracleService(
-                    log: (source, msg) => _debugLogService?.Info(source, msg));
-                var regResult = _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, oracleDocId);
-                _oracleTerminalId = regResult?.TerminalId ?? oracleDocId;
+                    log: (source, msg) => _debugLogService?.Info(source, msg),
+                    debugLogService: _debugLogService);
 
-                // On idle timeout, close Oracle's terminal from the UI thread
-                // Guard: timer callback may fire during app shutdown after form is disposed
-                _oracleService.IdleTimeout += (s, e) =>
-                {
-                    if (IsDisposed) return;
-                    if (InvokeRequired)
-                        BeginInvoke(new Action(CloseOracleTerminal));
-                    else
-                        CloseOracleTerminal();
-                };
+                // Start Oracle first so it generates its docId
+                _oracleService.Start(this);
 
-                _debugLogService?.Info("MainForm", $"Oracle registered as terminal '{OracleService.OracleName}' (ID: {_oracleTerminalId}) — on-demand, will spawn on first message");
+                // Register Oracle terminal with the same docId so broker and ConPTY are in sync
+                _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
+
+                // Apply user's font size and theme to Oracle's terminal
+                float oracleFontSize = _settings?.GetTerminalFontSize() ?? 10f;
+                _oracleService.SetFontSize(oracleFontSize);
+                _oracleService.ApplyTheme(_currentTheme.IsDark);
+
+                // Start recurring digest timer (every 2 hours)
+                _oracleDigestTimer = new System.Windows.Forms.Timer { Interval = 2 * 60 * 60 * 1000 };
+                _oracleDigestTimer.Tick += OnOracleDigestTimerTick;
+                _oracleDigestTimer.Start();
+
+                _debugLogService?.Info("MainForm", $"Oracle started (always-on, hidden popup, docId={_oracleService.DocId}, digest every 2h)");
             }
             catch (Exception ex)
             {
@@ -4707,156 +4767,29 @@ namespace MultiTerminal
             }
         }
 
-        /// <summary>
-        /// Create and dock Oracle's ConPTY terminal. Called on-demand when Oracle
-        /// receives its first message (or after idle shutdown + new message).
-        /// </summary>
-        private void CreateOracleTerminal()
+        private async void OnOracleDigestTimerTick(object sender, EventArgs e)
         {
-            if (_oracleTerminalDoc != null)
-                return; // Already running
+            var oracleTerminal = _mcpServer?.Broker?.GetTerminal(OracleService.OracleName);
+            if (oracleTerminal == null || !oracleTerminal.ChannelPort.HasValue)
+            {
+                _debugLogService?.Warning("MainForm", "Oracle digest timer: Oracle not connected or no channel port");
+                return;
+            }
 
             try
             {
-                var doc = new Docking.TerminalDocument();
-                doc.Terminal.SetDebugLogService(_debugLogService);
-                doc.SetDebugLogService(_debugLogService);
-                doc.SetTheme(_currentTheme);
-                doc.SetMessageBroker(_mcpServer?.Broker);
-
-                string autoRunCommand = _oracleService.BuildAutoRunCommand();
-                string workingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-                doc.StartTerminal(
-                    workingDirectory: workingDir,
-                    terminalName: OracleService.OracleName,
-                    autoRunCommand: autoRunCommand);
-
-                // Dock alongside other terminal tabs
-                doc.Show(_dockPanel, DockState.Document);
-
-                // Clean up when Oracle's terminal exits (idle timeout, manual close, or Claude exit)
-                // Guard: CloseOracleTerminal may have already nulled the reference
-                doc.TerminalExited += (s, e) =>
-                {
-                    if (_oracleTerminalDoc == null) return;
-                    _oracleTerminalDoc = null;
-                    _oracleService.NotifyStopped();
-                    _debugLogService?.Info("MainForm", "Oracle terminal exited");
-                };
-
-                _oracleTerminalDoc = doc;
-                _oracleService.NotifyStarted();
-                _debugLogService?.Info("MainForm", "Oracle terminal created and docked");
+                string digestMessage = "Scheduled digest check: run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel.";
+                bool delivered = await DeliverViaChannel(oracleTerminal.ChannelPort.Value, "System", digestMessage, "normal");
+                _debugLogService?.Info("MainForm", $"Oracle scheduled digest {(delivered ? "delivered" : "failed")}");
             }
             catch (Exception ex)
             {
-                _debugLogService?.Error("MainForm", $"Failed to create Oracle terminal: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Oracle digest timer failed: {ex.Message}");
             }
         }
 
-        /// <summary>
-        /// Close Oracle's terminal (called on idle timeout or app shutdown).
-        /// </summary>
-        private void CloseOracleTerminal()
-        {
-            try
-            {
-                var doc = _oracleTerminalDoc;
-                if (doc != null)
-                {
-                    _oracleTerminalDoc = null;
-                    _oracleService?.NotifyStopped();
-                    doc.Close();
-                    _debugLogService?.Info("MainForm", "Oracle terminal closed");
-                }
-            }
-            catch (Exception ex)
-            {
-                _debugLogService?.Error("MainForm", $"Failed to close Oracle terminal: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Spawn Oracle's terminal and deliver a queued message after the channel is ready.
-        /// Called from OnMcpMessageDelivery when Oracle isn't running and a message arrives.
-        /// </summary>
-        private async System.Threading.Tasks.Task SpawnOracleAndDeliverAsync(string messageId, string sender, string message)
-        {
-            try
-            {
-                // Create Oracle terminal on UI thread
-                if (InvokeRequired)
-                    Invoke(new Action(CreateOracleTerminal));
-                else
-                    CreateOracleTerminal();
-
-                // Wait for Oracle's channel server to register its port with the broker.
-                // IMPORTANT: Verify via /health that the port actually belongs to Oracle,
-                // not another terminal — registration races can cause stale ports.
-                for (int i = 0; i < 120; i++) // Up to 60 seconds
-                {
-                    await System.Threading.Tasks.Task.Delay(500);
-                    var oracleTerminal = _mcpServer?.Broker?.GetTerminal(OracleService.OracleName);
-                    if (oracleTerminal?.ChannelPort > 0)
-                    {
-                        int port = oracleTerminal.ChannelPort.Value;
-
-                        // Verify the port belongs to Oracle by checking the channel health endpoint
-                        bool portVerified = false;
-                        try
-                        {
-                            var healthResponse = await _channelHttpClient.GetAsync($"http://127.0.0.1:{port}/health");
-                            if (healthResponse.IsSuccessStatusCode)
-                            {
-                                var healthJson = await healthResponse.Content.ReadAsStringAsync();
-                                var healthDoc = System.Text.Json.JsonDocument.Parse(healthJson);
-                                var agentName = healthDoc.RootElement.GetProperty("agent").GetString();
-                                portVerified = string.Equals(agentName, OracleService.OracleName, StringComparison.OrdinalIgnoreCase);
-                                if (!portVerified)
-                                {
-                                    _debugLogService?.Warning("MainForm", $"Oracle port {port} health check returned agent '{agentName}' — wrong terminal, will keep polling");
-                                    continue; // Port belongs to someone else, keep waiting
-                                }
-                            }
-                        }
-                        catch
-                        {
-                            continue; // Port not responding yet, keep waiting
-                        }
-
-                        if (!portVerified)
-                            continue;
-
-                        // Channel verified as Oracle — deliver message
-                        bool delivered = await DeliverViaChannel(port, sender, message, "normal");
-                        if (delivered)
-                        {
-                            lock (_deduplicationLock)
-                            {
-                                _deliveredMessageCache[messageId] = DateTime.Now;
-                            }
-                            _debugLogService?.Info("MainForm", $"Delivered queued message {messageId} to Oracle via channel (port {port}, verified)");
-                        }
-                        else
-                        {
-                            _debugLogService?.Warning("MainForm", $"Channel delivery failed for queued Oracle message {messageId}");
-                        }
-                        return;
-                    }
-                }
-
-                _debugLogService?.Warning("MainForm", $"Oracle channel did not register in 60s — message {messageId} from {sender} was NOT delivered");
-            }
-            catch (Exception ex)
-            {
-                _debugLogService?.Error("MainForm", $"SpawnOracleAndDeliverAsync failed: {ex.Message}");
-            }
-            finally
-            {
-                _oracleSpawning = false;
-            }
-        }
+        // Oracle terminal management removed — OracleService now owns the terminal
+        // via OracleTerminalForm (always-on, hidden popup, auto-restart)
 
         /// <summary>
         /// Inject a nudge prompt into a terminal's ConPTY input to wake it up.
@@ -5036,7 +4969,7 @@ namespace MultiTerminal
                 _tasksPanel.SetDebugLogService(_debugLogService);
                 if (_mcpServer?.Broker != null)
                 {
-                    _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService);
+                    _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
                     _tasksPanel.InjectRequested += OnChatInjectRequested;
                 }
                 _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
@@ -5062,7 +4995,7 @@ namespace MultiTerminal
                 _inboxPanel = new InboxPanelDocument();
                 if (_mcpServer?.Broker != null)
                 {
-                    _inboxPanel.Initialize(_mcpServer.Broker);
+                    _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
                 }
                 _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
                 _inboxPanel.Show(_dockPanel, GetSavedDockState("InboxPanel", DockState.DockRight));
@@ -5655,6 +5588,8 @@ namespace MultiTerminal
             {
                 _messageQueueTimer?.Stop();
                 _messageQueueTimer?.Dispose();
+                _sessionSyncTimer?.Stop();
+                _sessionSyncTimer?.Dispose();
                 _teamWatcher?.Dispose();
                 _inboxMonitor?.Dispose();
                 _sessionIndexingService?.Dispose();
@@ -5662,7 +5597,10 @@ namespace MultiTerminal
                 _sharedProjectDatabase?.Dispose();
                 _gatewayService?.Dispose();
                 _debugLogService?.Dispose();
-                _mcpServer?.Dispose();
+                _mcpServer?.Broker?.SessionMemoryDb?.Dispose();
+                // MCP server already stopped in OnFormClosing (fire-and-forget StopAsync).
+                // Calling Dispose here would invoke StopAsync().GetAwaiter().GetResult()
+                // a second time, risking a UI-thread deadlock. Skip it — the process is exiting.
                 _mcpServer = null;
                 _dockPanel?.Dispose();
                 _dashboardHeader?.Dispose();

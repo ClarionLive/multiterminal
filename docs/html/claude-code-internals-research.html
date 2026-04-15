@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code Internals Research Report</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2129;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warning: #d29922;
+    --danger: #f85149;
+    --purple: #bc8cff;
+    --code-bg: #1a1f27;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 0;
+  }
+
+  /* Header */
+  .header {
+    background: linear-gradient(135deg, #1a1f35 0%, #0d1117 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 40px 0 30px;
+    text-align: center;
+  }
+  .header h1 {
+    font-size: 2.2em;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 8px;
+  }
+  .header .meta {
+    color: var(--text-muted);
+    font-size: 0.9em;
+  }
+  .header .meta span { margin: 0 12px; }
+
+  /* Layout */
+  .container {
+    display: flex;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: calc(100vh - 120px);
+  }
+
+  /* Sidebar TOC */
+  .sidebar {
+    width: 280px;
+    min-width: 280px;
+    padding: 24px 16px;
+    border-right: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--surface);
+  }
+  .sidebar h3 {
+    font-size: 0.75em;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    padding-left: 8px;
+  }
+  .sidebar a {
+    display: block;
+    padding: 6px 8px 6px 12px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.85em;
+    border-left: 2px solid transparent;
+    border-radius: 0 4px 4px 0;
+    transition: all 0.15s;
+  }
+  .sidebar a:hover {
+    color: var(--accent);
+    background: rgba(88,166,255,0.06);
+    border-left-color: var(--accent);
+  }
+  .sidebar a.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
+  .sidebar .sub { padding-left: 24px; font-size: 0.8em; }
+
+  /* Main content */
+  .content {
+    flex: 1;
+    padding: 32px 48px;
+    max-width: 960px;
+    overflow-x: hidden;
+  }
+
+  /* Sections */
+  .section {
+    margin-bottom: 48px;
+    scroll-margin-top: 24px;
+  }
+  .section h2 {
+    font-size: 1.6em;
+    font-weight: 700;
+    color: var(--accent);
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+    margin-bottom: 20px;
+  }
+  .section h3 {
+    font-size: 1.15em;
+    font-weight: 600;
+    color: var(--text);
+    margin: 24px 0 12px;
+  }
+  .section h4 {
+    font-size: 0.95em;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin: 16px 0 8px;
+  }
+
+  /* Key findings banner */
+  .key-findings {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--warning);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 20px 0;
+  }
+  .key-findings h3 {
+    color: var(--warning);
+    margin: 0 0 12px;
+    font-size: 1em;
+  }
+  .key-findings ul { padding-left: 20px; }
+  .key-findings li {
+    margin-bottom: 8px;
+    color: var(--text);
+    font-size: 0.9em;
+    line-height: 1.5;
+  }
+  .key-findings li strong { color: var(--accent); }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.88em;
+  }
+  thead {
+    background: var(--surface2);
+  }
+  th {
+    text-align: left;
+    padding: 10px 14px;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid var(--border);
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:hover td { background: rgba(88,166,255,0.03); }
+
+  /* Code */
+  code {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--purple);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-size: 0.83em;
+    line-height: 1.5;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+  }
+
+  /* Lists */
+  ul, ol {
+    padding-left: 24px;
+    margin: 8px 0;
+  }
+  li {
+    margin-bottom: 6px;
+    font-size: 0.92em;
+  }
+  li strong { color: var(--accent); }
+
+  /* Inline highlights */
+  p { margin: 10px 0; font-size: 0.92em; }
+
+  /* Priority badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-critical { background: rgba(248,81,73,0.15); color: var(--danger); border: 1px solid rgba(248,81,73,0.3); }
+  .badge-high { background: rgba(210,153,34,0.15); color: var(--warning); border: 1px solid rgba(210,153,34,0.3); }
+  .badge-medium { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+  .badge-low { background: rgba(139,148,158,0.15); color: var(--text-muted); border: 1px solid rgba(139,148,158,0.3); }
+
+  /* Recommendation cards */
+  .rec-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 12px 0;
+  }
+  .rec-card .rec-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .rec-card .rec-num {
+    background: var(--accent);
+    color: var(--bg);
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75em;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .rec-card .rec-title { font-weight: 600; font-size: 0.95em; }
+  .rec-card .rec-body { color: var(--text-muted); font-size: 0.88em; padding-left: 34px; }
+
+  /* Collapsible details */
+  details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 12px 0;
+    overflow: hidden;
+  }
+  details summary {
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.92em;
+    color: var(--accent);
+    user-select: none;
+  }
+  details summary:hover { background: rgba(88,166,255,0.06); }
+  details[open] summary { border-bottom: 1px solid var(--border); }
+  details .detail-body { padding: 16px; }
+
+  /* Diagram boxes */
+  .arch-diagram {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.8em;
+    line-height: 1.4;
+    white-space: pre;
+    overflow-x: auto;
+    margin: 16px 0;
+  }
+
+  /* Warning box */
+  .warning-box {
+    background: rgba(248,81,73,0.08);
+    border: 1px solid rgba(248,81,73,0.25);
+    border-left: 4px solid var(--danger);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 14px 0;
+    font-size: 0.9em;
+  }
+  .warning-box strong { color: var(--danger); }
+
+  /* Info box */
+  .info-box {
+    background: rgba(88,166,255,0.08);
+    border: 1px solid rgba(88,166,255,0.25);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 14px 0;
+    font-size: 0.9em;
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .content { padding: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Claude Code Internals Research Report</h1>
+  <div class="meta">
+    <span>March 31, 2026</span>
+    <span>|</span>
+    <span>Source: claw-code repo, official docs, leaked source analysis</span>
+    <span>|</span>
+    <span>Purpose: Optimize MultiTerminal integration</span>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- Sidebar -->
+<nav class="sidebar">
+  <h3>Contents</h3>
+  <a href="#executive-summary">Executive Summary</a>
+  <a href="#hooks">Hooks &amp; Dispatch</a>
+  <a href="#hooks-events" class="sub">Event Catalog</a>
+  <a href="#hooks-dispatch" class="sub">Dispatch Rules</a>
+  <a href="#hooks-data" class="sub">Data Passed to Hooks</a>
+  <a href="#hooks-errors" class="sub">Error/Timeout Handling</a>
+  <a href="#context">Context Window Management</a>
+  <a href="#context-assembly" class="sub">System Prompt Assembly</a>
+  <a href="#context-claudemd" class="sub">CLAUDE.md Loading</a>
+  <a href="#context-layout" class="sub">Context Layout</a>
+  <a href="#context-compaction" class="sub">Compaction</a>
+  <a href="#context-caching" class="sub">Prompt Caching</a>
+  <a href="#mcp">MCP Integration</a>
+  <a href="#mcp-naming" class="sub">Tool Naming</a>
+  <a href="#mcp-lifecycle" class="sub">Connection Lifecycle</a>
+  <a href="#mcp-deferred" class="sub">Deferred Tools</a>
+  <a href="#plugins">Plugin System</a>
+  <a href="#plugin-types" class="sub">Plugin Types</a>
+  <a href="#plugin-hooks" class="sub">Hook Merging</a>
+  <a href="#plugin-settings" class="sub">Settings Merge</a>
+  <a href="#agents">Subagent &amp; Teams</a>
+  <a href="#agents-tiers" class="sub">Three Tiers</a>
+  <a href="#agents-context" class="sub">Context Inheritance</a>
+  <a href="#agents-worktree" class="sub">Worktree Isolation</a>
+  <a href="#channels">Channels &amp; Messaging</a>
+  <a href="#channels-warning" class="sub">Channel Warning</a>
+  <a href="#channels-permission" class="sub">Permission Relay</a>
+  <a href="#channels-bridge" class="sub">Bridge / Remote</a>
+  <a href="#security">Permission &amp; Security</a>
+  <a href="#security-hierarchy" class="sub">5-Level Hierarchy</a>
+  <a href="#security-bash" class="sub">Bash Security</a>
+  <a href="#security-sandbox" class="sub">Sandbox</a>
+  <a href="#envvars">Env Vars &amp; Flags</a>
+  <a href="#envvars-mt" class="sub">Useful for MT</a>
+  <a href="#envvars-dangerous" class="sub">Dangerous Vars</a>
+  <a href="#envvars-flags" class="sub">Feature Flags</a>
+  <a href="#recommendations">Recommendations</a>
+  <a href="#recommendations-critical" class="sub">Critical</a>
+  <a href="#recommendations-high" class="sub">High Priority</a>
+  <a href="#recommendations-medium" class="sub">Medium Priority</a>
+  <a href="#recommendations-low" class="sub">Low Priority</a>
+</nav>
+
+<!-- Main Content -->
+<main class="content">
+
+<!-- Executive Summary -->
+<div class="section" id="executive-summary">
+  <h2>Executive Summary</h2>
+  <p>On March 31, 2026, Claude Code v2.1.88 was published to npm with a 59.8 MB source map file that exposed the full TypeScript source (1,902 files, 512K+ lines). The <code>instructkr/claw-code</code> repo is a clean-room Python/Rust reimplementation that preserves the architecture without copying proprietary code. This research examines the internals to optimize MultiTerminal's integration.</p>
+
+  <div class="key-findings">
+    <h3>Key Discoveries with Immediate Impact</h3>
+    <ul>
+      <li><strong>CLAUDE.md budget is 12,000 chars total</strong> &mdash; our project CLAUDE.md exceeds this and is being silently truncated</li>
+      <li><strong>Hook outputs via additionalContext enter context without truncation</strong> &mdash; we need to keep hook output minimal</li>
+      <li><strong>Hooks from multiple plugins are additive</strong> &mdash; explains potential double-firing issues</li>
+      <li><strong>MCP tools are deferred by default</strong> &mdash; only names loaded (~120 tokens), full schemas fetched via ToolSearch on demand</li>
+      <li><strong>Compaction preserves only ~12% of tokens</strong> &mdash; critical context must be explicitly marked for survival</li>
+      <li><strong>The channel warning can be suppressed</strong> via <code>--dangerously-load-development-channels</code> flag (already in LaunchCommandBuilder)</li>
+      <li><strong>CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC breaks channels</strong> &mdash; it kills GrowthBook flag evaluation alongside telemetry</li>
+    </ul>
+  </div>
+</div>
+
+<!-- Hooks & Dispatch -->
+<div class="section" id="hooks">
+  <h2>Hooks &amp; Dispatch</h2>
+
+  <h3 id="hooks-events">Event Catalog (21+ Events)</h3>
+  <table>
+    <thead><tr><th>Phase</th><th>Events</th></tr></thead>
+    <tbody>
+      <tr><td>Session setup</td><td><code>SessionStart</code>, <code>InstructionsLoaded</code>, <code>ConfigChange</code></td></tr>
+      <tr><td>User input</td><td><code>UserPromptSubmit</code>, <code>CwdChanged</code></td></tr>
+      <tr><td>Tool lifecycle</td><td><code>PreToolUse</code>, <code>PermissionRequest</code>, <code>PostToolUse</code>, <code>PostToolUseFailure</code>, <code>Elicitation</code>, <code>ElicitationResult</code>, <code>FileChanged</code></td></tr>
+      <tr><td>Agent lifecycle</td><td><code>SubagentStart</code>, <code>SubagentStop</code>, <code>TeammateIdle</code>, <code>TaskCreated</code>, <code>TaskCompleted</code></td></tr>
+      <tr><td>Session end</td><td><code>PreCompact</code>, <code>PostCompact</code>, <code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code>, <code>Notification</code></td></tr>
+      <tr><td>Workspace</td><td><code>WorktreeCreate</code>, <code>WorktreeRemove</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="hooks-dispatch">Dispatch Rules</h3>
+  <ol>
+    <li><strong>All matching matcher groups fire</strong> &mdash; not just the first match</li>
+    <li>Within each group, hooks execute <strong>sequentially in array order</strong></li>
+    <li>First <strong>blocking decision</strong> (exit code 2) stops the pipeline</li>
+    <li>Hooks from plugins and settings are <strong>additive</strong> &mdash; they don't override each other</li>
+    <li><strong>Async hooks</strong> fire-and-forget; cannot block operations</li>
+  </ol>
+
+  <h3 id="hooks-data">Data Passed to Hooks (stdin JSON)</h3>
+  <p>Common fields: <code>session_id</code>, <code>transcript_path</code>, <code>cwd</code>, <code>permission_mode</code>, <code>hook_event_name</code></p>
+  <ul>
+    <li><code>PreToolUse</code> adds: <code>tool_name</code>, <code>tool_input</code></li>
+    <li><code>PostToolUse</code> adds: <code>tool_response</code></li>
+    <li><code>SubagentStop</code> adds: <code>success</code>, <code>agent_transcript_path</code></li>
+  </ul>
+
+  <p><strong>Environment variables available:</strong> <code>CLAUDE_SESSION_ID</code>, <code>CLAUDE_PROJECT_DIR</code>, <code>CLAUDE_ENV_FILE</code>, <code>CLAUDE_CODE_REMOTE</code>, plus custom <code>env</code> block variables from settings.json.</p>
+
+  <h3 id="hooks-errors">Error/Timeout Handling</h3>
+  <table>
+    <thead><tr><th>Exit Code</th><th>Behavior</th></tr></thead>
+    <tbody>
+      <tr><td><code>0</code></td><td>Success &mdash; parse stdout as JSON</td></tr>
+      <tr><td><code>2</code></td><td>Blocking error &mdash; stderr fed to Claude</td></tr>
+      <tr><td>Other</td><td>Non-blocking &mdash; Claude continues</td></tr>
+      <tr><td>Timeout</td><td>Non-blocking &mdash; Claude continues</td></tr>
+      <tr><td>Crash</td><td>Non-blocking &mdash; Claude continues</td></tr>
+      <tr><td>Invalid JSON</td><td>Non-blocking &mdash; Claude continues</td></tr>
+    </tbody>
+  </table>
+  <p>Default timeout: 10 minutes (configurable per-hook in seconds).</p>
+
+  <details>
+    <summary>Hook Output Protocol (PreToolUse)</summary>
+    <div class="detail-body">
+<pre><code>{
+  "hookSpecificOutput": {
+    "permissionDecision": "allow|deny|ask",
+    "updatedInput": {"field": "modified_value"}
+  },
+  "systemMessage": "Explanation for Claude"
+}</code></pre>
+    </div>
+  </details>
+</div>
+
+<!-- Context Window Management -->
+<div class="section" id="context">
+  <h2>Context Window Management</h2>
+
+  <h3 id="context-assembly">System Prompt Assembly Order</h3>
+  <div class="arch-diagram">1. Intro section (agent identity, ~200 tokens)
+2. Output style instructions
+3. System section (core behavioral rules)
+4. Doing tasks section (coding guidelines)
+5. Actions section (reversibility/blast radius)
+   ────────────────────────────────────────────
+   __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__  (cache breakpoint)
+   ────────────────────────────────────────────
+6. Environment section (model, cwd, date, platform)
+7. Project context (CLAUDE.md discovery, git status)
+8. Instruction files (all CLAUDE.md, budget-enforced)
+9. Runtime config
+10. Appended: skills, agents, plugins, hooks, MCP instructions</div>
+  <div class="info-box">
+    Everything above the boundary (items 1-5) is <strong>static and cacheable</strong>. Everything below <strong>changes per-session</strong>.
+  </div>
+
+  <h3 id="context-claudemd">CLAUDE.md Loading</h3>
+  <p>For each directory from root to cwd:</p>
+  <ol>
+    <li><code>{dir}/CLAUDE.md</code></li>
+    <li><code>{dir}/CLAUDE.local.md</code></li>
+    <li><code>{dir}/.claude/CLAUDE.md</code></li>
+    <li><code>{dir}/.claude/instructions.md</code></li>
+  </ol>
+  <div class="warning-box">
+    <strong>Budget enforcement:</strong> 4,000 chars per file, 12,000 chars total. Files exceeding limits are silently truncated. Our CLAUDE.md likely exceeds this.
+  </div>
+  <p><strong>Loading priority:</strong> Managed policy &gt; Project CLAUDE.md &gt; User CLAUDE.md &gt; Rules</p>
+
+  <h3 id="context-layout">Context Window Layout (~200K tokens)</h3>
+  <table>
+    <thead><tr><th>Component</th><th>Typical Tokens</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>System prompt</td><td>4,200</td><td>Hidden, cached</td></tr>
+      <tr><td>Auto memory (MEMORY.md)</td><td>680</td><td>Hidden</td></tr>
+      <tr><td>Environment info</td><td>280</td><td>Hidden</td></tr>
+      <tr><td>MCP tools (deferred names)</td><td>120</td><td>Hidden</td></tr>
+      <tr><td>Skill descriptions</td><td>450</td><td>Hidden, dropped on compact</td></tr>
+      <tr><td>~/.claude/CLAUDE.md</td><td>320</td><td>Hidden</td></tr>
+      <tr><td>Project CLAUDE.md</td><td>1,800</td><td>Hidden</td></tr>
+      <tr style="font-weight:600"><td>Startup overhead total</td><td>~7,850</td><td>~3.9% of context</td></tr>
+      <tr><td>File reads</td><td>1,100-2,400 each</td><td style="color:var(--warning)">Dominates context</td></tr>
+      <tr><td>Hook outputs</td><td>100-120 each</td><td style="color:var(--danger)">No truncation!</td></tr>
+      <tr><td>Bash outputs</td><td>~1,200 each</td><td>Truncated at 30K chars</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="context-compaction">Compaction</h3>
+  <ul>
+    <li><strong>Trigger:</strong> Auto when context approaches limit, or manual <code>/compact [instructions]</code></li>
+    <li><strong>Preserves:</strong> Last 4 messages verbatim, CLAUDE.md (re-read from disk), auto memory, system prompt, MCP tools</li>
+    <li><strong>Drops/Summarizes:</strong> All older messages, full tool outputs, intermediate reasoning, skill descriptions</li>
+    <li><strong>Compression ratio:</strong> ~12% of original tokens retained</li>
+    <li><strong>Summary includes:</strong> Tools mentioned, recent requests, pending work, key files (up to 8), timeline</li>
+  </ul>
+
+  <h3 id="context-caching">Prompt Caching</h3>
+  <ul>
+    <li>Up to 4 cache breakpoints per API request (tools, system, messages)</li>
+    <li>Minimum thresholds: Opus 4,096 tokens, Sonnet 2,048 tokens</li>
+    <li>Tool definition changes <strong>invalidate all three cache levels</strong></li>
+    <li>Adding deferred tools via ToolSearch can break the cache if not handled carefully</li>
+  </ul>
+</div>
+
+<!-- MCP Integration -->
+<div class="section" id="mcp">
+  <h2>MCP Integration</h2>
+
+  <h3 id="mcp-naming">Tool Naming Convention</h3>
+  <pre><code>mcp__{normalized_server_name}__{normalized_tool_name}</code></pre>
+  <p>Normalization: Only <code>a-z</code>, <code>A-Z</code>, <code>0-9</code>, <code>_</code>, <code>-</code> kept. All other chars replaced with <code>_</code>. Special handling for <code>claude.ai</code> servers (collapsed underscores).</p>
+
+  <h3>Server Transport Types</h3>
+  <table>
+    <thead><tr><th>Type</th><th>Config Key</th><th>Fields</th></tr></thead>
+    <tbody>
+      <tr><td>Stdio</td><td><code>"stdio"</code> (default)</td><td>command, args, env</td></tr>
+      <tr><td>SSE</td><td><code>"sse"</code></td><td>url, headers, oauth</td></tr>
+      <tr><td>HTTP</td><td><code>"http"</code></td><td>url, headers, oauth</td></tr>
+      <tr><td>WebSocket</td><td><code>"ws"</code></td><td>url, headers</td></tr>
+      <tr><td>SDK</td><td><code>"sdk"</code></td><td>name</td></tr>
+      <tr><td>ClaudeAI Proxy</td><td><code>"claudeai-proxy"</code></td><td>url, id</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="mcp-lifecycle">Connection Lifecycle</h3>
+  <ol>
+    <li><strong>Discovery:</strong> Config files loaded User &rarr; Project &rarr; Local (last writer wins per server name)</li>
+    <li><strong>Lazy spawning:</strong> Servers not started until tools actually needed</li>
+    <li><strong>Initialization:</strong> JSON-RPC handshake with <code>protocolVersion: "2025-03-26"</code></li>
+    <li><strong>Tool discovery:</strong> <code>tools/list</code> with pagination, tools indexed in BTreeMap</li>
+    <li><strong>Tool invocation:</strong> Lookup qualified name, ensure server ready, send <code>tools/call</code> with raw name</li>
+    <li><strong>No automatic reconnection:</strong> Crashed servers produce IO error on next call</li>
+  </ol>
+
+  <h3 id="mcp-deferred">Deferred Tools System</h3>
+  <ul>
+    <li><strong>Core tools always present:</strong> bash, read_file, write_file, edit_file, glob_search, grep_search</li>
+    <li><strong>All other tools deferred:</strong> Listed by name only in <code>&lt;system-reminder&gt;</code> tags</li>
+    <li><strong>ToolSearch:</strong> Model calls this to fetch full schemas on demand</li>
+    <li><strong><code>ENABLE_TOOL_SEARCH=auto</code>:</strong> Load full schemas upfront if they fit within 10% of context</li>
+  </ul>
+
+  <div class="info-box">
+    <strong>Config Merge:</strong> Last writer wins. If same server name in User and Project config, Project wins. Plugin MCP servers use prefix <code>plugin:pluginName:serverName</code> to avoid collisions.
+  </div>
+</div>
+
+<!-- Plugin System -->
+<div class="section" id="plugins">
+  <h2>Plugin System</h2>
+
+  <h3 id="plugin-types">Plugin Types</h3>
+  <table>
+    <thead><tr><th>Type</th><th>Location</th><th>plugin.json</th><th>Enablement</th><th>CLAUDE_PLUGIN_ROOT</th></tr></thead>
+    <tbody>
+      <tr><td>Marketplace</td><td><code>~/.claude/plugins/cache/...</code></td><td>Required</td><td><code>enabledPlugins</code></td><td>Cache directory</td></tr>
+      <tr><td>Inline</td><td><code>.claude/</code> in project or global</td><td>Not required</td><td>Automatic</td><td><code>.claude/</code> directory</td></tr>
+    </tbody>
+  </table>
+
+  <details>
+    <summary>Plugin Directory Structure</summary>
+    <div class="detail-body">
+<pre><code>plugin-name/
+&#9500;&#9472;&#9472; .claude-plugin/
+&#9474;   &#9492;&#9472;&#9472; plugin.json          # Manifest (required for marketplace)
+&#9500;&#9472;&#9472; CLAUDE.md                # System prompt injection
+&#9500;&#9472;&#9472; .mcp.json                # MCP server definitions
+&#9500;&#9472;&#9472; agents/                  # Subagent definitions (.md)
+&#9500;&#9472;&#9472; skills/                  # Skills (subdirs with SKILL.md)
+&#9474;   &#9492;&#9472;&#9472; skill-name/
+&#9474;       &#9492;&#9472;&#9472; SKILL.md
+&#9500;&#9472;&#9472; hooks/
+&#9474;   &#9500;&#9472;&#9472; hooks.json           # Event handler configuration
+&#9474;   &#9492;&#9472;&#9472; *.js                 # Hook scripts
+&#9492;&#9472;&#9472; scripts/                 # Shared utilities</code></pre>
+    </div>
+  </details>
+
+  <h3 id="plugin-hooks">Hook Merging (Additive)</h3>
+  <p>All sources are merged additively:</p>
+  <ol>
+    <li>User settings hooks</li>
+    <li>Project settings hooks</li>
+    <li>Local settings hooks</li>
+    <li>Plugin hooks (from each enabled plugin)</li>
+  </ol>
+  <div class="warning-box">
+    <strong>No deduplication.</strong> If two plugins register hooks for the same event+matcher, both run. Execution order between plugins is not deterministic.
+  </div>
+
+  <h3>Skill Namespacing</h3>
+  <p>Plugin skills are namespaced: <code>pluginName:skillName</code> (e.g., <code>multiterminal:kanban-task</code>). Inline skills are NOT namespaced and could conflict.</p>
+
+  <h3 id="plugin-settings">Settings Merge Order</h3>
+  <p>Last wins for scalars, deep merge for objects:</p>
+  <ol>
+    <li><code>~/.claude.json</code> (legacy)</li>
+    <li><code>~/.claude/settings.json</code> (user)</li>
+    <li><code>.claude.json</code> (legacy project)</li>
+    <li><code>.claude/settings.json</code> (project)</li>
+    <li><code>.claude/settings.local.json</code> (local overrides)</li>
+  </ol>
+</div>
+
+<!-- Subagent & Teams -->
+<div class="section" id="agents">
+  <h2>Subagent &amp; Teams Architecture</h2>
+
+  <h3 id="agents-tiers">Three Tiers of Multi-Agent</h3>
+  <table>
+    <thead><tr><th>Tier</th><th>Mechanism</th><th>Context</th><th>Isolation</th></tr></thead>
+    <tbody>
+      <tr><td>Subagents (Agent tool)</td><td>In-process, same session</td><td>Fresh context window</td><td>Optional git worktree</td></tr>
+      <tr><td>Agent Teams (TeammateTool)</td><td>Separate Claude Code processes</td><td>Fully independent contexts</td><td>tmux panes, file-based</td></tr>
+      <tr><td>Coordinator Mode</td><td><code>CLAUDE_CODE_COORDINATOR_MODE=1</code></td><td>One worker per CPU</td><td>Workers get WORKER preamble</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Built-in Subagent Types</h3>
+  <table>
+    <thead><tr><th>Type</th><th>Purpose</th><th>Permission Level</th></tr></thead>
+    <tbody>
+      <tr><td>general-purpose</td><td>Full tool access (default)</td><td>Parent's level</td></tr>
+      <tr><td>Explore</td><td>Search/research, fresh context</td><td>ReadOnly</td></tr>
+      <tr><td>Plan</td><td>Planning mode, read-only tools</td><td>ReadOnly</td></tr>
+      <tr><td>Verification</td><td>Build/test verification</td><td>Parent's level</td></tr>
+      <tr><td>claude-code-guide</td><td>Help/guidance</td><td>ReadOnly</td></tr>
+      <tr><td>statusline-setup</td><td>Terminal config</td><td>WorkspaceWrite</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="agents-context">Context Inheritance</h3>
+  <p><strong>Subagents GET:</strong> System prompt, CLAUDE.md files, personal/project memory</p>
+  <p><strong>Subagents DON'T GET:</strong> Parent conversation history, tool results, file read cache</p>
+  <div class="info-box">
+    The <code>prompt</code> string is the <strong>sole data channel</strong> from parent to subagent. Even trivial subagents consume ~60K tokens due to inherited system prompt and memory.
+  </div>
+
+  <h3>Team Communication</h3>
+  <ul>
+    <li><strong>SendMessage tool:</strong> Peer-to-peer via filesystem mailboxes at <code>~/.claude/teams/{team}/messages/{session}/</code></li>
+    <li><strong>Task coordination:</strong> File-based at <code>~/.claude/tasks/{team}/</code></li>
+    <li><strong>Teammate modes:</strong> tmux (default), in-process, auto</li>
+  </ul>
+
+  <h3 id="agents-worktree">Worktree Isolation</h3>
+  <ul>
+    <li><code>isolation: "worktree"</code> creates a temporary git worktree on a new branch</li>
+    <li>Multiple agents can modify same files in parallel without conflicts</li>
+    <li>No changes = auto-cleanup; changes = worktree path and branch returned to parent</li>
+  </ul>
+</div>
+
+<!-- Channels & Messaging -->
+<div class="section" id="channels">
+  <h2>Channels &amp; Messaging</h2>
+
+  <p>A channel is an MCP server with experimental capabilities that can <strong>push events</strong> into Claude's conversation. Push events appear as <code>&lt;channel source="..." from="..."&gt;content&lt;/channel&gt;</code> XML tags.</p>
+
+  <details>
+    <summary>Channel Capability Declaration</summary>
+    <div class="detail-body">
+<pre><code>capabilities: {
+  experimental: {
+    'claude/channel': {},              // Push notification listener
+    'claude/channel/permission': {},   // Permission relay
+  }
+}</code></pre>
+    </div>
+  </details>
+
+  <h3 id="channels-warning">The Channel Warning</h3>
+  <p>When a channel is not on the approved allowlist, Claude Code shows a confirmation prompt with "Loading development channels" text.</p>
+  <p><strong>Suppression options:</strong></p>
+  <ol>
+    <li>CLI flag: <code>--dangerously-load-development-channels server:multiterminal-channel</code></li>
+    <li>MultiTerminal auto-accept: TerminalControl.cs detects the prompt text and sends keystroke "1"</li>
+  </ol>
+
+  <h3 id="channels-permission">Permission Relay Protocol</h3>
+  <ol>
+    <li>Claude wants to run a tool requiring approval</li>
+    <li>Claude Code generates a <strong>5-letter request ID</strong> (alphabet: a-z minus 'l')</li>
+    <li>Sends <code>notifications/claude/channel/permission_request</code> to channel server</li>
+    <li>Channel forwards to remote user (e.g., ClaudeRemote on phone)</li>
+    <li>User replies "yes/no/always {id}"</li>
+    <li>Channel sends <code>notifications/claude/channel/permission</code> back</li>
+    <li>Local terminal stays open simultaneously &mdash; first answer wins</li>
+  </ol>
+
+  <h3 id="channels-bridge">Bridge / Remote Control</h3>
+  <ul>
+    <li>31 TypeScript files in <code>src/bridge/</code></li>
+    <li>Uses <strong>outbound HTTPS only</strong> &mdash; no inbound ports</li>
+    <li>JWT-based auth with periodic refresh (every 3h55m)</li>
+    <li>Known issues: disconnects every ~25 minutes, close code 1002 treated as permanent</li>
+  </ul>
+
+  <div class="info-box">
+    <strong>UDS Inbox (Feature-Gated, Not Shipped):</strong> Unix Domain Socket-based inter-session messaging. Still behind the <code>UDS_INBOX</code> feature flag.
+  </div>
+</div>
+
+<!-- Permission & Security -->
+<div class="section" id="security">
+  <h2>Permission &amp; Security Model</h2>
+
+  <h3 id="security-hierarchy">5-Level Permission Hierarchy</h3>
+  <div class="arch-diagram">ReadOnly  &lt;  WorkspaceWrite  &lt;  DangerFullAccess  &lt;  Prompt  &lt;  Allow</div>
+
+  <table>
+    <thead><tr><th>Tool</th><th>Required Permission</th></tr></thead>
+    <tbody>
+      <tr><td>bash, Agent, REPL, PowerShell</td><td>DangerFullAccess</td></tr>
+      <tr><td>write_file, edit_file, NotebookEdit</td><td>WorkspaceWrite</td></tr>
+      <tr><td>read_file, glob, grep, WebFetch, WebSearch, Skill, ToolSearch</td><td>ReadOnly</td></tr>
+      <tr><td style="color:var(--warning)">Unknown tools</td><td style="color:var(--warning)">DangerFullAccess (fail-closed)</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>Config aliases:</strong> <code>"default"/"plan"/"read-only"</code> &rarr; ReadOnly, <code>"acceptEdits"/"auto"</code> &rarr; WorkspaceWrite, <code>"dontAsk"</code> &rarr; DangerFullAccess</p>
+
+  <h3 id="security-bash">Bash Security (23 Checks, 16 Modules)</h3>
+  <table>
+    <thead><tr><th>Category</th><th>Checks</th></tr></thead>
+    <tbody>
+      <tr><td>Input sanitization</td><td>Zero-width space, IFS manipulation, null byte injection, Unicode homoglyphs, shell metacharacters, command substitution nesting</td></tr>
+      <tr><td>Command classification</td><td>Read vs write, destructive commands, sed writes, network access, privilege escalation</td></tr>
+      <tr><td>Mode enforcement</td><td>Read-only blocks writes, workspace boundary, path validation, symlink traversal</td></tr>
+      <tr><td>Environment</td><td>Zsh builtins, shell enforcement, env var injection, PATH manipulation</td></tr>
+      <tr><td>Execution</td><td>Sandbox decision, background restrictions, timeouts, output limits</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="security-sandbox">Sandbox (Linux Only)</h3>
+  <p>Uses <code>unshare --user --map-root-user --mount --ipc --pid --uts --fork</code>. Three modes: Off, WorkspaceOnly (default), AllowList.</p>
+  <div class="warning-box">
+    <strong>Not supported on Windows</strong> &mdash; falls back to non-sandboxed execution with only HOME/TMPDIR redirection.
+  </div>
+
+  <h3>Auto Mode</h3>
+  <p>AI classifier that auto-approves tool calls appearing safe. Opt-in dialog required. Operates at WorkspaceWrite level but selectively auto-approves DangerFullAccess escalations.</p>
+
+  <h3>Denied Tool Handling</h3>
+  <p>When a tool call is denied, the <strong>denial reason is sent back to the model</strong> as an error tool result, allowing it to adapt rather than silently failing.</p>
+</div>
+
+<!-- Env Vars & Feature Flags -->
+<div class="section" id="envvars">
+  <h2>Environment Variables &amp; Feature Flags</h2>
+
+  <h3 id="envvars-mt">Most Useful for MultiTerminal</h3>
+  <table>
+    <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>CLAUDE_AUTOCOMPACT_PCT_OVERRIDE</code></td><td>Override compaction threshold percentage</td></tr>
+      <tr><td><code>CLAUDE_CODE_AUTO_COMPACT_WINDOW</code></td><td>Set auto-compact window size</td></tr>
+      <tr><td><code>CLAUDE_CODE_SUBAGENT_MODEL</code></td><td>Override model for subagents</td></tr>
+      <tr><td><code>CLAUDE_CODE_PLAN_V2_AGENT_COUNT</code></td><td>Control plan agent parallelism</td></tr>
+      <tr><td><code>MCP_TIMEOUT</code></td><td>MCP server connection timeout</td></tr>
+      <tr><td><code>MCP_TOOL_TIMEOUT</code></td><td>Individual tool call timeout</td></tr>
+      <tr><td><code>MAX_MCP_OUTPUT_TOKENS</code></td><td>Cap MCP tool output size</td></tr>
+      <tr><td><code>ENABLE_TOOL_SEARCH</code></td><td>auto/true/false &mdash; control deferred tool loading</td></tr>
+      <tr><td><code>CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS</code></td><td>SessionEnd hook timeout</td></tr>
+      <tr><td><code>CLAUDE_CODE_PLUGIN_SEED_DIR</code></td><td>Plugin seed directory override</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Warning Suppressors</h3>
+  <p><code>DISABLE_COST_WARNINGS</code>, <code>DISABLE_INSTALLATION_CHECKS</code>, <code>DISABLE_AUTOUPDATER</code>, <code>CLAUDE_CODE_DISABLE_TERMINAL_TITLE</code>, <code>CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS</code>, <code>CLAUDE_CODE_DISABLE_CLAUDE_MDS</code></p>
+
+  <h3 id="envvars-dangerous">Dangerous: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC</h3>
+  <div class="warning-box">
+    Kills GrowthBook flag evaluation alongside telemetry. <strong>Silently breaks:</strong> Channels, Remote Control, premium model access (Opus 4.6 1M), and all gated features. Use granular flags instead: <code>DISABLE_AUTOUPDATER</code>, <code>DISABLE_ERROR_REPORTING</code>, <code>DISABLE_FEEDBACK_SURVEY</code>.
+  </div>
+
+  <h3 id="envvars-flags">Feature Flags</h3>
+  <p><strong>Compile-time (can't enable externally):</strong></p>
+  <ul>
+    <li>KAIROS (autonomous daemon), BUDDY (terminal pet), ULTRAPLAN (30-min planning)</li>
+    <li>ANTI_DISTILLATION, UNDERCOVER_MODE, AUTO_MODE, UDS_INBOX, VOICE_MODE</li>
+  </ul>
+  <p><strong>Runtime (tengu_* via GrowthBook):</strong></p>
+  <ul>
+    <li><code>tengu_penguins_off</code> &mdash; Fast Mode kill-switch</li>
+    <li><code>tengu_amber_flint</code> &mdash; Agent Teams gate</li>
+    <li><code>tengu_cobalt_raccoon</code> &mdash; auto-compact</li>
+    <li><code>tengu_anti_distill_fake_tool_injection</code> &mdash; anti-distillation</li>
+  </ul>
+  <p><strong>Internal codenames:</strong> Tengu (Claude Code), Capybara (Claude 4.6 variant), Fennec (Opus 4.6), Penguin Mode (Fast Mode)</p>
+</div>
+
+<!-- Recommendations -->
+<div class="section" id="recommendations">
+  <h2>Actionable Recommendations for MultiTerminal</h2>
+
+  <h3 id="recommendations-critical"><span class="badge badge-critical">Critical</span> Do Now</h3>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">1</div>
+      <div class="rec-title">CLAUDE.md is being silently truncated</div>
+    </div>
+    <div class="rec-body">Budget is 12,000 chars total. Our project CLAUDE.md far exceeds this. Move reference tables (database schema, folder map, architecture diagram) into <code>.claude/rules/</code> path-scoped files or skills that load on demand. Keep root CLAUDE.md to ~200 lines of critical conventions.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">2</div>
+      <div class="rec-title">Hook output enters context without truncation</div>
+    </div>
+    <div class="rec-body">Every <code>additionalContext</code> field from hooks adds tokens permanently. Audit all hooks &mdash; keep output minimal. Use stdout on exit 0 for logging (doesn't enter context).</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">3</div>
+      <div class="rec-title">Remove duplicate multiterminal-channel from .mcp.json</div>
+    </div>
+    <div class="rec-body">Already done this session.</div>
+  </div>
+
+  <h3 id="recommendations-high"><span class="badge badge-high">High</span> Priority</h3>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">4</div>
+      <div class="rec-title">Add compaction survival instructions</div>
+    </div>
+    <div class="rec-body">Add to CLAUDE.md: "When compacting, always preserve: active task ID, modified file list, current checklist state, test commands."</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">5</div>
+      <div class="rec-title">Consider ENABLE_TOOL_SEARCH=auto</div>
+    </div>
+    <div class="rec-body">Our 80+ tools stay deferred by default (good), but some agents may benefit from preloading critical tool schemas.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">6</div>
+      <div class="rec-title">Use MCP timeout env vars</div>
+    </div>
+    <div class="rec-body"><code>MCP_TOOL_TIMEOUT</code> and <code>MCP_TIMEOUT</code> to tune timeouts for agents that call slow tools.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">7</div>
+      <div class="rec-title">Implement worker preamble pattern</div>
+    </div>
+    <div class="rec-body">When spawning non-coordinator agents, explicitly instruct them not to spawn sub-agents (prevents recursive spawning).</div>
+  </div>
+
+  <h3 id="recommendations-medium"><span class="badge badge-medium">Medium</span> Priority</h3>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">8</div>
+      <div class="rec-title">Git worktree support for parallel agents</div>
+    </div>
+    <div class="rec-body">Add worktree creation to <code>TerminalSpawner.cs</code> so parallel agents don't conflict on shared files.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">9</div>
+      <div class="rec-title">MCP server health monitoring</div>
+    </div>
+    <div class="rec-body">Surface MCP server health in our status bar. Claude Code has <code>useMcpConnectivityStatus</code> for UI notifications.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">10</div>
+      <div class="rec-title">Plugin hook deduplication</div>
+    </div>
+    <div class="rec-body">If MT and Clarion Assistant both register safety hooks for <code>PreToolUse &gt; Bash</code>, the hook runs twice. Add idempotency checks.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">11</div>
+      <div class="rec-title">Understand config merge order</div>
+    </div>
+    <div class="rec-body">Project settings override user settings for MCP servers (last writer wins). Local settings override both. Use this for per-project customization.</div>
+  </div>
+
+  <h3 id="recommendations-low"><span class="badge badge-low">Low</span> Priority / Future</h3>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">12</div>
+      <div class="rec-title">Explore in-process agent mode</div>
+    </div>
+    <div class="rec-body">Claude Code's <code>teammateMode: "in-process"</code> runs teammates without separate terminals. Could reduce overhead for quick tasks.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">13</div>
+      <div class="rec-title">Consider UDS Inbox integration</div>
+    </div>
+    <div class="rec-body">When/if it ships publicly &mdash; direct peer-to-peer agent communication without REST API middleman.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">14</div>
+      <div class="rec-title">Investigate auto-approve patterns</div>
+    </div>
+    <div class="rec-body">The <code>coordinatorHandler</code> auto-approves for autonomous operation. Could build a more granular version via PreToolUse hooks.</div>
+  </div>
+
+  <div class="rec-card">
+    <div class="rec-header">
+      <div class="rec-num">15</div>
+      <div class="rec-title">Watch for open-sourcing</div>
+    </div>
+    <div class="rec-body">If Anthropic open-sources Claude Code, many of these workarounds become direct code changes.</div>
+  </div>
+</div>
+
+<!-- Sources -->
+<div class="section" id="sources">
+  <h2>Sources</h2>
+  <h3>Primary</h3>
+  <ul>
+    <li><code>H:/DevLaptop/Projects/claw-code/</code> &mdash; Clean-room Python/Rust reimplementation</li>
+    <li><code>rust/crates/runtime/src/</code> &mdash; prompt.rs, compact.rs, mcp.rs, permissions.rs, config.rs</li>
+    <li><code>src/reference_data/</code> &mdash; Archived tool/command/subsystem snapshots</li>
+  </ul>
+  <h3>Official Documentation</h3>
+  <ul>
+    <li>code.claude.com/docs/en/context-window</li>
+    <li>code.claude.com/docs/en/channels-reference</li>
+    <li>code.claude.com/docs/en/agent-teams</li>
+    <li>code.claude.com/docs/en/sub-agents</li>
+    <li>platform.claude.com/docs/en/docs/build-with-claude/prompt-caching</li>
+  </ul>
+  <h3>Community Analysis</h3>
+  <ul>
+    <li>Alex Kim: claude-code-source-leak analysis</li>
+    <li>Victor Antos: "I Read the Leaked Claude Code Source"</li>
+    <li>Sebastian Raschka: "Claude Code's Real Secret Sauce"</li>
+    <li>DEV Community: Multiple technical breakdowns</li>
+    <li>Reddit: r/ClaudeAI, r/LocalLLaMA, r/ClaudeCode, r/programming</li>
+    <li>ccleaks.com: Architecture and hidden features documentation</li>
+  </ul>
+</div>
+
+</main>
+</div>
+
+<script>
+  // Highlight active sidebar link on scroll
+  const sections = document.querySelectorAll('.section');
+  const navLinks = document.querySelectorAll('.sidebar a');
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        navLinks.forEach(link => link.classList.remove('active'));
+        const activeLink = document.querySelector(`.sidebar a[href="#${entry.target.id}"]`);
+        if (activeLink) activeLink.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+
+  sections.forEach(section => observer.observe(section));
+</script>
+
+</body>
+</html>

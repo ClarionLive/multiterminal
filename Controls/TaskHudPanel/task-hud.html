@@ -356,18 +356,105 @@ body.light .badge-cycle {
 .no-task {
     display: none;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
     height: 100%;
     color: var(--text-muted);
     font-size: 11px;
-    gap: 6px;
     user-select: none;
+    overflow: hidden;
 }
 
-.no-task-icon {
-    font-size: 24px;
-    opacity: 0.4;
+.no-task-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border-column);
+    flex-shrink: 0;
+}
+
+.no-task-header-icon {
+    font-size: 16px;
+    opacity: 0.6;
+}
+
+.no-task-header-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.no-task-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+}
+
+.no-task-message {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 12px;
+    color: var(--text-muted);
+}
+
+.no-task-message-icon {
+    font-size: 28px;
+    opacity: 0.3;
+}
+
+.no-task-message-text {
+    font-size: 11px;
+}
+
+.available-tasks {
+    flex: 1;
+    padding: 6px 10px;
+    overflow-y: auto;
+    border-left: 1px solid var(--border-column);
+}
+
+.available-tasks-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.available-task-card {
+    border: 1px solid var(--border-card);
+    border-radius: 4px;
+    padding: 5px 8px;
+    margin-bottom: 4px;
+    background: var(--bg-card);
+    cursor: default;
+    transition: background 0.15s ease;
+}
+
+.available-task-card:hover {
+    background: var(--bg-card-hover);
+}
+
+.available-task-title {
+    font-size: 11px;
+    color: var(--text-primary);
+    line-height: 1.3;
+    word-break: break-word;
+}
+
+.available-task-card .chip-priority {
+    margin-top: 3px;
+}
+
+.no-available {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
 }
 
 /* Show no-task overlay, hide main layout */
@@ -377,10 +464,24 @@ body.empty .no-task       { display: flex; }
 </head>
 <body class="empty">
 
-<!-- No-task overlay (shown when clear message received) -->
+<!-- No-task overlay (shown when no active task) -->
 <div class="no-task">
-    <div class="no-task-icon">&#128197;</div>
-    <span>No task assigned</span>
+    <div class="no-task-header">
+        <span class="no-task-header-icon">&#128203;</span>
+        <span class="no-task-header-text" id="no-task-greeting">No active task</span>
+    </div>
+    <div class="no-task-body">
+        <div class="no-task-message">
+            <div class="no-task-message-icon">&#9745;</div>
+            <span class="no-task-message-text">No task assigned to this terminal</span>
+        </div>
+        <div class="available-tasks" id="available-tasks">
+            <div class="available-tasks-title">Available Tasks</div>
+            <div id="available-tasks-list">
+                <span class="no-available">No tasks in queue</span>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- Main HUD layout -->
@@ -462,10 +563,41 @@ function applyTheme(isDark) {
 }
 
 // ============================================================
-//  Clear (no task)
+//  Clear / Empty state
 // ============================================================
 function clearHud() {
     document.body.classList.add('empty');
+}
+
+function renderEmptyState(data) {
+    document.body.classList.add('empty');
+
+    // Update greeting with terminal name
+    const greeting = document.getElementById('no-task-greeting');
+    if (data.terminalName) {
+        greeting.textContent = `No active task \u2014 ${escapeHtml(data.terminalName)}`;
+    } else {
+        greeting.textContent = 'No active task';
+    }
+
+    // Render available tasks
+    const list = document.getElementById('available-tasks-list');
+    const tasks = Array.isArray(data.availableTasks) ? data.availableTasks : [];
+
+    if (tasks.length === 0) {
+        list.innerHTML = '<span class="no-available">No tasks in queue</span>';
+        return;
+    }
+
+    let html = '';
+    tasks.forEach(t => {
+        const priority = (t.priority || 'normal').toLowerCase();
+        html += `<div class="available-task-card">
+            <div class="available-task-title">${escapeHtml(t.title)}</div>
+            <span class="chip chip-priority ${priority}" style="font-size:9px;padding:0 4px;margin-top:3px">${priority}</span>
+        </div>`;
+    });
+    list.innerHTML = html;
 }
 
 // ============================================================
@@ -569,6 +701,8 @@ if (window.chrome && window.chrome.webview) {
         if (typeof data === 'object') {
             if (data.type === 'task_data' && data.task) {
                 renderTask(data.task);
+            } else if (data.type === 'empty_state') {
+                renderEmptyState(data);
             } else if (data.type === 'theme') {
                 applyTheme(data.isDark !== false);
             } else if (data.type === 'clear') {

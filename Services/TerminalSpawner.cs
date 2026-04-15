@@ -251,6 +251,7 @@ $env:MULTITERMINAL_DOC_ID='{safeDocId}';
 $env:MULTITERMINAL_ROLE='{safeType}';
 $env:MULTITERMINAL_SPAWNER='{SanitizeForPowerShell(Environment.GetEnvironmentVariable("MULTITERMINAL_NAME") ?? "host")}';
 $env:CHANNEL_PORT='{channelPort}';
+$env:CLAUDE_CODE_NO_FLICKER='1';
 cd '{safeDir}';
 Write-Host '🤖 Spawning as {safeName} ({safeType}) [channel port {channelPort}]...' -ForegroundColor Cyan;
 claude {claudeFlags}

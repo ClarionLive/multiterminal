@@ -51,10 +51,10 @@ namespace MultiTerminal.InboxPanel
         /// <summary>
         /// Initialize the inbox panel with the MessageBroker for inbox operations.
         /// </summary>
-        public void Initialize(MessageBroker broker)
+        public void Initialize(MessageBroker broker, string defaultUserId = "Owner")
         {
             _broker = broker;
-            _control?.Initialize(broker);
+            _control?.Initialize(broker, defaultUserId);
         }
 
         /// <summary>

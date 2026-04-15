@@ -45,16 +45,17 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Generates a .mcp.json string. Since multiterminal and mcp-gateway are registered
-        /// at user scope, the project .mcp.json is empty. Per-project server filtering is
-        /// handled by calling gateway__set_profile at runtime.
+        /// Generates a .mcp.json string. Core MCP servers (multiterminal, mcp-gateway,
+        /// multiterminal-channel) are all registered at user scope (~/.claude/.mcp.json).
+        /// Project .mcp.json is empty — kept for future per-project overrides.
         /// </summary>
-        public string GenerateSimpleMcpJson(string gatewayProfile = null)
+        public string GenerateSimpleMcpJson(string gatewayProfile = null, string sourcePath = null)
         {
-            // Both core MCPs (multiterminal + mcp-gateway) are registered at user scope.
-            // The gateway profile parameter is kept for backward compatibility but is no longer
-            // written into .mcp.json — profile switching happens at runtime via gateway__set_profile.
-            return "{\n  \"mcpServers\": {}\n}";
+            var sb = new StringBuilder();
+            sb.AppendLine("{");
+            sb.AppendLine("  \"mcpServers\": {}");
+            sb.Append("}");
+            return sb.ToString();
         }
 
         /// <summary>
@@ -97,18 +98,20 @@ namespace MultiTerminal.Services
                 }
             }
 
-            string content = GenerateSimpleMcpJson(gatewayProfile);
+            // All MCP servers are now registered globally in ~/.claude/.mcp.json.
+            // Do NOT write project-level .mcp.json — an empty one creates a scope boundary
+            // that can shadow global servers (like multiterminal-channel).
+            // Remove any stale project .mcp.json if it exists.
             string outputPath = Path.Combine(sourcePath, ".mcp.json");
-            string backupPath = outputPath + ".bak";
-
             if (File.Exists(outputPath))
             {
+                string backupPath = outputPath + ".bak";
                 File.Copy(outputPath, backupPath, overwrite: true);
-                _log("McpConfig", $"Backed up existing .mcp.json to {backupPath}");
+                File.Delete(outputPath);
+                _log("McpConfig", $"Removed stale project .mcp.json (backed up to {backupPath})");
             }
 
-            File.WriteAllText(outputPath, content, Encoding.UTF8);
-            _log("McpConfig", $"Wrote simplified .mcp.json (multiterminal + mcp-gateway) to {outputPath}");
+            _log("McpConfig", $"MCP servers registered globally — no project .mcp.json needed for {sourcePath}");
             return outputPath;
         }
 

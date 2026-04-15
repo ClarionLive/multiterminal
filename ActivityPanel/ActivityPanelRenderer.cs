@@ -54,6 +54,12 @@ namespace MultiTerminal.ActivityPanel
         public event EventHandler RefreshRequested;
 
         /// <summary>
+        /// Event fired when user clicks "Create Task" on an expanded feed item.
+        /// Args: (title, description)
+        /// </summary>
+        public event EventHandler<TaskCreateRequestArgs> TaskCreateRequested;
+
+        /// <summary>
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
@@ -200,6 +206,13 @@ namespace MultiTerminal.ActivityPanel
                     case "refresh":
                         System.Diagnostics.Debug.WriteLine("[ActivityRenderer] Manual refresh requested");
                         RefreshRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "createTask":
+                        var title = ExtractJsonString(json, "title");
+                        var description = ExtractJsonString(json, "description");
+                        System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] Create task requested: {title}");
+                        TaskCreateRequested?.Invoke(this, new TaskCreateRequestArgs(title, description));
                         break;
                 }
             }
@@ -423,9 +436,31 @@ namespace MultiTerminal.ActivityPanel
             sb.Append($"\"timestamp\":\"{item.Timestamp:O}\",");
             sb.Append($"\"isPinned\":{(item.IsPinned ? "true" : "false")},");
             sb.Append($"\"isNew\":true");
+            if (!string.IsNullOrEmpty(item.Details))
+                sb.Append($",\"details\":\"{EscapeJson(item.Details)}\"");
+            if (!string.IsNullOrEmpty(item.Severity))
+                sb.Append($",\"severity\":\"{EscapeJson(item.Severity)}\"");
+            if (!string.IsNullOrEmpty(item.ActivityType))
+                sb.Append($",\"activityType\":\"{EscapeJson(item.ActivityType)}\"");
             sb.Append("}");
 
             SendMessage($"feedItem:{sb}");
+        }
+
+        /// <summary>
+        /// Send task creation confirmation back to JavaScript.
+        /// </summary>
+        public void SendTaskCreatedConfirmation(string taskId)
+        {
+            SendMessage($"taskCreated:{taskId}");
+        }
+
+        /// <summary>
+        /// Send task creation failure back to JavaScript.
+        /// </summary>
+        public void SendTaskCreateFailed(string error)
+        {
+            SendMessage($"taskCreateFailed:{EscapeJson(error ?? "Unknown error")}");
         }
 
         private string EscapeJson(string s)
@@ -457,9 +492,20 @@ namespace MultiTerminal.ActivityPanel
             int start = json.IndexOf(pattern);
             if (start < 0) return "";
             start += pattern.Length;
-            int end = json.IndexOf("\"", start);
-            if (end < 0) return "";
-            return json.Substring(start, end - start);
+            int end = start;
+            while (end < json.Length)
+            {
+                end = json.IndexOf('"', end);
+                if (end < 0) return "";
+                if (end > 0 && json[end - 1] == '\\') { end++; continue; }
+                break;
+            }
+            return json.Substring(start, end - start)
+                       .Replace("\\\"", "\"")
+                       .Replace("\\\\", "\\")
+                       .Replace("\\n", "\n")
+                       .Replace("\\r", "\r")
+                       .Replace("\\t", "\t");
         }
 
         private bool ExtractJsonBool(string json, string key)
@@ -485,6 +531,21 @@ namespace MultiTerminal.ActivityPanel
                 _webView?.Dispose();
             }
             base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>
+    /// Event args for task creation requests from the activity panel.
+    /// </summary>
+    public class TaskCreateRequestArgs : EventArgs
+    {
+        public string Title { get; }
+        public string Description { get; }
+
+        public TaskCreateRequestArgs(string title, string description)
+        {
+            Title = title;
+            Description = description;
         }
     }
 
@@ -528,5 +589,8 @@ namespace MultiTerminal.ActivityPanel
         public string Content { get; set; }
         public DateTime Timestamp { get; set; }
         public bool IsPinned { get; set; }
+        public string Details { get; set; }
+        public string Severity { get; set; } // "info", "warning", "error"
+        public string ActivityType { get; set; } // "PLAN_CREATED", "BUILD_FAILED", etc.
     }
 }

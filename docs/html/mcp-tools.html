@@ -668,7 +668,7 @@
     <table>
       <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
       <tbody>
-        <tr><td><code>userId</code></td><td>string</td><td>Yes</td><td>User ID to get inbox for (e.g., "John")</td></tr>
+        <tr><td><code>userId</code></td><td>string</td><td>Yes</td><td>User ID to get inbox for (e.g., the owner's first name)</td></tr>
         <tr><td><code>unreadOnly</code></td><td>boolean</td><td>No</td><td>Only show unread messages. Default: <code>false</code></td></tr>
         <tr><td><code>limit</code></td><td>number</td><td>No</td><td>Max messages to return. Default: <code>50</code></td></tr>
       </tbody>
@@ -676,7 +676,7 @@
     <h4>Returns</h4>
     <p>Formatted inbox with message type, summary, task context, and read/reply status.</p>
     <h4>Example</h4>
-    <pre><code>get_inbox(userId="John", unreadOnly=true)</code></pre>
+    <pre><code>get_inbox(userId="Owner", unreadOnly=true)</code></pre>
   </div>
 
   <!-- mark_inbox_read -->
@@ -695,7 +695,7 @@
     <p>Success confirmation.</p>
     <h4>Example</h4>
     <pre><code>mark_inbox_read(messageId="abc12345")
-mark_inbox_read(userId="John")</code></pre>
+mark_inbox_read(userId="Owner")</code></pre>
   </div>
 
   <!-- reply_to_inbox -->
@@ -1074,7 +1074,7 @@ add_project_association(projectId="proj-123", type="skill", skillName="kanban-ta
     <p>Session ID and message count.</p>
     <h4>Example</h4>
     <pre><code>import_session(
-  sessionFilePath="C:\\Users\\John\\.claude\\projects\\...\\abc123.jsonl",
+  sessionFilePath="C:\\Users\\&lt;username&gt;\\.claude\\projects\\...\\abc123.jsonl",
   taskId="c0ce8037",
   agentName="Alice",
   sessionType="coding"
@@ -1132,7 +1132,7 @@ add_project_association(projectId="proj-123", type="skill", skillName="kanban-ta
     <p>Import summary: imported, skipped, failed, total counts.</p>
     <h4>Example</h4>
     <pre><code>sync_sessions(
-  claudeProjectPath="C:\\Users\\John\\.claude\\projects\\H--DevLaptop-...",
+  claudeProjectPath="C:\\Users\\&lt;username&gt;\\.claude\\projects\\H--DevLaptop-...",
   agentName="Alice",
   taskId="c0ce8037"
 )</code></pre>

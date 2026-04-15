@@ -132,12 +132,12 @@ With the plugin handling hooks and CLAUDE.md, `LaunchCommandBuilder.cs` is simpl
 
 **Before (3 flags):**
 ```
-claude --add-dir <mt-source> --settings <settings.local.json> --mcp-config <mcp.json> --dangerously-skip-permissions --dangerously-load-development-channels server:multiterminal-channel
+claude --add-dir <mt-source> --settings <settings.local.json> --mcp-config <mcp.json> --dangerously-skip-permissions --channels server:multiterminal-channel
 ```
 
 **After (1 flag):**
 ```
-claude --mcp-config <mcp.json> --dangerously-skip-permissions --dangerously-load-development-channels server:multiterminal-channel
+claude --mcp-config <mcp.json> --dangerously-skip-permissions --channels server:multiterminal-channel
 ```
 
 - `--add-dir` removed: Plugin provides CLAUDE.md; project has its own

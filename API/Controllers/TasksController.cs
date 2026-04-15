@@ -63,7 +63,7 @@ namespace MultiTerminal.API.Controllers
 
             var task = _broker.GetMyActiveTask(agentName);
             if (task == null)
-                return NotFound(new { error = $"No active task for {agentName}" });
+                return Ok(new { task = (object)null, message = $"No active task for {agentName}" });
 
             // Load helpers
             var helpers = _taskDb.LoadTaskHelpers(task.Id);

@@ -157,6 +157,7 @@ namespace MultiTerminal.Services
         private const string LifecycleBoardTopKey = "LifecycleBoardTop";
         private const string LifecycleBoardWidthKey = "LifecycleBoardWidth";
         private const string LifecycleBoardHeightKey = "LifecycleBoardHeight";
+        private const string LifecycleBoardZoomKey = "LifecycleBoardZoom";
 
         /// <summary>
         /// Gets the toolbar font size (8-14pt range).
@@ -710,6 +711,22 @@ namespace MultiTerminal.Services
             Set(LifecycleBoardWidthKey, bounds.Width.ToString());
             Set(LifecycleBoardHeightKey, bounds.Height.ToString());
             EndBatch();
+        }
+
+        public double GetLifecycleBoardZoom()
+        {
+            string value = Get(LifecycleBoardZoomKey);
+            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            {
+                return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            }
+            return DefaultPanelZoom;
+        }
+
+        public void SetLifecycleBoardZoom(double zoom)
+        {
+            zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            Set(LifecycleBoardZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
         }
 
         /// <summary>

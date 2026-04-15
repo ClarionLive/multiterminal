@@ -278,7 +278,7 @@ namespace MultiTerminal.Controls
         /// <summary>
         /// Updates the status line (rows 2 and 3) with Claude Code session data.
         /// </summary>
-        public void UpdateStatusLine(string model, string folder, string gitBranch, string gitStatus, bool gitDirty, int? contextPct)
+        public void UpdateStatusLine(string model, string folder, string gitBranch, string gitStatus, bool gitDirty, int? contextPct, int? quota5h = null, int? quota7d = null, int? pace5h = null, int? pace7d = null, string resetIn5h = null, bool? isOffPeak = null)
         {
             var data = new
             {
@@ -287,7 +287,13 @@ namespace MultiTerminal.Controls
                 gitBranch = gitBranch ?? "",
                 gitStatus = gitStatus ?? "",
                 gitDirty = gitDirty,
-                contextPct = contextPct
+                contextPct = contextPct,
+                quota5h = quota5h,
+                quota7d = quota7d,
+                pace5h = pace5h,
+                pace7d = pace7d,
+                resetIn5h = resetIn5h,
+                isOffPeak = isOffPeak
             };
 
             string json = JsonSerializer.Serialize(data);

@@ -23,6 +23,7 @@ namespace MultiTerminal.ChatPanel
         private bool _isInitializing;
         private bool _initializePending;
         private bool _isPaused;
+        private bool _isShuttingDown;
         private MessageBroker _broker;
         private double _pendingZoom = 1.0;
 
@@ -105,13 +106,25 @@ namespace MultiTerminal.ChatPanel
 
         private async System.Threading.Tasks.Task InitializeWebView2Async()
         {
-            if (_isInitializing || _isInitialized) return;
+            if (_isInitializing || _isInitialized || _isShuttingDown) return;
             _isInitializing = true;
 
             try
             {
                 var env = await WebView2EnvironmentCache.GetEnvironmentAsync();
                 await _webView.EnsureCoreWebView2Async(env);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected during shutdown — WebView2 aborts initialization when the host is closing
+                System.Diagnostics.Debug.WriteLine("Chat panel WebView2 init cancelled (shutdown).");
+                _isInitializing = false;
+            }
+            catch (Exception ex) when (_isShuttingDown || IsDisposed || Disposing)
+            {
+                // Suppress any errors during shutdown
+                System.Diagnostics.Debug.WriteLine($"Chat panel WebView2 init failed during shutdown: {ex.Message}");
+                _isInitializing = false;
             }
             catch (Exception ex)
             {
@@ -124,6 +137,9 @@ namespace MultiTerminal.ChatPanel
         {
             if (!e.IsSuccess)
             {
+                // Suppress error during shutdown — WebView2 COM teardown causes E_ABORT / "Class not registered"
+                if (_isShuttingDown || IsDisposed || Disposing || !IsHandleCreated)
+                    return;
                 MessageBox.Show($"WebView2 initialization failed: {e.InitializationException?.Message}",
                     "Chat Panel Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -444,6 +460,8 @@ namespace MultiTerminal.ChatPanel
 
         protected override void Dispose(bool disposing)
         {
+            _isShuttingDown = true;
+
             if (disposing)
             {
                 if (_broker != null)

@@ -1,8 +1,9 @@
 # Deploy script for MultiTerminal
-# Copies from staged/ to the Deploy folder. Does NOT build.
-# Build separately (dotnet build -c Release), then run this to deploy.
+# Builds Release, then copies from staged/ to the Deploy folder.
+# The csproj CopyToStaged target mirrors Release output into staged/ after build.
 param(
-    [switch]$IncludePdb = $false  # Include debug symbols (.pdb files)
+    [switch]$IncludePdb = $false,  # Include debug symbols (.pdb files)
+    [switch]$SkipBuild = $false    # Skip the build step (deploy existing staged/ output)
 )
 
 $source = "staged"
@@ -18,16 +19,29 @@ if ($IncludePdb) {
 }
 Write-Host ""
 
+# Build Release (incremental — fast if nothing changed).
+# The csproj CopyToStaged AfterTargets=Build target auto-mirrors output into staged/.
+if (-not $SkipBuild) {
+    Write-Host "Building Release configuration..." -ForegroundColor Cyan
+    dotnet build -c Release
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Build failed!" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "Build succeeded." -ForegroundColor Green
+    Write-Host ""
+}
+
 # Check if staged folder exists and has files
 if (-not (Test-Path $source)) {
     Write-Host "ERROR: Staged folder not found: $source" -ForegroundColor Red
-    Write-Host "Run a build first, then copy output to staged/." -ForegroundColor Yellow
+    Write-Host "Run without -SkipBuild so the build populates staged/." -ForegroundColor Yellow
     exit 1
 }
 
 if (-not (Test-Path "$source\MultiTerminal.exe")) {
     Write-Host "ERROR: MultiTerminal.exe not found in staged folder!" -ForegroundColor Red
-    Write-Host "Run a build first, then copy output to staged/." -ForegroundColor Yellow
+    Write-Host "Run without -SkipBuild so the build populates staged/." -ForegroundColor Yellow
     exit 1
 }
 

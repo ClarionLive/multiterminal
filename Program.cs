@@ -69,6 +69,19 @@ namespace MultiTerminal
             // Create main form (starts hidden via Opacity=0)
             var mainForm = new MainForm();
 
+            // Track three startup gates: loading, animation, and dashboard WebView2
+            bool animationDone = false;
+            bool dashboardReady = false;
+
+            void TryShowMainForm()
+            {
+                if (!animationDone || !dashboardReady) return;
+                splash.Close();
+                splash.Dispose();
+                mainForm.Opacity = 1;
+                mainForm.Activate();
+            }
+
             // Wire splash screen events (animation starts automatically in splash constructor)
             mainForm.LoadingComplete += (s, e) =>
             {
@@ -77,13 +90,20 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine("[Program] splash.SetLoadingComplete() returned");
             };
 
-            // Show main form when animation completes (and loading is done)
+            // Dashboard WebView2 is loaded — one of two gates for showing the form
+            mainForm.DashboardContentReady += (s, e) =>
+            {
+                System.Diagnostics.Trace.WriteLine("[Program] DashboardContentReady event fired");
+                dashboardReady = true;
+                TryShowMainForm();
+            };
+
+            // Splash animation + loading complete — other gate for showing the form
             splash.AnimationComplete += (s, e) =>
             {
-                splash.Close();
-                splash.Dispose();
-                mainForm.Opacity = 1;
-                mainForm.Activate();
+                System.Diagnostics.Trace.WriteLine("[Program] AnimationComplete event fired");
+                animationDone = true;
+                TryShowMainForm();
             };
 
             Application.Run(mainForm);

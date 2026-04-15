@@ -62,8 +62,8 @@ namespace MultiTerminal.ProfilePanel
 
         private void OnDockStateChanged(object sender, EventArgs e)
         {
-            // When panel becomes visible for the first time, ensure data is loaded
-            if (!_hasLoadedInitialData && this.Visible && _renderer?.IsInitialized == true)
+            // Reload profiles whenever the panel becomes visible
+            if (this.Visible && _renderer?.IsInitialized == true)
             {
                 LoadProfiles();
             }

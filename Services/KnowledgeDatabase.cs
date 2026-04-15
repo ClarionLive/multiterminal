@@ -36,10 +36,10 @@ namespace MultiTerminal.Services
             const string sql = @"
                 INSERT INTO knowledge_entries
                     (project_id, category, title, content, source_type, source_id,
-                     source_agent, tags, confidence, superseded_by, created_at, updated_at)
+                     source_agent, tags, confidence, superseded_by, query_hash, last_referenced, created_at, updated_at)
                 VALUES
                     (@projectId, @category, @title, @content, @sourceType, @sourceId,
-                     @sourceAgent, @tags, @confidence, @supersededBy, datetime('now'), datetime('now'));
+                     @sourceAgent, @tags, @confidence, @supersededBy, @queryHash, datetime('now'), datetime('now'), datetime('now'));
                 SELECT last_insert_rowid();";
 
             using var cmd = new SQLiteCommand(sql, _connection);
@@ -53,6 +53,7 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@tags", (object)entry.Tags ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@confidence", entry.Confidence ?? "confirmed");
             cmd.Parameters.AddWithValue("@supersededBy", (object)entry.SupersededBy ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@queryHash", (object)entry.QueryHash ?? DBNull.Value);
 
             var result = cmd.ExecuteScalar();
             return Convert.ToInt32(result);
@@ -72,7 +73,7 @@ namespace MultiTerminal.Services
             // Allowlist of updatable columns — never interpolate raw dictionary keys into SQL
             var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                "category", "title", "content", "tags", "confidence", "superseded_by"
+                "category", "title", "content", "tags", "confidence", "superseded_by", "query_hash"
             };
 
             var setClauses = new List<string> { "updated_at = datetime('now')" };
@@ -132,7 +133,8 @@ namespace MultiTerminal.Services
         {
             const string sql = @"
                 SELECT id, project_id, category, title, content, source_type, source_id,
-                       source_agent, tags, confidence, superseded_by, created_at, updated_at
+                       source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
+                       last_referenced, reference_count
                 FROM knowledge_entries
                 WHERE id = @id";
 
@@ -151,7 +153,8 @@ namespace MultiTerminal.Services
         {
             const string sql = @"
                 SELECT id, project_id, category, title, content, source_type, source_id,
-                       source_agent, tags, confidence, superseded_by, created_at, updated_at
+                       source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
+                       last_referenced, reference_count
                 FROM knowledge_entries
                 WHERE source_type = @sourceType AND source_id = @sourceId
                 ORDER BY created_at DESC";
@@ -215,7 +218,8 @@ namespace MultiTerminal.Services
             var sql = @"
                 SELECT ke.id, ke.project_id, ke.category, ke.title, ke.content, ke.source_type,
                        ke.source_id, ke.source_agent, ke.tags, ke.confidence, ke.superseded_by,
-                       ke.created_at, ke.updated_at
+                       ke.created_at, ke.updated_at, ke.query_hash,
+                       ke.last_referenced, ke.reference_count
                 FROM knowledge_entries ke
                 JOIN knowledge_entries_fts fts ON ke.id = fts.rowid
                 WHERE knowledge_entries_fts MATCH @query";
@@ -228,7 +232,10 @@ namespace MultiTerminal.Services
             sql += $" ORDER BY ke.updated_at DESC LIMIT {limit}";
 
             using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@query", query);
+            // Sanitize FTS5 query: strip double-quotes and wrap in phrase quotes to prevent
+            // FTS5 expression injection (OR, NOT, NEAR operators). This forces literal matching.
+            var sanitizedQuery = "\"" + query.Replace("\"", " ") + "\"";
+            cmd.Parameters.AddWithValue("@query", sanitizedQuery);
             if (category != null)  cmd.Parameters.AddWithValue("@category", category);
             if (projectId != null) cmd.Parameters.AddWithValue("@projectId", projectId);
             if (tags != null)      cmd.Parameters.AddWithValue("@tags", $"%{tags}%");
@@ -246,7 +253,8 @@ namespace MultiTerminal.Services
         {
             var sql = @"
                 SELECT id, project_id, category, title, content, source_type, source_id,
-                       source_agent, tags, confidence, superseded_by, created_at, updated_at
+                       source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
+                       last_referenced, reference_count
                 FROM knowledge_entries
                 WHERE 1=1";
 
@@ -266,6 +274,89 @@ namespace MultiTerminal.Services
 
             return ReadEntries(cmd);
         }
+
+        /// <summary>
+        /// Bumps the last_referenced timestamp and increments reference_count for the given entry.
+        /// Called when knowledge is queried or injected into agent context.
+        /// </summary>
+        public void BumpReference(int id)
+        {
+            const string sql = @"
+                UPDATE knowledge_entries
+                SET last_referenced = datetime('now'),
+                    reference_count = reference_count + 1
+                WHERE id = @id";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Bumps last_referenced and reference_count for multiple entries at once.
+        /// Wraps in a transaction for atomicity and performance (single WAL commit).
+        /// </summary>
+        public void BumpReferences(IEnumerable<int> ids)
+        {
+            using var transaction = _connection.BeginTransaction();
+            try
+            {
+                foreach (var id in ids)
+                    BumpReference(id);
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+
+        #region Research Cache
+
+        /// <summary>
+        /// Looks up a cached research result by query hash. Returns the most recent
+        /// non-deprecated entry with the given hash, or null if no cache hit.
+        /// </summary>
+        public KnowledgeEntry LookupResearchCache(string queryHash)
+        {
+            if (string.IsNullOrEmpty(queryHash)) return null;
+
+            const string sql = @"
+                SELECT id, project_id, category, title, content, source_type, source_id,
+                       source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
+                       last_referenced, reference_count
+                FROM knowledge_entries
+                WHERE query_hash = @queryHash
+                  AND confidence != 'deprecated'
+                ORDER BY updated_at DESC
+                LIMIT 1";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@queryHash", queryHash);
+
+            using var reader = cmd.ExecuteReader();
+            return reader.Read() ? ReadEntry(reader) : null;
+        }
+
+        /// <summary>
+        /// Checks if a query hash already exists in the knowledge base.
+        /// </summary>
+        public bool ResearchCacheExists(string queryHash)
+        {
+            if (string.IsNullOrEmpty(queryHash)) return false;
+
+            const string sql = @"
+                SELECT 1 FROM knowledge_entries
+                WHERE query_hash = @queryHash AND confidence != 'deprecated'
+                LIMIT 1";
+
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@queryHash", queryHash);
+            return cmd.ExecuteScalar() != null;
+        }
+
+        #endregion
 
         #endregion
 
@@ -430,7 +521,12 @@ namespace MultiTerminal.Services
                 Confidence   = reader.IsDBNull(9)  ? null : reader.GetString(9),
                 SupersededBy = reader.IsDBNull(10) ? (int?)null : reader.GetInt32(10),
                 CreatedAt    = reader.IsDBNull(11) ? null : reader.GetString(11),
-                UpdatedAt    = reader.IsDBNull(12) ? null : reader.GetString(12)
+                UpdatedAt    = reader.IsDBNull(12) ? null : reader.GetString(12),
+                // query_hash column added by migration — guard for older queries that may not select it
+                QueryHash      = reader.FieldCount > 13 && !reader.IsDBNull(13) ? reader.GetString(13) : null,
+                // attention decay columns added by migration
+                LastReferenced = reader.FieldCount > 14 && !reader.IsDBNull(14) ? reader.GetString(14) : null,
+                ReferenceCount = reader.FieldCount > 15 && !reader.IsDBNull(15) ? reader.GetInt32(15) : 0
             };
         }
 
@@ -462,6 +558,74 @@ namespace MultiTerminal.Services
                 CreatedAt    = reader.IsDBNull(12) ? null : reader.GetString(12),
                 UpdatedAt    = reader.IsDBNull(13) ? null : reader.GetString(13)
             };
+        }
+
+        #endregion
+
+        #region Decay-Ranked Injection
+
+        /// <summary>
+        /// Returns knowledge entries ranked by attention decay score.
+        /// Score = (reference_count + 1) / (days_since_last_referenced + 1).
+        /// Falls back to updated_at ordering if decay columns don't exist yet.
+        /// </summary>
+        public List<KnowledgeEntry> GetDecayRanked(int limit = 15)
+        {
+            // Check if decay columns exist (migration may not have run)
+            bool hasDecay = false;
+            using (var pragma = new SQLiteCommand("PRAGMA table_info(knowledge_entries)", _connection))
+            using (var reader = pragma.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (reader.GetString(1) == "last_referenced")
+                    {
+                        hasDecay = true;
+                        break;
+                    }
+                }
+            }
+
+            string sql;
+            if (hasDecay)
+            {
+                sql = @"
+                    SELECT id, project_id, category, title, content,
+                           source_type, source_id, source_agent, tags, confidence,
+                           superseded_by, created_at, updated_at, query_hash,
+                           last_referenced, reference_count,
+                           (COALESCE(reference_count, 0) + 1.0)
+                           / (julianday('now') - julianday(COALESCE(last_referenced, updated_at)) + 1.0)
+                           AS decay_score
+                    FROM knowledge_entries
+                    WHERE (superseded_by IS NULL OR superseded_by = 0)
+                      AND confidence != 'deprecated'
+                    ORDER BY decay_score DESC
+                    LIMIT @limit";
+            }
+            else
+            {
+                sql = @"
+                    SELECT id, project_id, category, title, content,
+                           source_type, source_id, source_agent, tags, confidence,
+                           superseded_by, created_at, updated_at, NULL, NULL, 0
+                    FROM knowledge_entries
+                    WHERE (superseded_by IS NULL OR superseded_by = 0)
+                      AND confidence != 'deprecated'
+                    ORDER BY updated_at DESC
+                    LIMIT @limit";
+            }
+
+            var results = new List<KnowledgeEntry>();
+            using (var cmd = new SQLiteCommand(sql, _connection))
+            {
+                cmd.Parameters.AddWithValue("@limit", limit);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    results.Add(ReadEntry(reader));
+            }
+
+            return results;
         }
 
         #endregion

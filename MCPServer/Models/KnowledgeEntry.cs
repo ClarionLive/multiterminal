@@ -2,8 +2,8 @@ namespace MultiTerminal.MCPServer.Models
 {
     /// <summary>
     /// A unit of institutional knowledge captured from sessions, tasks, or manual input.
-    /// Categories: decision, pattern, gotcha, anti_pattern, debug_insight, preference.
-    /// Confidence levels: observed, confirmed, deprecated.
+    /// Categories: decision, pattern, gotcha, anti_pattern, debug_insight, preference, web_research.
+    /// Confidence levels: observed, confirmed, likely, deprecated.
     /// </summary>
     public class KnowledgeEntry
     {
@@ -32,11 +32,20 @@ namespace MultiTerminal.MCPServer.Models
         /// <summary>Comma-separated tags for filtering.</summary>
         public string Tags { get; set; }
 
-        /// <summary>Confidence level: observed, confirmed, deprecated.</summary>
+        /// <summary>Confidence level: observed, confirmed, likely, deprecated.</summary>
         public string Confidence { get; set; }
 
         /// <summary>ID of a newer KnowledgeEntry that supersedes this one.</summary>
         public int? SupersededBy { get; set; }
+
+        /// <summary>SHA256 hash of normalized query for research cache deduplication.</summary>
+        public string QueryHash { get; set; }
+
+        /// <summary>Last time this entry was referenced (queried/injected). Used for attention decay.</summary>
+        public string LastReferenced { get; set; }
+
+        /// <summary>Number of times this entry has been referenced. Used for attention decay ranking.</summary>
+        public int ReferenceCount { get; set; }
 
         public string CreatedAt { get; set; }
         public string UpdatedAt { get; set; }

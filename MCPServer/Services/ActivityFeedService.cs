@@ -92,6 +92,20 @@ namespace MultiTerminal.MCPServer.Services
 
             using var command = new SQLiteCommand(schema, _connection);
             command.ExecuteNonQuery();
+
+            // Migration: add project_id column if missing
+            try
+            {
+                using var migrateCmd = new SQLiteCommand(
+                    "ALTER TABLE activity_feed ADD COLUMN project_id TEXT", _connection);
+                migrateCmd.ExecuteNonQuery();
+
+                using var indexCmd = new SQLiteCommand(
+                    "CREATE INDEX IF NOT EXISTS idx_activity_project_time ON activity_feed(project_id, timestamp DESC)",
+                    _connection);
+                indexCmd.ExecuteNonQuery();
+            }
+            catch (SQLiteException) { /* column already exists */ }
         }
 
         #region Record Methods
@@ -163,13 +177,14 @@ namespace MultiTerminal.MCPServer.Services
             string actor,
             string summary,
             string severity,
-            string detailsJson)
+            string detailsJson,
+            string projectId = null)
         {
             var timestamp = DateTime.UtcNow.ToString("o");
 
             const string sql = @"
-                INSERT INTO activity_feed (timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json)
-                VALUES (@timestamp, @activityType, @planId, @phaseId, @actor, @summary, @severity, @detailsJson);
+                INSERT INTO activity_feed (timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id)
+                VALUES (@timestamp, @activityType, @planId, @phaseId, @actor, @summary, @severity, @detailsJson, @projectId);
                 SELECT last_insert_rowid();
             ";
 
@@ -182,6 +197,7 @@ namespace MultiTerminal.MCPServer.Services
             command.Parameters.AddWithValue("@summary", summary);
             command.Parameters.AddWithValue("@severity", severity);
             command.Parameters.AddWithValue("@detailsJson", (object)detailsJson ?? DBNull.Value);
+            command.Parameters.AddWithValue("@projectId", (object)projectId ?? DBNull.Value);
 
             var id = Convert.ToInt64(command.ExecuteScalar());
 
@@ -196,7 +212,8 @@ namespace MultiTerminal.MCPServer.Services
                 Actor = actor,
                 Summary = summary,
                 Severity = severity,
-                DetailsJson = detailsJson
+                DetailsJson = detailsJson,
+                ProjectId = projectId
             };
             ActivityRecorded?.Invoke(this, entry);
 
@@ -205,29 +222,41 @@ namespace MultiTerminal.MCPServer.Services
             return id;
         }
 
+        /// <summary>
+        /// Record a general activity event (task created, message sent, session started, etc.).
+        /// Unlike the typed methods above, this accepts any activity type string.
+        /// </summary>
+        public long RecordGeneralActivity(string activityType, string actor, string summary, string severity = "info", string detailsJson = null, string projectId = null)
+        {
+            return InsertActivity(activityType, null, null, actor, summary, severity, detailsJson, projectId);
+        }
+
         #endregion
 
         #region Query Methods
 
         /// <summary>
-        /// Get recent activities, optionally filtered by plan.
+        /// Get recent activities, optionally filtered by plan and/or project.
         /// </summary>
-        public List<ActivityFeedEntry> GetRecentActivities(int limit = 50, string planId = null)
+        public List<ActivityFeedEntry> GetRecentActivities(int limit = 50, string planId = null, string projectId = null)
         {
             var entries = new List<ActivityFeedEntry>();
 
-            var sql = planId != null
-                ? @"SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json
-                    FROM activity_feed WHERE plan_id = @planId ORDER BY timestamp DESC LIMIT @limit"
-                : @"SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json
-                    FROM activity_feed ORDER BY timestamp DESC LIMIT @limit";
+            var conditions = new List<string>();
+            if (planId != null) conditions.Add("plan_id = @planId");
+            if (projectId != null) conditions.Add("project_id = @projectId");
+
+            var whereClause = conditions.Count > 0
+                ? "WHERE " + string.Join(" AND ", conditions)
+                : "";
+
+            var sql = $@"SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
+                    FROM activity_feed {whereClause} ORDER BY timestamp DESC LIMIT @limit";
 
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@limit", limit);
-            if (planId != null)
-            {
-                command.Parameters.AddWithValue("@planId", planId);
-            }
+            if (planId != null) command.Parameters.AddWithValue("@planId", planId);
+            if (projectId != null) command.Parameters.AddWithValue("@projectId", projectId);
 
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -246,7 +275,7 @@ namespace MultiTerminal.MCPServer.Services
             var entries = new List<ActivityFeedEntry>();
 
             const string sql = @"
-                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json
+                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                 FROM activity_feed
                 WHERE timestamp >= @since
                 ORDER BY timestamp DESC
@@ -273,7 +302,7 @@ namespace MultiTerminal.MCPServer.Services
             var entries = new List<ActivityFeedEntry>();
 
             const string sql = @"
-                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json
+                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                 FROM activity_feed
                 WHERE activity_type = @activityType
                 ORDER BY timestamp DESC
@@ -294,7 +323,7 @@ namespace MultiTerminal.MCPServer.Services
 
         private ActivityFeedEntry ReadEntry(SQLiteDataReader reader)
         {
-            return new ActivityFeedEntry
+            var entry = new ActivityFeedEntry
             {
                 Id = reader.GetInt64(0),
                 Timestamp = DateTime.Parse(reader.GetString(1)),
@@ -306,6 +335,12 @@ namespace MultiTerminal.MCPServer.Services
                 Severity = reader.IsDBNull(7) ? "info" : reader.GetString(7),
                 DetailsJson = reader.IsDBNull(8) ? null : reader.GetString(8)
             };
+
+            // project_id is column index 9 when selected
+            if (reader.FieldCount > 9 && !reader.IsDBNull(9))
+                entry.ProjectId = reader.GetString(9);
+
+            return entry;
         }
 
         #endregion
@@ -335,5 +370,6 @@ namespace MultiTerminal.MCPServer.Services
         public string Summary { get; set; }
         public string Severity { get; set; }
         public string DetailsJson { get; set; }
+        public string ProjectId { get; set; }
     }
 }

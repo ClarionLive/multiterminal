@@ -47,6 +47,13 @@ namespace MultiTerminal.MCPServer.Models
         /// Used for spawn handshake to ensure agent is initialized before sending work.
         /// </summary>
         public bool IsReady { get; set; } = false;
+
+        /// <summary>
+        /// HTTP port for the terminal's Claude Code Channel server.
+        /// When set, messages are delivered via HTTP POST to localhost:{ChannelPort}/message
+        /// instead of the legacy inbox file + [cm] nudge system.
+        /// </summary>
+        public int? ChannelPort { get; set; }
     }
 
     /// <summary>

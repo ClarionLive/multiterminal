@@ -46,5 +46,10 @@ namespace MultiTerminal.MCPServer.Models
         /// Optional additional details.
         /// </summary>
         public string Details { get; set; }
+
+        /// <summary>
+        /// Project ID this activity belongs to. Auto-resolved from RelatedId (task lookup) if not set explicitly.
+        /// </summary>
+        public string ProjectId { get; set; }
     }
 }

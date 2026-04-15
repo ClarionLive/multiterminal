@@ -52,5 +52,10 @@ namespace MultiTerminal.Models
         /// Optional initial prompt sent to the teammate after registration.
         /// </summary>
         public string InitialPrompt { get; set; }
+
+        /// <summary>
+        /// HTTP port for the terminal's Claude Code Channel server.
+        /// </summary>
+        public int ChannelPort { get; set; }
     }
 }

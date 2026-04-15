@@ -17,6 +17,7 @@ using MultiTerminal.MCPServer.Models;
 using MultiTerminal.TasksPanel;
 using MultiTerminal.Services;
 using MultiTerminal.StartScreen;
+using Microsoft.Web.WebView2.WinForms;
 using WeifenLuo.WinFormsUI.Docking;
 
 namespace MultiTerminal.Docking
@@ -33,6 +34,10 @@ namespace MultiTerminal.Docking
         private Panel _dropZone;
         private Label _dropZoneLabel;
         private HudTabContainer _hudTabContainer;
+        private HudDashboardRenderer _hudDashboard;
+        private HudNotesRenderer _hudNotes;
+        private HudKnowledgeRenderer _hudKnowledge;
+        private HudSessionsRenderer _hudSessions;
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
         private EmbeddedAgentPanel _embeddedAgentPanel;
@@ -41,6 +46,11 @@ namespace MultiTerminal.Docking
         private DebugLogService _debugLogService;
         private static int _instanceCount = 0;
         private readonly string _docId = Guid.NewGuid().ToString("N").Substring(0, 8);
+
+        // Diff popup saved bounds and zoom (persisted across sessions)
+        private static Rectangle? _diffPopupBounds;
+        private static double _diffPopupZoom = 1.0;
+        private static bool _diffPopupSettingsLoaded;
 
         // Start screen — shown before a terminal shell is started
         private StartScreenControl _startScreen;
@@ -156,9 +166,16 @@ namespace MultiTerminal.Docking
         // Status line polling timer — reads temp file written by Claude Code statusline script
         private System.Threading.Timer _statusLineTimer;
         private string _lastStatusLineContent;
+        private string _lastSharedQuotaContent;
+        // Last folder pushed to the HUD Dashboard — lets polling detect real cwd drift
+        // and re-push so the HUD header tracks Claude Code's workspace instead of the
+        // stale launch-dir that came from the global _settings.GetLastDirectory() fallback.
+        private string _hudDispatchedFolder;
 
         // Track the last known working directory for session persistence
         private string _lastKnownDirectory;
+        // The directory passed to StartTerminal — authoritative project path
+        private string _startingWorkingDirectory;
 
         // FileSystemWatcher to detect project.json creation/changes
         private FileSystemWatcher _projectFileWatcher;
@@ -166,6 +183,9 @@ namespace MultiTerminal.Docking
 
         // Custom user-defined title (overrides auto title from working directory)
         private string _customTitle;
+
+        // Project name for display in tab title (e.g., "Alice - MultiTerminal")
+        private string _projectName;
 
         // For session restore: working directory to use when starting terminal
         private string _pendingWorkingDirectory;
@@ -215,8 +235,11 @@ namespace MultiTerminal.Docking
         {
             if (!string.IsNullOrEmpty(_customTitle))
             {
-                Text = _customTitle;
-                TabText = _customTitle;
+                var title = !string.IsNullOrEmpty(_projectName)
+                    ? $"{_customTitle} - {_projectName}"
+                    : _customTitle;
+                Text = title;
+                TabText = title;
             }
 
             // Update status bar and task HUD when terminal name changes
@@ -371,6 +394,22 @@ namespace MultiTerminal.Docking
                 Dock = DockStyle.Fill
             };
 
+            // Add permanent HUD tabs: Dashboard, then Notes (Tasks is already tab 0)
+            _hudDashboard = new HudDashboardRenderer();
+            _hudTabContainer.AddPermanentTab("__dashboard__", "\ud83d\udcca Dashboard", _hudDashboard);
+
+            _hudNotes = new HudNotesRenderer();
+            _hudTabContainer.AddPermanentTab("__notes__", "\ud83d\udcdd Notes", _hudNotes);
+
+            _hudKnowledge = new HudKnowledgeRenderer();
+            _hudTabContainer.AddPermanentTab("__knowledge__", "\ud83d\udcda Knowledge", _hudKnowledge);
+
+            _hudSessions = new HudSessionsRenderer();
+            _hudTabContainer.AddPermanentTab("__sessions__", "\ud83d\udd52 Sessions", _hudSessions);
+
+            // Set desired tab order: Dashboard first, then Tasks, Notes, Knowledge, Sessions
+            _hudTabContainer.ReorderPermanentTabs("__dashboard__", "__tasks__", "__notes__", "__knowledge__", "__sessions__");
+
             // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
             taskHudRenderer.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
 
@@ -391,34 +430,27 @@ namespace MultiTerminal.Docking
             _terminalHudSplitter.Panel1.Controls.Add(_terminal);
             _terminalHudSplitter.Panel2.Controls.Add(_hudTabContainer);
 
-            // Show Panel2 (task HUD) by default
+            // HUD is always visible — Panel2 never collapses
             _terminalHudSplitter.Panel2Collapsed = false;
 
-            // Handle HUD show/hide requests by controlling Panel2Collapsed directly.
-            // This avoids the WinForms deadlock where VisibleChanged won't fire on a
-            // control inside a collapsed panel (parent invisible → child VisibleChanged
-            // never fires → panel never uncollapses).
+            // Apply saved HUD split ratio once the splitter has a valid height.
+            _terminalHudSplitter.SizeChanged += OnHudSplitterSizeChanged;
+
+            // Handle HUD visibility requests. The HUD is always-on now, so we
+            // only use this to apply the splitter ratio when first shown.
             _hudTabContainer.VisibilityRequested += (s, show) =>
             {
-                // Capture the ratio BEFORE uncollapsing. WinForms fires async
-                // SplitterMoved events after Panel2Collapsed changes, which would
-                // overwrite _hudSplitRatio with a bogus default value.
+                // HUD is always visible — ignore hide requests.
+                // Only process show requests to ensure splitter ratio is applied.
+                if (!show) return;
+
                 double ratioToApply = _hudSplitRatio;
                 System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}, initialApplied={_initialHudSplitApplied}");
 
-                // Keep events suppressed from uncollapse through the deferred
-                // BeginInvoke so no stray SplitterMoved can corrupt the ratio.
                 _suppressSplitterEvents = true;
-                _terminalHudSplitter.Panel2Collapsed = !show;
-                System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested: after Panel2Collapsed={!show}, suppress still={_suppressSplitterEvents}");
 
-                // Sync the status bar HUD toggle to match auto-show/hide
-                _statusBar?.SetHudToggleState(show);
-
-                if (show && _terminalHudSplitter.Height > 0 && IsHandleCreated)
+                if (_terminalHudSplitter.Height > 0 && IsHandleCreated)
                 {
-                    // Defer ratio application until after WinForms finishes its
-                    // layout pass. Events stay suppressed until the callback runs.
                     BeginInvoke((Action)(() =>
                     {
                         System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested BeginInvoke: suppress={_suppressSplitterEvents}, ratioToApply={ratioToApply:F4}, currentRatio={_hudSplitRatio:F4}, height={_terminalHudSplitter.Height}, dist={_terminalHudSplitter.SplitterDistance}");
@@ -453,7 +485,6 @@ namespace MultiTerminal.Docking
                 }
                 else
                 {
-                    System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested hide path: clearing suppress");
                     _suppressSplitterEvents = false;
                 }
             };
@@ -608,6 +639,10 @@ namespace MultiTerminal.Docking
             CloseButtonVisible = true;
             ShowHint = DockState.Document;
 
+            // Reserve space for focus border (always 2px padding, color toggles)
+            Padding = new Padding(2);
+            BackColor = Color.FromArgb(30, 30, 30);
+
             // Initialize tab header context menu
             InitializeTabContextMenu();
 
@@ -651,9 +686,36 @@ namespace MultiTerminal.Docking
             finally { _suppressSplitterEvents = prevSuppress; }
         }
 
-        // OnHudSplitterSizeChanged removed — SplitterMoved is now hooked
-        // in VisibilityRequested on first HUD show, preventing spurious
-        // saves during startup layout when Panel2 is collapsed.
+        /// <summary>
+        /// Applies the saved HUD splitter ratio once the container has a valid height.
+        /// Mirrors OnSplitterSizeChanged for the agent panel. Now that the HUD is always
+        /// visible (Panel2 never collapses), VisibilityRequested may not fire on startup,
+        /// so we need this to apply the persisted height.
+        /// </summary>
+        private void OnHudSplitterSizeChanged(object sender, EventArgs e)
+        {
+            if (_initialHudSplitApplied) return;
+            if (_terminalHudSplitter == null || _terminalHudSplitter.Height <= 0) return;
+
+            bool prevSuppress = _suppressSplitterEvents;
+            try
+            {
+                _suppressSplitterEvents = true;
+                int maxDistance = _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize;
+                int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
+                if (distance > maxDistance)
+                    distance = maxDistance;
+                if (distance > _terminalHudSplitter.Panel1MinSize &&
+                    distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
+                {
+                    _terminalHudSplitter.SplitterDistance = distance;
+                    _initialHudSplitApplied = true;
+                    _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
+                }
+            }
+            catch { }
+            finally { _suppressSplitterEvents = prevSuppress; }
+        }
 
         /// <summary>
         /// Enforces the invariant: Panel2 collapsed iff AgentSlotCount == 0.
@@ -845,8 +907,25 @@ namespace MultiTerminal.Docking
             HideStartScreen();
 
             _lastKnownDirectory = workingDirectory;
+            _startingWorkingDirectory = workingDirectory;
             ToolTipText = workingDirectory;
             _isTerminalStarted = true;
+
+            // Derive project name for tab title: use project lookup, or fall back to folder name
+            if (!string.IsNullOrEmpty(projectId) && _messageBroker != null)
+            {
+                try
+                {
+                    var project = _messageBroker.ProjectDatabase?.GetProject(projectId);
+                    if (project != null && !string.IsNullOrEmpty(project.Name))
+                        _projectName = project.Name;
+                }
+                catch { /* ignore lookup errors */ }
+            }
+            if (string.IsNullOrEmpty(_projectName) && !string.IsNullOrEmpty(workingDirectory))
+            {
+                _projectName = System.IO.Path.GetFileName(workingDirectory.TrimEnd('\\', '/'));
+            }
 
             // Set terminal name as custom title if provided
             if (!string.IsNullOrEmpty(terminalName))
@@ -861,6 +940,16 @@ namespace MultiTerminal.Docking
 
             // Update status bar after terminal starts
             UpdateStatusBar();
+
+            // Update all HUD tabs with project context
+            _hudDashboard?.SetProject(projectId, workingDirectory, _projectName);
+            _hudDispatchedFolder = workingDirectory;
+            _hudNotes?.SetProject(workingDirectory);
+            _hudKnowledge?.SetProject(projectId);
+            _hudSessions?.SetProject(workingDirectory);
+            // Switch HUD to dashboard tab by default when starting a terminal
+            _hudTabContainer?.SwitchToTabById("__dashboard__");
+
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== COMPLETE =====");
         }
 
@@ -908,6 +997,20 @@ namespace MultiTerminal.Docking
         public void FocusTerminal()
         {
             _terminal.FocusTerminal();
+        }
+
+        /// <summary>
+        /// Shows or hides a green focus border around this terminal.
+        /// Padding is always 2 to avoid layout shift; only BackColor changes.
+        /// </summary>
+        public void SetFocusBorder(bool hasFocus)
+        {
+            var newColor = hasFocus
+                ? Color.FromArgb(76, 175, 80) // Green focus indicator
+                : Color.FromArgb(30, 30, 30); // Blend with background
+
+            if (BackColor != newColor)
+                BackColor = newColor;
         }
 
         /// <summary>
@@ -964,6 +1067,301 @@ namespace MultiTerminal.Docking
         public BrowserTabPage GetBrowserTab(string tabId)
         {
             return _hudTabContainer?.GetBrowserTab(tabId);
+        }
+
+        /// <summary>
+        /// Handles a diff request from the dashboard activity feed.
+        /// Finds the file in the project, runs git diff, and opens a browser tab with the diff.
+        /// </summary>
+        private async void OnShowDiffRequested(object sender, string fileName)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnShowDiffRequested(sender, fileName)));
+                return;
+            }
+
+            string workDir = GetWorkingDirectory();
+            if (string.IsNullOrEmpty(workDir) || !Directory.Exists(workDir)) return;
+
+            try
+            {
+                // Run git diff on a background thread
+                var diffResult = await System.Threading.Tasks.Task.Run(() =>
+                {
+                    // Find the git root
+                    string gitRoot = RunGitCommandInDir(workDir, "rev-parse --show-toplevel")?.Trim();
+                    if (string.IsNullOrEmpty(gitRoot)) return (diff: "", fullPath: "");
+
+                    // Find the file relative to git root
+                    // fileName may be a full relative path (e.g. "Controls/Foo/Bar.cs") or just a basename
+                    string diffFiles = RunGitCommandInDir(gitRoot, "diff --name-only");
+                    string stagedFiles = RunGitCommandInDir(gitRoot, "diff --cached --name-only");
+                    string allChanged = (diffFiles ?? "") + "\n" + (stagedFiles ?? "");
+
+                    string fileBaseName = Path.GetFileName(fileName);
+                    string relativePath = allChanged
+                        .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                        .FirstOrDefault(f =>
+                            f.Equals(fileName, StringComparison.OrdinalIgnoreCase) ||
+                            f.Replace('/', '\\').Equals(fileName.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase) ||
+                            Path.GetFileName(f).Equals(fileBaseName, StringComparison.OrdinalIgnoreCase));
+
+                    if (string.IsNullOrEmpty(relativePath))
+                    {
+                        // Try HEAD~1 diff as fallback (recently committed)
+                        string headFiles = RunGitCommandInDir(gitRoot, "diff HEAD~1 --name-only");
+                        relativePath = headFiles?
+                            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                            .FirstOrDefault(f =>
+                                f.Equals(fileName, StringComparison.OrdinalIgnoreCase) ||
+                                f.Replace('/', '\\').Equals(fileName.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase) ||
+                                Path.GetFileName(f).Equals(fileBaseName, StringComparison.OrdinalIgnoreCase));
+
+                        if (!string.IsNullOrEmpty(relativePath))
+                        {
+                            string d = RunGitCommandInDir(gitRoot, $"diff HEAD~1 -- \"{relativePath}\"");
+                            return (diff: d ?? "", fullPath: Path.Combine(gitRoot, relativePath));
+                        }
+                        return (diff: "", fullPath: "");
+                    }
+
+                    string diff = RunGitCommandInDir(gitRoot, $"diff -- \"{relativePath}\"");
+                    if (string.IsNullOrEmpty(diff))
+                        diff = RunGitCommandInDir(gitRoot, $"diff --cached -- \"{relativePath}\"");
+
+                    return (diff: diff ?? "", fullPath: Path.Combine(gitRoot, relativePath));
+                });
+
+                string displayName = Path.GetFileName(fileName);
+                string html;
+                if (string.IsNullOrEmpty(diffResult.diff))
+                    html = GenerateDiffHtml(displayName, diffResult.fullPath, "(no changes found)");
+                else
+                    html = GenerateDiffHtml(displayName, diffResult.fullPath, diffResult.diff);
+
+                ShowDiffPopup(displayName, html);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TerminalDocument] ShowDiff failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Opens a standalone popup window showing diff HTML content.
+        /// </summary>
+        private async void ShowDiffPopup(string fileName, string html)
+        {
+            LoadDiffPopupSettings();
+
+            var form = new Form
+            {
+                Text = $"Diff: {fileName}",
+                Width = _diffPopupBounds?.Width ?? 800,
+                Height = _diffPopupBounds?.Height ?? 600,
+                StartPosition = _diffPopupBounds.HasValue
+                    ? FormStartPosition.Manual
+                    : FormStartPosition.CenterParent,
+                Icon = FindForm()?.Icon
+            };
+
+            if (_diffPopupBounds.HasValue)
+                form.Location = _diffPopupBounds.Value.Location;
+
+            var webView = new WebView2 { Dock = DockStyle.Fill };
+            form.Controls.Add(webView);
+
+            try
+            {
+                var environment = await WebView2EnvironmentCache.GetEnvironmentAsync();
+                await webView.EnsureCoreWebView2Async(environment);
+                webView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(26, 26, 46);
+                webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+
+                if (Math.Abs(_diffPopupZoom - 1.0) > 0.01)
+                    webView.ZoomFactor = _diffPopupZoom;
+
+                webView.CoreWebView2.NavigateToString(html);
+            }
+            catch { }
+
+            form.FormClosed += (s, e) =>
+            {
+                // Save bounds (use RestoreBounds if maximized to get normal size)
+                _diffPopupBounds = form.WindowState == FormWindowState.Normal
+                    ? form.Bounds
+                    : form.RestoreBounds;
+
+                if (webView.CoreWebView2 != null)
+                    _diffPopupZoom = webView.ZoomFactor;
+
+                SaveDiffPopupSettings();
+                webView.Dispose();
+            };
+
+            form.Show(FindForm());
+        }
+
+        private static void LoadDiffPopupSettings()
+        {
+            if (_diffPopupSettingsLoaded) return;
+            _diffPopupSettingsLoaded = true;
+
+            try
+            {
+                var settings = new SettingsService();
+                string x = settings.Get("DiffPopupX");
+                string y = settings.Get("DiffPopupY");
+                string w = settings.Get("DiffPopupWidth");
+                string h = settings.Get("DiffPopupHeight");
+                string z = settings.Get("DiffPopupZoom");
+
+                if (int.TryParse(x, out int ix) && int.TryParse(y, out int iy) &&
+                    int.TryParse(w, out int iw) && int.TryParse(h, out int ih) &&
+                    iw > 100 && ih > 100)
+                {
+                    var bounds = new Rectangle(ix, iy, iw, ih);
+                    // Verify the saved position is on a visible screen
+                    bool onScreen = false;
+                    foreach (var screen in Screen.AllScreens)
+                    {
+                        if (screen.WorkingArea.IntersectsWith(bounds))
+                        {
+                            onScreen = true;
+                            break;
+                        }
+                    }
+                    if (onScreen)
+                        _diffPopupBounds = bounds;
+                }
+
+                if (double.TryParse(z, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double zoom) &&
+                    zoom >= 0.25 && zoom <= 5.0)
+                {
+                    _diffPopupZoom = zoom;
+                }
+            }
+            catch { }
+        }
+
+        private static void SaveDiffPopupSettings()
+        {
+            try
+            {
+                var settings = new SettingsService();
+                if (_diffPopupBounds.HasValue)
+                {
+                    var b = _diffPopupBounds.Value;
+                    settings.BeginBatch();
+                    settings.Set("DiffPopupX", b.X.ToString());
+                    settings.Set("DiffPopupY", b.Y.ToString());
+                    settings.Set("DiffPopupWidth", b.Width.ToString());
+                    settings.Set("DiffPopupHeight", b.Height.ToString());
+                    settings.Set("DiffPopupZoom", _diffPopupZoom.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    settings.EndBatch();
+                }
+            }
+            catch { }
+        }
+
+        private static string RunGitCommandInDir(string workDir, string args)
+        {
+            try
+            {
+                if (!Directory.Exists(workDir)) return null;
+                var psi = new System.Diagnostics.ProcessStartInfo("git", args)
+                {
+                    WorkingDirectory = workDir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = false,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var process = System.Diagnostics.Process.Start(psi);
+                if (process == null) return null;
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit(5000);
+                return output;
+            }
+            catch { return null; }
+        }
+
+        private static string GenerateDiffHtml(string fileName, string fullPath, string diff)
+        {
+            string escapedName = System.Net.WebUtility.HtmlEncode(fileName);
+            string escapedPath = System.Net.WebUtility.HtmlEncode(fullPath);
+
+            // Parse diff lines into styled HTML
+            var lines = diff.Split('\n');
+            var sb = new System.Text.StringBuilder();
+            foreach (var line in lines)
+            {
+                string escaped = System.Net.WebUtility.HtmlEncode(line);
+                if (line.StartsWith("+++") || line.StartsWith("---"))
+                    sb.Append($"<div class=\"diff-meta\">{escaped}</div>");
+                else if (line.StartsWith("@@"))
+                    sb.Append($"<div class=\"diff-hunk\">{escaped}</div>");
+                else if (line.StartsWith("+"))
+                    sb.Append($"<div class=\"diff-add\">{escaped}</div>");
+                else if (line.StartsWith("-"))
+                    sb.Append($"<div class=\"diff-del\">{escaped}</div>");
+                else
+                    sb.Append($"<div class=\"diff-ctx\">{escaped}</div>");
+            }
+
+            return $@"<!DOCTYPE html>
+<html><head><meta charset=""UTF-8""><style>
+body {{
+    margin: 0; padding: 12px;
+    font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    background: #1a1a2e;
+    color: #e0e0e0;
+}}
+.diff-header {{
+    padding: 8px 12px;
+    background: #16213e;
+    border: 1px solid #2a2a4a;
+    border-radius: 6px;
+    margin-bottom: 12px;
+}}
+.diff-header h2 {{
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    color: #89b4fa;
+}}
+.diff-header .path {{
+    font-size: 10px;
+    color: #707088;
+}}
+.diff-content {{
+    border: 1px solid #2a2a4a;
+    border-radius: 4px;
+    overflow-x: auto;
+    background: #12122a;
+}}
+.diff-content > div {{
+    padding: 1px 10px;
+    white-space: pre;
+    line-height: 1.5;
+}}
+.diff-add {{ background: rgba(166, 227, 161, 0.12); color: #a6e3a1; }}
+.diff-del {{ background: rgba(243, 139, 168, 0.12); color: #f38ba8; }}
+.diff-hunk {{ background: rgba(137, 180, 250, 0.08); color: #89b4fa; font-style: italic; }}
+.diff-meta {{ color: #707088; font-weight: bold; }}
+.diff-ctx {{ color: #a0a0b8; }}
+</style></head><body>
+<div class=""diff-header"">
+    <h2>{escapedName}</h2>
+    <div class=""path"">{escapedPath}</div>
+</div>
+<div class=""diff-content"">
+{sb}
+</div>
+</body></html>";
         }
 
         /// <summary>
@@ -1191,7 +1589,7 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(title))
                 return null;
 
-            // PowerShell title format: "Administrator: C:\Users\John" or just "C:\Users\John"
+            // PowerShell title format: "Administrator: C:\Users\<username>" or just "C:\Users\<username>"
             var match = Regex.Match(title, @"([A-Za-z]:\\[^""<>|*?\r\n]*)");
             if (match.Success)
             {
@@ -1424,12 +1822,12 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Injects a ProjectDatabase so the start screen can list projects.
+        /// Injects a ProjectDatabase (and optional ProjectService) so the start screen can list projects.
         /// Call after construction, before the document is shown.
         /// </summary>
-        public void SetProjectDatabase(ProjectDatabase projectDatabase)
+        public void SetProjectDatabase(ProjectDatabase projectDatabase, ProjectService projectService = null)
         {
-            _startScreen?.Initialize(projectDatabase);
+            _startScreen?.Initialize(projectDatabase, projectService);
         }
 
         /// <summary>
@@ -1443,6 +1841,10 @@ namespace MultiTerminal.Docking
             {
                 _terminal.Stop();
                 _isTerminalStarted = false;
+
+                // Notify MainForm — OnTerminalExited handles UnregisterTerminal + doc map cleanup
+                // (consistent with OnTerminalProcessExited pattern)
+                TerminalExited?.Invoke(this, EventArgs.Empty);
             }
             ShowStartScreen();
         }
@@ -1537,6 +1939,16 @@ namespace MultiTerminal.Docking
                 taskHud.Initialize(broker, null);
             }
 
+            // Wire HUD tabs to broker
+            _hudDashboard?.Initialize(broker);
+            _hudDashboard.ShowDiffRequested -= OnShowDiffRequested;
+            _hudDashboard.ShowDiffRequested += OnShowDiffRequested;
+            _hudNotes?.Initialize(broker);
+            _hudKnowledge?.Initialize(broker);
+            _hudSessions?.Initialize(broker);
+            if (!string.IsNullOrEmpty(CustomTitle))
+                _hudDashboard?.SetTerminalName(CustomTitle);
+
             // Update status bar if terminal name is already set
             // Otherwise, StartTerminal() will call UpdateStatusBar() later
             if (!string.IsNullOrEmpty(CustomTitle))
@@ -1623,31 +2035,34 @@ namespace MultiTerminal.Docking
                 _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: _messageBroker is null, updating with name only: {terminalName}");
             }
 
-            // Look up project by working directory path
+            // Look up project by working directory path. If the folder isn't a
+            // registered MT project, fall back to the folder's leaf name so Row 1
+            // still shows something meaningful (not the agent name).
             string projectName = null;
             string projectDescription = null;
-            if (_messageBroker?.ProjectService != null)
+            string workDir = GetWorkingDirectory();
+            if (_messageBroker?.ProjectService != null && !string.IsNullOrEmpty(workDir))
             {
-                string workDir = GetWorkingDirectory();
-                if (!string.IsNullOrEmpty(workDir))
+                try
                 {
-                    try
+                    var projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
+                    var matchedEntry = projects.FirstOrDefault(p =>
+                        !string.IsNullOrEmpty(p.Path) &&
+                        string.Equals(p.Path.TrimEnd('\\', '/'), workDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+                    if (matchedEntry != null)
                     {
-                        var projects = _messageBroker.ProjectService.GetAllRegisteredProjects();
-                        var matchedEntry = projects.FirstOrDefault(p =>
-                            !string.IsNullOrEmpty(p.Path) &&
-                            string.Equals(p.Path.TrimEnd('\\', '/'), workDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
-                        if (matchedEntry != null)
-                        {
-                            projectName = matchedEntry.Name;
-                            // Load full project for description
-                            var fullProject = _messageBroker.ProjectService.LoadProject(matchedEntry.Path);
-                            if (fullProject != null)
-                                projectDescription = fullProject.Description;
-                        }
+                        projectName = matchedEntry.Name;
+                        // Load full project for description
+                        var fullProject = _messageBroker.ProjectService.LoadProject(matchedEntry.Path);
+                        if (fullProject != null)
+                            projectDescription = fullProject.Description;
                     }
-                    catch { /* Non-critical — fall back to no project info */ }
                 }
+                catch { /* Non-critical — fall back to folder name below */ }
+            }
+            if (string.IsNullOrEmpty(projectName) && !string.IsNullOrEmpty(workDir))
+            {
+                projectName = System.IO.Path.GetFileName(workDir.TrimEnd('\\', '/'));
             }
 
             _debugLogService?.Trace("TerminalDocument", $"UpdateStatusBar: Calling _statusBar.UpdateStatus with:");
@@ -1683,7 +2098,17 @@ namespace MultiTerminal.Docking
                     if (!File.Exists(filePath)) return;
 
                     string content = File.ReadAllText(filePath);
-                    if (string.IsNullOrEmpty(content) || content == _lastStatusLineContent) return;
+                    if (string.IsNullOrEmpty(content)) return;
+
+                    // Check if either the per-terminal file or shared quota file changed
+                    string sharedQuotaPath = Path.Combine(Path.GetTempPath(), "mt-statusline-quota.json");
+                    string sharedContent = null;
+                    try { if (File.Exists(sharedQuotaPath)) sharedContent = File.ReadAllText(sharedQuotaPath); } catch { }
+
+                    bool perTerminalChanged = content != _lastStatusLineContent;
+                    bool sharedQuotaChanged = sharedContent != null && sharedContent != _lastSharedQuotaContent;
+
+                    if (!perTerminalChanged && !sharedQuotaChanged) return;
 
                     // Only cache content AFTER successfully delivering to UI thread.
                     // Otherwise, if IsHandleCreated is false on first read, the content
@@ -1695,16 +2120,126 @@ namespace MultiTerminal.Docking
 
                     string model = root.TryGetProperty("model", out var m) ? m.GetString() : null;
                     string folder = root.TryGetProperty("folder", out var f) ? f.GetString() : null;
+
+                    // If statusline reports the home directory but we have a real project path, use that instead.
+                    // Claude Code's first statusline event can report the shell's cwd before navigating to the project.
+                    string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    if (!string.IsNullOrEmpty(_startingWorkingDirectory) &&
+                        !string.IsNullOrEmpty(folder) &&
+                        string.Equals(folder.TrimEnd('\\', '/'), homeDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                    {
+                        folder = _startingWorkingDirectory;
+                    }
                     string gitBranch = root.TryGetProperty("gitBranch", out var gb) ? gb.GetString() : null;
                     string gitStatus = root.TryGetProperty("gitStatus", out var gs) ? gs.GetString() : null;
                     bool gitDirty = root.TryGetProperty("gitDirty", out var gd) && gd.GetBoolean();
                     int? contextPct = root.TryGetProperty("contextPct", out var cp) && cp.ValueKind == JsonValueKind.Number
                         ? cp.GetInt32() : (int?)null;
+                    // Read account-level quota from the shared file so all terminals
+                    // show identical 5h/7d stats regardless of which one was updated last.
+                    int? quota5h = null, quota7d = null, pace5h = null, pace7d = null;
+                    string resetIn5h = null;
+                    bool? isOffPeak = null;
+
+                    try
+                    {
+                        // Reuse sharedContent already read during change detection above
+                        if (!string.IsNullOrEmpty(sharedContent))
+                        {
+                            using var sharedDoc = JsonDocument.Parse(sharedContent);
+                            var sq = sharedDoc.RootElement;
+                            quota5h = sq.TryGetProperty("quota5h", out var sq5) && sq5.ValueKind == JsonValueKind.Number
+                                ? sq5.GetInt32() : (int?)null;
+                            quota7d = sq.TryGetProperty("quota7d", out var sq7) && sq7.ValueKind == JsonValueKind.Number
+                                ? sq7.GetInt32() : (int?)null;
+                            pace5h = sq.TryGetProperty("pace5h", out var sp5) && sp5.ValueKind == JsonValueKind.Number
+                                ? sp5.GetInt32() : (int?)null;
+                            pace7d = sq.TryGetProperty("pace7d", out var sp7) && sp7.ValueKind == JsonValueKind.Number
+                                ? sp7.GetInt32() : (int?)null;
+                            resetIn5h = sq.TryGetProperty("resetIn5h", out var sr5) && sr5.ValueKind == JsonValueKind.String
+                                ? sr5.GetString() : null;
+                            isOffPeak = sq.TryGetProperty("isOffPeak", out var sop) && sop.ValueKind != JsonValueKind.Null
+                                ? sop.GetBoolean() : (bool?)null;
+                            _lastSharedQuotaContent = sharedContent;
+                        }
+                    }
+                    catch
+                    {
+                        // Shared file may be mid-write; fall back to per-terminal data
+                    }
+
+                    // Fall back to per-terminal quota if shared file unavailable
+                    if (quota5h == null && quota7d == null)
+                    {
+                        quota5h = root.TryGetProperty("quota5h", out var q5) && q5.ValueKind == JsonValueKind.Number
+                            ? q5.GetInt32() : (int?)null;
+                        quota7d = root.TryGetProperty("quota7d", out var q7) && q7.ValueKind == JsonValueKind.Number
+                            ? q7.GetInt32() : (int?)null;
+                        pace5h = root.TryGetProperty("pace5h", out var p5) && p5.ValueKind == JsonValueKind.Number
+                            ? p5.GetInt32() : (int?)null;
+                        pace7d = root.TryGetProperty("pace7d", out var p7) && p7.ValueKind == JsonValueKind.Number
+                            ? p7.GetInt32() : (int?)null;
+                        resetIn5h = root.TryGetProperty("resetIn5h", out var r5) && r5.ValueKind == JsonValueKind.String
+                            ? r5.GetString() : null;
+                        isOffPeak = root.TryGetProperty("isOffPeak", out var op) && op.ValueKind != JsonValueKind.Null
+                            ? op.GetBoolean() : (bool?)null;
+                    }
 
                     // Marshal to UI thread
+                    string folderForUi = folder;
                     BeginInvoke(new Action(() =>
                     {
-                        _statusBar?.UpdateStatusLine(model, folder, gitBranch, gitStatus, gitDirty, contextPct);
+                        _statusBar?.UpdateStatusLine(model, folderForUi, gitBranch, gitStatus, gitDirty, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h, isOffPeak);
+
+                        // If Claude Code's real workspace drifts from what the HUD Dashboard
+                        // is showing (e.g. because the launch dir came from the stale global
+                        // _settings.GetLastDirectory() fallback), push the real folder to the
+                        // HUD so its header reflects reality. Look up the matching project so
+                        // the dashboard can show name/description too; pass null projectId if
+                        // no registered project matches.
+                        if (!string.IsNullOrEmpty(folderForUi) &&
+                            !string.Equals(folderForUi.TrimEnd('\\', '/'),
+                                           (_hudDispatchedFolder ?? "").TrimEnd('\\', '/'),
+                                           StringComparison.OrdinalIgnoreCase))
+                        {
+                            string resolvedProjectId = null;
+                            string resolvedProjectName = null;
+                            try
+                            {
+                                var projects = _messageBroker?.ProjectService?.GetAllRegisteredProjects();
+                                if (projects != null)
+                                {
+                                    var match = projects.FirstOrDefault(p =>
+                                        !string.IsNullOrEmpty(p.Path) &&
+                                        string.Equals(p.Path.TrimEnd('\\', '/'),
+                                                      folderForUi.TrimEnd('\\', '/'),
+                                                      StringComparison.OrdinalIgnoreCase));
+                                    if (match != null)
+                                    {
+                                        resolvedProjectId = match.Id;
+                                        resolvedProjectName = match.Name;
+                                    }
+                                }
+                            }
+                            catch { /* non-critical — fall back to deriving name from path */ }
+
+                            if (string.IsNullOrEmpty(resolvedProjectName))
+                            {
+                                resolvedProjectName = System.IO.Path.GetFileName(folderForUi.TrimEnd('\\', '/'));
+                            }
+
+                            _projectName = resolvedProjectName;
+                            // Also refresh the status bar Row 1 so its project-name
+                            // title tracks Claude Code's real workspace instead of
+                            // the stale launch-dir lookup from StartTerminal.
+                            _lastKnownDirectory = folderForUi;
+                            _hudDashboard?.SetProject(resolvedProjectId, folderForUi, resolvedProjectName);
+                            _hudNotes?.SetProject(folderForUi);
+                            _hudKnowledge?.SetProject(resolvedProjectId);
+                            _hudSessions?.SetProject(folderForUi);
+                            _hudDispatchedFolder = folderForUi;
+                            UpdateStatusBar();
+                        }
                     }));
 
                     _lastStatusLineContent = content;
@@ -1870,6 +2405,7 @@ namespace MultiTerminal.Docking
                 // to prevent WinForms layout changes from firing save events
                 if (_terminalHudSplitter != null)
                 {
+                    _terminalHudSplitter.SizeChanged -= OnHudSplitterSizeChanged;
                     _terminalHudSplitter.SplitterMoved -= OnHudSplitterMoved;
                 }
 

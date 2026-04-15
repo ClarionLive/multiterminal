@@ -376,6 +376,9 @@ namespace MultiTerminal.Terminal
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MCP_GATEWAY_PROFILE = '{gatewayProfile}'");
             }
 
+            // Enable flicker-free alternate-screen renderer for Claude Code
+            envSetup += "$env:CLAUDE_CODE_NO_FLICKER = '1'; ";
+
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
 
             // If autoRunCommand is specified, append it after the prompt function setup

@@ -24,8 +24,10 @@ namespace MultiTerminal.TasksPanel
         private bool _isInitialized;
         private bool _isInitializing;
         private bool _initializePending;
+        private bool _isShuttingDown;
         private MessageBroker _broker;
         private ActivityService _activityService;
+        private SettingsService _settings;
         private DebugLogService _debugLogService;
         private string _selectedProjectId;
 
@@ -134,10 +136,11 @@ namespace MultiTerminal.TasksPanel
         /// <summary>
         /// Initialize the tasks panel with a message broker.
         /// </summary>
-        public async void Initialize(MessageBroker broker, ActivityService activityService = null)
+        public async void Initialize(MessageBroker broker, ActivityService activityService = null, SettingsService settings = null)
         {
             _broker = broker;
             _activityService = activityService;
+            _settings = settings;
 
             DebugLog($"Initialize called. HandleCreated={IsHandleCreated}, isInitializing={_isInitializing}, isInitialized={_isInitialized}");
 
@@ -167,7 +170,7 @@ namespace MultiTerminal.TasksPanel
 
         private async System.Threading.Tasks.Task InitializeWebView2Async()
         {
-            if (_isInitializing || _isInitialized) return;
+            if (_isInitializing || _isInitialized || _isShuttingDown) return;
             _isInitializing = true;
 
             DebugLog("InitializeWebView2Async: starting");
@@ -177,6 +180,16 @@ namespace MultiTerminal.TasksPanel
                 DebugLog("InitializeWebView2Async: got environment, calling EnsureCoreWebView2Async");
                 await _webView.EnsureCoreWebView2Async(env);
                 DebugLog("InitializeWebView2Async: EnsureCoreWebView2Async completed");
+            }
+            catch (OperationCanceledException)
+            {
+                DebugLog("WebView2 init cancelled (shutdown).");
+                _isInitializing = false;
+            }
+            catch (Exception ex) when (_isShuttingDown || IsDisposed || Disposing)
+            {
+                DebugLog($"WebView2 init failed during shutdown: {ex.Message}");
+                _isInitializing = false;
             }
             catch (Exception ex)
             {
@@ -226,6 +239,8 @@ namespace MultiTerminal.TasksPanel
             if (!e.IsSuccess)
             {
                 DebugLogError($"WebView2 init failed: {e.InitializationException?.Message}");
+                if (_isShuttingDown || IsDisposed || Disposing || !IsHandleCreated)
+                    return;
                 MessageBox.Show($"WebView2 initialization failed: {e.InitializationException?.Message}",
                     "Tasks Panel Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -339,7 +354,7 @@ namespace MultiTerminal.TasksPanel
                         if (root.TryGetProperty("taskId", out var lifecycleTaskIdEl))
                         {
                             var taskId = lifecycleTaskIdEl.GetString();
-                            TaskLifecycleBoard.TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme);
+                            TaskLifecycleBoard.TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme, _settings);
                         }
                         break;
 
@@ -949,6 +964,8 @@ namespace MultiTerminal.TasksPanel
 
         protected override void Dispose(bool disposing)
         {
+            _isShuttingDown = true;
+
             if (disposing)
             {
                 if (_broker != null)

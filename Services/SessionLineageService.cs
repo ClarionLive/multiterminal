@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 
@@ -77,6 +78,10 @@ namespace MultiTerminal.Services
                 if (parsed.Lineage == null)
                     return new ImportSessionResult { Success = false, Error = "No user/assistant messages found in file" };
 
+                // Auto-generate heuristic summary if none exists
+                if (string.IsNullOrEmpty(parsed.Lineage.Summary))
+                    parsed.Lineage.Summary = GenerateHeuristicSummaryFromMessages(parsed.Messages);
+
                 // Persist lineage record (upsert by session_id)
                 _db.SaveSessionLineage(parsed.Lineage);
 
@@ -102,7 +107,7 @@ namespace MultiTerminal.Services
         /// Imports all JSONL files found under a Claude project folder (top-level + subagents).
         /// </summary>
         /// <param name="claudeProjectPath">
-        ///   Path like C:\Users\John\.claude\projects\H--DevLaptop-...\
+        ///   Path like C:\Users\&lt;username&gt;\.claude\projects\H--DevLaptop-...\
         ///   (the per-project folder inside .claude\projects\)
         /// </param>
         /// <param name="agentName">Default agent name for imported sessions.</param>
@@ -182,6 +187,12 @@ namespace MultiTerminal.Services
         /// <param name="defaultAgentName">Agent name for sessions with no known agent.</param>
         /// <param name="defaultTaskId">Task ID for unlinked sessions. Defaults to "__unlinked__".</param>
         /// <returns>A SyncResult with counts of imported, skipped, and failed sessions.</returns>
+        /// <summary>
+        /// Threshold for considering a session file still actively being written.
+        /// Files modified within this window are skipped to avoid importing partial data.
+        /// </summary>
+        private static readonly TimeSpan ActiveFileThreshold = TimeSpan.FromSeconds(120);
+
         public SyncResult SyncNewSessions(string claudeProjectPath, string defaultAgentName = "Unknown", string defaultTaskId = "__unlinked__")
         {
             var result = new SyncResult();
@@ -192,8 +203,7 @@ namespace MultiTerminal.Services
             // Get already-imported session IDs in one query
             var importedIds = _db.GetImportedSessionIds();
 
-            // Get currently active session IDs — skip these to avoid importing in-progress sessions
-            var activeIds = _db.GetActiveSessionIds();
+            var now = DateTime.UtcNow;
 
             // Top-level JSONL files
             foreach (var file in Directory.GetFiles(claudeProjectPath, "*.jsonl"))
@@ -205,11 +215,20 @@ namespace MultiTerminal.Services
                     continue;
                 }
 
-                // Skip sessions that are currently active (being written by a live terminal)
-                if (activeIds.Contains(sessionId))
+                // Skip files modified recently — likely still being written by a live session.
+                // Uses file-age heuristic instead of session_agent_map which is unreliable.
+                try
                 {
-                    result.Skipped++;
-                    continue;
+                    var lastWrite = File.GetLastWriteTimeUtc(file);
+                    if ((now - lastWrite) < ActiveFileThreshold)
+                    {
+                        result.Skipped++;
+                        continue;
+                    }
+                }
+                catch
+                {
+                    // If we can't read file time, try to import anyway
                 }
 
                 try
@@ -245,11 +264,16 @@ namespace MultiTerminal.Services
                         continue;
                     }
 
-                    if (activeIds.Contains(sessionId))
+                    try
                     {
-                        result.Skipped++;
-                        continue;
+                        var lastWrite = File.GetLastWriteTimeUtc(file);
+                        if ((now - lastWrite) < ActiveFileThreshold)
+                        {
+                            result.Skipped++;
+                            continue;
+                        }
                     }
+                    catch { }
 
                     try
                     {
@@ -275,6 +299,160 @@ namespace MultiTerminal.Services
 
         #endregion
 
+        #region Session Lifecycle
+
+        /// <summary>
+        /// Registers a new session as 'open' in the session_lineage table.
+        /// Also closes any previous 'open' sessions for the same agent+project.
+        /// Called at session start (before any JSONL processing) to establish the
+        /// session as a known entity in the database.
+        /// </summary>
+        public SessionLineageRecord RegisterSession(string sessionId, string agentName, string projectPath)
+        {
+            if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(agentName))
+                return null;
+
+            // Close any prior 'open' sessions for this agent+project
+            CloseAgentSessions(agentName, projectPath, excludeSessionId: sessionId);
+
+            // Compute the expected JSONL file path
+            string sessionFilePath = null;
+            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            if (claudeFolder != null)
+                sessionFilePath = Path.Combine(claudeFolder, $"{sessionId}.jsonl");
+
+            var record = new SessionLineageRecord
+            {
+                SessionId = sessionId,
+                AgentName = agentName,
+                SessionType = "terminal",
+                ProcessingStatus = "open",
+                ProjectPath = projectPath,
+                SessionFilePath = sessionFilePath,
+                StartedAt = DateTime.UtcNow.ToString("O"),
+                CreatedAt = DateTime.UtcNow.ToString("O")
+            };
+
+            _db.SaveSessionLineage(record);
+            return record;
+        }
+
+        /// <summary>
+        /// Closes all 'open' sessions for the given agent and project, optionally
+        /// excluding a specific session (the current one). Sets processing_status='closed'
+        /// and ended_at to now.
+        /// </summary>
+        public int CloseAgentSessions(string agentName, string projectPath, string excludeSessionId = null)
+            => _db.CloseOpenSessions(agentName, projectPath, excludeSessionId);
+
+        /// <summary>
+        /// Drives a session through the processing pipeline to 'complete'.
+        /// Checks the current processing_status and runs remaining steps:
+        ///   closed → import messages → imported
+        ///   imported → index chunks → indexed
+        ///   indexed → generate summary → complete
+        /// Returns the updated session record, or null if the session doesn't exist.
+        /// Pass sessionMemoryDb to enable chunk indexing; if null, indexing is skipped.
+        /// </summary>
+        public SessionLineageRecord EnsureSessionReady(string sessionId, SessionMemoryDatabase sessionMemoryDb = null)
+        {
+            var record = _db.GetSessionById(sessionId);
+            if (record == null) return null;
+
+            // Already done
+            if (record.ProcessingStatus == "complete") return record;
+
+            // Step 1: Import messages (closed → imported)
+            if (record.ProcessingStatus == "closed" || record.ProcessingStatus == "open")
+            {
+                // If status is still 'open', the session file should be closed by now
+                // (the caller is a new session, so the previous one is definitely done)
+                if (!string.IsNullOrEmpty(record.SessionFilePath) && File.Exists(record.SessionFilePath))
+                {
+                    try
+                    {
+                        var importResult = ImportSession(
+                            record.SessionFilePath,
+                            record.TaskId ?? "__unlinked__",
+                            record.AgentName,
+                            record.ParentSessionId,
+                            record.SessionType);
+
+                        if (importResult.Success)
+                        {
+                            _db.UpdateSessionProcessingStatus(sessionId, "imported");
+                            record.ProcessingStatus = "imported";
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SessionLifecycle] Import failed for {sessionId}: {ex.Message}");
+                    }
+                }
+                else
+                {
+                    // No file path — can't import, but we can still try to summarize
+                    // if messages were already imported by another path
+                    var existingMessages = _db.GetRecentSessionMessages(sessionId, "assistant", 5);
+                    if (existingMessages.Count > 0)
+                    {
+                        _db.UpdateSessionProcessingStatus(sessionId, "imported");
+                        record.ProcessingStatus = "imported";
+                    }
+                }
+            }
+
+            // Step 2: Index chunks (imported → indexed)
+            if (record.ProcessingStatus == "imported" && sessionMemoryDb != null)
+            {
+                if (!string.IsNullOrEmpty(record.SessionFilePath) && File.Exists(record.SessionFilePath))
+                {
+                    try
+                    {
+                        sessionMemoryDb.IndexSessionFile(
+                            record.SessionFilePath,
+                            record.AgentName,
+                            record.ProjectPath);
+
+                        _db.UpdateSessionProcessingStatus(sessionId, "indexed", "indexed_at");
+                        record.ProcessingStatus = "indexed";
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[SessionLifecycle] Indexing failed for {sessionId}: {ex.Message}");
+                        // Don't block — skip to summary generation
+                        _db.UpdateSessionProcessingStatus(sessionId, "indexed", "indexed_at");
+                        record.ProcessingStatus = "indexed";
+                    }
+                }
+                else
+                {
+                    // No file — skip indexing
+                    _db.UpdateSessionProcessingStatus(sessionId, "indexed", "indexed_at");
+                    record.ProcessingStatus = "indexed";
+                }
+            }
+
+            // Step 3: Generate summary (indexed → complete)
+            if (record.ProcessingStatus == "indexed" || record.ProcessingStatus == "imported")
+            {
+                string summary = GenerateHeuristicSummary(sessionId);
+                if (!string.IsNullOrEmpty(summary))
+                {
+                    _db.UpdateSessionSummary(sessionId, summary);
+                    record.Summary = summary;
+                }
+
+                _db.UpdateSessionProcessingStatus(sessionId, "complete", "summarized_at");
+                record.ProcessingStatus = "complete";
+            }
+
+            // Re-read to get latest state
+            return _db.GetSessionById(sessionId);
+        }
+
+        #endregion
+
         #region Query
 
         /// <summary>
@@ -295,13 +473,13 @@ namespace MultiTerminal.Services
         /// project path to its .claude/projects/ folder and querying by file path prefix.
         /// Returns null if the project folder doesn't exist or no sessions are found.
         /// </summary>
-        public SessionLineageRecord GetMostRecentSessionForProject(string projectPath, string agentName = null)
+        public SessionLineageRecord GetMostRecentSessionForProject(string projectPath, string agentName = null, string excludeSessionId = null, int skip = 0)
         {
             string claudeFolder = GetClaudeProjectFolder(projectPath);
             if (claudeFolder == null)
                 return null;
 
-            return _db.GetMostRecentSessionByFolder(claudeFolder, agentName);
+            return _db.GetMostRecentSessionByFolder(claudeFolder, agentName, excludeSessionId, skip);
         }
 
         /// <summary>
@@ -366,6 +544,241 @@ namespace MultiTerminal.Services
                 return _db.GetSessionMessages(taskId: taskId, role: role, agentName: agentName, limit: limit);
 
             return _db.SearchSessionMessages(query, taskId: taskId, role: role, agentName: agentName, limit: limit);
+        }
+
+        #endregion
+
+        #region Heuristic Summary Generation
+
+        /// <summary>
+        /// Generates a brief heuristic summary for a session from its stored messages.
+        /// Returns null if the session has no useful messages.
+        /// </summary>
+        public string GenerateHeuristicSummary(string sessionId)
+        {
+            // Get all messages (capped) for this session
+            var messages = _db.GetSessionMessagesBySessionId(sessionId, 200);
+            if (messages == null || messages.Count == 0)
+                return null;
+
+            return BuildSummaryFromMessages(messages);
+        }
+
+        /// <summary>
+        /// Generates a heuristic summary directly from parsed messages (no DB query).
+        /// Used during import when messages haven't been committed yet or were just saved.
+        /// </summary>
+        public static string GenerateHeuristicSummaryFromMessages(List<SessionMessageRecord> messages)
+        {
+            if (messages == null || messages.Count == 0)
+                return null;
+
+            return BuildSummaryFromMessages(messages);
+        }
+
+        /// <summary>
+        /// Backfills heuristic summaries for all sessions that have no summary.
+        /// Only overwrites null/empty summaries — never replaces agent-generated ones.
+        /// Returns the number of sessions updated.
+        /// </summary>
+        public int BackfillSummaries()
+        {
+            // Get all session IDs with no summary
+            var unsummarized = _db.GetAllUnsummarizedSessionIds();
+            int updated = 0;
+
+            foreach (var sessionId in unsummarized)
+            {
+                try
+                {
+                    string summary = GenerateHeuristicSummary(sessionId);
+                    if (!string.IsNullOrEmpty(summary))
+                    {
+                        _db.UpdateSessionSummary(sessionId, summary);
+                        updated++;
+                    }
+                }
+                catch
+                {
+                    // Skip failed sessions
+                }
+            }
+
+            return updated;
+        }
+
+        /// <summary>
+        /// Returns true if the text looks like a noise/boilerplate user message that
+        /// should not be used as a session topic. Public wrapper for use by other components.
+        /// </summary>
+        public static bool IsNoisyUserMessagePublic(string content) => IsNoisyUserMessage(content);
+
+        /// <summary>
+        /// Returns true if the text looks like a noise/boilerplate user message that
+        /// should not be used as a session topic.
+        /// </summary>
+        private static bool IsNoisyUserMessage(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return true;
+            string trimmed = content.Trim();
+            if (trimmed.Length < 4) return true;
+
+            // JSON payloads (hook responses, tool results, etc.)
+            if (trimmed.StartsWith("{") && (trimmed.Contains("terminalId") || trimmed.Length > 50)) return true;
+
+            string lower = trimmed.ToLowerInvariant();
+
+            // Greetings and trivial
+            if (lower == "hello" || lower == "hi" || lower == "hey" ||
+                lower == "initializing..." || lower == "initializing" ||
+                lower == "tool loaded." || lower == "tool loaded") return true;
+
+            // Skill/command framework noise
+            if (lower.StartsWith("<local-command") || lower.StartsWith("<command-name") ||
+                lower.StartsWith("<command-message") || lower.StartsWith("<channel ") ||
+                lower.StartsWith("<system-reminder") || lower.StartsWith("<user-prompt") ||
+                lower.StartsWith("execute skill:") || lower.StartsWith("launching skill:") ||
+                lower.StartsWith("base directory for this skill:") ||
+                lower.StartsWith("active terminals:") || lower.StartsWith("no active terminals") ||
+                lower.StartsWith("user has answered your questions:") ||
+                lower.StartsWith("# session-start") || lower.StartsWith("# ")) return true;
+
+            // Registration echoes like "Alice|6bb0bdf1" or "Alice|472d6198"
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[A-Za-z]+\|[0-9a-f]{4,}$")) return true;
+
+            // Raw env var echoes like "Alice|" or "|"
+            if (trimmed.EndsWith("|") && trimmed.Length < 30) return true;
+
+            return false;
+        }
+
+        private static string BuildSummaryFromMessages(List<SessionMessageRecord> messages)
+        {
+            // 1. Find the first meaningful user message (the "topic")
+            string topic = null;
+            foreach (var msg in messages)
+            {
+                if (msg.Role != "user") continue;
+                if (IsNoisyUserMessage(msg.Content)) continue;
+                topic = msg.Content.Trim();
+                break;
+            }
+
+            // 1b. Fallback: if all user messages were noise, try the first meaningful assistant text
+            if (string.IsNullOrEmpty(topic))
+            {
+                foreach (var msg in messages)
+                {
+                    if (msg.Role != "assistant" || !string.IsNullOrEmpty(msg.ToolName)) continue;
+                    string content = msg.Content?.Trim();
+                    if (string.IsNullOrEmpty(content) || content.Length < 10) continue;
+                    // Skip assistant messages that are just tool stubs or framework noise
+                    if (content.StartsWith("[tool:") || content.StartsWith("{")) continue;
+                    topic = content;
+                    break;
+                }
+            }
+
+            // 2. Count tool usage
+            int totalMessages = messages.Count;
+            int edits = 0, writes = 0, reads = 0, builds = 0, searches = 0, skills = 0;
+            var editedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var msg in messages)
+            {
+                if (string.IsNullOrEmpty(msg.ToolName)) continue;
+                switch (msg.ToolName)
+                {
+                    case "Edit":
+                        edits++;
+                        ExtractFileName(msg.Content, editedFiles);
+                        break;
+                    case "Write":
+                        writes++;
+                        ExtractFileName(msg.Content, editedFiles);
+                        break;
+                    case "Read":
+                        reads++;
+                        break;
+                    case "Glob":
+                    case "Grep":
+                        searches++;
+                        break;
+                    case "Bash":
+                        if (msg.Content != null && (msg.Content.Contains("dotnet build") || msg.Content.Contains("msbuild")))
+                            builds++;
+                        break;
+                    case "Skill":
+                        skills++;
+                        break;
+                    default:
+                        if (msg.ToolName.Contains("build_project"))
+                            builds++;
+                        break;
+                }
+            }
+
+            // 3. Build the summary
+            var parts = new List<string>();
+
+            // Topic line — clean and truncate
+            if (!string.IsNullOrEmpty(topic))
+            {
+                string topicLine = topic.Replace('\n', ' ').Replace('\r', ' ').Trim();
+                if (topicLine.Length > 120) topicLine = topicLine.Substring(0, 117) + "...";
+                parts.Add(topicLine);
+            }
+
+            // Activity stats
+            var stats = new List<string>();
+            int fileChanges = edits + writes;
+            if (fileChanges > 0)
+            {
+                string fileCount = editedFiles.Count > 0 ? $" across {editedFiles.Count} file{(editedFiles.Count == 1 ? "" : "s")}" : "";
+                stats.Add($"{fileChanges} edit{(fileChanges == 1 ? "" : "s")}{fileCount}");
+            }
+            if (builds > 0) stats.Add($"{builds} build{(builds == 1 ? "" : "s")}");
+            if (reads > 0) stats.Add($"{reads} read{(reads == 1 ? "" : "s")}");
+            if (searches > 0) stats.Add($"{searches} search{(searches == 1 ? "" : "es")}");
+
+            if (stats.Count > 0)
+                parts.Add(string.Join(", ", stats));
+            else if (totalMessages <= 4)
+                parts.Add("Brief session");
+            else
+                parts.Add($"{totalMessages} messages");
+
+            return parts.Count > 0 ? string.Join(" — ", parts) : null;
+        }
+
+        private static void ExtractFileName(string content, HashSet<string> files)
+        {
+            if (string.IsNullOrEmpty(content)) return;
+
+            // Tool content often starts with a file path or contains "file_path" references.
+            // Try to extract the first path-like segment.
+            var lines = content.Split('\n', 3);
+            foreach (var line in lines)
+            {
+                string trimmed = line.Trim();
+                // Match common path patterns: absolute paths or relative paths with extensions
+                if ((trimmed.Contains(":\\") || trimmed.Contains(":/") || trimmed.StartsWith("/")) &&
+                    trimmed.Contains("."))
+                {
+                    // Clean up — take just the path portion
+                    string path = trimmed.Split(new[] { ' ', '\t', '"' }, StringSplitOptions.RemoveEmptyEntries)
+                        .FirstOrDefault(p => p.Contains(".") && (p.Contains("\\") || p.Contains("/")));
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        try
+                        {
+                            files.Add(Path.GetFileName(path));
+                        }
+                        catch { }
+                    }
+                    return;
+                }
+            }
         }
 
         #endregion

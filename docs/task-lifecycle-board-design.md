@@ -1,8 +1,8 @@
 # Task Lifecycle Board - Design Document
 
 **Date:** 2026-02-10
-**Authors:** Alice (brainstorm), Bob (research), John (vision), Diana (backend review)
-**Status:** APPROVED by John (2026-02-10)
+**Authors:** Alice (brainstorm), Bob (research), PM (vision), Diana (backend review)
+**Status:** APPROVED by PM (2026-02-10)
 **Related Ticket:** `0e815093` (Make KanBan Form window resizable) + `32cc2235` (Implementation Checklist Grid)
 
 ---
@@ -120,7 +120,7 @@ The gear popover keeps metadata **accessible but not cluttering** the main works
 
 ### 2. Lifecycle Columns (The Mini Kanban)
 
-**Fixed 4 columns** representing the workflow lifecycle (John: no custom columns):
+**Fixed 4 columns** representing the workflow lifecycle (PM decision: no custom columns):
 
 | Column | Maps To | Color Accent | Phase Notes Content |
 |--------|---------|-------------|-------------------|
@@ -184,7 +184,7 @@ Instead of separate tabs for Plan/Implementation/Testing/Continuation, each colu
 
 ### 4b. Session Notes Strip (Persistent Bottom Bar)
 
-> **John's design change:** Continuation notes don't belong anchored to the Done column. They're session-level handoff notes ("where to pick up next"), written when work is IN PROGRESS across any column. They need to be the first thing the next person sees.
+> **Design change:** Continuation notes don't belong anchored to the Done column. They're session-level handoff notes ("where to pick up next"), written when work is IN PROGRESS across any column. They need to be the first thing the next person sees.
 
 A **persistent collapsible strip** pinned to the bottom of the entire board, spanning all columns:
 
@@ -234,7 +234,7 @@ The main kanban board card auto-updates in real-time when sub-tasks move.
 
 ### Swimlanes by Assignee (V1 — Phase 3)
 
-> **John's decision:** ON by default when multiple assignees exist on a task.
+> **Design decision:** ON by default when multiple assignees exist on a task.
 
 When multiple helpers are on a task, add horizontal rows per person:
 
@@ -388,7 +388,7 @@ Minimal for V1 — only `SortOrder` added to ChecklistItem JSON (no schema migra
 
 ---
 
-## Resolved Decisions (John, 2026-02-10)
+## Resolved Decisions (2026-02-10)
 
 | # | Question | Decision |
 |---|----------|----------|
@@ -402,7 +402,7 @@ Minimal for V1 — only `SortOrder` added to ChecklistItem JSON (no schema migra
 
 ### Key Design Change: Continuation Notes
 
-**John's feedback:** Continuation notes are session-level handoff notes ("where to pick up next"), written while work is IN PROGRESS. They don't belong anchored to Done.
+**PM feedback:** Continuation notes are session-level handoff notes ("where to pick up next"), written while work is IN PROGRESS. They don't belong anchored to Done.
 
 **Solution:** Persistent collapsible "Session Notes" strip at the bottom of the entire board (see Component 4b above). The Done column gets "Completion/Release Notes" instead (or stays empty).
 
@@ -431,9 +431,9 @@ Minimal for V1 — only `SortOrder` added to ChecklistItem JSON (no schema migra
 | Auto-Status | Need `AutoStatus` flag + manual override support | Added edge cases: zero items fallback, manual override, re-enable toggle |
 | Phase-Anchored Notes | "Killer feature" — no DB changes needed, just JS routing | Confirmed: Plan/Impl/Test/Continuation already separate fields |
 | Implementation Phases | Move "Wire up Edit button" to first step | Reordered Phase 1 checklist |
-| Classic View | Keep 6-tab modal as fallback for V1 | **John overruled: replace entirely, no fallback** |
-| Conflict Resolution | Use MessageBroker.TasksUpdated for live refresh | **Approved by John — added to Phase 3** |
-| Performance | Virtual scrolling for 50+ items | **Deferred to V2 per John** |
+| Classic View | Keep 6-tab modal as fallback for V1 | **PM overruled: replace entirely, no fallback** |
+| Conflict Resolution | Use MessageBroker.TasksUpdated for live refresh | **Approved by PM — added to Phase 3** |
+| Performance | Virtual scrolling for 50+ items | **Deferred to V2 per PM** |
 
 ### Diana's Key Insight
 

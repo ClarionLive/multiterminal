@@ -54,6 +54,7 @@ namespace MultiTerminal.ActivityPanel
             // Subscribe to Ready event to load data when WebView2 is ready
             _renderer.Ready += OnRendererReady;
             _renderer.RefreshRequested += OnRefreshRequested;
+            _renderer.TaskCreateRequested += OnTaskCreateRequested;
 
             Controls.Add(_renderer);
         }
@@ -93,6 +94,41 @@ namespace MultiTerminal.ActivityPanel
         {
             System.Diagnostics.Debug.WriteLine("[ActivityPanel] Manual refresh requested by user");
             RefreshActivity();
+        }
+
+        private void OnTaskCreateRequested(object sender, TaskCreateRequestArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnTaskCreateRequested(sender, e)));
+                return;
+            }
+
+            if (_messageBroker == null || string.IsNullOrWhiteSpace(e.Title))
+            {
+                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Cannot create task: no broker or empty title");
+                return;
+            }
+
+            try
+            {
+                var result = _messageBroker.CreateTask(e.Title, e.Description ?? "", "ActivityFeed");
+                if (result.Success)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Task created from feed: {result.TaskId}");
+                    _renderer?.SendTaskCreatedConfirmation(result.TaskId ?? "");
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Task creation failed: {result.Error}");
+                    _renderer?.SendTaskCreateFailed(result.Error ?? "Unknown error");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Failed to create task: {ex.Message}");
+                _renderer?.SendTaskCreateFailed(ex.Message);
+            }
         }
 
         /// <summary>
@@ -362,7 +398,9 @@ namespace MultiTerminal.ActivityPanel
                 Type = activity.Type,
                 Content = activity.Content,
                 Timestamp = activity.Timestamp,
-                IsPinned = false
+                IsPinned = false,
+                Details = activity.Details,
+                ActivityType = !string.IsNullOrEmpty(activity.Action) ? $"{activity.Type}_{activity.Action}".ToUpperInvariant() : null
             };
 
             _renderer?.AddFeedItem(feedItem);
@@ -661,6 +699,7 @@ namespace MultiTerminal.ActivityPanel
                 if (_renderer != null)
                 {
                     _renderer.Ready -= OnRendererReady;
+                    _renderer.TaskCreateRequested -= OnTaskCreateRequested;
                     _renderer.Dispose();
                 }
             }

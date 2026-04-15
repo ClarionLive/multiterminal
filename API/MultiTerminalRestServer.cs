@@ -212,7 +212,7 @@ namespace MultiTerminal.API
                             Details = entry.DetailsJson
                         };
 
-                        _broker.RecordActivity(activityEvent);
+                        _broker.RecordActivity(activityEvent, alreadyPersisted: true);
                         System.Diagnostics.Debug.WriteLine($"[ActivityFeed→UI] {entry.ActivityType}: {entry.Summary}");
                     }
                     catch (Exception ex)

@@ -60,6 +60,27 @@ namespace MultiTerminal.Services
         /// When this lineage record was inserted into the database.
         /// </summary>
         public string CreatedAt { get; set; }
+
+        /// <summary>
+        /// Lifecycle status: open, closed, imported, indexed, complete.
+        /// Tracks where this session is in the processing pipeline.
+        /// </summary>
+        public string ProcessingStatus { get; set; }
+
+        /// <summary>
+        /// The project filesystem path (e.g. "H:\DevLaptop\ClarionPowerShell\MultiTerminal").
+        /// </summary>
+        public string ProjectPath { get; set; }
+
+        /// <summary>
+        /// When session chunks were indexed into session_chunks (embeddings).
+        /// </summary>
+        public string IndexedAt { get; set; }
+
+        /// <summary>
+        /// When the session summary was generated.
+        /// </summary>
+        public string SummarizedAt { get; set; }
     }
 
     /// <summary>

@@ -37,7 +37,7 @@ namespace MultiTerminal.TaskLifecycleBoard
         /// <summary>
         /// Opens or focuses the lifecycle board for a given task.
         /// </summary>
-        public static void OpenForTask(string taskId, MessageBroker broker, bool isDarkTheme)
+        public static void OpenForTask(string taskId, MessageBroker broker, bool isDarkTheme, SettingsService settings = null)
         {
             if (_openWindows.TryGetValue(taskId, out var existing) && !existing.IsDisposed)
             {
@@ -46,12 +46,12 @@ namespace MultiTerminal.TaskLifecycleBoard
                 return;
             }
 
-            var form = new TaskLifecycleBoardForm(taskId, broker, isDarkTheme);
+            var form = new TaskLifecycleBoardForm(taskId, broker, isDarkTheme, settings);
             _openWindows[taskId] = form;
             form.Show();
         }
 
-        public TaskLifecycleBoardForm(string taskId, MessageBroker broker, bool isDarkTheme)
+        public TaskLifecycleBoardForm(string taskId, MessageBroker broker, bool isDarkTheme, SettingsService settings = null)
         {
             _taskId = taskId ?? throw new ArgumentNullException(nameof(taskId));
             _broker = broker ?? throw new ArgumentNullException(nameof(broker));
@@ -66,7 +66,7 @@ namespace MultiTerminal.TaskLifecycleBoard
                 _broker.SetAutoStatus(_taskId, true);
             }
 
-            _settings = new SettingsService();
+            _settings = settings ?? new SettingsService();
 
             InitializeComponent(isDarkTheme);
             RestoreWindowBounds();
@@ -168,6 +168,17 @@ namespace MultiTerminal.TaskLifecycleBoard
             }
 
             _isInitialized = true;
+
+            // Restore saved zoom level
+            var savedZoom = _settings.GetLifecycleBoardZoom();
+            _webView.CoreWebView2.Settings.IsPinchZoomEnabled = true;
+            _webView.ZoomFactor = savedZoom;
+
+            // Save zoom on change (ctrl+mousewheel)
+            _webView.ZoomFactorChanged += (s, args) =>
+            {
+                _settings.SetLifecycleBoardZoom(_webView.ZoomFactor);
+            };
 
             // Navigate to the lifecycle board HTML
             string htmlPath = GetHtmlPath();

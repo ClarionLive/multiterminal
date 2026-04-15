@@ -1,0 +1,150 @@
+{
+  "$schema": "./wiki-manifest.schema.json",
+  "version": 1,
+  "description": "Subsystem manifest for the wiki generator. Each entry defines a coherent module that spans multiple files. Hand-maintained for V1.",
+  "subsystems": [
+    {
+      "id": "message-broker",
+      "name": "MessageBroker",
+      "description": "Central event hub routing messages between terminals, caching tasks/terminals/profiles, firing events to UI panels, and delivering webhooks.",
+      "rootFiles": [
+        "MCPServer/Services/MessageBroker.cs",
+        "MCPServer/Services/HttpWebhookService.cs",
+        "MCPServer/Services/ActivityService.cs",
+        "MCPServer/Services/ActivityFeedService.cs",
+        "MCPServer/Services/StaleTaskService.cs",
+        "MCPServer/Services/ComplexityDetector.cs",
+        "MCPServer/Services/SummaryService.cs"
+      ],
+      "tags": ["core", "hub", "events"]
+    },
+    {
+      "id": "task-database",
+      "name": "TaskDatabase",
+      "description": "SQLite persistence for the kanban system. 21+ tables covering tasks, checklists, helpers, inbox, attachments, activity, summaries, and session tracking.",
+      "rootFiles": [
+        "Services/TaskDatabase.cs",
+        "MCPServer/Models/KanbanTask.cs",
+        "MCPServer/Models/TaskHelper.cs",
+        "MCPServer/Models/TaskSummary.cs",
+        "MCPServer/Models/TaskAttachment.cs",
+        "MCPServer/Models/InboxMessage.cs",
+        "MCPServer/Models/Plan.cs"
+      ],
+      "tags": ["core", "persistence", "sqlite"]
+    },
+    {
+      "id": "main-form",
+      "name": "MainForm",
+      "description": "WinForms application shell. Hosts docked panels, orchestrates terminal lifecycle, wires MessageBroker events to UI, manages theme and layout.",
+      "rootFiles": [
+        "MainForm.cs",
+        "Program.cs",
+        "Docking/TerminalDocument.cs"
+      ],
+      "tags": ["ui", "shell", "host"]
+    },
+    {
+      "id": "rest-api",
+      "name": "REST API",
+      "description": "HTTP server exposing ~161 endpoints across 26 controllers on port 5050. Bridges MCP tools and UI panels to MessageBroker and databases.",
+      "rootFiles": [
+        "API/MultiTerminalRestServer.cs",
+        "API/Controllers/TasksController.cs",
+        "API/Controllers/MessagingController.cs",
+        "API/Controllers/KnowledgeController.cs",
+        "API/Controllers/ProjectContextController.cs",
+        "API/Controllers/SessionLineageController.cs"
+      ],
+      "controllerGlob": "API/Controllers/*.cs",
+      "tags": ["api", "http", "integration"]
+    },
+    {
+      "id": "code-graph",
+      "name": "Code Graph",
+      "description": "Roslyn-based C# code indexer and query layer. Extracts symbols (classes, methods, properties) and relationships (calls, inherits, references) into cg_* SQLite tables.",
+      "rootFiles": [
+        "Services/CSharpCodeGraphIndexer.cs",
+        "Services/CodeGraphDatabase.cs",
+        "Services/CodeGraphQuery.cs",
+        "API/Controllers/CodeGraphController.cs",
+        "MCPServer/Models/CodeSymbol.cs",
+        "MCPServer/Models/CodeRelationship.cs"
+      ],
+      "tags": ["indexing", "roslyn", "analysis"]
+    },
+    {
+      "id": "session-lineage",
+      "name": "Session Lineage",
+      "description": "Tracks Claude Code session history, lineage chains (parent/child spawn relationships), and semantic session memory via embeddings + FTS5 search.",
+      "rootFiles": [
+        "Services/SessionLineageService.cs",
+        "Services/SessionLineage.cs",
+        "Services/SessionIndexingService.cs",
+        "Services/SessionSyncService.cs",
+        "Services/SessionMemoryDatabase.cs",
+        "Services/SessionContextWriter.cs",
+        "Services/TranscriptTailer.cs",
+        "API/Controllers/SessionLineageController.cs",
+        "API/Controllers/SessionMemoryController.cs"
+      ],
+      "tags": ["sessions", "history", "search"]
+    },
+    {
+      "id": "knowledge-db",
+      "name": "Knowledge Database",
+      "description": "Stores knowledge entries (patterns, decisions, gotchas), code digests, and research cache. FTS5 search across knowledge content.",
+      "rootFiles": [
+        "Services/KnowledgeDatabase.cs",
+        "MCPServer/Models/KnowledgeEntry.cs",
+        "MCPServer/Models/CodeDigest.cs",
+        "API/Controllers/KnowledgeController.cs"
+      ],
+      "tags": ["knowledge", "persistence", "search"]
+    },
+    {
+      "id": "mcp-server",
+      "name": "MCP Server",
+      "description": "Node.js MCP tool definitions (88 tools) that bridge Claude Code agents to MultiTerminal's REST API. Lives outside the repo at %APPDATA%/multiterminal/mcp but managed by McpConfigService.",
+      "rootFiles": [
+        "Services/McpConfigService.cs",
+        "Services/GatewayIntegrationService.cs",
+        "API/Controllers/ToolsController.cs",
+        "API/Controllers/GatewayController.cs"
+      ],
+      "tags": ["mcp", "tools", "external"]
+    },
+    {
+      "id": "webview2-panels",
+      "name": "WebView2 Panel Pattern",
+      "description": "Pattern for building UI panels hosted in WebView2. Each panel has an outer DockContent + inner UserControl + HTML/CSS/JS, wired to MessageBroker events.",
+      "rootFiles": [
+        "Controls/HudTabContainer/HudTabContainer.cs",
+        "Controls/TaskHudPanel/TaskHudRenderer.cs",
+        "Controls/HudDashboardPanel/HudDashboardRenderer.cs",
+        "Controls/HudNotesPanel/HudNotesRenderer.cs",
+        "Controls/HudKnowledgePanel/HudKnowledgeRenderer.cs",
+        "Controls/HudSessionsPanel/HudSessionsRenderer.cs",
+        "ActivityPanel/ActivityPanelDocument.cs",
+        "ChatPanel/ChatPanelControl.cs",
+        "TasksPanel/TasksPanelControl.cs"
+      ],
+      "tags": ["ui", "webview2", "panel-pattern"]
+    },
+    {
+      "id": "terminal-management",
+      "name": "Terminal Management",
+      "description": "Terminal spawning, ConPty lifecycle, agent process coordination, and companion process management.",
+      "rootFiles": [
+        "Services/TerminalSpawner.cs",
+        "Services/AgentProcess.cs",
+        "Services/CompanionProcessManager.cs",
+        "Services/LaunchCommandBuilder.cs",
+        "Terminal/ConPtyTerminal.cs",
+        "Controls/TerminalControl.cs",
+        "MCPServer/Models/TerminalInfo.cs"
+      ],
+      "tags": ["terminal", "process", "conpty"]
+    }
+  ]
+}

@@ -33,7 +33,7 @@ namespace MultiTerminal.API.Controllers
         /// Stores in DB, fires broker event, and forwards to ClaudeRemote for phone push.
         /// </summary>
         [HttpPost]
-        public IActionResult PostNotification([FromBody] NotificationRequest request)
+        public IActionResult PostNotification([FromBody] NotificationRequest request, [FromQuery] bool skipPush = false)
         {
             if (string.IsNullOrWhiteSpace(request.NotificationType))
                 return BadRequest(new { error = "notification_type is required" });
@@ -72,8 +72,9 @@ namespace MultiTerminal.API.Controllers
                 request.AgentName,
                 request.Cwd);
 
-            // Fire-and-forget forward to ClaudeRemote for phone push
-            _ = ForwardToClaudeRemoteAsync(request, id);
+            // Fire-and-forget forward to ClaudeRemote for phone push (skip if caller already pushed)
+            if (!skipPush)
+                _ = ForwardToClaudeRemoteAsync(request, id);
 
             return Ok(new { success = true, id });
         }

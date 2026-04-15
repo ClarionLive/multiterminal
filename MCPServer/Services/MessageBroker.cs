@@ -30,12 +30,20 @@ namespace MultiTerminal.MCPServer.Services
         // Project storage
         private readonly ConcurrentDictionary<string, Project> _projects = new ConcurrentDictionary<string, Project>();
         private readonly ProjectDatabase _projectDb;
+        public ProjectDatabase ProjectDatabase => _projectDb;
 
         // Team member profile storage
         private readonly ConcurrentDictionary<string, TeamMemberProfile> _profiles = new ConcurrentDictionary<string, TeamMemberProfile>();
 
         // Office agent tracking (for Office Panel animation - not registered terminals)
         private readonly ConcurrentDictionary<string, OfficeAgentInfo> _officeAgents = new ConcurrentDictionary<string, OfficeAgentInfo>();
+
+        // Elicitation relay: in-memory store for pending MCP elicitation requests
+        private readonly ConcurrentDictionary<string, ElicitationRequest> _pendingElicitations = new ConcurrentDictionary<string, ElicitationRequest>();
+        private readonly ConcurrentDictionary<string, ElicitationResponse> _elicitationResponses = new ConcurrentDictionary<string, ElicitationResponse>();
+
+        // Remote mode: when true, hooks relay questions/elicitations to ClaudeRemote on phone
+        private volatile bool _remoteMode = false;
 
         // Message queue persistence for reliable delivery
         private readonly MessageQueueDatabase _messageQueueDb;
@@ -219,9 +227,9 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Default inbox recipient for auto-generated notifications (PM/tester).
-        /// Defaults to "John". Set to change the default PM user.
+        /// Defaults to "Owner". Set from OwnerProfile.FullName at startup if configured.
         /// </summary>
-        public string DefaultInboxRecipient { get; set; } = "John";
+        public string DefaultInboxRecipient { get; set; } = "Owner";
 
         /// <summary>
         /// Debug log service for internal diagnostics.
@@ -262,9 +270,17 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Raised when session lineage data is updated (session imported or linked to a task).
-        /// Event arg is the session ID that was updated.
+        /// Event arg is the session ID that was updated (null for bulk sync).
         /// </summary>
         public event EventHandler<string> SessionLineageUpdated;
+
+        /// <summary>
+        /// Fires the SessionLineageUpdated event. Called from MainForm after sync imports new sessions.
+        /// </summary>
+        public void FireSessionLineageUpdated(string sessionId)
+        {
+            SessionLineageUpdated?.Invoke(this, sessionId);
+        }
 
         /// <summary>
         /// Raised when an agent requests a browser tab action (open, update, close).
@@ -277,6 +293,29 @@ namespace MultiTerminal.MCPServer.Services
         /// Set via DI after broker is created (shares multiterminal.db via TaskDatabase).
         /// </summary>
         public MultiTerminal.Services.KnowledgeDatabase KnowledgeDb { get; set; }
+
+        /// <summary>
+        /// Session memory database — vector-embedded session chunks for semantic search.
+        /// Set via DI after broker is created (shares multiterminal.db via TaskDatabase).
+        /// </summary>
+        public MultiTerminal.Services.SessionMemoryDatabase SessionMemoryDb { get; set; }
+
+        /// <summary>
+        /// Code graph database — Roslyn-based C# code indexer for symbols, relationships, impact analysis.
+        /// Set via DI after broker is created (shares multiterminal.db via TaskDatabase).
+        /// </summary>
+        public MultiTerminal.Services.CodeGraphDatabase CodeGraphDb { get; set; }
+
+        /// <summary>
+        /// Code graph query layer — structured queries over the code graph.
+        /// </summary>
+        public MultiTerminal.Services.CodeGraphQuery CodeGraphQuery { get; set; }
+
+        /// <summary>
+        /// Wiki generator service — produces per-subsystem markdown articles from the code graph + code digests.
+        /// Set via DI after broker is created.
+        /// </summary>
+        public MultiTerminal.Services.WikiGeneratorService WikiGenerator { get; set; }
 
         /// <summary>
         /// Project service for managing .claude/project.json files.
@@ -447,8 +486,17 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Register a terminal with the broker.
         /// </summary>
-        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false)
+        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null)
         {
+            LogInfo($"RegisterTerminal ENTRY: name='{name}', docId='{docId ?? "null"}', channelPort={channelPort?.ToString() ?? "null"}, stack={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name ?? "?"}");
+
+            // Validate channel port range to prevent SSRF — only allow ports in the assigned range
+            if (channelPort.HasValue && (channelPort.Value < 8800 || channelPort.Value > 8899))
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Rejected channel port {channelPort.Value} for '{name}' — outside allowed range 8800-8899");
+                channelPort = null; // Silently drop invalid port, fall back to inbox delivery
+            }
+
             var id = Guid.NewGuid().ToString("N").Substring(0, 8);
 
             // Check if DocId already exists (terminal renaming, e.g., "Unassigned" → "Bob")
@@ -480,9 +528,15 @@ namespace MultiTerminal.MCPServer.Services
 
                 System.Diagnostics.Debug.WriteLine($"[MessageBroker] Terminal renaming: {oldName} → {newName} (DocId: {docId})");
 
-                // Update terminal name
+                // Update terminal name and channel port
                 existingByDocId.Name = newName;
                 existingByDocId.LastActiveAt = DateTime.UtcNow;
+                if (channelPort.HasValue)
+                {
+                    if (existingByDocId.ChannelPort != channelPort.Value)
+                        LogInfo($"CHANNEL_PORT CHANGE (docId path): '{existingByDocId.Name}' {existingByDocId.ChannelPort} → {channelPort.Value}");
+                    existingByDocId.ChannelPort = channelPort.Value;
+                }
                 existingByDocId.IsConnected = true;
 
                 // Handle profile transitions
@@ -556,6 +610,14 @@ namespace MultiTerminal.MCPServer.Services
                 existingByName.LastActiveAt = DateTime.UtcNow;
                 existingByName.IsConnected = true;
 
+                // Update channel port if provided
+                if (channelPort.HasValue)
+                {
+                    if (existingByName.ChannelPort != channelPort.Value)
+                        LogInfo($"CHANNEL_PORT CHANGE (name path): '{existingByName.Name}' {existingByName.ChannelPort} → {channelPort.Value}");
+                    existingByName.ChannelPort = channelPort.Value;
+                }
+
                 // Update DocId if provided AND existing DocId is empty (don't overwrite valid pre-registration)
                 if (!string.IsNullOrEmpty(docId) && string.IsNullOrEmpty(existingByName.DocId))
                 {
@@ -608,6 +670,9 @@ namespace MultiTerminal.MCPServer.Services
                     System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to create/update profile: {ex.Message}");
                 }
 
+                // Ensure message queue exists (may be missing after disconnect/reconnect)
+                _messageQueues.TryAdd(existingByName.Id, new BlockingCollection<Message>());
+
                 return new RegisterResult
                 {
                     Success = true,
@@ -620,8 +685,10 @@ namespace MultiTerminal.MCPServer.Services
                 Id = id,
                 Name = name,
                 DocId = docId,
-                Color = _terminalColors[_colorIndex++ % _terminalColors.Length]
+                Color = _terminalColors[_colorIndex++ % _terminalColors.Length],
+                ChannelPort = channelPort
             };
+            LogInfo($"NEW TERMINAL: '{name}' id={id} channelPort={channelPort?.ToString() ?? "null"} docId={docId ?? "null"}");
 
             if (_terminals.TryAdd(id, terminal))
             {
@@ -787,6 +854,7 @@ namespace MultiTerminal.MCPServer.Services
             if (terminal != null)
             {
                 terminal.IsConnected = false;
+                terminal.ChannelPort = null; // Clear stale port to prevent delivery to dead channel server
                 TerminalDisconnected?.Invoke(this, terminal);
             }
 
@@ -822,18 +890,25 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Get or set remote mode. When on, hooks relay questions to ClaudeRemote.
+        /// </summary>
+        public bool IsRemoteMode => _remoteMode;
+        public void SetRemoteMode(bool enabled) => _remoteMode = enabled;
+
+        /// <summary>
         /// Get terminal by ID, DocId, or name.
         /// </summary>
         public TerminalInfo GetTerminal(string idOrNameOrDocId)
         {
             // First try direct lookup by terminalId (dictionary key)
-            if (_terminals.TryGetValue(idOrNameOrDocId, out var terminal))
+            if (_terminals.TryGetValue(idOrNameOrDocId, out var terminal) && terminal.IsConnected)
                 return terminal;
 
-            // Then try lookup by DocId or Name
+            // Then try lookup by DocId or Name (only connected terminals)
             return _terminals.Values.FirstOrDefault(t =>
-                (!string.IsNullOrEmpty(t.DocId) && t.DocId.Equals(idOrNameOrDocId, StringComparison.OrdinalIgnoreCase)) ||
-                t.Name.Equals(idOrNameOrDocId, StringComparison.OrdinalIgnoreCase));
+                t.IsConnected && (
+                    (!string.IsNullOrEmpty(t.DocId) && t.DocId.Equals(idOrNameOrDocId, StringComparison.OrdinalIgnoreCase)) ||
+                    t.Name.Equals(idOrNameOrDocId, StringComparison.OrdinalIgnoreCase)));
         }
 
         /// <summary>
@@ -892,11 +967,9 @@ namespace MultiTerminal.MCPServer.Services
             // Log message ID for debugging (searchable format)
             LogInfo($"MESSAGE SENT → [MSG-ID: {message.Id}] from [{fromTerminal.Name}] to [{toTerminal.Name}] | Content: {content.Substring(0, Math.Min(80, content.Length))}...");
 
-            // Add to recipient's queue
-            if (_messageQueues.TryGetValue(toTerminal.Id, out var queue))
-            {
-                queue.Add(message);
-            }
+            // Add to recipient's queue (ensure queue exists — may be missing after reconnect)
+            var queue = _messageQueues.GetOrAdd(toTerminal.Id, _ => new BlockingCollection<Message>());
+            queue.Add(message);
 
             // Add to history with pruning to prevent unbounded growth
             lock (_historyLock)
@@ -912,6 +985,9 @@ namespace MultiTerminal.MCPServer.Services
 
             // Notify listeners
             MessageSent?.Invoke(this, message);
+
+            // Push notification to owner's phone for all incoming messages
+            _ = ForwardMessagePushAsync(fromTerminal.Name, content);
 
             // Mark as delivering to prevent retry race condition
             if (queuedMessageId > 0)
@@ -1217,11 +1293,9 @@ namespace MultiTerminal.MCPServer.Services
                 ThreadId = threadId
             };
 
-            // Add to recipient's queue
-            if (_messageQueues.TryGetValue(toTerminal.Id, out var queue))
-            {
-                queue.Add(message);
-            }
+            // Add to recipient's queue (ensure queue exists — may be missing after reconnect)
+            var queue = _messageQueues.GetOrAdd(toTerminal.Id, _ => new BlockingCollection<Message>());
+            queue.Add(message);
 
             // Add to history with pruning to prevent unbounded growth
             lock (_historyLock)
@@ -1595,11 +1669,9 @@ namespace MultiTerminal.MCPServer.Services
                 TaskTitle = taskTitle
             };
 
-            // Add to recipient's queue
-            if (_messageQueues.TryGetValue(helper.Id, out var queue))
-            {
-                queue.Add(message);
-            }
+            // Add to recipient's queue (ensure queue exists — may be missing after reconnect)
+            var queue = _messageQueues.GetOrAdd(helper.Id, _ => new BlockingCollection<Message>());
+            queue.Add(message);
 
             // Add to history
             lock (_historyLock)
@@ -1725,11 +1797,9 @@ namespace MultiTerminal.MCPServer.Services
                 TaskTitle = taskTitle
             };
 
-            // Add to recipient's queue
-            if (_messageQueues.TryGetValue(helper.Id, out var queue))
-            {
-                queue.Add(message);
-            }
+            // Add to recipient's queue (ensure queue exists — may be missing after reconnect)
+            var queue = _messageQueues.GetOrAdd(helper.Id, _ => new BlockingCollection<Message>());
+            queue.Add(message);
 
             // Add to history
             lock (_historyLock)
@@ -1876,11 +1946,9 @@ namespace MultiTerminal.MCPServer.Services
                 TaskTitle = taskTitle
             };
 
-            // Add to recipient's queue
-            if (_messageQueues.TryGetValue(assignee.Id, out var queue))
-            {
-                queue.Add(message);
-            }
+            // Add to recipient's queue (ensure queue exists — may be missing after reconnect)
+            var queue = _messageQueues.GetOrAdd(assignee.Id, _ => new BlockingCollection<Message>());
+            queue.Add(message);
 
             // Add to history
             lock (_historyLock)
@@ -2821,7 +2889,7 @@ namespace MultiTerminal.MCPServer.Services
         /// Transition a checklist item to a new status with mandatory notes.
         /// Enforces the state machine: pending→coding→testing→done (with cycling).
         /// Agent can: pending→coding, coding→testing.
-        /// John can: testing→coding, testing→done.
+        /// PM/tester can: testing→coding, testing→done.
         /// </summary>
         public UpdateChecklistItemResult TransitionChecklistItem(string taskId, int itemIndex, string newStatus, string notes, string updatedBy)
         {
@@ -4591,11 +4659,33 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Record an activity event for the Activity Panel feed.
+        /// Also persists to the activity_feed table for the dashboard.
         /// </summary>
-        public void RecordActivity(ActivityEvent activity)
+        public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
         {
             System.Diagnostics.Debug.WriteLine($"[MessageBroker] Recording activity: {activity.Type}/{activity.Action} - {activity.Content}");
+
+            // Auto-resolve project_id from task cache if not set explicitly
+            if (string.IsNullOrEmpty(activity.ProjectId) && !string.IsNullOrEmpty(activity.RelatedId))
+            {
+                var task = GetTask(activity.RelatedId);
+                if (task != null && !string.IsNullOrEmpty(task.ProjectId))
+                    activity.ProjectId = task.ProjectId;
+            }
+
             ActivityRecorded?.Invoke(this, activity);
+
+            // Persist to activity_feed table for dashboard (skip if caller already persisted, e.g. RecordBuildActivity)
+            if (!alreadyPersisted)
+            {
+                try
+                {
+                    var activityType = $"{activity.Type}_{activity.Action}";
+                    ActivityFeedService?.RecordGeneralActivity(activityType, activity.Terminal, activity.Content,
+                        projectId: activity.ProjectId);
+                }
+                catch { /* Don't let feed persistence failures break the main flow */ }
+            }
         }
 
         /// <summary>
@@ -4610,7 +4700,7 @@ namespace MultiTerminal.MCPServer.Services
             // Record to new activity_feed table
             ActivityFeedService?.RecordBuildEvent(projectName, eventType, terminal, summary, details);
 
-            // Keep legacy event for backwards compatibility
+            // Keep legacy event for backwards compatibility (alreadyPersisted: true to avoid double-write)
             RecordActivity(new ActivityEvent
             {
                 Terminal = terminal,
@@ -4618,7 +4708,7 @@ namespace MultiTerminal.MCPServer.Services
                 Action = success ? "completed" : "failed",
                 Content = summary,
                 Details = details
-            });
+            }, alreadyPersisted: true);
         }
 
         /// <summary>
@@ -5205,7 +5295,9 @@ namespace MultiTerminal.MCPServer.Services
                     FileSizeBytes = imageData.Length,
                     AddedBy = addedBy
                 };
-                attachment.StoredFileName = $"{attachment.Id}_{fileName}";
+                var safeName = Path.GetFileName(fileName);
+                if (string.IsNullOrEmpty(safeName)) safeName = "attachment";
+                attachment.StoredFileName = $"{attachment.Id}_{safeName}";
 
                 // Create attachments directory
                 string attachmentsDir = Path.Combine(
@@ -5228,6 +5320,14 @@ namespace MultiTerminal.MCPServer.Services
 
                 // Notify UI
                 BroadcastTaskUpdate();
+
+                // Send push notification for the attachment
+                var taskTitle = _tasks.TryGetValue(taskId, out var attachTask) ? attachTask.Title : taskId;
+                var target = checklistItemIndex >= 0 ? $"checklist item #{checklistItemIndex}" : "ticket";
+                RecordNotification("image_attached",
+                    $"Image attached to {target}",
+                    $"\"{fileName}\" added to: {taskTitle}",
+                    sessionId: null, agentName: addedBy, cwd: null);
 
                 return new AddAttachmentResult { Success = true, AttachmentId = attachment.Id };
             }
@@ -5399,6 +5499,141 @@ namespace MultiTerminal.MCPServer.Services
             catch (Exception ex)
             {
                 LogError($"Failed to cleanup attachments for task {taskId}: {ex.Message}");
+            }
+        }
+
+        #endregion
+
+        #region Message Images
+
+        /// <summary>
+        /// Save a batch of images sent via chat message. Returns the batch ID.
+        /// </summary>
+        public string SaveMessageImages(List<MessageImageInput> images)
+        {
+            return _taskDb.SaveMessageImages(images);
+        }
+
+        /// <summary>
+        /// Retrieve all images in a batch by batch ID.
+        /// </summary>
+        public List<MessageImage> GetMessageImages(string batchId)
+        {
+            return _taskDb.GetMessageImages(batchId);
+        }
+
+        #endregion
+
+        #region Elicitation Relay
+
+        /// <summary>
+        /// Store a pending elicitation request from the hook. Auto-cleans expired entries.
+        /// </summary>
+        public void StoreElicitation(ElicitationRequest request)
+        {
+            CleanExpiredElicitations();
+            _pendingElicitations[request.ElicitationId] = request;
+        }
+
+        /// <summary>
+        /// Submit a response to a pending elicitation (from ClaudeRemote).
+        /// </summary>
+        public bool SubmitElicitationResponse(string elicitationId, ElicitationResponse response)
+        {
+            if (!_pendingElicitations.TryGetValue(elicitationId, out var request))
+                return false;
+            _elicitationResponses[elicitationId] = response;
+
+            // Notify the originating agent that the elicitation was answered
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var summary = response.Action == "accept"
+                        ? $"[ELICITATION_RESPONSE:{elicitationId}] User accepted. Values: {response.ContentJson}"
+                        : $"[ELICITATION_RESPONSE:{elicitationId}] User {response.Action}d the form.";
+                    await SendMessage("ClaudeRemote", request.AgentName, summary);
+                }
+                catch { /* best-effort notification */ }
+            });
+
+            return true;
+        }
+
+        /// <summary>
+        /// Poll for an elicitation response. Returns null if not yet answered.
+        /// </summary>
+        public ElicitationResponse GetElicitationResponse(string elicitationId)
+        {
+            CleanExpiredElicitations();
+            _elicitationResponses.TryGetValue(elicitationId, out var response);
+            return response;
+        }
+
+        /// <summary>
+        /// Get a pending elicitation by ID.
+        /// </summary>
+        public ElicitationRequest GetElicitation(string elicitationId)
+        {
+            _pendingElicitations.TryGetValue(elicitationId, out var request);
+            return request;
+        }
+
+        /// <summary>
+        /// Remove expired elicitations (older than 5 minutes).
+        /// </summary>
+        private void CleanExpiredElicitations()
+        {
+            var cutoff = DateTime.UtcNow.AddMinutes(-5);
+            foreach (var kvp in _pendingElicitations)
+            {
+                if (kvp.Value.CreatedAt < cutoff)
+                {
+                    _pendingElicitations.TryRemove(kvp.Key, out _);
+                    _elicitationResponses.TryRemove(kvp.Key, out _);
+                }
+            }
+        }
+
+        #endregion
+
+        #region Push Notifications for Messages
+
+        /// <summary>
+        /// Fire-and-forget push notification to owner's phone when a message is sent.
+        /// Posts to ClaudeRemote (port 5100) which forwards as a Web Push notification.
+        /// </summary>
+        private async Task ForwardMessagePushAsync(string fromName, string messageContent)
+        {
+            // Don't notify the owner about their own messages sent from ClaudeRemote
+            if (string.Equals(fromName, "ClaudeRemote", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            try
+            {
+                // Truncate message for notification preview
+                var preview = messageContent?.Length > 200
+                    ? messageContent.Substring(0, 200) + "..."
+                    : messageContent ?? "";
+
+                var payload = new
+                {
+                    id = Guid.NewGuid().ToString("N").Substring(0, 8),
+                    notification_type = "message",
+                    title = $"Message from {fromName}",
+                    message = preview,
+                    agent_name = fromName,
+                    created_at = DateTime.UtcNow.ToString("o")
+                };
+
+                var json = System.Text.Json.JsonSerializer.Serialize(payload);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                await _httpClient.PostAsync("http://localhost:5100/api/notifications/runtime", content);
+            }
+            catch (Exception ex)
+            {
+                LogTrace($"ClaudeRemote push failed: {ex.Message}");
             }
         }
 

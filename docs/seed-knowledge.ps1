@@ -28,7 +28,7 @@ Write-Host "Seeding institutional knowledge base..." -ForegroundColor Cyan
 
 Post-Knowledge `
     -title "Windows Bash: never use `$env:VARNAME or %VARNAME% in Bash tool" `
-    -content "When running commands in the Bash tool on Windows, environment variable syntax (`$env:VARNAME or %VARNAME%) gets mangled. Hardcode known paths instead. APPDATA = C:\Users\John Hickey\AppData\Roaming. Always prefer Glob/Grep/Read over PowerShell for file operations. MCP location: C:\Users\John Hickey\AppData\Roaming\multiterminal\mcp" `
+    -content "When running commands in the Bash tool on Windows, environment variable syntax (`$env:VARNAME or %VARNAME%) gets mangled. Hardcode known paths instead. APPDATA = resolve via `$env:APPDATA at runtime. Always prefer Glob/Grep/Read over PowerShell for file operations. MCP location: %APPDATA%\multiterminal\mcp" `
     -category "gotcha" `
     -tags "windows,bash,env-vars,powershell"
 
@@ -39,8 +39,8 @@ Post-Knowledge `
     -tags "kanban,checklist,notes,formatting"
 
 Post-Knowledge `
-    -title "Build & Deploy: Alice builds, John deploys — never copy to Deploy folder" `
-    -content "Running app is at H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe (the live binary we are working on). Alice can run build_project to compile. Alice CANNOT copy files to Deploy. Deploy workflow (John only): John closes app -> runs deploy.ps1 -> relaunches MultiTerminal. After successful build, tell John to exit + run deploy.ps1 + relaunch." `
+    -title "Build & Deploy: agents build, owner deploys — never copy to Deploy folder" `
+    -content "Running app is at the Deploy folder (the live binary). Agents can run build_project to compile. Agents CANNOT copy files to Deploy. Deploy workflow (owner only): owner closes app -> runs deploy.ps1 -> relaunches MultiTerminal. After successful build, tell the owner to exit + run deploy.ps1 + relaunch." `
     -category "pattern" `
     -tags "build,deploy,workflow,alice"
 
@@ -76,9 +76,9 @@ Post-Knowledge `
 
 Post-Knowledge `
     -title "Testing workflow: complete ALL testing before any coding fixes" `
-    -content "John's testing workflow: set checklist items to testing, present ONE at a time, John replies pass or fail (with details if fail). Pass -> done. Fail -> coding with failure reason in notes. Complete ALL testing before ANY coding fixes. Fix all failed items (use subagents for parallel fixes), then re-test." `
+    -content "PM/tester testing workflow: set checklist items to testing, present ONE at a time, PM replies pass or fail (with details if fail). Pass -> done. Fail -> coding with failure reason in notes. Complete ALL testing before ANY coding fixes. Fix all failed items (use subagents for parallel fixes), then re-test." `
     -category "pattern" `
-    -tags "testing,workflow,john,checklist,kanban"
+    -tags "testing,workflow,checklist,kanban"
 
 Post-Knowledge `
     -title "Default to SMALL tier — only scale up ceremony when genuinely needed" `
