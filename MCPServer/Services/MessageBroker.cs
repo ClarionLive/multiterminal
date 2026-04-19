@@ -5629,8 +5629,10 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private async Task ForwardMessagePushAsync(string fromName, string messageContent)
         {
-            // Don't notify the owner about their own messages sent from ClaudeRemote
-            if (string.Equals(fromName, "ClaudeRemote", StringComparison.OrdinalIgnoreCase))
+            // Don't notify the owner about their own messages sent from the phone.
+            // The phone proxy registers as "MultiRemote" (post-rename) — older "ClaudeRemote" kept for migration safety.
+            if (string.Equals(fromName, "MultiRemote", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(fromName, "ClaudeRemote", StringComparison.OrdinalIgnoreCase))
                 return;
 
             try
