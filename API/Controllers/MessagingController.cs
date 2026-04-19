@@ -1,3 +1,4 @@
+using System;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
@@ -37,6 +38,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("send")]
         public async Task<IActionResult> SendMessage([FromBody] SendMessageRequest request)
         {
+            InferRemoteModeFromSource();
             var result = await _broker.SendMessage(request.FromTerminalId, request.To, request.Message, request.Priority);
             return Ok(result);
         }
@@ -47,8 +49,37 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("broadcast")]
         public async Task<IActionResult> Broadcast([FromBody] BroadcastRequest request)
         {
+            InferRemoteModeFromSource();
             var result = await _broker.Broadcast(request.FromTerminalId, request.Message);
             return Ok(result);
+        }
+
+        // X-Source header presence-inference. The signal must be EXPLICIT so ambient
+        // traffic (MCP tools, hook pings, cross-agent chatter) doesn't thrash the flag.
+        //   X-Source: phone    → user is at phone → remote mode on
+        //   X-Source: desktop  → user is at desk  → remote mode off
+        //   absent / other     → no signal → leave state unchanged
+        // Short-circuits when the inferred value already matches current state — avoids
+        // rewriting settings.txt on every HTTP hit and keeps the audit log meaningful.
+        private void InferRemoteModeFromSource()
+        {
+            if (!Request.Headers.TryGetValue("X-Source", out var v)) return;
+            var src = v.ToString();
+
+            bool intended;
+            if (string.Equals(src, "phone", StringComparison.OrdinalIgnoreCase))
+                intended = true;
+            else if (string.Equals(src, "desktop", StringComparison.OrdinalIgnoreCase))
+                intended = false;
+            else
+                return;
+
+            if (intended == _broker.IsRemoteMode) return;
+
+            var callerIp = HttpContext?.Connection?.RemoteIpAddress?.ToString() ?? "unknown";
+            _broker.DebugLogService?.Info("RemoteMode",
+                $"{(intended ? "desktop→phone" : "phone→desktop")} (X-Source={src}, caller={callerIp})");
+            _broker.SetRemoteMode(intended);
         }
 
         /// <summary>

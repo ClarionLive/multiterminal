@@ -23,6 +23,7 @@ namespace MultiTerminal.Controls
         private bool _isDarkTheme = true;
         private string _pendingUpdateJson;
         private string _pendingStatusLineJson;
+        private bool? _pendingRemoteMode;
         private DebugLogService _debugLogService;
 
         /// <summary>
@@ -194,6 +195,11 @@ namespace MultiTerminal.Controls
                             SendMessage($"statusline:{_pendingStatusLineJson}");
                             _pendingStatusLineJson = null;
                         }
+                        if (_pendingRemoteMode.HasValue)
+                        {
+                            SendMessage($"remoteMode:{(_pendingRemoteMode.Value ? "true" : "false")}");
+                            _pendingRemoteMode = null;
+                        }
 
                         Ready?.Invoke(this, EventArgs.Empty);
                     }
@@ -316,6 +322,22 @@ namespace MultiTerminal.Controls
             if (_isInitialized)
             {
                 SendMessage($"hudState:{(isVisible ? "true" : "false")}");
+            }
+        }
+
+        /// <summary>
+        /// Updates the "Input: Local/Remote" pill in the status bar.
+        /// Buffered if called before the WebView2 renderer is ready.
+        /// </summary>
+        public void SetRemoteMode(bool enabled)
+        {
+            if (_isInitialized)
+            {
+                SendMessage($"remoteMode:{(enabled ? "true" : "false")}");
+            }
+            else
+            {
+                _pendingRemoteMode = enabled;
             }
         }
 

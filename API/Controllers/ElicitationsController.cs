@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
@@ -11,10 +12,12 @@ namespace MultiTerminal.API.Controllers
     public class ElicitationsController : ControllerBase
     {
         private readonly MessageBroker _broker;
+        private readonly PermissionRelayService _permissionRelay;
 
-        public ElicitationsController(MessageBroker broker)
+        public ElicitationsController(MessageBroker broker, PermissionRelayService permissionRelay = null)
         {
             _broker = broker;
+            _permissionRelay = permissionRelay;
         }
 
         /// <summary>
@@ -37,6 +40,10 @@ namespace MultiTerminal.API.Controllers
 
             _broker.StoreElicitation(elicitation);
 
+            // Fire-and-forget bridge to Cloudflare Worker permission relay.
+            // No-op if the relay is disabled or not configured (see PermissionRelayService).
+            _permissionRelay?.Bridge(elicitation);
+
             return Ok(new { success = true, elicitationId = request.ElicitationId });
         }
 
@@ -53,6 +60,8 @@ namespace MultiTerminal.API.Controllers
             if (!validActions.Contains(request.Action))
                 return BadRequest(new { error = "action must be accept, decline, or cancel" });
 
+            InferRemoteModeFromSource();
+
             var response = new ElicitationResponse
             {
                 Action = request.Action,
@@ -63,7 +72,38 @@ namespace MultiTerminal.API.Controllers
             if (!success)
                 return NotFound(new { error = "Elicitation not found or expired" });
 
+            // Cancel any in-flight Worker poll for this elicitation — we already have the answer
+            _permissionRelay?.Cancel(id);
+
             return Ok(new { success = true });
+        }
+
+        // X-Source header presence-inference. The signal must be EXPLICIT so ambient
+        // traffic doesn't thrash the flag.
+        //   X-Source: phone    → remote mode on
+        //   X-Source: desktop  → remote mode off
+        //   absent / other     → leave state unchanged
+        // Short-circuits when the inferred value already matches current state — avoids
+        // rewriting settings.txt on every HTTP hit and keeps the audit log meaningful.
+        private void InferRemoteModeFromSource()
+        {
+            if (!Request.Headers.TryGetValue("X-Source", out var v)) return;
+            var src = v.ToString();
+
+            bool intended;
+            if (string.Equals(src, "phone", StringComparison.OrdinalIgnoreCase))
+                intended = true;
+            else if (string.Equals(src, "desktop", StringComparison.OrdinalIgnoreCase))
+                intended = false;
+            else
+                return;
+
+            if (intended == _broker.IsRemoteMode) return;
+
+            var callerIp = HttpContext?.Connection?.RemoteIpAddress?.ToString() ?? "unknown";
+            _broker.DebugLogService?.Info("RemoteMode",
+                $"{(intended ? "desktop→phone" : "phone→desktop")} (X-Source={src}, caller={callerIp})");
+            _broker.SetRemoteMode(intended);
         }
 
         /// <summary>

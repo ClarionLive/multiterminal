@@ -224,6 +224,7 @@ namespace MultiTerminal.Docking
             get => _customTitle;
             set
             {
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.CustomTitle.set] Instance={InstanceId} DocId='{_docId}' old='{_customTitle}' new='{value}' _projectName='{_projectName}'");
                 _customTitle = value;
                 UpdateTabTitle();
                 // Start polling for status line data once we know the terminal name
@@ -238,6 +239,7 @@ namespace MultiTerminal.Docking
                 var title = !string.IsNullOrEmpty(_projectName)
                     ? $"{_customTitle} - {_projectName}"
                     : _customTitle;
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.UpdateTabTitle] Instance={InstanceId} DocId='{_docId}' setting Text/TabText='{title}' (customTitle='{_customTitle}' projectName='{_projectName}')");
                 Text = title;
                 TabText = title;
             }
@@ -321,6 +323,12 @@ namespace MultiTerminal.Docking
                 if (!string.IsNullOrEmpty(CustomTitle) && _messageBroker != null)
                 {
                     UpdateStatusBar();
+                }
+
+                // Push current remoteMode state so the Input pill reflects reality on load
+                if (_messageBroker != null)
+                {
+                    _statusBar.SetRemoteMode(_messageBroker.IsRemoteMode);
                 }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
@@ -917,15 +925,25 @@ namespace MultiTerminal.Docking
                 try
                 {
                     var project = _messageBroker.ProjectDatabase?.GetProject(projectId);
+                    System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] _messageBroker.ProjectDatabase.GetProject('{projectId}') => {(project == null ? "NULL" : $"id='{project.Id}' name='{project.Name}' path='{project.Path}'")}");
                     if (project != null && !string.IsNullOrEmpty(project.Name))
+                    {
+                        if (!string.Equals(project.Id, projectId, StringComparison.Ordinal))
+                            System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] *** BROKER DB ID MISMATCH *** requested='{projectId}' returned='{project.Id}' name='{project.Name}'");
                         _projectName = project.Name;
+                    }
                 }
-                catch { /* ignore lookup errors */ }
+                catch (Exception lookupEx)
+                {
+                    System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] project lookup threw: {lookupEx.Message}");
+                }
             }
             if (string.IsNullOrEmpty(_projectName) && !string.IsNullOrEmpty(workingDirectory))
             {
                 _projectName = System.IO.Path.GetFileName(workingDirectory.TrimEnd('\\', '/'));
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] Fell back to folder-name projectName='{_projectName}' from workingDirectory='{workingDirectory}'");
             }
+            System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] Final _projectName='{_projectName}' for projectId='{projectId}'");
 
             // Set terminal name as custom title if provided
             if (!string.IsNullOrEmpty(terminalName))
@@ -933,6 +951,12 @@ namespace MultiTerminal.Docking
                 System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Setting CustomTitle to '{terminalName}'");
                 CustomTitle = terminalName;
             }
+
+            // Pre-write a fallback statusline file with the folder path so the header
+            // always shows SOMETHING even if the Claude Code process has a project-level
+            // statusLine override and never invokes scripts/statusline.js. When the real
+            // script does run, it overwrites this file with full model/git/quota data.
+            WriteFallbackStatusline(terminalName, workingDirectory);
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
             _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
@@ -1211,7 +1235,7 @@ namespace MultiTerminal.Docking
 
             try
             {
-                var settings = new SettingsService();
+                var settings = SettingsService.Default;
                 string x = settings.Get("DiffPopupX");
                 string y = settings.Get("DiffPopupY");
                 string w = settings.Get("DiffPopupWidth");
@@ -1251,7 +1275,7 @@ namespace MultiTerminal.Docking
         {
             try
             {
-                var settings = new SettingsService();
+                var settings = SettingsService.Default;
                 if (_diffPopupBounds.HasValue)
                 {
                     var b = _diffPopupBounds.Value;
@@ -1924,6 +1948,15 @@ body {{
                 _messageBroker.ActivityService.ActivityUpdated += OnActivityUpdated;
             }
 
+            // Keep the Input: Local/Remote pill in sync with server-side remoteMode flips.
+            if (_messageBroker != null)
+            {
+                _messageBroker.RemoteModeChanged -= OnRemoteModeChanged;
+                _messageBroker.RemoteModeChanged += OnRemoteModeChanged;
+                // Push current state immediately (renderer buffers if not yet ready)
+                _statusBar?.SetRemoteMode(_messageBroker.IsRemoteMode);
+            }
+
             // Wire task HUD to broker.
             // If CustomTitle is already set, initialize fully.
             // If not, still call Initialize so HUD can pick up any _pendingTerminalName
@@ -1955,6 +1988,19 @@ body {{
             {
                 UpdateStatusBar();
             }
+        }
+
+        /// <summary>
+        /// Pushes a remoteMode change to the status bar renderer. Runs on UI thread.
+        /// </summary>
+        private void OnRemoteModeChanged(object sender, bool enabled)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnRemoteModeChanged(sender, enabled)));
+                return;
+            }
+            _statusBar?.SetRemoteMode(enabled);
         }
 
         /// <summary>
@@ -2080,6 +2126,57 @@ body {{
         }
 
         /// <summary>
+        /// Pre-writes a fallback statusline JSON file containing just the folder path
+        /// and terminal name. Ensures the header renders something (folder row + model
+        /// placeholder) even if the child Claude Code process has a project-level
+        /// statusLine override that points elsewhere and never invokes our script.
+        /// The real statusline.js overwrites this on its first tick if it runs.
+        /// </summary>
+        private void WriteFallbackStatusline(string terminalName, string workingDirectory)
+        {
+            if (string.IsNullOrEmpty(terminalName) || string.IsNullOrEmpty(_docId)) return;
+
+            try
+            {
+                string folder = workingDirectory ?? "";
+                string folderName = string.IsNullOrEmpty(folder)
+                    ? ""
+                    : Path.GetFileName(folder.TrimEnd('\\', '/'));
+
+                var fallback = new Dictionary<string, object>
+                {
+                    ["terminalName"] = terminalName,
+                    ["model"] = (string)null,
+                    ["folder"] = folder,
+                    ["folderName"] = folderName,
+                    ["contextPct"] = (int?)null,
+                    ["quota5h"] = (int?)null,
+                    ["quota7d"] = (int?)null,
+                    ["pace5h"] = (int?)null,
+                    ["pace7d"] = (int?)null,
+                    ["resetIn5h"] = (string)null,
+                    ["isOffPeak"] = false,
+                    ["gitBranch"] = "",
+                    ["gitStatus"] = "",
+                    ["gitDirty"] = false,
+                    ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ["fallback"] = true
+                };
+
+                string filePath = Path.Combine(
+                    Path.GetTempPath(),
+                    $"mt-statusline-{terminalName}-{_docId}.json");
+
+                File.WriteAllText(filePath, JsonSerializer.Serialize(fallback));
+                System.Diagnostics.Trace.WriteLine($"[TerminalDocument.WriteFallbackStatusline] Wrote fallback to '{filePath}'");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[TerminalDocument.WriteFallbackStatusline] Failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Starts polling the status line temp file for Claude Code session data.
         /// Called when the terminal identity is known (CustomTitle is set).
         /// </summary>
@@ -2094,7 +2191,9 @@ body {{
             {
                 try
                 {
-                    string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}.json");
+                    // File path is scoped by both terminal name AND docId so sibling
+                    // terminals with the same name can't read each other's statusline.
+                    string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
                     if (!File.Exists(filePath)) return;
 
                     string content = File.ReadAllText(filePath);
@@ -2228,6 +2327,7 @@ body {{
                                 resolvedProjectName = System.IO.Path.GetFileName(folderForUi.TrimEnd('\\', '/'));
                             }
 
+                            System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StatusLinePoll] Instance={InstanceId} DocId='{_docId}' folderForUi='{folderForUi}' resolvedProjectId='{resolvedProjectId}' resolvedProjectName='{resolvedProjectName}' (was _projectName='{_projectName}')");
                             _projectName = resolvedProjectName;
                             // Also refresh the status bar Row 1 so its project-name
                             // title tracks Claude Code's real workspace instead of
@@ -2258,6 +2358,19 @@ body {{
         {
             _statusLineTimer?.Dispose();
             _statusLineTimer = null;
+
+            // Delete this terminal's scoped statusline file so %TEMP% doesn't
+            // accumulate orphans. Best-effort — missing/locked file is fine.
+            try
+            {
+                string terminalName = CustomTitle;
+                if (!string.IsNullOrEmpty(terminalName) && !string.IsNullOrEmpty(_docId))
+                {
+                    string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
+                    if (File.Exists(filePath)) File.Delete(filePath);
+                }
+            }
+            catch { /* best-effort cleanup */ }
         }
 
         /// <summary>
@@ -2399,6 +2512,12 @@ body {{
                 if (_messageBroker?.ActivityService != null)
                 {
                     _messageBroker.ActivityService.ActivityUpdated -= OnActivityUpdated;
+                }
+
+                // Unsubscribe from remoteMode change notifications
+                if (_messageBroker != null)
+                {
+                    _messageBroker.RemoteModeChanged -= OnRemoteModeChanged;
                 }
 
                 // Unsubscribe splitter events BEFORE disposing child controls

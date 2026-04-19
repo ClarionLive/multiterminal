@@ -42,8 +42,9 @@ namespace MultiTerminal.MCPServer.Services
         private readonly ConcurrentDictionary<string, ElicitationRequest> _pendingElicitations = new ConcurrentDictionary<string, ElicitationRequest>();
         private readonly ConcurrentDictionary<string, ElicitationResponse> _elicitationResponses = new ConcurrentDictionary<string, ElicitationResponse>();
 
-        // Remote mode: when true, hooks relay questions/elicitations to ClaudeRemote on phone
-        private volatile bool _remoteMode = false;
+        // Remote mode: when true, hooks relay questions/elicitations to ClaudeRemote on phone.
+        // Backed by SettingsService (key: remoteMode.enabled) so the flag survives MT restart.
+        private const string SettingRemoteMode = "remoteMode.enabled";
 
         // Message queue persistence for reliable delivery
         private readonly MessageQueueDatabase _messageQueueDb;
@@ -891,9 +892,32 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Get or set remote mode. When on, hooks relay questions to ClaudeRemote.
+        /// Persisted via SettingsService so the value survives MT restart.
         /// </summary>
-        public bool IsRemoteMode => _remoteMode;
-        public void SetRemoteMode(bool enabled) => _remoteMode = enabled;
+        public bool IsRemoteMode
+        {
+            get
+            {
+                var v = SettingsService.Default.Get(SettingRemoteMode);
+                return v == "1" || string.Equals(v, "true", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>
+        /// Fires only when the persisted remoteMode value actually changes (post-idempotent-check).
+        /// UI (terminal status bar pill, phone toggle) subscribes to stay in sync with server-side flips
+        /// from the desktop-presence hook, X-Source auto-infer, and manual /api/remote-mode toggles.
+        /// </summary>
+        public event EventHandler<bool> RemoteModeChanged;
+
+        public void SetRemoteMode(bool enabled)
+        {
+            // Idempotent — skip the write if the value isn't changing. Avoids rewriting
+            // settings.txt on every UserPromptSubmit hook fire + every phone X-Source ping.
+            if (IsRemoteMode == enabled) return;
+            SettingsService.Default.Set(SettingRemoteMode, enabled ? "1" : "0");
+            RemoteModeChanged?.Invoke(this, enabled);
+        }
 
         /// <summary>
         /// Get terminal by ID, DocId, or name.

@@ -162,6 +162,41 @@
             color: var(--text-muted);
         }
 
+        /* Input source pill (Local / Remote) */
+        .input-pill {
+            flex-shrink: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 7px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            border-radius: 3px;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            user-select: none;
+            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        }
+
+        .input-pill .input-label {
+            color: var(--text-muted);
+        }
+
+        .input-pill .input-value {
+            color: var(--text-secondary);
+        }
+
+        .input-pill.remote {
+            background: rgba(99, 102, 241, 0.15);
+            border-color: #6366f1;
+        }
+
+        .input-pill.remote .input-value {
+            color: #6366f1;
+        }
+
         /* HUD slide toggle */
         .hud-toggle {
             flex-shrink: 0;
@@ -518,6 +553,10 @@
                     <span class="task-label">Ready to work</span>
                 </div>
             </div>
+            <div class="input-pill" id="input-pill" title="Input source (Local = desktop, Remote = phone)">
+                <span class="input-label">Input:</span>
+                <span class="input-value" id="input-value">Local</span>
+            </div>
             <div class="hud-toggle active" id="hud-toggle" title="Show/Hide Task HUD" onclick="onHudToggleClick()">
                 <span class="hud-toggle-label">HUD</span>
                 <div class="hud-toggle-track">
@@ -591,6 +630,19 @@
             var el = document.getElementById('hud-toggle');
             if (isActive) el.classList.add('active');
             else el.classList.remove('active');
+        }
+
+        function setRemoteMode(enabled) {
+            var el = document.getElementById('input-pill');
+            var valEl = document.getElementById('input-value');
+            if (!el || !valEl) return;
+            if (enabled) {
+                el.classList.add('remote');
+                valEl.textContent = 'Remote';
+            } else {
+                el.classList.remove('remote');
+                valEl.textContent = 'Local';
+            }
         }
 
         function onOpenFolderClick() {
@@ -861,6 +913,8 @@
                         updateStatusLine(JSON.parse(data.substring(11)));
                     } else if (data.startsWith('hudState:')) {
                         setHudToggleState(data.split(':')[1] === 'true');
+                    } else if (data.startsWith('remoteMode:')) {
+                        setRemoteMode(data.split(':')[1] === 'true');
                     }
                 }
             });
