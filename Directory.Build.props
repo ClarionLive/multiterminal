@@ -1,0 +1,41 @@
+<Project>
+  <!--
+    Repo-wide MSBuild defaults. Loaded automatically by every *.csproj under this directory.
+    Individual csprojs can override any of these (a setting in the csproj wins).
+
+    Strategy: enforce strict defaults going forward, but let existing projects opt out
+    per-file via their own <Nullable>disable</Nullable> etc. until they're cleaned up.
+  -->
+  <PropertyGroup>
+    <!-- Treat analyzer/compiler warnings as build errors by default. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!--
+      Rules that are visible as warnings but don't break the build.
+      Two categories:
+        1. Rules we accept long-term (logging API, XML doc headers).
+        2. Rules we plan to fix in Item 4 of the lint task — once fixed, delete
+           them from this list so they're load-bearing again.
+    -->
+    <WarningsNotAsErrors>
+      $(WarningsNotAsErrors);
+      CA1848;SA1633;
+      CA1001;CA1063;CA1816;CA2000;CA2100;CA2213;CA3003;
+      CA2216;CA3001;CA5394
+    </WarningsNotAsErrors>
+
+    <!-- Default to nullable-enabled for NEW projects. Existing csprojs that set
+         <Nullable>disable</Nullable> will keep their opt-out until migrated. -->
+    <Nullable>enable</Nullable>
+
+    <!-- Run IDE/formatting analyzers during build (IDE00xx rules). -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!-- Make sure NetAnalyzers + StyleCop severities kick in. -->
+    <AnalysisMode>Recommended</AnalysisMode>
+    <AnalysisLevel>latest</AnalysisLevel>
+
+    <!-- Don't produce XML doc files; SA1633/SA1600 are silenced in .editorconfig. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+</Project>

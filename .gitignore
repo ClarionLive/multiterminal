@@ -47,6 +47,11 @@ Thumbs.db
 # Git-stint worktrees
 .stint/
 
+# Transient agent/runtime state (regeneratable, not team-wide)
+.claude/scheduled_tasks.lock
+memory/
+.codesight/
+
 # Misc artifacts
 nul
 cq-windows-amd64.exe

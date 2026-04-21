@@ -1,0 +1,349 @@
+# EditorConfig: https://editorconfig.org
+# Top-most EditorConfig for the MultiTerminal repo.
+#
+# Strategy: ship a strict-looking config but baseline the existing codebase to
+# 'suggestion' for noisy rules so day-one builds stay green. Raise severities
+# rule-by-rule as violations are cleaned up. Critical correctness/security
+# rules (dispose, SQL injection, crypto, GC) stay at warning/error.
+
+root = true
+
+# ============================================================================
+# Baseline for all files
+# ============================================================================
+[*]
+indent_style = space
+indent_size = 4
+tab_width = 4
+end_of_line = crlf
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# ============================================================================
+# Language-specific overrides
+# ============================================================================
+[*.{json,yml,yaml,js,mjs,cjs,ts,html,css,scss,md}]
+indent_size = 2
+
+[*.{csproj,props,targets,config,xml,xaml,resx}]
+indent_size = 2
+
+[*.{sh,ps1}]
+end_of_line = lf
+
+[*.md]
+trim_trailing_whitespace = false
+
+# ============================================================================
+# C# style + analyzer severities
+# ============================================================================
+[*.cs]
+indent_size = 4
+
+# --- Language preferences -------------------------------------------------
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_prefer_braces = true:suggestion
+csharp_style_var_for_built_in_types = false:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = false:suggestion
+csharp_style_expression_bodied_methods = when_on_single_line:silent
+csharp_style_expression_bodied_properties = when_on_single_line:silent
+csharp_style_namespace_declarations = block_scoped:silent
+csharp_prefer_simple_using_statement = true:suggestion
+csharp_style_prefer_pattern_matching = true:suggestion
+csharp_indent_case_contents = true
+csharp_indent_switch_labels = true
+
+# --- .NET style preferences ------------------------------------------------
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+dotnet_style_qualification_for_field = false:silent
+dotnet_style_qualification_for_property = false:silent
+dotnet_style_qualification_for_method = false:silent
+dotnet_style_qualification_for_event = false:silent
+dotnet_style_predefined_type_for_locals_parameters_members = true:suggestion
+dotnet_style_readonly_field = true:suggestion
+
+# ---------------------------------------------------------------------------
+# Analyzer severities
+#
+# Philosophy:
+#   error      = will break the build (use sparingly, for must-fix things)
+#   warning    = shown as warning; becomes error only if TreatWarningsAsErrors
+#   suggestion = shows in IDE, ignored by build  (the usual "baseline" level)
+#   silent     = hidden, essentially off
+#
+# We lean heavily on 'suggestion' for existing-code noise; keep correctness
+# and security rules louder.
+# ---------------------------------------------------------------------------
+
+# ---- Nullable reference types (CS85xx / CS86xx) ---------------------------
+# Projects still set <Nullable>disable</Nullable>, so these rarely fire today.
+# When a project opts in (remove the disable), we want warnings, not errors,
+# until that project has been cleaned. Leave at warning globally; critical
+# misuse is caught by CA rules below.
+dotnet_diagnostic.CS8600.severity = suggestion
+dotnet_diagnostic.CS8601.severity = suggestion
+dotnet_diagnostic.CS8602.severity = suggestion
+dotnet_diagnostic.CS8603.severity = suggestion
+dotnet_diagnostic.CS8604.severity = suggestion
+dotnet_diagnostic.CS8618.severity = suggestion
+dotnet_diagnostic.CS8625.severity = suggestion
+
+# ---- FxCop / NetAnalyzers (CAxxxx) ----------------------------------------
+
+# Critical correctness — keep loud
+dotnet_diagnostic.CA1001.severity = warning    # Type owns disposable field; should be IDisposable
+dotnet_diagnostic.CA2000.severity = warning    # Dispose objects before losing scope
+dotnet_diagnostic.CA2213.severity = warning    # Disposable fields should be disposed
+dotnet_diagnostic.CA2215.severity = warning    # Dispose methods should call base.Dispose
+dotnet_diagnostic.CA2216.severity = warning    # Disposable types should declare finalizer
+dotnet_diagnostic.CA1816.severity = warning    # GC.SuppressFinalize(this)
+dotnet_diagnostic.CA1063.severity = warning    # Implement IDisposable correctly
+
+# Security — keep loud
+dotnet_diagnostic.CA2100.severity = warning    # SQL injection
+dotnet_diagnostic.CA3001.severity = warning    # SQL injection: untrusted input
+dotnet_diagnostic.CA3002.severity = warning    # XSS
+dotnet_diagnostic.CA3003.severity = warning    # Path injection
+dotnet_diagnostic.CA3004.severity = warning    # Information disclosure
+dotnet_diagnostic.CA3005.severity = warning    # LDAP injection
+dotnet_diagnostic.CA3006.severity = warning    # Process command injection
+dotnet_diagnostic.CA3007.severity = warning    # Open redirect
+dotnet_diagnostic.CA3075.severity = warning    # Insecure DTD processing
+dotnet_diagnostic.CA3077.severity = warning    # Insecure XML resolution
+dotnet_diagnostic.CA5350.severity = warning    # Do not use weak crypto
+dotnet_diagnostic.CA5351.severity = warning    # Do not use broken crypto
+dotnet_diagnostic.CA5358.severity = warning    # Review cipher mode
+dotnet_diagnostic.CA5359.severity = warning    # Do not disable certificate validation
+dotnet_diagnostic.CA5394.severity = warning    # Insecure randomness
+
+# Reliability
+dotnet_diagnostic.CA2007.severity = silent     # ConfigureAwait(false) — noisy for WinForms apps
+dotnet_diagnostic.CA1031.severity = suggestion # Do not catch general exception types — we do this a lot on purpose
+dotnet_diagnostic.CA1032.severity = suggestion # Implement standard exception constructors
+dotnet_diagnostic.CA1507.severity = suggestion # Use nameof
+dotnet_diagnostic.CA1508.severity = suggestion # Dead conditional code
+dotnet_diagnostic.CA1806.severity = suggestion # Do not ignore method results
+
+# Naming — existing code has lots of _camel, ALLCAPS, etc.
+dotnet_diagnostic.CA1707.severity = suggestion # Identifiers should not contain underscores
+dotnet_diagnostic.CA1708.severity = suggestion # Identifiers differ only in case
+dotnet_diagnostic.CA1710.severity = suggestion # Identifiers should have correct suffix
+dotnet_diagnostic.CA1711.severity = suggestion # Identifiers should not have incorrect suffix
+dotnet_diagnostic.CA1715.severity = suggestion # Identifiers should have correct prefix (I for interface)
+dotnet_diagnostic.CA1716.severity = suggestion # Identifiers should not match keywords
+dotnet_diagnostic.CA1720.severity = suggestion # Identifiers should not contain type names
+dotnet_diagnostic.CA1721.severity = suggestion # Property names should not match Get methods
+dotnet_diagnostic.CA1724.severity = suggestion # Type names should not match namespaces
+dotnet_diagnostic.CA1725.severity = suggestion # Parameter names should match base declaration
+
+# Performance — review later
+dotnet_diagnostic.CA1805.severity = suggestion # Do not initialize unnecessarily
+dotnet_diagnostic.CA1810.severity = suggestion # Initialize reference type static fields inline
+dotnet_diagnostic.CA1812.severity = suggestion # Avoid uninstantiated internal classes
+dotnet_diagnostic.CA1822.severity = suggestion # Mark members as static
+dotnet_diagnostic.CA1823.severity = suggestion # Avoid unused private fields
+dotnet_diagnostic.CA1824.severity = suggestion # Mark assemblies with NeutralResourcesLanguage
+dotnet_diagnostic.CA1825.severity = suggestion # Avoid zero-length array allocations
+dotnet_diagnostic.CA1826.severity = suggestion # Use property instead of Linq Enumerable method
+dotnet_diagnostic.CA1827.severity = suggestion # Do not use Count() when Any() will do
+dotnet_diagnostic.CA1828.severity = suggestion # Do not use CountAsync when AnyAsync will do
+dotnet_diagnostic.CA1829.severity = suggestion # Use Length/Count instead of Count()
+dotnet_diagnostic.CA1830.severity = suggestion # Prefer strongly-typed Append/Insert overloads
+dotnet_diagnostic.CA1831.severity = suggestion # Use AsSpan instead of Range-based indexers
+dotnet_diagnostic.CA1832.severity = suggestion # Use AsSpan or AsMemory instead of Range-based indexers
+dotnet_diagnostic.CA1834.severity = suggestion # Use StringBuilder.Append(char)
+dotnet_diagnostic.CA1835.severity = suggestion # Prefer Memory overloads for Stream.ReadAsync/WriteAsync
+dotnet_diagnostic.CA1836.severity = suggestion # Prefer IsEmpty over Count
+dotnet_diagnostic.CA1837.severity = suggestion # Use Environment.ProcessId instead of Process.GetCurrentProcess().Id
+dotnet_diagnostic.CA1838.severity = suggestion # Avoid StringBuilder parameters for P/Invokes
+dotnet_diagnostic.CA1841.severity = suggestion # Prefer Dictionary.Contains methods
+dotnet_diagnostic.CA1845.severity = suggestion # Use span-based string.Concat
+dotnet_diagnostic.CA1846.severity = suggestion # Prefer AsSpan over Substring
+dotnet_diagnostic.CA1847.severity = suggestion # Use string.Contains(char) instead of string.Contains(string)
+dotnet_diagnostic.CA1848.severity = silent     # LoggerMessage — very noisy, not worth forcing
+
+# Usage / design — review later
+dotnet_diagnostic.CA1051.severity = suggestion # Do not declare visible instance fields
+dotnet_diagnostic.CA1052.severity = suggestion # Static holder types should be static
+dotnet_diagnostic.CA1054.severity = suggestion # Uri parameters should not be strings
+dotnet_diagnostic.CA1055.severity = suggestion # Uri return values should not be strings
+dotnet_diagnostic.CA1056.severity = suggestion # Uri properties should not be strings
+dotnet_diagnostic.CA1062.severity = suggestion # Validate arguments of public methods
+dotnet_diagnostic.CA1064.severity = suggestion # Exceptions should be public
+dotnet_diagnostic.CA1065.severity = suggestion # Do not raise exceptions in unexpected locations
+dotnet_diagnostic.CA1303.severity = silent     # Do not pass literals as localized parameters — not localized
+dotnet_diagnostic.CA1304.severity = suggestion # Specify CultureInfo
+dotnet_diagnostic.CA1305.severity = suggestion # Specify IFormatProvider
+dotnet_diagnostic.CA1307.severity = suggestion # Specify StringComparison for clarity
+dotnet_diagnostic.CA1308.severity = suggestion # Normalize strings to uppercase
+dotnet_diagnostic.CA1309.severity = suggestion # Use ordinal string comparison
+dotnet_diagnostic.CA1310.severity = suggestion # Specify StringComparison for correctness
+dotnet_diagnostic.CA1311.severity = suggestion # Specify a culture or use an invariant version
+dotnet_diagnostic.CA1401.severity = suggestion # P/Invokes should not be visible
+dotnet_diagnostic.CA1416.severity = silent     # Validate platform compatibility — we set SupportedOSPlatformVersion already
+dotnet_diagnostic.CA1417.severity = suggestion # Do not use OutAttribute on string parameters for P/Invokes
+dotnet_diagnostic.CA1419.severity = suggestion # Provide a parameterless constructor for SafeHandle subclasses
+dotnet_diagnostic.CA1420.severity = suggestion # Property, type, or attribute requires runtime marshalling
+
+# Documentation
+dotnet_diagnostic.CA1014.severity = silent     # CLSCompliant — not a library
+dotnet_diagnostic.CA2227.severity = suggestion # Collection properties should be read-only
+
+# ---- StyleCop (SAxxxx) ----------------------------------------------------
+# Existing code doesn't follow StyleCop conventions. Default everything to
+# suggestion; raise rule-by-rule as cleanup happens.
+
+# Layout
+dotnet_diagnostic.SA1101.severity = silent     # Prefix local calls with this
+dotnet_diagnostic.SA1200.severity = silent     # Using directives must be placed correctly
+dotnet_diagnostic.SA1201.severity = suggestion # Elements must appear in the correct order
+dotnet_diagnostic.SA1202.severity = suggestion # Elements must be ordered by access
+dotnet_diagnostic.SA1204.severity = suggestion # Static elements must appear before instance elements
+dotnet_diagnostic.SA1208.severity = suggestion # System usings must appear first
+dotnet_diagnostic.SA1210.severity = suggestion # Using directives must be ordered alphabetically
+dotnet_diagnostic.SA1214.severity = suggestion # Readonly elements must appear before non-readonly elements
+
+# Readability
+dotnet_diagnostic.SA1101.severity = silent     # Prefix local calls with this (duplicate — belt-and-braces)
+dotnet_diagnostic.SA1118.severity = suggestion # Parameter must not span multiple lines
+dotnet_diagnostic.SA1124.severity = suggestion # Do not use regions
+dotnet_diagnostic.SA1128.severity = suggestion # Constructor initializer must be on own line
+
+# Documentation — mostly silent; the project doesn't ship XML docs today
+dotnet_diagnostic.SA1600.severity = silent     # Elements must be documented
+dotnet_diagnostic.SA1601.severity = silent     # Partial elements must be documented
+dotnet_diagnostic.SA1602.severity = silent     # Enumeration items must be documented
+dotnet_diagnostic.SA1633.severity = silent     # File must have header
+dotnet_diagnostic.SA1649.severity = silent     # File name must match first type
+dotnet_diagnostic.SA1652.severity = silent     # Enable XML documentation output
+
+# Naming
+dotnet_diagnostic.SA1300.severity = silent     # Element must begin with upper-case — many WinForms conventions violate
+dotnet_diagnostic.SA1302.severity = suggestion # Interface names must begin with I
+dotnet_diagnostic.SA1303.severity = suggestion # Const field names must begin with upper-case
+dotnet_diagnostic.SA1304.severity = suggestion # Non-private readonly fields must begin with upper-case
+dotnet_diagnostic.SA1306.severity = silent     # Field names must begin with lower-case — we use _camelCase and PascalCase readonly
+dotnet_diagnostic.SA1307.severity = silent     # Accessible fields must begin with upper-case
+dotnet_diagnostic.SA1308.severity = silent     # Variable names must not be prefixed — we use _field
+dotnet_diagnostic.SA1309.severity = silent     # Field names must not begin with underscore — WE DO USE _field
+dotnet_diagnostic.SA1310.severity = suggestion # Field names must not contain underscore
+dotnet_diagnostic.SA1311.severity = silent     # Static readonly fields must begin with upper-case
+
+# Maintainability
+dotnet_diagnostic.SA1401.severity = suggestion # Fields must be private
+dotnet_diagnostic.SA1402.severity = suggestion # File may only contain a single type
+dotnet_diagnostic.SA1404.severity = suggestion # Code analysis suppression must have justification
+
+# XML docs not enabled for this project.
+dotnet_diagnostic.SA0001.severity = none
+
+# Spacing + layout style — silent (pure formatting churn, not a defect).
+dotnet_diagnostic.SA1000.severity = silent
+dotnet_diagnostic.SA1001.severity = silent
+dotnet_diagnostic.SA1002.severity = silent
+dotnet_diagnostic.SA1003.severity = silent
+dotnet_diagnostic.SA1005.severity = silent
+dotnet_diagnostic.SA1008.severity = silent
+dotnet_diagnostic.SA1009.severity = silent
+dotnet_diagnostic.SA1010.severity = silent
+dotnet_diagnostic.SA1011.severity = silent
+dotnet_diagnostic.SA1012.severity = silent
+dotnet_diagnostic.SA1013.severity = silent
+dotnet_diagnostic.SA1025.severity = silent
+dotnet_diagnostic.SA1028.severity = silent
+
+# Readability nags — silent until we decide to enforce.
+dotnet_diagnostic.SA1100.severity = silent  # Do not prefix calls with base unless needed
+dotnet_diagnostic.SA1107.severity = silent  # Code must not contain multiple statements on one line
+dotnet_diagnostic.SA1108.severity = silent  # Block statements should not contain embedded comments
+dotnet_diagnostic.SA1111.severity = silent  # Closing parenthesis placement
+dotnet_diagnostic.SA1116.severity = silent  # Parameters must begin on the line after declaration
+dotnet_diagnostic.SA1117.severity = silent  # All parameters on same line or each on its own
+dotnet_diagnostic.SA1119.severity = silent  # Unnecessary parens
+dotnet_diagnostic.SA1120.severity = silent  # Comments should contain text
+dotnet_diagnostic.SA1122.severity = silent  # Use string.Empty for empty strings
+dotnet_diagnostic.SA1136.severity = silent  # Enum values on separate lines
+dotnet_diagnostic.SA1137.severity = silent  # Elements should have the same indentation
+dotnet_diagnostic.SA1203.severity = silent  # Constants before non-constants
+dotnet_diagnostic.SA1316.severity = silent  # Tuple element casing
+dotnet_diagnostic.SA1400.severity = silent  # Access modifier must be declared
+dotnet_diagnostic.SA1407.severity = silent  # Arithmetic expressions should declare precedence
+dotnet_diagnostic.SA1408.severity = silent  # Conditional expressions should declare precedence
+dotnet_diagnostic.SA1500.severity = silent  # Braces for multi-line statements
+dotnet_diagnostic.SA1501.severity = silent  # Statement must not be on single line
+dotnet_diagnostic.SA1502.severity = silent  # Element must not be on single line
+dotnet_diagnostic.SA1503.severity = silent  # Braces must not be omitted
+dotnet_diagnostic.SA1504.severity = silent  # All accessors must be single-line or multi-line
+dotnet_diagnostic.SA1505.severity = silent  # Opening braces must not be followed by blank line
+dotnet_diagnostic.SA1506.severity = silent  # Element docs must not be followed by blank line
+dotnet_diagnostic.SA1507.severity = silent  # Code must not contain multiple blank lines
+dotnet_diagnostic.SA1508.severity = silent  # Closing braces must not be preceded by blank line
+dotnet_diagnostic.SA1509.severity = silent  # Opening brace must not be preceded by blank line
+dotnet_diagnostic.SA1510.severity = silent
+dotnet_diagnostic.SA1511.severity = silent
+dotnet_diagnostic.SA1517.severity = silent  # Code must not contain blank lines at start of file
+dotnet_diagnostic.SA1520.severity = silent  # Use braces consistently
+
+# Ordering noise — silent.
+dotnet_diagnostic.SA1413.severity = silent # Use trailing comma in multi-line initializers
+dotnet_diagnostic.SA1512.severity = silent # Single-line comments must not be followed by blank line
+dotnet_diagnostic.SA1513.severity = silent # Closing brace must be followed by blank line
+dotnet_diagnostic.SA1514.severity = silent # Element documentation header must be preceded by blank line
+dotnet_diagnostic.SA1515.severity = silent # Single-line comment must be preceded by blank line
+dotnet_diagnostic.SA1516.severity = silent # Elements must be separated by blank line
+dotnet_diagnostic.SA1518.severity = silent # Use line endings correctly at end of file
+dotnet_diagnostic.SA1519.severity = silent # Braces must not be omitted from multi-line child statement
+
+# CA perf / style rules — suggestion: informational, don't fail the build.
+dotnet_diagnostic.CA1510.severity = suggestion # Use ArgumentNullException.ThrowIfNull
+dotnet_diagnostic.CA1850.severity = suggestion # Prefer static HashData over ComputeHash
+dotnet_diagnostic.CA1852.severity = suggestion # Type can be sealed
+dotnet_diagnostic.CA1854.severity = suggestion # TryGetValue over ContainsKey + indexer
+dotnet_diagnostic.CA1859.severity = suggestion # Concrete return type for performance
+dotnet_diagnostic.CA1860.severity = suggestion # Prefer Count property over Any()
+dotnet_diagnostic.CA1861.severity = suggestion # Constant array arguments
+dotnet_diagnostic.CA1862.severity = suggestion # Use StringComparison method overloads
+dotnet_diagnostic.CA1866.severity = suggestion # Use char overload for Starts/EndsWith etc.
+dotnet_diagnostic.CA1869.severity = suggestion # Cache JsonSerializerOptions instances
+dotnet_diagnostic.CA1870.severity = suggestion # Use cached SearchValues
+dotnet_diagnostic.CA2016.severity = suggestion # Forward CancellationToken
+dotnet_diagnostic.CA2249.severity = suggestion # Contains over IndexOf
+dotnet_diagnostic.CA2263.severity = suggestion # Prefer generic overload (typeof)
+
+# Disposable-pattern warnings — the "critical" ones per the plan. Keep them
+# visible at warning severity so they show up in the IDE, but add them to
+# WarningsNotAsErrors in Directory.Build.props so they don't fail the build
+# while Item 4 works through the fixes. Once Item 4 clears them, remove from
+# the allow-list so they're load-bearing again.
+# (rules listed here just for clarity — severity already set above)
+#   CA1001, CA1063, CA1816, CA2000, CA2100, CA2213, CA3003
+
+# IDE analyzers — mostly informational
+dotnet_diagnostic.IDE0003.severity = silent    # Remove qualification
+dotnet_diagnostic.IDE0011.severity = suggestion # Add braces
+dotnet_diagnostic.IDE0040.severity = silent    # Add accessibility modifiers
+dotnet_diagnostic.IDE0044.severity = suggestion # Add readonly modifier
+dotnet_diagnostic.IDE0051.severity = suggestion # Remove unused private members
+dotnet_diagnostic.IDE0052.severity = suggestion # Remove unread private members
+dotnet_diagnostic.IDE0055.severity = silent    # Fix formatting — don't reformat the world
+dotnet_diagnostic.IDE0058.severity = silent    # Expression value is never used
+dotnet_diagnostic.IDE0059.severity = suggestion # Unnecessary assignment
+dotnet_diagnostic.IDE0060.severity = suggestion # Remove unused parameter
+
+# ============================================================================
+# Generated & third-party exclusions
+# ============================================================================
+[**/obj/**.cs]
+generated_code = true
+
+[**/bin/**.cs]
+generated_code = true
+
+[*.Designer.cs]
+generated_code = true

@@ -9,7 +9,7 @@ A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET
 
 ```
 MainForm.cs (5.2K LOC) - UI Host, 11 WebView2 panels
-  REST API (port 5050) - 23 controllers in API/Controllers/
+  REST API (port 5050) - 24 controllers in API/Controllers/
   MessageBroker.cs (5.5K LOC) - Central hub, routes messages, fires events
   SQLite (TaskDatabase.cs 4.6K LOC) - 21+ tables: tasks, sessions, knowledge, profiles
   CodeGraph (Roslyn) - CodeGraphDatabase + CSharpCodeGraphIndexer, cg_ tables in same SQLite
@@ -46,6 +46,35 @@ MainForm.cs (5.2K LOC) - UI Host, 11 WebView2 panels
 1. Add tool definition in `%APPDATA%/multiterminal/mcp/index.js`
 2. Tools call REST API at localhost:5050 -> MessageBroker -> TaskDatabase
 3. Return formatted result with success/error context
+
+## Linting
+
+Two analyzer chains run from this repo. Both produce a green build/lint today; warnings are intentional carry-overs flagged for follow-up cleanup.
+
+### C# (NetAnalyzers + StyleCop)
+
+- **Run:** `dotnet build MultiTerminal.csproj -c Debug --no-restore`
+- **Where it's wired:** `Directory.Build.props` (TreatWarningsAsErrors, Nullable=enable default, EnforceCodeStyleInBuild) + `.editorconfig` (severity per rule) + `Microsoft.CodeAnalysis.NetAnalyzers` + `StyleCop.Analyzers` PackageReferences in each csproj.
+- **Suppress one site:** `#pragma warning disable CAxxxx` / `#pragma warning restore CAxxxx` around the offending line. Add a one-line comment explaining why (e.g. "WHERE clause is constant; user input flows through SQLiteParameter").
+- **Suppress whole class/method:** `[System.Diagnostics.CodeAnalysis.SuppressMessage("Category", "CAxxxx", Justification="...")]`.
+- **Baseline a noisy new rule:** add `dotnet_diagnostic.CAxxxx.severity = suggestion` (or `silent`) to the `[*.cs]` block in `.editorconfig`. Use `suggestion` for "informational, not enforced", `silent` for "off entirely".
+- **Allow a rule to warn but not fail the build:** add it to `<WarningsNotAsErrors>` in `Directory.Build.props`. Use this when you plan to fix the rule's instances later but don't want to block CI today. The block currently carries `CA1001;CA1063;CA1816;CA2000;CA2100;CA2213;CA3003;CA2216;CA3001;CA5394` for follow-up cleanup, plus `CA1848;SA1633` as long-term carve-outs.
+
+### JavaScript (ESLint v9 flat config)
+
+- **Run:** `npm run lint` (or `npm run lint:fix` to auto-fix). Requires `npm install` once after clone.
+- **Where it's wired:** `eslint.config.mjs` (flat config) + `package.json` devDependencies (`eslint`, `@eslint/js`, `globals`).
+- **Targets:** `hooks/**/*.js` and `scripts/**/*.js` only. Embedded subprojects like `mcp-session-history/` manage their own tooling.
+- **Suppress one line:** `// eslint-disable-next-line rule-name` followed by the line.
+- **Suppress one block:** `/* eslint-disable rule-name */ ... /* eslint-enable rule-name */`.
+- **Suppress unused vars:** prefix the identifier with `_` (e.g. `function foo(_unusedArg) { ... }` or `catch (_e)`). Bare `catch { }` (no binding) is also valid — ESLint won't flag it.
+- **Add/loosen a rule:** edit `eslint.config.mjs`. Keep `no-console: off` for hook scripts (they legitimately log).
+
+### When the build's warning count grows
+
+If a new rule starts firing across many files, the right move is usually: (1) decide if it's load-bearing; (2) if yes, fix the few sites and keep severity at `warning`; (3) if no, downgrade to `suggestion` in `.editorconfig` with a one-line comment explaining why. Don't add `#pragma`s everywhere — that's a smell that the rule shouldn't be at warning.
+
+**Before downgrading a rule, reason explicitly about whether it can mask a real bug.** Pure style rules (e.g. `SA1503` "braces omitted" — `if (x) foo();` behaves identically with or without braces) are safe to silence. Rules that catch semantic defects (dispose, injection, nullable deref, race conditions) are not — downgrade those only after fixing the existing sites, never as a way to make the build green. If you can't articulate in one sentence why silencing a rule can't hide a defect, keep it loud.
 
 ## Compaction Instructions
 
