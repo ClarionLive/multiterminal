@@ -66,7 +66,7 @@ namespace MultiTerminal.TaskLifecycleBoard
                 _broker.SetAutoStatus(_taskId, true);
             }
 
-            _settings = settings ?? new SettingsService();
+            _settings = settings ?? SettingsService.Default;
 
             InitializeComponent(isDarkTheme);
             RestoreWindowBounds();

@@ -19,9 +19,11 @@ namespace MultiTerminal.Panels
         private ListView _logListView;
         private ToolStrip _toolStrip;
         private ToolStripButton _clearButton;
+        private ToolStripButton _copyButton;
         private ToolStripButton _exportButton;
         private ToolStripButton _pauseButton;
         private ToolStripButton _systemWideCaptureButton;
+        private ToolStripMenuItem _copyMenuItem;
         private ToolStripLabel _countLabel;
         private DebugLogService _logService;
         private bool _isPaused = false;
@@ -80,6 +82,15 @@ namespace MultiTerminal.Panels
             };
             _clearButton.Click += OnClearClick;
 
+            _copyButton = new ToolStripButton
+            {
+                Text = "Copy Selected to Clipboard",
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                ForeColor = Color.White,
+                ToolTipText = "Copy selected rows as tab-separated text (Ctrl+C)"
+            };
+            _copyButton.Click += (s, e) => CopySelectedToClipboard();
+
             _exportButton = new ToolStripButton
             {
                 Text = "Export",
@@ -114,6 +125,8 @@ namespace MultiTerminal.Panels
 
             _toolStrip.Items.Add(_clearButton);
             _toolStrip.Items.Add(new ToolStripSeparator());
+            _toolStrip.Items.Add(_copyButton);
+            _toolStrip.Items.Add(new ToolStripSeparator());
             _toolStrip.Items.Add(_exportButton);
             _toolStrip.Items.Add(new ToolStripSeparator());
             _toolStrip.Items.Add(_pauseButton);
@@ -145,6 +158,37 @@ namespace MultiTerminal.Panels
             _logListView.Columns.Add("Source", 120);
             _logListView.Columns.Add("Level", 70);
             _logListView.Columns.Add("Message", 500);
+
+            // Right-click menu for copy
+            var listViewMenu = new ContextMenuStrip
+            {
+                Renderer = new DarkToolStripRenderer(),
+                BackColor = Color.FromArgb(45, 45, 48),
+                ForeColor = Color.White
+            };
+            _copyMenuItem = new ToolStripMenuItem("Copy Selected to Clipboard")
+            {
+                ShortcutKeyDisplayString = "Ctrl+C",
+                ForeColor = Color.White
+            };
+            _copyMenuItem.Click += (s, e) => CopySelectedToClipboard();
+            listViewMenu.Items.Add(_copyMenuItem);
+            listViewMenu.Opening += (s, e) =>
+            {
+                _copyMenuItem.Enabled = _logListView.SelectedItems.Count > 0;
+            };
+            _logListView.ContextMenuStrip = listViewMenu;
+
+            // Ctrl+C keyboard shortcut
+            _logListView.KeyDown += (s, e) =>
+            {
+                if (e.Control && e.KeyCode == Keys.C)
+                {
+                    CopySelectedToClipboard();
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                }
+            };
 
             Controls.Add(_logListView);
             Controls.Add(_toolStrip);
@@ -253,6 +297,32 @@ namespace MultiTerminal.Panels
         private void OnClearClick(object sender, EventArgs e)
         {
             _logService?.Clear();
+        }
+
+        private void CopySelectedToClipboard()
+        {
+            var selected = _logListView.SelectedItems;
+            if (selected.Count == 0) return;
+
+            var sb = new StringBuilder();
+            foreach (ListViewItem item in selected)
+            {
+                for (int i = 0; i < item.SubItems.Count; i++)
+                {
+                    if (i > 0) sb.Append('\t');
+                    sb.Append(item.SubItems[i].Text);
+                }
+                sb.Append("\r\n");
+            }
+
+            try
+            {
+                Clipboard.SetText(sb.ToString());
+            }
+            catch
+            {
+                // Clipboard can fail if another process is holding it; ignore.
+            }
         }
 
         private void OnExportClick(object sender, EventArgs e)

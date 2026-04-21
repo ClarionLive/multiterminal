@@ -15,9 +15,12 @@ process.stdin.on('end', () => {
     try {
         const data = JSON.parse(input);
         const terminalName = process.env.MULTITERMINAL_NAME;
+        const docId = process.env.MULTITERMINAL_DOC_ID;
 
-        // Graceful no-op when running outside MultiTerminal
-        if (!terminalName) {
+        // Graceful no-op when running outside MultiTerminal. Both name and docId
+        // are required — docId scopes the output file so sibling terminals with
+        // the same name can't clobber each other's statusline data.
+        if (!terminalName || !docId) {
             process.exit(0);
         }
 
@@ -85,8 +88,9 @@ process.stdin.on('end', () => {
             timestamp: Date.now()
         };
 
-        // Write to temp file keyed by terminal name
-        const outPath = path.join(os.tmpdir(), `mt-statusline-${terminalName}.json`);
+        // Write to temp file keyed by terminal name + docId so sibling terminals
+        // sharing a name (e.g. a zombie session) can't clobber each other.
+        const outPath = path.join(os.tmpdir(), `mt-statusline-${terminalName}-${docId}.json`);
         fs.writeFileSync(outPath, JSON.stringify(output), 'utf8');
 
         // Write account-level quota data to a shared file so all terminals
@@ -111,11 +115,11 @@ process.stdin.on('end', () => {
                 if (shouldWrite) {
                     fs.writeFileSync(sharedPath, JSON.stringify(sharedData), 'utf8');
                 }
-            } catch (e) {
+            } catch {
                 // Silently fail — shared file is best-effort
             }
         }
-    } catch (e) {
+    } catch {
         // Silently fail — don't break Claude Code
     }
 });
@@ -156,7 +160,7 @@ function getGitInfo(cwd) {
         try {
             ahead = parseInt(execSync('git rev-list --count @{u}..HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim()) || 0;
             behind = parseInt(execSync('git rev-list --count HEAD..@{u}', { cwd, encoding: 'utf8', timeout: 3000 }).trim()) || 0;
-        } catch (e) { /* no upstream */ }
+        } catch { /* no upstream */ }
 
         let status = '';
         if (ahead > 0) status += `\u21e1${ahead}`;
@@ -165,7 +169,7 @@ function getGitInfo(cwd) {
         if (modified > 0) status += `!${modified}`;
 
         return { branch, status, dirty: lines.length > 0 };
-    } catch (e) {
+    } catch {
         return { branch: '', status: '', dirty: false };
     }
 }

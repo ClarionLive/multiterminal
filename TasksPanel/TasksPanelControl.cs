@@ -662,6 +662,8 @@ namespace MultiTerminal.TasksPanel
         private void OnPanelReady()
         {
             DebugLog("OnPanelReady: JS sent 'ready' signal");
+            // Send pending theme before data so the panel renders in the correct mode
+            PostWebMessage($"theme:{(_isDarkTheme ? "dark" : "light")}");
             // Send current tasks, terminals, members, and projects
             SendTasksToWebView();
             SendTerminalsToWebView();

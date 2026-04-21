@@ -975,7 +975,8 @@
 
         // Launch project on card click (not pin)
         card.addEventListener('click', function() {
-            postMsg({ type: 'launch_project', projectId: project.id });
+            try { console.log('#PROJ# [start-screen.js] card click: id=' + project.id + ' name=' + project.name + ' path=' + (project.path || '')); } catch(e) {}
+            postMsg({ type: 'launch_project', projectId: project.id, projectName: project.name });
         });
 
         // Pin toggle
@@ -1054,7 +1055,8 @@
                 '<td><span class="last-opened">' + relativeTime(project.lastOpenedAt) + '</span></td>';
 
             tr.addEventListener('click', function() {
-                postMsg({ type: 'launch_project', projectId: project.id });
+                try { console.log('#PROJ# [start-screen.js] list row click: id=' + project.id + ' name=' + project.name); } catch(e) {}
+                postMsg({ type: 'launch_project', projectId: project.id, projectName: project.name });
             });
 
             body.appendChild(tr);

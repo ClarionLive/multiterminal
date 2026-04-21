@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -241,9 +242,22 @@ namespace MultiTerminal.StartScreen
                         if (root.TryGetProperty("projectId", out var launchIdEl))
                         {
                             var projectId = launchIdEl.GetString();
+                            string clickedName = root.TryGetProperty("projectName", out var nEl) ? nEl.GetString() : "(none)";
+                            System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] launch_project received: id='{projectId}' clickedName='{clickedName}' validLen={(projectId?.Length ?? -1)}");
+                            // Cross-check with the cached list we sent to JS
+                            try
+                            {
+                                var all = _projectDatabase?.GetAllRichProjects();
+                                var match = all?.FirstOrDefault(p => p.Id == projectId);
+                                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] DB lookup from same db: id='{match?.Id ?? "NULL"}' name='{match?.Name ?? "NULL"}' path='{match?.SourcePath ?? match?.Path ?? "NULL"}'");
+                            }
+                            catch (Exception dbgEx) { System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] DB lookup threw: {dbgEx.Message}"); }
                             // Validate: non-empty, GUID-length (36 chars max)
                             if (!string.IsNullOrEmpty(projectId) && projectId.Length <= 36)
+                            {
+                                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] Firing ProjectLaunched event with id='{projectId}'");
                                 ProjectLaunched?.Invoke(this, new StartScreenLaunchEventArgs(projectId));
+                            }
                         }
                         break;
 
@@ -297,6 +311,15 @@ namespace MultiTerminal.StartScreen
             try
             {
                 var projects = _projectDatabase.GetAllRichProjects();
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.SendProjectsToWebView] Sending {projects?.Count ?? 0} projects to JS");
+                if (projects != null)
+                {
+                    int dbgIdx = 0;
+                    foreach (var dp in projects.Take(20))
+                    {
+                        System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.SendProjectsToWebView]   [{dbgIdx++}] id='{dp.Id}' name='{dp.Name}' path='{dp.SourcePath ?? dp.Path}'");
+                    }
+                }
                 var projectDtos = new List<object>();
 
                 foreach (var p in projects)

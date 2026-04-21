@@ -1096,48 +1096,10 @@ namespace MultiTerminal
 
                 _debugLogService.Info("MainForm", $"Terminal spawned for {agentName} (DocId: {docId})");
 
-                // Auto-initialize Claude Code by injecting "initializing..." to trigger startup hooks
-                // This removes the need for manual Enter press after spawning
-                if (_terminalDocMap.TryGetValue(docId, out var spawnedDoc))
-                {
-                    // Wait for renderer to be ready before injecting (fixes race condition with slow-initializing terminals)
-                    System.Diagnostics.Trace.WriteLine($"[MainForm.OnSpawnRequested] Waiting for renderer ready before auto-inject for {agentName}...");
-
-                    // Increased timeout from 3s to 10s for more reliable initialization
-                    var ready = await WaitForRendererReadyAsync(spawnedDoc, timeoutMs: 10000);
-
-                    if (ready)
-                    {
-                        // Try injection with retry logic (sometimes first attempt fails)
-                        bool injected = false;
-                        for (int attempt = 1; attempt <= 3; attempt++)
-                        {
-                            injected = await spawnedDoc.InjectInputAsync("initializing...");
-                            if (injected)
-                            {
-                                System.Diagnostics.Trace.WriteLine($"[MainForm.OnSpawnRequested] Auto-injected 'initializing...' for {agentName} (attempt {attempt}, success={injected})");
-                                _debugLogService.Info("MainForm", $"Auto-submitted initializing prompt for {agentName} (attempt {attempt})");
-                                break;
-                            }
-                            else
-                            {
-                                System.Diagnostics.Trace.WriteLine($"[MainForm.OnSpawnRequested] Injection attempt {attempt} failed for {agentName}, retrying...");
-                                await Task.Delay(200); // Brief delay before retry
-                            }
-                        }
-
-                        if (!injected)
-                        {
-                            System.Diagnostics.Trace.WriteLine($"[MainForm.OnSpawnRequested] All injection attempts failed for {agentName}");
-                            _debugLogService.Warning("MainForm", $"Failed to auto-submit initializing prompt for {agentName} after 3 attempts");
-                        }
-                    }
-                    else
-                    {
-                        System.Diagnostics.Trace.WriteLine($"[MainForm.OnSpawnRequested] Timeout waiting for renderer ready for {agentName}, skipping auto-inject");
-                        _debugLogService.Warning("MainForm", $"Failed to auto-submit initializing prompt for {agentName} - renderer not ready after 10 seconds");
-                    }
-                }
+                // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's
+                // banner appears in output. That handler uses atomic TypeInput (character-by-character
+                // via xterm.js) which is reliable and avoids the double-injection bug caused by
+                // the old InjectInputAsync retry loop. No injection needed here.
 
                 return (true, docId, null);
             }
@@ -1928,7 +1890,7 @@ namespace MultiTerminal
 
         private void LoadSettings()
         {
-            _settings = new SettingsService();
+            _settings = SettingsService.Default;
 
             // Load theme preference
             string themeSetting = _settings.Get("Theme");
@@ -2296,15 +2258,28 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenProjectLaunched(object sender, StartScreenLaunchEventArgs e)
         {
-            if (sender is not TerminalDocument doc) return;
+            System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] ===== ENTER ===== projectId='{e?.ProjectId}'");
+            if (sender is not TerminalDocument doc)
+            {
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] sender is not TerminalDocument: {sender?.GetType().Name ?? "null"}");
+                return;
+            }
+            System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] sender doc: DocId='{doc.DocId}' InstanceId={doc.InstanceId} HashCode={doc.GetHashCode()} CustomTitle='{doc.CustomTitle}' TabText='{doc.TabText}' Text='{doc.Text}'");
 
             try
             {
                 var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] _sharedProjectDatabase.GetRichProject('{e.ProjectId}') returned: {(project == null ? "NULL" : $"id='{project.Id}' name='{project.Name}' sourcePath='{project.SourcePath}' path='{project.Path}'")}");
                 if (project == null)
                 {
                     System.Diagnostics.Debug.WriteLine($"[StartScreen] Project not found: {e.ProjectId}");
                     return;
+                }
+
+                // Sanity check: requested ID must equal returned ID
+                if (!string.Equals(project.Id, e.ProjectId, StringComparison.Ordinal))
+                {
+                    System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] *** ID MISMATCH *** requested='{e.ProjectId}' returned='{project.Id}' name='{project.Name}'");
                 }
 
                 // Update last opened timestamp
@@ -2315,6 +2290,7 @@ namespace MultiTerminal
                 var launchCmd = Services.LaunchCommandBuilder.BuildClaudeCommand(project);
                 string launchDir = launchCmd.WorkingDirectory;
                 string autoRunCommand = launchCmd.AutoRunCommand;
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}'");
 
                 // Register terminal before starting (start screen tabs are unregistered)
                 // If the project has a designated team lead, use their name and flag the terminal accordingly
@@ -2367,7 +2343,9 @@ namespace MultiTerminal
                 catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
 
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead}");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile);
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 // Apply current font size
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;

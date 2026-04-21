@@ -686,9 +686,27 @@ namespace MultiTerminal.Controls
             // Wait for Claude Code to process /clear (it's instant, but give the UI a moment)
             await Task.Delay(1500);
 
-            if (_isDisposed || _terminal == null || !_terminal.IsRunning) return;
+            if (_isDisposed || _terminal == null || !_terminal.IsRunning)
+            {
+                LogTrace($"/clear injection aborted: terminal not running (disposed={_isDisposed}, terminal={(_terminal == null ? "null" : "ok")}, running={_terminal?.IsRunning ?? false})");
+                return;
+            }
 
-            LogTrace("Injecting 'initializing...' after /clear to trigger session-start");
+            // Wait for renderer to be ready (may be briefly unavailable during /clear transition)
+            int waitedMs = 0;
+            while (!IsRendererReady && waitedMs < 3000)
+            {
+                await Task.Delay(100);
+                waitedMs += 100;
+            }
+
+            if (!IsRendererReady)
+            {
+                LogTrace($"/clear injection failed: renderer not ready after {waitedMs}ms (renderer={(_renderer == null ? "null" : "not initialized")})");
+                return;
+            }
+
+            LogTrace($"Injecting 'initializing...' after /clear to trigger session-start (renderer ready after {waitedMs}ms)");
             TypeInput("initializing...", "cr", 20);
         }
 
