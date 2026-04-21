@@ -361,6 +361,53 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- Dark TabControl style -->
+        <Style x:Key="DarkTabControl" TargetType="TabControl">
+            <Setter Property="Background" Value="#1E1E1E"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+
+        <!-- Dark TabItem style -->
+        <Style x:Key="DarkTabItem" TargetType="TabItem">
+            <Setter Property="Background" Value="#2D2D30"/>
+            <Setter Property="Foreground" Value="#A0A0A0"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1,1,1,0"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="Border"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3,3,0,0"
+                                Margin="0,0,2,-1">
+                            <ContentPresenter ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}"
+                                              TextBlock.Foreground="{TemplateBinding Foreground}"
+                                              TextBlock.FontFamily="{TemplateBinding FontFamily}"
+                                              TextBlock.FontSize="{TemplateBinding FontSize}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="#1E1E1E"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="#3E3E42"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -369,8 +416,11 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
+        <TabControl Grid.Row="0" Margin="16,16,16,8" Style="{StaticResource DarkTabControl}">
+            <TabItem Header="General" Style="{StaticResource DarkTabItem}">
+
         <!-- Two-column form content -->
-        <Grid Grid.Row="0" Margin="16,16,16,8">
+        <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="16"/>
@@ -639,6 +689,70 @@
 
             </StackPanel>
         </Grid>
+            </TabItem>
+
+            <TabItem Header="Pipeline" Style="{StaticResource DarkTabItem}">
+                <StackPanel Margin="16,16,16,16">
+                    <TextBlock Text="Assign each /pipeline role to a provider, or turn it off entirely. Changes take effect on the next /pipeline run."
+                               Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
+                               Margin="4,4,4,16"
+                               TextWrapping="Wrap"/>
+
+                    <GroupBox Header="Gate Providers"
+                              Style="{StaticResource DarkGroupBox}"
+                              Margin="0,0,0,10">
+                        <Grid Margin="8,12,8,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="160"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="36"/>
+                                <RowDefinition Height="36"/>
+                                <RowDefinition Height="36"/>
+                                <RowDefinition Height="36"/>
+                                <RowDefinition Height="36"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Verifier"
+                                       Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                       VerticalAlignment="Center"/>
+                            <ComboBox x:Name="VerifierProviderCombo" Grid.Row="0" Grid.Column="1"
+                                      Style="{StaticResource DarkComboBox}" Height="28"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Code Reviewer"
+                                       Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                       VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CodeReviewerProviderCombo" Grid.Row="1" Grid.Column="1"
+                                      Style="{StaticResource DarkComboBox}" Height="28"/>
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Security Auditor"
+                                       Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                       VerticalAlignment="Center"/>
+                            <ComboBox x:Name="SecurityAuditorProviderCombo" Grid.Row="2" Grid.Column="1"
+                                      Style="{StaticResource DarkComboBox}" Height="28"/>
+
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Debugger"
+                                       Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                       VerticalAlignment="Center"/>
+                            <ComboBox x:Name="DebuggerProviderCombo" Grid.Row="3" Grid.Column="1"
+                                      Style="{StaticResource DarkComboBox}" Height="28"/>
+
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Cross-Model Adversary"
+                                       Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                       VerticalAlignment="Center"/>
+                            <ComboBox x:Name="CrossModelAdversaryProviderCombo" Grid.Row="4" Grid.Column="1"
+                                      Style="{StaticResource DarkComboBox}" Height="28"/>
+                        </Grid>
+                    </GroupBox>
+
+                    <TextBlock Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                               Margin="4,0,4,0"
+                               TextWrapping="Wrap"
+                               Text="Defaults: Verifier / Code Reviewer / Security Auditor / Debugger run on Claude. Cross-Model Adversary is off. Selecting Codex requires the Codex plugin to be installed and authenticated."/>
+                </StackPanel>
+            </TabItem>
+        </TabControl>
 
         <!-- Bottom bar with OK / Cancel -->
         <Border Grid.Row="1"

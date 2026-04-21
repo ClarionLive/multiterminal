@@ -143,6 +143,8 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<MultiTerminal.Services.McpConfigService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.GatewayIntegrationService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.RipgrepService>();
+                builder.Services.AddSingleton(SettingsService.Default);
+                builder.Services.AddSingleton<PermissionRelayService>();
                 builder.Services.AddSingleton(_companionProcessManager);
                 builder.Services.AddSingleton(sp =>
                     new MultiTerminal.Services.OwnerProfileService(

@@ -30,6 +30,9 @@ namespace MultiTerminal.Dialogs
         private static readonly float[] UiFontSizes = { 8f, 9f, 10f, 11f, 12f, 14f };
         private static readonly float[] TerminalFontSizes = { 8f, 10f, 12f, 14f, 16f, 18f, 20f, 24f };
 
+        // Pipeline provider options (display-cased; SettingsService normalizes to lowercase)
+        private static readonly string[] PipelineProviders = { "Claude", "Codex", "Off" };
+
         // Public properties for MainForm to read after dialog closes
         public float ToolbarFontSize => GetSelectedFontSize(ToolbarFontCombo);
         public float TerminalFontSize => GetSelectedFontSize(TerminalFontCombo);
@@ -85,6 +88,16 @@ namespace MultiTerminal.Dialogs
             // Max Tabs per Grid: 1-10
             for (int i = 1; i <= 10; i++)
                 MaxTabsCombo.Items.Add(i.ToString());
+
+            // Pipeline provider combos
+            foreach (string provider in PipelineProviders)
+            {
+                VerifierProviderCombo.Items.Add(provider);
+                CodeReviewerProviderCombo.Items.Add(provider);
+                SecurityAuditorProviderCombo.Items.Add(provider);
+                DebuggerProviderCombo.Items.Add(provider);
+                CrossModelAdversaryProviderCombo.Items.Add(provider);
+            }
         }
 
         private void LoadSettings()
@@ -129,6 +142,13 @@ namespace MultiTerminal.Dialogs
             // Claude commands
             _commands = _settings.GetClaudeCommands();
             RefreshCommandsGrid();
+
+            // Pipeline topology
+            SelectProviderByValue(VerifierProviderCombo, _settings.GetPipelineVerifier());
+            SelectProviderByValue(CodeReviewerProviderCombo, _settings.GetPipelineCodeReviewer());
+            SelectProviderByValue(SecurityAuditorProviderCombo, _settings.GetPipelineSecurityAuditor());
+            SelectProviderByValue(DebuggerProviderCombo, _settings.GetPipelineDebugger());
+            SelectProviderByValue(CrossModelAdversaryProviderCombo, _settings.GetPipelineCrossModelAdversary());
         }
 
         private void SaveSettings()
@@ -152,6 +172,12 @@ namespace MultiTerminal.Dialogs
                 _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
 
                 _settings.SetClaudeCommands(_commands);
+
+                _settings.SetPipelineVerifier(GetSelectedProvider(VerifierProviderCombo));
+                _settings.SetPipelineCodeReviewer(GetSelectedProvider(CodeReviewerProviderCombo));
+                _settings.SetPipelineSecurityAuditor(GetSelectedProvider(SecurityAuditorProviderCombo));
+                _settings.SetPipelineDebugger(GetSelectedProvider(DebuggerProviderCombo));
+                _settings.SetPipelineCrossModelAdversary(GetSelectedProvider(CrossModelAdversaryProviderCombo));
             }
             finally
             {
@@ -219,6 +245,26 @@ namespace MultiTerminal.Dialogs
                 return size;
             return 10f;
         }
+
+        // -----------------------------------------------------------------
+        // Pipeline provider helpers
+        // -----------------------------------------------------------------
+
+        private static void SelectProviderByValue(ComboBox combo, string value)
+        {
+            for (int i = 0; i < combo.Items.Count; i++)
+            {
+                if (string.Equals(combo.Items[i]?.ToString(), value, StringComparison.OrdinalIgnoreCase))
+                {
+                    combo.SelectedIndex = i;
+                    return;
+                }
+            }
+            if (combo.Items.Count > 0) combo.SelectedIndex = 0;
+        }
+
+        private static string GetSelectedProvider(ComboBox combo) =>
+            combo.SelectedItem?.ToString();
 
         // -----------------------------------------------------------------
         // Commands DataGrid

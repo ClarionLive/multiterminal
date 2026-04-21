@@ -39,4 +39,21 @@ namespace MultiTerminal.MCPServer.Models
     /// revise comment (null for a straight approval).
     /// </summary>
     public sealed record PlanApprovalResult(string Decision, string Comment);
+
+    /// <summary>
+    /// Result of an ask_owner round-trip via the permission relay.
+    ///
+    /// Source values (see constants below) tell the caller which branch fired:
+    ///   "owner"   — owner answered on the phone; Answer is the chosen value
+    ///   "default" — no answer within timeout, caller-provided default was used; Answer is the default
+    ///   "timeout" — no answer within timeout and no default was provided; Answer is null
+    ///   "local"   — remote mode is OFF; relay was skipped entirely; Answer is null (caller should ask locally)
+    /// </summary>
+    public sealed record AskOwnerResult(string Answer, string Source)
+    {
+        public const string SourceOwner = "owner";
+        public const string SourceDefault = "default";
+        public const string SourceTimeout = "timeout";
+        public const string SourceLocal = "local";
+    }
 }

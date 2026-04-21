@@ -17,6 +17,12 @@ namespace MultiTerminal.Services
         private readonly string _settingsPath;
         private Dictionary<string, string> _settings;
         private bool _batchMode;
+        private readonly object _sync = new object();
+
+        // Shared process-wide instance. All callers MUST use this so writes go through a single
+        // in-memory dict; otherwise per-instance dicts race and Save() will clobber settings.txt
+        // with whichever dict was last mutated.
+        public static SettingsService Default { get; } = new SettingsService();
 
         public SettingsService()
         {
@@ -35,20 +41,32 @@ namespace MultiTerminal.Services
             Load();
         }
 
-        public string Get(string key) => _settings.TryGetValue(key ?? "", out var v) ? v : null;
+        public string Get(string key)
+        {
+            lock (_sync)
+            {
+                return _settings.TryGetValue(key ?? "", out var v) ? v : null;
+            }
+        }
 
         public void Set(string key, string value)
         {
             if (string.IsNullOrEmpty(key)) return;
-            _settings[key] = value ?? "";
-            if (!_batchMode) Save();
+            lock (_sync)
+            {
+                _settings[key] = value ?? "";
+                if (!_batchMode) Save();
+            }
         }
 
         public void Remove(string key)
         {
-            if (_settings.Remove(key ?? ""))
+            lock (_sync)
             {
-                if (!_batchMode) Save();
+                if (_settings.Remove(key ?? ""))
+                {
+                    if (!_batchMode) Save();
+                }
             }
         }
 
@@ -56,15 +74,24 @@ namespace MultiTerminal.Services
         /// Begins batch mode - saves are deferred until EndBatch is called.
         /// Use this when making multiple settings changes to avoid repeated disk writes.
         /// </summary>
-        public void BeginBatch() => _batchMode = true;
+        public void BeginBatch()
+        {
+            lock (_sync)
+            {
+                _batchMode = true;
+            }
+        }
 
         /// <summary>
         /// Ends batch mode and saves all pending changes.
         /// </summary>
         public void EndBatch()
         {
-            _batchMode = false;
-            Save();
+            lock (_sync)
+            {
+                _batchMode = false;
+                Save();
+            }
         }
 
         private const string LastDirectoryKey = "LastDirectory";
@@ -158,6 +185,18 @@ namespace MultiTerminal.Services
         private const string LifecycleBoardWidthKey = "LifecycleBoardWidth";
         private const string LifecycleBoardHeightKey = "LifecycleBoardHeight";
         private const string LifecycleBoardZoomKey = "LifecycleBoardZoom";
+
+        // Pipeline topology settings — which provider handles each /pipeline role.
+        // Values are stored lowercase: "claude", "codex", or "off". Unset/null falls back to the role default.
+        private const string PipelineVerifierKey = "PipelineVerifier";
+        private const string PipelineCodeReviewerKey = "PipelineCodeReviewer";
+        private const string PipelineSecurityAuditorKey = "PipelineSecurityAuditor";
+        private const string PipelineDebuggerKey = "PipelineDebugger";
+        private const string PipelineCrossModelAdversaryKey = "PipelineCrossModelAdversary";
+
+        public const string PipelineProviderClaude = "claude";
+        public const string PipelineProviderCodex = "codex";
+        public const string PipelineProviderOff = "off";
 
         /// <summary>
         /// Gets the toolbar font size (8-14pt range).
@@ -912,6 +951,78 @@ namespace MultiTerminal.Services
 
             // Save
             Set(RecentDirectoriesKey, string.Join("|", recent));
+        }
+
+        /// <summary>
+        /// Gets the provider assigned to the verifier pipeline role. Defaults to "claude".
+        /// </summary>
+        public string GetPipelineVerifier() =>
+            NormalizePipelineProvider(Get(PipelineVerifierKey)) ?? PipelineProviderClaude;
+
+        /// <summary>
+        /// Sets the provider assigned to the verifier pipeline role.
+        /// </summary>
+        public void SetPipelineVerifier(string provider) =>
+            Set(PipelineVerifierKey, NormalizePipelineProvider(provider) ?? PipelineProviderClaude);
+
+        /// <summary>
+        /// Gets the provider assigned to the code-reviewer pipeline role. Defaults to "claude".
+        /// </summary>
+        public string GetPipelineCodeReviewer() =>
+            NormalizePipelineProvider(Get(PipelineCodeReviewerKey)) ?? PipelineProviderClaude;
+
+        /// <summary>
+        /// Sets the provider assigned to the code-reviewer pipeline role.
+        /// </summary>
+        public void SetPipelineCodeReviewer(string provider) =>
+            Set(PipelineCodeReviewerKey, NormalizePipelineProvider(provider) ?? PipelineProviderClaude);
+
+        /// <summary>
+        /// Gets the provider assigned to the security-auditor pipeline role. Defaults to "claude".
+        /// </summary>
+        public string GetPipelineSecurityAuditor() =>
+            NormalizePipelineProvider(Get(PipelineSecurityAuditorKey)) ?? PipelineProviderClaude;
+
+        /// <summary>
+        /// Sets the provider assigned to the security-auditor pipeline role.
+        /// </summary>
+        public void SetPipelineSecurityAuditor(string provider) =>
+            Set(PipelineSecurityAuditorKey, NormalizePipelineProvider(provider) ?? PipelineProviderClaude);
+
+        /// <summary>
+        /// Gets the provider assigned to the debugger pipeline role. Defaults to "claude".
+        /// </summary>
+        public string GetPipelineDebugger() =>
+            NormalizePipelineProvider(Get(PipelineDebuggerKey)) ?? PipelineProviderClaude;
+
+        /// <summary>
+        /// Sets the provider assigned to the debugger pipeline role.
+        /// </summary>
+        public void SetPipelineDebugger(string provider) =>
+            Set(PipelineDebuggerKey, NormalizePipelineProvider(provider) ?? PipelineProviderClaude);
+
+        /// <summary>
+        /// Gets the provider assigned to the cross-model adversary pipeline role. Defaults to "off".
+        /// </summary>
+        public string GetPipelineCrossModelAdversary() =>
+            NormalizePipelineProvider(Get(PipelineCrossModelAdversaryKey)) ?? PipelineProviderOff;
+
+        /// <summary>
+        /// Sets the provider assigned to the cross-model adversary pipeline role.
+        /// </summary>
+        public void SetPipelineCrossModelAdversary(string provider) =>
+            Set(PipelineCrossModelAdversaryKey, NormalizePipelineProvider(provider) ?? PipelineProviderOff);
+
+        private static string NormalizePipelineProvider(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            switch (value.Trim().ToLowerInvariant())
+            {
+                case PipelineProviderClaude: return PipelineProviderClaude;
+                case PipelineProviderCodex: return PipelineProviderCodex;
+                case PipelineProviderOff: return PipelineProviderOff;
+                default: return null;
+            }
         }
 
         private void Load()

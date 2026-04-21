@@ -119,10 +119,10 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void Bridge(ElicitationRequest elicitation)
         {
-            if (elicitation == null || string.IsNullOrWhiteSpace(elicitation.ElicitationId))
-                return;
+            // remoteMode gate — no phone pushes when user is at the desk.
+            if (!_broker.IsRemoteMode) return;
 
-            if (!_broker.IsRemoteMode)
+            if (elicitation == null || string.IsNullOrWhiteSpace(elicitation.ElicitationId))
                 return;
 
             if (!IsEnabled(out var baseUrl, out var apiKey))
@@ -241,8 +241,8 @@ namespace MultiTerminal.MCPServer.Services
             string description = null,
             CancellationToken ct = default)
         {
-            if (!_broker.IsRemoteMode)
-                return null;
+            // remoteMode gate — no phone pushes when user is at the desk.
+            if (!_broker.IsRemoteMode) return null;
 
             if (!IsEnabled(out var baseUrl, out var apiKey))
                 return null;
@@ -278,6 +278,61 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// High-level "ask the owner a question" bridge used by the ask_owner MCP tool.
+        /// Thin wrapper over <see cref="BridgeChoiceAsync"/> that:
+        ///   1. Reports remote-mode OFF explicitly (<see cref="AskOwnerResult.SourceLocal"/>)
+        ///      so the agent knows to fall back to a chat-side question.
+        ///   2. Honors a caller-supplied timeout shorter than the 5-min Worker TTL by
+        ///      linking a cancel-after CTS onto the caller's token.
+        ///   3. Distinguishes "owner answered" from "timed out, used default" from
+        ///      "timed out, no default" on the wire so the caller can branch.
+        /// </summary>
+        public async Task<AskOwnerResult> BridgeAskOwnerAsync(
+            string agentName,
+            string prompt,
+            IEnumerable<(string label, string value)> options,
+            string description = null,
+            int? timeoutSeconds = null,
+            string defaultOnTimeout = null,
+            CancellationToken ct = default)
+        {
+            // Remote-mode gate is reported explicitly so the caller (REST controller /
+            // ask_owner MCP tool) can fall back to a local chat question instead of
+            // silently hanging. This mirrors BridgeChoiceAsync's gate but makes the
+            // "why was this null" question answerable on the wire.
+            if (!_broker.IsRemoteMode)
+                return new AskOwnerResult(null, AskOwnerResult.SourceLocal);
+
+            CancellationTokenSource linkedCts = null;
+            try
+            {
+                CancellationToken effectiveCt = ct;
+                if (timeoutSeconds.HasValue && timeoutSeconds.Value > 0)
+                {
+                    linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    linkedCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds.Value));
+                    effectiveCt = linkedCts.Token;
+                }
+
+                var answer = await BridgeChoiceAsync(agentName, prompt, options, description, effectiveCt).ConfigureAwait(false);
+                if (answer != null)
+                    return new AskOwnerResult(answer, AskOwnerResult.SourceOwner);
+
+                // Null from BridgeChoiceAsync collapses three states (our linked timeout,
+                // relay-disabled, transport error) into one. For ask_owner semantics we
+                // treat all three as "owner didn't answer in time": if the caller wanted
+                // a default, use it; otherwise report timeout so the agent can decide.
+                return defaultOnTimeout != null
+                    ? new AskOwnerResult(defaultOnTimeout, AskOwnerResult.SourceDefault)
+                    : new AskOwnerResult(null, AskOwnerResult.SourceTimeout);
+            }
+            finally
+            {
+                linkedCts?.Dispose();
+            }
+        }
+
+        /// <summary>
         /// Relay a plan-approval request (markdown plan sent when ExitPlanMode fires)
         /// and await the user's decision. Returns the decision + optional revise comment,
         /// or null on timeout, cancellation, relay-disabled, or error.
@@ -288,8 +343,8 @@ namespace MultiTerminal.MCPServer.Services
             string description = null,
             CancellationToken ct = default)
         {
-            if (!_broker.IsRemoteMode)
-                return null;
+            // remoteMode gate — no phone pushes when user is at the desk.
+            if (!_broker.IsRemoteMode) return null;
 
             if (!IsEnabled(out var baseUrl, out var apiKey))
                 return null;
@@ -333,8 +388,8 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void Notify(string agentName, string description)
         {
-            if (!_broker.IsRemoteMode)
-                return;
+            // remoteMode gate — no phone pushes when user is at the desk.
+            if (!_broker.IsRemoteMode) return;
 
             if (!IsEnabled(out var baseUrl, out var apiKey))
                 return;
