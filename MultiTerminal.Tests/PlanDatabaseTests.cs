@@ -10,7 +10,7 @@ namespace MultiTerminal.Tests
     /// <summary>
     /// Tests for PlanDatabase - database layer and GenerateStartupContext.
     /// </summary>
-    public class PlanDatabaseTests : IDisposable
+    public sealed class PlanDatabaseTests : IDisposable
     {
         private readonly string _testDbPath;
         private readonly PlanDatabase _db;
@@ -32,6 +32,7 @@ namespace MultiTerminal.Tests
                 File.Delete(_testDbPath);
             }
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
+            GC.SuppressFinalize(this);
         }
 
         #region Plan CRUD Tests

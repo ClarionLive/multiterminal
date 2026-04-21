@@ -292,17 +292,19 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// Backfills heuristic summaries for all sessions that have no summary.
+        /// Backfills heuristic summaries. Without ?regenerate=true, only fills null/empty summaries.
+        /// With ?regenerate=true, also overwrites existing summaries that match known-junk patterns
+        /// (tool-result echoes, hook markers, trace prefixes).
         /// </summary>
         [HttpPost("backfill-summaries")]
-        public IActionResult BackfillSummaries()
+        public IActionResult BackfillSummaries([FromQuery] bool regenerate = false)
         {
             var service = GetService();
             if (service == null)
                 return ServiceUnavailable();
 
-            int updated = service.BackfillSummaries();
-            return Ok(new { success = true, updated });
+            int updated = service.BackfillSummaries(regenerate);
+            return Ok(new { success = true, updated, regenerate });
         }
 
         /// <summary>

@@ -4100,6 +4100,109 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Returns session IDs whose existing summary matches known-junk patterns
+        /// (tool-result echoes, hook markers, trace prefixes). Used by BackfillSummaries
+        /// in regenerate mode to repair historical summaries.
+        /// </summary>
+        public List<string> GetJunkSummarizedSessionIds()
+        {
+            var results = new List<string>();
+            const string sql = @"
+                SELECT session_id FROM session_lineage
+                WHERE summary IS NOT NULL AND summary != ''
+                  AND (
+                       summary LIKE '✅%'
+                    OR summary LIKE '❌%'
+                    OR summary LIKE '📋%'
+                    OR summary LIKE '⚠️%'
+                    OR summary LIKE '📌%'
+                    OR summary LIKE '🔧%'
+                    OR summary LIKE '📝%'
+                    OR summary LIKE '📊%'
+                    OR summary LIKE '🧪%'
+                    OR summary LIKE '⬜%'
+                    OR summary LIKE '[Tool:%'
+                    OR summary LIKE '[Result]%'
+                    OR summary LIKE '[DEBUG]%'
+                    OR summary LIKE '[Assistant]%'
+                    OR summary LIKE 'Terminal registered%'
+                    OR summary LIKE 'Terminal ID:%'
+                    OR summary LIKE 'Found %'
+                    OR summary LIKE 'No matches found%'
+                    OR summary LIKE 'No matching %'
+                    OR summary LIKE 'No active task for %'
+                    OR summary LIKE 'Error:%'
+                    OR summary LIKE 'Tool result%'
+                    OR summary LIKE 'Checklist item%'
+                    OR summary LIKE '%SessionStart:startup%'
+                    OR summary LIKE '%AUTO-RUN SKILL:%'
+                    OR summary LIKE '%MultiTerminal Agent Rules%'
+                    OR summary LIKE '%Terminal Identity:%'
+                    OR summary LIKE '%<persisted-output%'
+                    OR summary LIKE '%<system-reminder%'
+                    OR summary LIKE 'Latest Session:%'
+                    OR summary LIKE 'Session registered%'
+                    OR summary LIKE 'Session %mapped to%'
+                    OR summary LIKE 'Profile %created%'
+                    OR summary LIKE 'Profile %marked online%'
+                    OR summary LIKE 'Active Task:%'
+                    OR summary LIKE 'Exit code %'
+                    OR summary LIKE 'ls: %'
+                    OR summary LIKE 'bash: %'
+                    OR summary LIKE 'cat: %'
+                    OR summary LIKE 'rm: %'
+                    OR summary LIKE 'cp: %'
+                    OR summary LIKE 'mv: %'
+                    OR summary LIKE 'mkdir: %'
+                    OR summary LIKE 'cd: %'
+                    OR summary LIKE 'sh: %'
+                    OR summary LIKE '/bin/%'
+                    OR summary LIKE 'No such file or directory%'
+                    OR summary LIKE 'cannot access%'
+                    OR summary LIKE 'permission denied%'
+                    OR summary LIKE '<tool_use_error>%'
+                    OR summary LIKE '<tool_result_error>%'
+                    OR summary LIKE '{""success"":%'
+                    OR summary LIKE '{""error"":%'
+                    OR summary LIKE '{""updated"":%'
+                    OR summary LIKE '1→%'
+                    OR summary LIKE '1	%'
+                    OR summary LIKE 'The user doesn''t want to proceed%'
+                    OR summary LIKE 'Command running in background with ID:%'
+                    OR summary LIKE 'No images attached to this checklist item%'
+                    OR summary LIKE 'The file %has been updated successfully%'
+                    OR summary LIKE 'The file %has been created successfully%'
+                    OR summary LIKE '[Request interrupted%'
+                    OR summary LIKE '-rwx%'
+                    OR summary LIKE '-rw-%'
+                    OR summary LIKE 'drwx%'
+                    OR summary LIKE 'lrwx%'
+                    OR summary LIKE 'H:/%'
+                    OR summary LIKE 'C:/%'
+                    OR summary LIKE 'D:/%'
+                    OR summary LIKE 'H:\%'
+                    OR summary LIKE 'C:\%'
+                    OR summary LIKE 'D:\%'
+                    OR summary LIKE '/usr/%'
+                    OR summary LIKE '/home/%'
+                    OR summary LIKE '/var/%'
+                    OR summary LIKE '/etc/%'
+                    OR summary LIKE '%==========%'
+                    OR summary LIKE 'diff --git %'
+                    OR summary LIKE '--- a/%'
+                    OR summary LIKE '+++ b/%'
+                    OR (summary GLOB '[0-9]*' AND substr(summary, 1, 20) LIKE '%:    %')
+                    OR (summary LIKE '%ID: ________-____-____-____-____________%'
+                        AND (summary LIKE '%Agent:%' OR summary LIKE '%Status:%' OR summary LIKE '%Started:%'))
+                  )";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                results.Add(reader.GetString(0));
+            return results;
+        }
+
+        /// <summary>
         /// Returns the last N messages for a session, filtered to the given role, ordered
         /// by message_index DESC (most recent first). Useful for generating session summaries.
         /// </summary>
@@ -4918,7 +5021,10 @@ namespace MultiTerminal.Services
             var where = conditions.Count > 0 ? "WHERE " + string.Join(" AND ", conditions) : "";
             var sql = $"SELECT * FROM agent_invocations {where} ORDER BY invoked_at DESC LIMIT @limit";
 
+            // CA2100: WHERE fragments are compile-time-constant strings; all user input flows through parameters.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             if (!string.IsNullOrEmpty(agentName))
                 cmd.Parameters.AddWithValue("@agentName", agentName);
             if (!string.IsNullOrEmpty(taskId))
@@ -5010,7 +5116,10 @@ namespace MultiTerminal.Services
             var where = "WHERE " + string.Join(" AND ", conditions);
             var sql = $"SELECT id, task_id, invocation_id, agent_name, report_type, verdict, score, created_at, created_by FROM task_reports {where} ORDER BY created_at DESC LIMIT @limit";
 
+            // CA2100: WHERE fragments are compile-time-constant strings; all user input flows through parameters.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             cmd.Parameters.AddWithValue("@taskId", taskId);
             if (!string.IsNullOrEmpty(agentName))
                 cmd.Parameters.AddWithValue("@agentName", agentName);
@@ -5150,14 +5259,23 @@ namespace MultiTerminal.Services
 
         #endregion
 
+        // CA1063: full Dispose(bool) template. Other IDisposable services in this codebase still
+        // use the simpler one-method form pending a bulk sweep — see follow-up task f74c0ab0.
         public void Dispose()
         {
-            if (!_isDisposed)
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
             {
                 _connection?.Close();
                 _connection?.Dispose();
-                _isDisposed = true;
             }
+            _isDisposed = true;
         }
     }
 

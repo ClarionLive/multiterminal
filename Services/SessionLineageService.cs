@@ -579,15 +579,23 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Backfills heuristic summaries for all sessions that have no summary.
         /// Only overwrites null/empty summaries — never replaces agent-generated ones.
+        /// When regenerate=true, also overwrites existing summaries that match known-junk
+        /// patterns (tool-result echoes, hook markers, trace prefixes).
         /// Returns the number of sessions updated.
         /// </summary>
-        public int BackfillSummaries()
+        public int BackfillSummaries(bool regenerate = false)
         {
-            // Get all session IDs with no summary
-            var unsummarized = _db.GetAllUnsummarizedSessionIds();
+            var sessionIds = new List<string>(_db.GetAllUnsummarizedSessionIds());
+            if (regenerate)
+            {
+                var junk = _db.GetJunkSummarizedSessionIds();
+                foreach (var id in junk)
+                    if (!sessionIds.Contains(id)) sessionIds.Add(id);
+            }
+
             int updated = 0;
 
-            foreach (var sessionId in unsummarized)
+            foreach (var sessionId in sessionIds)
             {
                 try
                 {
@@ -623,10 +631,46 @@ namespace MultiTerminal.Services
             string trimmed = content.Trim();
             if (trimmed.Length < 4) return true;
 
-            // JSON payloads (hook responses, tool results, etc.)
-            if (trimmed.StartsWith("{") && (trimmed.Contains("terminalId") || trimmed.Length > 50)) return true;
+            // JSON payloads (hook responses, tool results, REST API responses, etc.)
+            // Lowered length threshold to 30 to catch short success responses like {"success":true,"updated":102,"regenerate":true}.
+            if (trimmed.StartsWith("{") && (trimmed.Contains("terminalId") || trimmed.Contains("\"success\"") || trimmed.Length > 30)) return true;
+
+            // Claude Code tool-error echoes — surfaced as user messages when a tool call is cancelled/errored
+            if (trimmed.StartsWith("<tool_use_error>") || trimmed.StartsWith("<tool_result_error>")) return true;
+
+            // Read/Grep tool output echoes — line-numbered code listings have a recognizable shape:
+            //   "1→using System;" / "1\tusing System;" (Read-tool separators)
+            //   "4107:        public List<string>..." (Grep-tool colon+indent form; requires 2+ spaces after colon to avoid false-positives on "1: Title" user text).
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^\s*\d+([\t→]|:\s{2,})")) return true;
+
+            // `ls -l` output echo — line starts with unix permission string (e.g. "-rwxr-xr-x 1 John ...", "drwxr-xr-x ...")
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[-dl][rwxst-]{9}\s+\d+\s")) return true;
+
+            // Claude Code interrupt marker — surfaced as a user message when the user cancels a tool call
+            if (trimmed.StartsWith("[Request interrupted")) return true;
+
+            // Tool-output emoji prefixes — tool results echoed as user messages start with these
+            if (trimmed.StartsWith("✅") || trimmed.StartsWith("❌") || trimmed.StartsWith("📋") ||
+                trimmed.StartsWith("⚠️") || trimmed.StartsWith("📌") || trimmed.StartsWith("🔧") ||
+                trimmed.StartsWith("📝") || trimmed.StartsWith("📊") || trimmed.StartsWith("🧪") ||
+                trimmed.StartsWith("⬜")) return true;
+
+            // Tool trace prefixes (jsonl transcript format)
+            if (trimmed.StartsWith("[Tool:") || trimmed.StartsWith("[Result]") ||
+                trimmed.StartsWith("[DEBUG]") || trimmed.StartsWith("[Assistant]")) return true;
 
             string lower = trimmed.ToLowerInvariant();
+
+            // Short acknowledgements the user sends back during testing
+            if (lower.Length < 10)
+            {
+                if (lower == "pass" || lower == "fail" || lower == "yes" || lower == "no" ||
+                    lower == "ok" || lower == "okay" || lower == "y" || lower == "n" ||
+                    lower == "done" || lower == "continue" || lower == "go" || lower == "stop" ||
+                    lower == "next" || lower == "skip" || lower == "later") return true;
+                // Single-digit or short numeric replies ("1", "2", "3")
+                if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[0-9]{1,2}\.?$")) return true;
+            }
 
             // Greetings and trivial
             if (lower == "hello" || lower == "hi" || lower == "hey" ||
@@ -637,11 +681,74 @@ namespace MultiTerminal.Services
             if (lower.StartsWith("<local-command") || lower.StartsWith("<command-name") ||
                 lower.StartsWith("<command-message") || lower.StartsWith("<channel ") ||
                 lower.StartsWith("<system-reminder") || lower.StartsWith("<user-prompt") ||
+                lower.StartsWith("<persisted-output") ||
                 lower.StartsWith("execute skill:") || lower.StartsWith("launching skill:") ||
                 lower.StartsWith("base directory for this skill:") ||
                 lower.StartsWith("active terminals:") || lower.StartsWith("no active terminals") ||
                 lower.StartsWith("user has answered your questions:") ||
                 lower.StartsWith("# session-start") || lower.StartsWith("# ")) return true;
+
+            // Tool-result echoes (register_terminal, search results, errors)
+            if (lower.StartsWith("terminal registered") || lower.StartsWith("terminal id:") ||
+                lower.StartsWith("found ") || lower.StartsWith("no matches found") ||
+                lower.StartsWith("no matching ") ||
+                lower.StartsWith("error:") || lower.StartsWith("tool result") ||
+                lower.StartsWith("checklist item") ||
+                lower.StartsWith("the user doesn't want to proceed") ||
+                lower.StartsWith("command running in background with id:") ||
+                lower.StartsWith("no images attached to this checklist item") ||
+                lower.StartsWith("task ") && (lower.Contains(" status updated") || lower.Contains(" claimed"))) return true;
+
+            // Edit/Write tool success-result echoes: these land as user messages (tool_result blocks).
+            //   "The file H:\...\Foo.cs has been updated successfully. (file state is current...)"
+            //   "The file H:\...\Foo.cs has been created successfully. (file state is current...)"
+            // Must be filtered here — the assistant fallback never runs when a user message scores ≥ 3.
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed,
+                @"^The file .+ has been (updated|created) successfully",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)) return true;
+
+            // Bash tool error-result echoes ("Exit code N", "ls: cannot access", "No such file or directory", etc.)
+            // Line-anchored: tool output always puts the error phrase at the start of a line.
+            // Matching mid-sentence would over-filter real user questions quoting these phrases.
+            if (lower.StartsWith("exit code ") ||
+                lower.StartsWith("ls: ") || lower.StartsWith("bash: ") ||
+                lower.StartsWith("cat: ") || lower.StartsWith("rm: ") ||
+                lower.StartsWith("cp: ") || lower.StartsWith("mv: ") ||
+                lower.StartsWith("mkdir: ") || lower.StartsWith("cd: ") ||
+                lower.StartsWith("sh: ") || lower.StartsWith("/bin/") ||
+                lower.StartsWith("no such file or directory") || lower.Contains("\nno such file or directory") ||
+                lower.StartsWith("cannot access") || lower.Contains("\ncannot access") ||
+                lower.StartsWith("permission denied") || lower.Contains("\npermission denied")) return true;
+            // ": command not found" — only filter if it appears on the first line (tool echo format),
+            // not mid-sentence (so "What does 'docker: command not found' mean?" still becomes a topic).
+            {
+                int firstNewline = lower.IndexOf('\n');
+                string firstLine = firstNewline < 0 ? lower : lower.Substring(0, firstNewline);
+                if (firstLine.Contains(": command not found")) return true;
+            }
+
+            // MCP tool dump echoes (get_latest_session, register_session, get_my_active_task etc.)
+            if (lower.StartsWith("latest session:") ||
+                lower.StartsWith("session registered") ||
+                lower.StartsWith("📋 active task:") ||
+                lower.StartsWith("📌 active task:") ||
+                lower.StartsWith("active task:") ||
+                lower.StartsWith("no active task for ")) return true;
+
+            // SessionStart console output ("Session <uuid> mapped to Alice", "Profile Alice created/marked online")
+            if (lower.StartsWith("session ") && lower.Contains(" mapped to ")) return true;
+            if (lower.StartsWith("profile ") && (lower.Contains(" created") || lower.Contains(" marked online"))) return true;
+
+            // Multi-line MCP structured dumps: a heading followed by "  ID: <uuid>" — catches anything we missed above
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed,
+                @"\bID:\s+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b") &&
+                System.Text.RegularExpressions.Regex.IsMatch(trimmed,
+                @"\b(Agent|Status|Started|Ended|Assignee|Priority):\s")) return true;
+
+            // Hook-injected content markers
+            if (lower.Contains("sessionstart:startup") || lower.Contains("auto-run skill:") ||
+                lower.Contains("# multiterminal agent rules") || lower.Contains("terminal identity:") ||
+                lower.Contains("the task tools haven't been used recently")) return true;
 
             // Registration echoes like "Alice|6bb0bdf1" or "Alice|472d6198"
             if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[A-Za-z]+\|[0-9a-f]{4,}$")) return true;
@@ -652,19 +759,124 @@ namespace MultiTerminal.Services
             return false;
         }
 
+        /// <summary>
+        /// Returns true if the text looks like an assistant-side tool-result echo that
+        /// should not be used as a session topic in the assistant fallback. These are
+        /// messages that are prose-shaped (subject + verb + object) but originate from
+        /// a tool's success output, not real assistant reasoning.
+        /// </summary>
+        private static bool IsNoisyAssistantMessage(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return true;
+            string trimmed = content.Trim();
+
+            // Edit/Write tool success-result echoes that get surfaced as assistant text:
+            //   "The file H:\...\Foo.cs has been updated successfully..."
+            //   "The file H:\...\Foo.cs has been created successfully..."
+            // Real prose rarely opens with this exact shape.
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed,
+                @"^The file .+ has been (updated|created) successfully",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Scores text by how much it looks like prose a human would type (vs. tool output).
+        /// Returns 0 for definitely-not-prose content (mostly paths, columnar output, low alpha
+        /// ratio). Otherwise returns 1..6 based on length, word count, and sentence structure.
+        /// Used by BuildSummaryFromMessages to pick the best topic candidate rather than
+        /// bailing on the first non-filtered message.
+        /// </summary>
+        private static int ScoreAsProse(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return 0;
+            string trimmed = content.Trim();
+            if (trimmed.Length < 10) return 0;
+
+            // Hard disqualifiers — these shapes are always tool output, never user prose.
+
+            // Columnar/tabular output: banner rules (===, ---), or 3+ consecutive space-runs of
+            // 5+ spaces on a single line (column alignment).
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"={10,}|-{10,}")) return 0;
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"\S\s{5,}\S.*\S\s{5,}\S")) return 0;
+
+            // Message that opens with a drive-letter path (e.g. "C:\Users\John Hickey\...") is
+            // tool output — a Glob/Grep dump, file list, or JSONL excerpt — never user prose.
+            // Catching this at the start avoids the whitespace-in-path blind spot the length-based
+            // dominance check below has (paths with spaces get under-counted by [^\s] boundaries).
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^[A-Za-z]:[/\\]")) return 0;
+
+            // Mostly absolute paths: 2+ path-looking substrings AND they dominate the content.
+            // Matches Windows ("H:/...", "C:\\..."), Unix ("/usr/..."), and path-list dumps.
+            var pathMatches = System.Text.RegularExpressions.Regex.Matches(trimmed,
+                @"(?:[A-Za-z]:[/\\][^\s""']{3,}|(?:^|\s)/(?:usr|home|var|etc|opt|bin)/[^\s""']{3,})");
+            if (pathMatches.Count >= 2)
+            {
+                int pathChars = 0;
+                foreach (System.Text.RegularExpressions.Match m in pathMatches) pathChars += m.Length;
+                if (pathChars * 2 >= trimmed.Length) return 0; // paths are 50%+ of content
+            }
+
+            // Low alpha ratio: tool output is heavy on digits/punctuation/whitespace.
+            int letterCount = 0;
+            foreach (char c in trimmed) if (char.IsLetter(c)) letterCount++;
+            if (trimmed.Length > 20 && letterCount * 2 < trimmed.Length) return 0;
+
+            // Git diff / patch output.
+            if (trimmed.StartsWith("diff --git ") || trimmed.StartsWith("--- a/") ||
+                trimmed.StartsWith("+++ b/") || trimmed.StartsWith("@@ ")) return 0;
+
+            // Positive signals — cumulative score.
+            int score = 0;
+
+            // Length sweet spot for a user prompt: ~15–400 chars.
+            if (trimmed.Length >= 15 && trimmed.Length <= 400) score += 2;
+            else if (trimmed.Length > 400 && trimmed.Length <= 1500) score += 1;
+
+            // Word count.
+            var words = trimmed.Split(new[] { ' ', '\t', '\n', '\r' },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length >= 3) score += 1;
+            if (words.Length >= 8) score += 1;
+
+            // Sentence structure: a letter followed by terminal punctuation (not a decimal).
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"[A-Za-z]\s*[.?!](\s|$)")) score += 2;
+
+            return score;
+        }
+
         private static string BuildSummaryFromMessages(List<SessionMessageRecord> messages)
         {
-            // 1. Find the first meaningful user message (the "topic")
+            // 1. Score-based topic selection: scan first N user messages, score each, pick highest.
+            // Replaces the old "first non-noisy wins" approach which was fragile — each session
+            // surfaced a new tool-output pattern not covered by IsNoisyUserMessage. Scoring looks
+            // at positive prose signals (words, sentences) AND negative tool-output signals
+            // (paths, columnar output, low alpha ratio) so we don't whack-a-mole every new format.
+            const int MaxUserMessagesToScan = 30;
+            const int MinAcceptableScore = 3;
+
             string topic = null;
+            int bestScore = 0;
+            int userScanned = 0;
+
             foreach (var msg in messages)
             {
                 if (msg.Role != "user") continue;
+                if (++userScanned > MaxUserMessagesToScan) break;
                 if (IsNoisyUserMessage(msg.Content)) continue;
-                topic = msg.Content.Trim();
-                break;
+
+                int score = ScoreAsProse(msg.Content);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    topic = msg.Content.Trim();
+                }
             }
 
-            // 1b. Fallback: if all user messages were noise, try the first meaningful assistant text
+            if (bestScore < MinAcceptableScore) topic = null;
+
+            // 1b. Fallback: if no user message looked like prose, try the first meaningful assistant text
             if (string.IsNullOrEmpty(topic))
             {
                 foreach (var msg in messages)
@@ -672,8 +884,9 @@ namespace MultiTerminal.Services
                     if (msg.Role != "assistant" || !string.IsNullOrEmpty(msg.ToolName)) continue;
                     string content = msg.Content?.Trim();
                     if (string.IsNullOrEmpty(content) || content.Length < 10) continue;
-                    // Skip assistant messages that are just tool stubs or framework noise
                     if (content.StartsWith("[tool:") || content.StartsWith("{")) continue;
+                    if (IsNoisyAssistantMessage(content)) continue;
+                    if (ScoreAsProse(content) < MinAcceptableScore) continue;
                     topic = content;
                     break;
                 }
