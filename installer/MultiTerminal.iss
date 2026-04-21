@@ -3,7 +3,7 @@
 ; https://jrsoftware.org/isinfo.php
 
 #define AppName "MultiTerminal"
-#define AppVersion "1.3.0"
+#define AppVersion "1.4.1"
 #define AppPublisher "MultiTerminal"
 #define AppExeName "MultiTerminal.exe"
 #define AppURL "https://github.com/peterparker57"
@@ -12,10 +12,8 @@
 #define PublishDir "..\bin\Release\net8.0-windows\win-x64\publish"
 #define McpServerDir GetEnv("APPDATA") + "\multiterminal\mcp"
 #define McpGatewayPublishDir "..\..\McpGateway\bin\publish\win-x64"
-#define ClaudeRemotePublishDir "H:\DevLaptop\Projects\ClaudeRemote\bin\Release\net8.0\publish"
-#define HooksDir GetEnv("USERPROFILE") + "\.claude\hooks"
-#define SkillsDir GetEnv("USERPROFILE") + "\.claude\skills"
-#define ClaudeProjectDir "..\.claude"
+; Claude Code plugin marketplace (hooks, agents, skills, CLAUDE.md, channel MCP)
+#define PluginMarketplaceDir GetEnv("USERPROFILE") + "\.claude\plugins\marketplaces\multiterminal-marketplace"
 #define ToolsDir "..\tools"
 #define DocsDir "..\docs\html"
 
@@ -67,10 +65,7 @@ Name: "tools"; Description: "Bundled tools (ripgrep)"; Types: full app custom; F
 Name: "docs"; Description: "HTML Documentation"; Types: full
 Name: "claude"; Description: "Claude Code Integration"; Types: full
 Name: "claude\mcp"; Description: "MCP Servers (agent tools + gateway)"; Types: full
-Name: "claude\hooks"; Description: "Session hooks (activity tracking, status)"; Types: full
-Name: "claude\skills"; Description: "Skills — 13 workflow skills (/kanban-task, /pipeline, /review, /audit, etc.)"; Types: full
-Name: "claude\agents"; Description: "Specialist agents (9 definitions incl. verifier, debugger, security auditor, code reviewer)"; Types: full
-Name: "clauderemote"; Description: "ClaudeRemote — Mobile access via phone (PWA)"; Types: full custom
+Name: "claude\plugin"; Description: "MultiTerminal Claude Code plugin (hooks, skills, agents, CLAUDE.md)"; Types: full
 
 ; ============================================================
 ; FILES
@@ -98,6 +93,17 @@ Source: "{#PublishDir}\Microsoft.Web.WebView2.Wpf.dll"; DestDir: "{app}"; Compon
 Source: "{#PublishDir}\SQLite.Interop.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 Source: "{#PublishDir}\System.Data.SQLite.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 Source: "{#PublishDir}\WebView2Loader.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+; Roslyn code graph indexer (v1.4.0+)
+Source: "{#PublishDir}\Microsoft.CodeAnalysis.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Microsoft.CodeAnalysis.CSharp.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Microsoft.DiaSymReader.Native.amd64.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+; SmartComponents local embeddings (v1.4.0+)
+Source: "{#PublishDir}\SmartComponents.Inference.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\SmartComponents.LocalEmbeddings.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\FastBertTokenizer.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Microsoft.ML.OnnxRuntime.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\onnxruntime.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\onnxruntime_providers_shared.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 
 ; ============================================================
 ; --- App content directories (HTML panels, Terminal) ---
@@ -115,6 +121,10 @@ Source: "{#PublishDir}\Terminal\*"; DestDir: "{app}\Terminal"; Components: main;
 Source: "{#PublishDir}\AgentPanel\*"; DestDir: "{app}\AgentPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\StartScreen\*"; DestDir: "{app}\StartScreen"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PublishDir}\FilePreviewPanel\*"; DestDir: "{app}\FilePreviewPanel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\DashboardHeader\*"; DestDir: "{app}\DashboardHeader"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\shared\*"; DestDir: "{app}\shared"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\tools\*"; DestDir: "{app}\tools"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\LocalEmbeddingsModel\*"; DestDir: "{app}\LocalEmbeddingsModel"; Components: main; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
 ; --- .NET Runtime: Managed DLLs (skip if .NET 8 installed) ---
@@ -204,34 +214,12 @@ Source: "{#ToolsDir}\rg-UNLICENSE.txt"; DestDir: "{app}\tools"; Components: tool
 Source: "{#DocsDir}\*"; DestDir: "{app}\docs\html"; Components: docs; Flags: ignoreversion
 
 ; ============================================================
-; --- Project .claude folder ---
+; --- Claude Code Plugin Marketplace ---
+; --- Ships hooks, agents, skills, CLAUDE.md, and the
+; --- multiterminal-channel MCP server (with node_modules).
+; --- Claude Code auto-discovers marketplaces placed here.
 ; ============================================================
-Source: "{#ClaudeProjectDir}\CLAUDE.md"; DestDir: "{app}\.claude"; Components: main; Flags: ignoreversion
-
-; --- Project-level hooks (to {app}\.claude\hooks) ---
-Source: "{#ClaudeProjectDir}\hooks\inbox-check-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\task-to-agent-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\subagent-office-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\project-context-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\safety-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\session-status-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\pipeline-trigger-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\active-context-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\hooks\notification-hook.js"; DestDir: "{app}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-
-; --- Specialist agent definitions (to {app}\.claude\agents) ---
-Source: "{#ClaudeProjectDir}\agents\session-summarizer.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\verifier.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\security-auditor.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\debugger.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\test-designer.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\devils-advocate.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\session-distiller.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\code-reviewer.md"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-Source: "{#ClaudeProjectDir}\agents\report-template.html"; DestDir: "{app}\.claude\agents"; Components: claude\agents; Flags: ignoreversion
-
-; --- Project-level skills (to {app}\.claude\skills) ---
-Source: "{#ClaudeProjectDir}\skills\verifier-multiterminal\*"; DestDir: "{app}\.claude\skills\verifier-multiterminal"; Components: claude\agents; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PluginMarketplaceDir}\*"; DestDir: "{%USERPROFILE}\.claude\plugins\marketplaces\multiterminal-marketplace"; Components: claude\plugin; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ============================================================
 ; --- MCP Server (to %APPDATA%\multiterminal\mcp) ---
@@ -268,44 +256,6 @@ Source: "{#McpEverythingDir}\build\*"; DestDir: "{app}\mcps\everything-search\bu
 Source: "{#McpEverythingDir}\node_modules\*"; DestDir: "{app}\mcps\everything-search\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: IsMcpSelected('everything-search')
 Source: "{#McpEverythingDir}\package.json"; DestDir: "{app}\mcps\everything-search"; Flags: ignoreversion; Check: IsMcpSelected('everything-search')
 
-; ============================================================
-; --- Global Hook Scripts (to %USERPROFILE%\.claude\hooks) ---
-; ============================================================
-Source: "{#HooksDir}\session-status-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#HooksDir}\activity-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#HooksDir}\pool-context.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#HooksDir}\profile-status-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-Source: "{#HooksDir}\session-import-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: claude\hooks; Flags: ignoreversion
-
-; ============================================================
-; --- Skills (to %USERPROFILE%\.claude\skills) ---
-; ============================================================
-Source: "{#SkillsDir}\kanban-task\*"; DestDir: "{%USERPROFILE}\.claude\skills\kanban-task"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\multiterminal-addproject\*"; DestDir: "{%USERPROFILE}\.claude\skills\multiterminal-addproject"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\profile\*"; DestDir: "{%USERPROFILE}\.claude\skills\profile"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\new-project\*"; DestDir: "{%USERPROFILE}\.claude\skills\new-project"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\project-management\*"; DestDir: "{%USERPROFILE}\.claude\skills\project-management"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\session-start\*"; DestDir: "{%USERPROFILE}\.claude\skills\session-start"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\pipeline\*"; DestDir: "{%USERPROFILE}\.claude\skills\pipeline"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\review\*"; DestDir: "{%USERPROFILE}\.claude\skills\review"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\audit\*"; DestDir: "{%USERPROFILE}\.claude\skills\audit"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\diagnose\*"; DestDir: "{%USERPROFILE}\.claude\skills\diagnose"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\reload-context\*"; DestDir: "{%USERPROFILE}\.claude\skills\reload-context"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\start-servers\*"; DestDir: "{%USERPROFILE}\.claude\skills\start-servers"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SkillsDir}\snapshot-agents\*"; DestDir: "{%USERPROFILE}\.claude\skills\snapshot-agents"; Components: claude\skills; Flags: ignoreversion recursesubdirs createallsubdirs
-
-; ============================================================
-; --- ClaudeRemote (PWA mobile access) ---
-; ============================================================
-Source: "{#ClaudeRemotePublishDir}\*"; DestDir: "{app}\claude-remote"; Components: clauderemote; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#ClaudeRemotePublishDir}\wwwroot\*"; DestDir: "{app}\claude-remote\wwwroot"; Components: clauderemote; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "H:\DevLaptop\Projects\ClaudeRemote\THIRD-PARTY-NOTICES.md"; DestDir: "{app}\claude-remote"; Components: clauderemote; Flags: ignoreversion
-Source: "H:\DevLaptop\Projects\ClaudeRemote\Documentation\ClaudeRemote-UserGuide.html"; DestDir: "{app}\claude-remote\docs"; Components: clauderemote; Flags: ignoreversion
-Source: "H:\DevLaptop\Projects\ClaudeRemote\README.md"; DestDir: "{app}\claude-remote"; Components: clauderemote; Flags: ignoreversion
-
-; --- ClaudeRemote global hook (commentary for mobile feed) ---
-Source: "{#HooksDir}\commentary-hook.js"; DestDir: "{%USERPROFILE}\.claude\hooks"; Components: clauderemote; Flags: ignoreversion
-
 ; --- Post-install/uninstall scripts (temp) ---
 Source: "post-install.js"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "post-uninstall.js"; DestDir: "{app}"; Flags: ignoreversion
@@ -318,7 +268,6 @@ Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{group}\{#AppName} Documentation"; Filename: "{app}\docs\html\index.html"; Components: docs
-Name: "{group}\ClaudeRemote"; Filename: "{app}\claude-remote\ClaudeRemote.exe"; IconFilename: "{app}\claude-remote\wwwroot\img\ClaudeRemote.ico"; Components: clauderemote
 
 ; ============================================================
 ; POST-INSTALL: Configure Claude Code integration
@@ -341,16 +290,8 @@ Filename: "node"; Parameters: """{app}\post-uninstall.js"" ""{app}"" ""{userappd
   RunOnceId: "MultiTerminalCleanup"; Flags: runhidden waituntilterminated
 
 [UninstallDelete]
-; Clean up generated config files
-Type: files; Name: "{app}\.claude\project.json"
-Type: files; Name: "{app}\.claude\settings.local.json"
 ; Note: MCP servers are registered in ~/.claude.json — cleaned up by post-uninstall.js
-Type: dirifempty; Name: "{app}\.claude\hooks"
-Type: dirifempty; Name: "{app}\.claude\agents"
-Type: dirifempty; Name: "{app}\.claude\skills\verifier-multiterminal"
-Type: dirifempty; Name: "{app}\.claude\skills"
-Type: dirifempty; Name: "{app}\.claude"
-Type: filesandordirs; Name: "{app}\claude-remote"
+; Note: Plugin marketplace at %USERPROFILE%\.claude\plugins\... — cleaned up by post-uninstall.js
 Type: filesandordirs; Name: "{app}\mcp-gateway"
 Type: filesandordirs; Name: "{app}\mcps"
 

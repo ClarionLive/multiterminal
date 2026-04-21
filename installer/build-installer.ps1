@@ -17,13 +17,11 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)  # ClarionPowerShell
 $MultiTermDir   = Join-Path $RepoRoot 'MultiTerminal'
 $GatewayDir     = Join-Path $RepoRoot 'McpGateway'
-$ClaudeRemoteDir = 'H:\DevLaptop\Projects\ClaudeRemote'
 $InstallerDir   = Join-Path $MultiTermDir 'installer'
 $IssFile        = Join-Path $InstallerDir 'MultiTerminal.iss'
 
 $MTPublishDir   = Join-Path $MultiTermDir 'bin\Release\net8.0-windows\win-x64\publish'
 $GWPublishDir   = Join-Path $GatewayDir   'bin\publish\win-x64'
-$CRPublishDir   = Join-Path $ClaudeRemoteDir 'bin\Release\net8.0\publish'
 
 # --- Find Inno Setup ---
 $InnoCompiler = @(
@@ -71,29 +69,10 @@ if (-not $SkipPublish) {
         if ($LASTEXITCODE -ne 0) { throw "MCP Gateway publish failed (exit code $LASTEXITCODE)" }
         Write-Ok "Published to $GWPublishDir"
     } finally { Pop-Location }
-
-    # --- Publish ClaudeRemote ---
-    Write-Step "Publishing ClaudeRemote..."
-    $crArgs = @(
-        'publish'
-        '-c', 'Release'
-        '-r', 'win-x64'
-        '--no-self-contained'
-        '-o', $CRPublishDir
-    )
-    if (-not $Verbose) { $crArgs += '-v'; $crArgs += 'quiet' }
-
-    Push-Location $ClaudeRemoteDir
-    try {
-        & dotnet @crArgs
-        if ($LASTEXITCODE -ne 0) { throw "ClaudeRemote publish failed (exit code $LASTEXITCODE)" }
-        Write-Ok "Published to $CRPublishDir"
-    } finally { Pop-Location }
 } else {
     Write-Step "Skipping publish (reusing existing output)"
     if (-not (Test-Path $MTPublishDir)) { throw "MultiTerminal publish output not found at $MTPublishDir" }
     if (-not (Test-Path $GWPublishDir)) { throw "MCP Gateway publish output not found at $GWPublishDir" }
-    if (-not (Test-Path $CRPublishDir)) { throw "ClaudeRemote publish output not found at $CRPublishDir" }
     Write-Ok "Using existing publish output"
 }
 
@@ -101,22 +80,17 @@ if (-not $SkipPublish) {
 Write-Step "Validating publish output..."
 $mtExe = Join-Path $MTPublishDir 'MultiTerminal.exe'
 $gwExe = Join-Path $GWPublishDir 'McpGateway.exe'
-$crExe = Join-Path $CRPublishDir 'ClaudeRemote.exe'
 
 if (-not (Test-Path $mtExe)) { throw "Missing: $mtExe" }
 if (-not (Test-Path $gwExe)) { throw "Missing: $gwExe" }
-if (-not (Test-Path $crExe)) { throw "Missing: $crExe" }
 
 $mtSize = [math]::Round((Get-Item $mtExe).Length / 1MB, 1)
 $gwSize = [math]::Round((Get-Item $gwExe).Length / 1MB, 1)
-$crSize = [math]::Round((Get-Item $crExe).Length / 1MB, 1)
 $mtCount = (Get-ChildItem $MTPublishDir -Recurse -File).Count
 $gwCount = (Get-ChildItem $GWPublishDir -Recurse -File).Count
-$crCount = (Get-ChildItem $CRPublishDir -Recurse -File).Count
 
 Write-Ok "MultiTerminal: $mtCount files, exe=$mtSize MB"
 Write-Ok "MCP Gateway:   $gwCount files, exe=$gwSize MB"
-Write-Ok "ClaudeRemote:  $crCount files, exe=$crSize MB"
 
 # --- Compile installer ---
 Write-Step "Compiling Inno Setup installer..."

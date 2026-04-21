@@ -2,13 +2,12 @@
  * MultiTerminal Post-Uninstall Script
  *
  * Runs during uninstall to clean up Claude Code integration:
- * 1. Removes MultiTerminal hooks from global settings.json
- * 2. Removes hook script files
- * 3. Removes skill folders
- * 4. Removes MCP server files from AppData
- * 5. Removes MCP server entries from ~/.claude.json (user-level config)
- * 6. Removes optional MCP servers from gateway database
- * 7. Restores runtimeconfig.json if framework-dependent backup exists
+ * 1. Removes CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var from settings.json
+ * 2. Removes MultiTerminal MCP server files from AppData
+ * 3. Removes MCP server entries from ~/.claude.json
+ * 4. Removes optional MCP servers from gateway database
+ * 5. Removes the plugin marketplace directory
+ * 6. Restores runtimeconfig.json if framework-dependent backup exists
  *
  * Usage: node post-uninstall.js <installDir> <appDataDir> <userProfileDir>
  */
@@ -26,8 +25,6 @@ if (!installDir || !appDataDir || !userProfileDir) {
 }
 
 const claudeGlobalDir = path.join(userProfileDir, '.claude');
-const hooksDir = path.join(claudeGlobalDir, 'hooks');
-const skillsDir = path.join(claudeGlobalDir, 'skills');
 
 function safeDelete(filePath) {
     try {
@@ -52,51 +49,21 @@ function safeRmdir(dirPath) {
 }
 
 // ============================================================
-// 1. Remove MultiTerminal hooks from settings.json
+// 1. Remove CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env from settings.json
 // ============================================================
-function removeHooksFromSettings() {
+function removeExperimentalAgentTeamsEnv() {
     const settingsPath = path.join(claudeGlobalDir, 'settings.json');
-
-    if (!fs.existsSync(settingsPath)) {
-        console.log('  No settings.json found, skipping hook removal.');
-        return;
-    }
+    if (!fs.existsSync(settingsPath)) return;
 
     try {
         const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-
-        if (settings.hooks) {
-            // Hook files installed by MultiTerminal
-            const ourHookFiles = [
-                'pool-context.js',
-                'profile-status-hook.js',
-                'activity-hook.js',
-                'session-status-hook.js',
-                'session-import-hook.js'
-            ];
-
-            for (const [event, hookGroups] of Object.entries(settings.hooks)) {
-                if (Array.isArray(hookGroups)) {
-                    settings.hooks[event] = hookGroups.filter(group => {
-                        if (!group.hooks || !Array.isArray(group.hooks)) return true;
-                        return group.hooks.some(hook => {
-                            if (!hook.command) return true;
-                            return !ourHookFiles.some(f => hook.command.includes(f));
-                        });
-                    });
-
-                    if (settings.hooks[event].length === 0) {
-                        delete settings.hooks[event];
-                    }
-                }
+        if (settings.env && settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== undefined) {
+            delete settings.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+            if (Object.keys(settings.env).length === 0) {
+                delete settings.env;
             }
-
-            if (Object.keys(settings.hooks).length === 0) {
-                delete settings.hooks;
-            }
-
             fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-            console.log('  Updated settings.json: removed MultiTerminal hooks');
+            console.log('  Removed CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS from settings.json');
         }
     } catch (e) {
         console.warn(`  Warning: Could not update settings.json: ${e.message}`);
@@ -104,42 +71,19 @@ function removeHooksFromSettings() {
 }
 
 // ============================================================
-// 2. Remove global hook script files
-// ============================================================
-function removeHookFiles() {
-    safeDelete(path.join(hooksDir, 'session-status-hook.js'));
-    safeDelete(path.join(hooksDir, 'activity-hook.js'));
-    safeDelete(path.join(hooksDir, 'pool-context.js'));
-    safeDelete(path.join(hooksDir, 'profile-status-hook.js'));
-    safeDelete(path.join(hooksDir, 'session-import-hook.js'));
-}
-
-// ============================================================
-// 3. Remove skill folders
-// ============================================================
-function removeSkills() {
-    safeRmdir(path.join(skillsDir, 'kanban-task'));
-    safeRmdir(path.join(skillsDir, 'multiterminal-addproject'));
-    safeRmdir(path.join(skillsDir, 'profile'));
-    safeRmdir(path.join(skillsDir, 'new-project'));
-    safeRmdir(path.join(skillsDir, 'project-management'));
-}
-
-// ============================================================
-// 4. Remove MCP server files from AppData
+// 2. Remove MCP server files from AppData
 // ============================================================
 function removeMcpServerFiles() {
     safeRmdir(path.join(appDataDir, 'multiterminal', 'mcp'));
 }
 
 // ============================================================
-// 5. Remove MCP server entries from ~/.claude.json
+// 3. Remove MCP server entries from ~/.claude.json
 // ============================================================
 function removeMcpConfig() {
     // Clean up legacy .mcp.json if it exists (from older installs)
     safeDelete(path.join(appDataDir, 'multiterminal', '.mcp.json'));
 
-    // Remove MCP entries from ~/.claude.json (the actual config location)
     const claudeJsonPath = path.join(userProfileDir, '.claude.json');
     if (!fs.existsSync(claudeJsonPath)) return;
 
@@ -168,29 +112,35 @@ function removeMcpConfig() {
 }
 
 // ============================================================
-// 6. Remove optional MCP servers from gateway database
+// 4. Remove optional MCP servers from gateway database
 // ============================================================
 function removeGatewayMcps() {
     const gatewayDbPath = path.join(appDataDir, 'multiterminal', 'gateway', 'gateway.db');
-    if (!fs.existsSync(gatewayDbPath)) return;
-
-    const mcpNames = ['mssql', 'sqlite', 'windows-build-runner', 'windowssnapit', 'everything-search'];
-
-    try {
-        const { execSync } = require('child_process');
-        const names = mcpNames.map(n => `'${n}'`).join(',');
-        execSync(`sqlite3 "${gatewayDbPath}" "DELETE FROM servers WHERE name IN (${names});"`, { stdio: 'inherit' });
-        console.log('  Removed optional MCP servers from gateway database');
-    } catch (e) {
-        console.warn(`  Warning: Could not clean up gateway database: ${e.message}`);
+    if (fs.existsSync(gatewayDbPath)) {
+        const mcpNames = ['mssql', 'sqlite', 'windows-build-runner', 'windowssnapit', 'everything-search'];
+        try {
+            const { execSync } = require('child_process');
+            const names = mcpNames.map(n => `'${n}'`).join(',');
+            execSync(`sqlite3 "${gatewayDbPath}" "DELETE FROM servers WHERE name IN (${names});"`, { stdio: 'inherit' });
+            console.log('  Removed optional MCP servers from gateway database');
+        } catch (e) {
+            console.warn(`  Warning: Could not clean up gateway database: ${e.message}`);
+        }
     }
 
-    // Remove the defaults file
     safeDelete(path.join(appDataDir, 'multiterminal', 'gateway', 'gateway-defaults.json'));
 }
 
 // ============================================================
-// 7. Clean up runtimeconfig backup
+// 5. Remove the plugin marketplace directory
+// ============================================================
+function removePluginMarketplace() {
+    const marketplaceDir = path.join(claudeGlobalDir, 'plugins', 'marketplaces', 'multiterminal-marketplace');
+    safeRmdir(marketplaceDir);
+}
+
+// ============================================================
+// 6. Clean up runtimeconfig backup
 // ============================================================
 function cleanupRuntimeConfigBackup() {
     safeDelete(path.join(installDir, 'MultiTerminal.runtimeconfig.json.self-contained.bak'));
@@ -203,14 +153,8 @@ try {
     console.log('MultiTerminal uninstall cleanup...');
     console.log('');
 
-    console.log('Removing Claude Code hooks from settings...');
-    removeHooksFromSettings();
-
-    console.log('Removing hook script files...');
-    removeHookFiles();
-
-    console.log('Removing skills...');
-    removeSkills();
+    console.log('Removing agent-teams env var from settings...');
+    removeExperimentalAgentTeamsEnv();
 
     console.log('Removing MCP server files...');
     removeMcpServerFiles();
@@ -221,6 +165,9 @@ try {
     console.log('Removing optional MCP servers from gateway...');
     removeGatewayMcps();
 
+    console.log('Removing plugin marketplace...');
+    removePluginMarketplace();
+
     console.log('Cleaning up runtime config backup...');
     cleanupRuntimeConfigBackup();
 
@@ -229,6 +176,5 @@ try {
     process.exit(0);
 } catch (err) {
     console.error('Uninstall cleanup error:', err.message);
-    // Don't fail the uninstaller
     process.exit(0);
 }

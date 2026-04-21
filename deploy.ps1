@@ -22,8 +22,8 @@ Write-Host ""
 # Build Release (incremental — fast if nothing changed).
 # The csproj CopyToStaged AfterTargets=Build target auto-mirrors output into staged/.
 if (-not $SkipBuild) {
-    Write-Host "Building Release configuration..." -ForegroundColor Cyan
-    dotnet build -c Release
+    Write-Host "Building Release configuration (Rebuild)..." -ForegroundColor Cyan
+    dotnet build MultiTerminal.csproj -c Release -t:Rebuild
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: Build failed!" -ForegroundColor Red
         exit 1
