@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
@@ -25,6 +27,30 @@ namespace MultiTerminal.API.Controllers
         private IActionResult ServiceUnavailable()
             => StatusCode(503, new { error = "WikiGeneratorService is not available" });
 
+        // Resolve a caller-supplied projectRoot to a canonical absolute path that exists on disk.
+        // Returns null on any failure; callers should respond 400. This collapses '..' segments and
+        // normalizes separators, blocking the most basic path-traversal cases before the value
+        // reaches File.* APIs downstream.
+        private static string SafeProjectRoot(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            try
+            {
+                var full = Path.GetFullPath(raw);
+                return Directory.Exists(full) ? full : null;
+            }
+            catch (ArgumentException) { return null; }
+            catch (PathTooLongException) { return null; }
+            catch (NotSupportedException) { return null; }
+        }
+
+        // Subsystem IDs are filename stems written by the generator; they must round-trip safely
+        // through Path.Combine without enabling traversal. Restrict to a conservative alphabet so
+        // backslashes / forward slashes / .. / colons / null bytes can never reach the File.* sink
+        // in WikiGeneratorService.
+        private static readonly Regex _safeSubsystemId = new Regex(@"^[A-Za-z0-9_-]{1,64}$", RegexOptions.Compiled);
+        private static bool IsSafeSubsystemId(string id) => !string.IsNullOrEmpty(id) && _safeSubsystemId.IsMatch(id);
+
         /// <summary>
         /// Regenerate all wiki articles for a project.
         /// POST /api/wiki/generate
@@ -34,17 +60,22 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("generate")]
         public IActionResult Generate([FromBody] GenerateRequest request)
         {
-            if (request == null || string.IsNullOrWhiteSpace(request.ProjectRoot))
-                return BadRequest(new { error = "projectRoot is required" });
+            if (request == null) return BadRequest(new { error = "request body is required" });
+            var projectRoot = SafeProjectRoot(request.ProjectRoot);
+            if (projectRoot == null)
+                return BadRequest(new { error = "projectRoot is required and must resolve to an existing directory" });
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
+
+            if (!string.IsNullOrWhiteSpace(request.SubsystemId) && !IsSafeSubsystemId(request.SubsystemId))
+                return BadRequest(new { error = "subsystemId must match ^[A-Za-z0-9_-]{1,64}$" });
 
             try
             {
                 if (!string.IsNullOrWhiteSpace(request.SubsystemId))
                 {
-                    var article = service.GenerateOne(request.ProjectRoot, request.ProjectId, request.SubsystemId);
+                    var article = service.GenerateOne(projectRoot, request.ProjectId, request.SubsystemId);
                     return Ok(new
                     {
                         success = true,
@@ -60,7 +91,7 @@ namespace MultiTerminal.API.Controllers
                     });
                 }
 
-                var articles = service.GenerateAll(request.ProjectRoot, request.ProjectId);
+                var articles = service.GenerateAll(projectRoot, request.ProjectId);
                 return Ok(new
                 {
                     success = true,
@@ -90,15 +121,16 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("articles")]
         public IActionResult ListArticles([FromQuery] string projectRoot)
         {
-            if (string.IsNullOrWhiteSpace(projectRoot))
-                return BadRequest(new { error = "projectRoot query parameter is required" });
+            var safeRoot = SafeProjectRoot(projectRoot);
+            if (safeRoot == null)
+                return BadRequest(new { error = "projectRoot query parameter is required and must resolve to an existing directory" });
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             try
             {
-                var articles = service.ListArticles(projectRoot);
+                var articles = service.ListArticles(safeRoot);
                 return Ok(new
                 {
                     count = articles.Count,
@@ -126,13 +158,16 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("articles/{id}")]
         public IActionResult GetArticle(string id, [FromQuery] string projectRoot)
         {
-            if (string.IsNullOrWhiteSpace(projectRoot))
-                return BadRequest(new { error = "projectRoot query parameter is required" });
+            var safeRoot = SafeProjectRoot(projectRoot);
+            if (safeRoot == null)
+                return BadRequest(new { error = "projectRoot query parameter is required and must resolve to an existing directory" });
+            if (!IsSafeSubsystemId(id))
+                return BadRequest(new { error = "id must match ^[A-Za-z0-9_-]{1,64}$" });
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
-            var markdown = service.GetArticleMarkdown(projectRoot, id);
+            var markdown = service.GetArticleMarkdown(safeRoot, id);
             if (markdown == null)
                 return NotFound(new { error = $"Article '{id}' not found. Run POST /api/wiki/generate first." });
 

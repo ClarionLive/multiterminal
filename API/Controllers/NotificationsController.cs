@@ -115,6 +115,9 @@ namespace MultiTerminal.API.Controllers
 
         private async System.Threading.Tasks.Task ForwardToClaudeRemoteAsync(NotificationRequest request, string id)
         {
+            // remoteMode gate — no phone pushes when user is at the desk.
+            if (!_broker.IsRemoteMode) return;
+
             try
             {
                 var payload = new
@@ -133,7 +136,13 @@ namespace MultiTerminal.API.Controllers
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
 
                 // ClaudeRemote runs on port 5100
-                await _httpClient.PostAsync("http://localhost:5100/api/notifications/runtime", content);
+                var response = await _httpClient.PostAsync("http://localhost:5100/api/notifications/runtime", content);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync();
+                    _broker.DebugLogService?.Warning("NotificationsController",
+                        $"ClaudeRemote rejected notification {id} with {(int)response.StatusCode} {response.ReasonPhrase}: {body}");
+                }
             }
             catch (Exception ex)
             {

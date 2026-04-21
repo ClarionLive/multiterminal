@@ -15,8 +15,10 @@ namespace MultiTerminal.MCPServer.Services
     /// Routes messages between terminals and maintains message queues.
     /// Supports SQLite persistence for reliable delivery with retry.
     /// </summary>
-    public class MessageBroker
+    public class MessageBroker : IDisposable
     {
+        private bool _isDisposed;
+
         private readonly ConcurrentDictionary<string, TerminalInfo> _terminals = new ConcurrentDictionary<string, TerminalInfo>();
         private readonly ConcurrentDictionary<string, BlockingCollection<Message>> _messageQueues = new ConcurrentDictionary<string, BlockingCollection<Message>>();
         private readonly List<Message> _messageHistory = new List<Message>();
@@ -891,8 +893,18 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Get or set remote mode. When on, hooks relay questions to ClaudeRemote.
+        /// Get or set remote mode. When on, hooks relay questions to ClaudeRemote and
+        /// push notifications fire to the owner's phone. When off (user at desk), all
+        /// phone-directed traffic short-circuits so the phone stays silent.
         /// Persisted via SettingsService so the value survives MT restart.
+        ///
+        /// Gate sites (keep in sync when adding new push paths):
+        ///   MT:
+        ///     - PermissionRelayService.Bridge / BridgeChoiceAsync / BridgePlanApprovalAsync / Notify
+        ///     - NotificationsController.ForwardToClaudeRemoteAsync
+        ///     - MessageBroker.ForwardMessagePushAsync
+        ///   ClaudeRemote (consults this flag via GET /api/remote-mode):
+        ///     - InboxMonitorService.CheckInbox (GetRemoteModeAsync helper)
         /// </summary>
         public bool IsRemoteMode
         {
@@ -5629,6 +5641,9 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private async Task ForwardMessagePushAsync(string fromName, string messageContent)
         {
+            // remoteMode gate — no phone pushes when user is at the desk.
+            if (!IsRemoteMode) return;
+
             // Don't notify the owner about their own messages sent from the phone.
             // The phone proxy registers as "MultiRemote" (post-rename) — older "ClaudeRemote" kept for migration safety.
             if (string.Equals(fromName, "MultiRemote", StringComparison.OrdinalIgnoreCase) ||
@@ -5653,7 +5668,7 @@ namespace MultiTerminal.MCPServer.Services
                 };
 
                 var json = System.Text.Json.JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
                 await _httpClient.PostAsync("http://localhost:5100/api/notifications/runtime", content);
             }
@@ -5664,6 +5679,27 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         #endregion
+
+        // CA1063: full Dispose(bool) template. Other IDisposable services in this codebase still
+        // use the simpler one-method form pending a bulk sweep — see follow-up task f74c0ab0.
+        // MainForm currently does not call this Dispose; that wiring is also part of f74c0ab0.
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
+            {
+                _taskDb?.Dispose();
+                _projectDb?.Dispose();
+                _messageQueueDb?.Dispose();
+            }
+            _isDisposed = true;
+        }
     }
 
     /// <summary>
