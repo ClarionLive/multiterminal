@@ -2189,7 +2189,10 @@ namespace MultiTerminal
                     // Apply team lead naming convention: "Team Lead {Name} - {3-digit random}"
                     if (isTeamLead)
                     {
+                        // CA5394: display-label disambiguator, not a security identifier — insecure RNG is fine.
+#pragma warning disable CA5394
                         string suffix = Random.Shared.Next(100, 999).ToString();
+#pragma warning restore CA5394
                         identityName = $"Team Lead {identityName} - {suffix}";
                         System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Team lead naming applied: '{identityName}'");
                     }
