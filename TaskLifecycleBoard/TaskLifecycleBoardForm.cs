@@ -894,5 +894,14 @@ namespace MultiTerminal.TaskLifecycleBoard
 
             base.OnFormClosed(e);
         }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _webView?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
     }
 }

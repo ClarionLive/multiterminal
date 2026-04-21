@@ -448,6 +448,8 @@ namespace MultiTerminal.API
                 _staleAgentTimer?.Dispose();
                 _staleAgentTimer = null;
                 StopAsync().GetAwaiter().GetResult();
+                _broker?.Dispose();
+                _poolCoordinator?.Dispose();
             }
             _isDisposed = true;
         }

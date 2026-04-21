@@ -20,8 +20,8 @@
     <WarningsNotAsErrors>
       $(WarningsNotAsErrors);
       CA1848;SA1633;
-      CA1001;CA1063;CA1816;CA2000;CA2100;CA2213;CA3003;
-      CA2216;CA3001;CA5394
+      CA1001;CA2000;CA2100;CA3003;
+      CA3001;CA5394
     </WarningsNotAsErrors>
 
     <!-- Default to nullable-enabled for NEW projects. Existing csprojs that set

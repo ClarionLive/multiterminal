@@ -31,6 +31,8 @@ namespace MultiTerminal.Dialogs
 
         private Project _workingProject;
 
+        // Controls — added to Controls collection via tab pages / parent form and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         // Tab 1 - General
         private TextBox nameTextBox;
         private TextBox descriptionTextBox;
@@ -83,6 +85,7 @@ namespace MultiTerminal.Dialogs
         private Button saveButton;
         private Button cancelButton;
         private TabControl tabControl;
+#pragma warning restore CA2213
 
         // Track which tabs the user has visited to avoid reading stale textbox values
         private readonly HashSet<int> _visitedTabs = new HashSet<int> { 0 };

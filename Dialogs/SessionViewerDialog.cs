@@ -23,13 +23,15 @@ namespace MultiTerminal.Dialogs
         private readonly TerminalTheme _theme;
         private readonly SessionSyncService _syncService;
 
-        // Controls
+        // Controls — added to Controls collection and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         private Panel _headerPanel;
         private Label _sessionDateLabel;
         private Label _messageCountLabel;
         private Label _branchLabel;
         private WebView2 _webView;
         private Button _closeButton;
+#pragma warning restore CA2213
 
         // Session data
         private List<SessionMessage> _messages;

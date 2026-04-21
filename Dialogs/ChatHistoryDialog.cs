@@ -18,7 +18,8 @@ namespace MultiTerminal.Dialogs
         private List<ChatMessageRecord> _allMessages;
         private List<ChatMessageRecord> _filteredMessages;
 
-        // Controls
+        // Controls — added to Controls collection and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         private TextBox _searchBox;
         private ComboBox _terminalFilter;
         private ComboBox _dateRangeFilter;
@@ -27,6 +28,7 @@ namespace MultiTerminal.Dialogs
         private TextBox _previewBox;
         private Button _copyButton;
         private Button _closeButton;
+#pragma warning restore CA2213
 
         /// <summary>
         /// Creates a new ChatHistoryDialog instance.

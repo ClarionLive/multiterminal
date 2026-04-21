@@ -168,5 +168,14 @@ namespace MultiTerminal
             _animationTimer?.Dispose();
             base.OnFormClosed(e);
         }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _animationTimer?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
     }
 }

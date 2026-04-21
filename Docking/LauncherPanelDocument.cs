@@ -39,12 +39,14 @@ namespace MultiTerminal.Docking
     /// </summary>
     public class LauncherPanelDocument : DockContent
     {
-        // Controls
+        // Controls — added to Controls collection and auto-disposed by base Control.Dispose().
+#pragma warning disable CA2213
         private Panel _headerPanel;
         private Button _refreshButton;
         private Button _launchButton;
         private ListView _identityListView;
         private Label _statusLabel;
+#pragma warning restore CA2213
 
         // Theme
         private TerminalTheme _currentTheme;

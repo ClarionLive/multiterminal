@@ -12,11 +12,15 @@ namespace MultiTerminal
     public class TestSpawnForm : Form
     {
         private readonly MainForm _mainForm;
+
+        // Controls — added to Controls collection and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         private TextBox _nameTextBox;
         private TextBox _typeTextBox;
         private TextBox _dirTextBox;
         private Button _spawnButton;
         private TextBox _outputTextBox;
+#pragma warning restore CA2213
 
         public TestSpawnForm(MainForm mainForm)
         {

@@ -14,8 +14,11 @@ namespace MultiTerminal.Controls
     /// </summary>
     public class HudTabContainer : UserControl
     {
+        // Child controls; added to Controls collection and auto-disposed by base Control.Dispose().
+#pragma warning disable CA2213
         private readonly Panel _tabStrip;
         private readonly Panel _contentArea;
+#pragma warning restore CA2213
         private readonly TaskHudRenderer _taskHud;
         private readonly List<TabEntry> _tabs = new List<TabEntry>();
         private int _activeTabIndex;

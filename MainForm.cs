@@ -38,6 +38,13 @@ namespace MultiTerminal
         private SettingsService _settings;
         private GridLayoutManager _gridManager;
         private TerminalTheme _currentTheme = TerminalTheme.Dark;
+        // CA2213 pragma rationale for the field block below:
+        // - ToolStrip* buttons are added to _toolStrip.Items and disposed transitively via _toolStrip?.Dispose() in Dispose(bool).
+        // - *PanelDocument fields are DockContent panels registered with _dockPanel; disposed transitively via _dockPanel?.Dispose() in Dispose(bool).
+        // - _lastActiveTerminal is a borrowed reference (points to whichever TerminalDocument is currently active); not owned.
+        // - _mcpServer is deliberately not disposed here because OnFormClosing already called StopAsync; a second dispose would deadlock the UI thread.
+        // - _projectService, _webhookService have explicit disposal added to Dispose(bool) below; the pragma is a no-op on them.
+#pragma warning disable CA2213
         private ToolStripButton _themeButton;
         private ToolStripDropDownButton _gridDropdown;
         private ToolStripButton _settingsButton;
@@ -81,6 +88,7 @@ namespace MultiTerminal
         private InboxMonitorService _inboxMonitor;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
+#pragma warning restore CA2213
 
         // Companion process manager — auto-launches external services on startup
         private Services.CompanionProcessManager _companionManager;
@@ -5564,6 +5572,12 @@ namespace MultiTerminal
         {
             if (disposing)
             {
+                _oracleDigestTimer?.Stop();
+                _oracleDigestTimer?.Dispose();
+                _oracleService?.Dispose();
+                _webhookService?.Dispose();
+                _projectService?.Dispose();
+
                 _messageQueueTimer?.Stop();
                 _messageQueueTimer?.Dispose();
                 _sessionSyncTimer?.Stop();

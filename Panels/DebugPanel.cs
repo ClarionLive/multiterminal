@@ -18,6 +18,9 @@ namespace MultiTerminal.Panels
     {
         private ListView _logListView;
         private ToolStrip _toolStrip;
+
+        // ToolStrip items added to _toolStrip.Items / listViewMenu.Items; disposed transitively when parent ToolStrip/ContextMenuStrip is disposed.
+#pragma warning disable CA2213
         private ToolStripButton _clearButton;
         private ToolStripButton _copyButton;
         private ToolStripButton _exportButton;
@@ -25,6 +28,7 @@ namespace MultiTerminal.Panels
         private ToolStripButton _systemWideCaptureButton;
         private ToolStripMenuItem _copyMenuItem;
         private ToolStripLabel _countLabel;
+#pragma warning restore CA2213
         private DebugLogService _logService;
         private bool _isPaused = false;
         private bool _isDisposed = false;

@@ -28,6 +28,10 @@ namespace MultiTerminal.Docking
     /// </summary>
     public class TerminalDocument : DockContent
     {
+        // Controls nested inside inner container panels (_dropZone, _hudTabContainer, _terminalAgentSplitter);
+        // disposed transitively via the respective container's Dispose() in the override below, or via
+        // base DockContent.Controls for top-level children.
+#pragma warning disable CA2213
         private TerminalControl _terminal;
         private TerminalStatusBarRenderer _statusBar;
         private Splitter _statusBarSplitter;
@@ -41,6 +45,7 @@ namespace MultiTerminal.Docking
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
         private EmbeddedAgentPanel _embeddedAgentPanel;
+#pragma warning restore CA2213
         private System.Windows.Forms.Timer _agentPanelSanityTimer;
         private MessageBroker _messageBroker;
         private DebugLogService _debugLogService;
@@ -213,7 +218,9 @@ namespace MultiTerminal.Docking
         private TerminalTheme _currentTheme;
 
         // Terminal content context menu (for dismissing on click)
+#pragma warning disable CA2213 // Borrowed reference — we track the currently-shown menu to Close() it; we do not own its lifecycle.
         private ContextMenuStrip _currentContextMenu;
+#pragma warning restore CA2213
 
         /// <summary>
         /// Gets or sets a custom user-defined title for the tab.
@@ -2490,6 +2497,9 @@ body {{
                 // Prevent stray splitter events from saving bogus ratios during teardown
                 _isDisposing = true;
                 _suppressSplitterEvents = true;
+
+                _tabContextMenu?.Dispose();
+                _tabContextMenu = null;
 
                 // Unregister terminal from broker so the team leader name is released
                 if (_messageBroker != null && !string.IsNullOrEmpty(_docId))

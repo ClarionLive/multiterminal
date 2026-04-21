@@ -20,7 +20,8 @@ namespace MultiTerminal.Dialogs
         private List<MultiTerminal.Models.Project> _allProjects;
         private List<MultiTerminal.Models.Project> _filteredProjects;
 
-        // Controls
+        // Controls — added to Controls collection and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         private TextBox searchTextBox;
         private Button newProjectButton;
         private DataGridView projectsGridView;
@@ -29,6 +30,7 @@ namespace MultiTerminal.Dialogs
         private Button removeButton;
         private Button deleteConfigButton;
         private Button closeButton;
+#pragma warning restore CA2213
 
         /// <summary>
         /// Gets the currently selected rich project.

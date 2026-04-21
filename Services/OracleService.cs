@@ -136,6 +136,7 @@ namespace MultiTerminal.Services
                 form.TerminalExited -= OnTerminalExited;
                 form.ForceClose();
             }
+            _form?.Dispose();
             _form = null;
 
             _log("Oracle", "Oracle shut down");

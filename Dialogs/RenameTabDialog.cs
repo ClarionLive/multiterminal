@@ -9,9 +9,12 @@ namespace MultiTerminal.Dialogs
     /// </summary>
     public class RenameTabDialog : Form
     {
+        // Child controls; added to Controls collection and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         private TextBox _textBox;
         private Button _okButton;
         private Button _cancelButton;
+#pragma warning restore CA2213
 
         /// <summary>
         /// Gets the new name entered by the user.

@@ -16,12 +16,15 @@ namespace MultiTerminal.Dialogs
     /// </summary>
     public class IdentityPickerDialog : Form
     {
+        // Controls — added to Controls collection and auto-disposed by base Form.Dispose().
+#pragma warning disable CA2213
         private ListBox _identityList;
         private TextBox _folderTextBox;
         private Button _browseButton;
         private ListBox _recentList;
         private Button _okButton;
         private Button _cancelButton;
+#pragma warning restore CA2213
         private readonly string _conflictingName;
         private readonly List<string> _identities;
         private readonly bool _isSelectionMode;

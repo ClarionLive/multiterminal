@@ -554,6 +554,7 @@ namespace MultiTerminal.DashboardHeader
                     _broker.TaskClaimed -= OnTaskClaimed;
                     _broker.InboxUpdated -= OnInboxUpdated;
                 }
+                _fallbackTimer?.Dispose();
                 _webView?.Dispose();
                 _logoMenu?.Dispose();
             }
