@@ -1223,7 +1223,7 @@ namespace MultiTerminal.MCPServer.Services
                               $"&from={Uri.EscapeDataString(fromTerminalName)}" +
                               $"&content={Uri.EscapeDataString(content)}";
 
-                var httpContent = new StringContent(postData, Encoding.UTF8, "application/x-www-form-urlencoded");
+                using var httpContent = new StringContent(postData, Encoding.UTF8, "application/x-www-form-urlencoded");
 
                 var response = await _httpClient.PostAsync("http://localhost:5000/message", httpContent);
 

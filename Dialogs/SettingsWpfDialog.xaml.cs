@@ -191,7 +191,7 @@ namespace MultiTerminal.Dialogs
 
         private void BrowseDefaultDirButton_Click(object sender, RoutedEventArgs e)
         {
-            var dlg = new System.Windows.Forms.FolderBrowserDialog
+            using var dlg = new System.Windows.Forms.FolderBrowserDialog
             {
                 Description = "Select default working directory for Just Claude",
                 ShowNewFolderButton = true

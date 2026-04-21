@@ -1320,8 +1320,8 @@ namespace MultiTerminal
                     timestamp = DateTime.UtcNow.ToString("o")
                 });
 
-                var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-                var response = await _channelHttpClient.PostAsync($"http://127.0.0.1:{channelPort}/message", content);
+                using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+                using var response = await _channelHttpClient.PostAsync($"http://127.0.0.1:{channelPort}/message", content);
                 return response.IsSuccessStatusCode;
             }
             catch (Exception ex)
@@ -2836,7 +2836,10 @@ namespace MultiTerminal
             doc.RendererReady += handler;
 
             // Timeout fallback
+            // CA2000: CTS ownership transferred to Task.Delay/ContinueWith chain; lifetime bound to timeout task, not this method.
+#pragma warning disable CA2000
             cts = new System.Threading.CancellationTokenSource();
+#pragma warning restore CA2000
             Task.Delay(timeoutMs, cts.Token).ContinueWith(t =>
             {
                 if (!t.IsCanceled)
@@ -2871,7 +2874,10 @@ namespace MultiTerminal
             doc.StartTerminal(workingDirectory, terminalName);
 
             // Timeout fallback - don't wait forever
+            // CA2000: CTS ownership transferred to Task.Delay/ContinueWith chain; lifetime bound to timeout task, not this method.
+#pragma warning disable CA2000
             cts = new System.Threading.CancellationTokenSource();
+#pragma warning restore CA2000
             Task.Delay(timeoutMs, cts.Token).ContinueWith(t =>
             {
                 if (!t.IsCanceled)

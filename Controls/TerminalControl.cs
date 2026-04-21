@@ -727,7 +727,7 @@ namespace MultiTerminal.Controls
                     projectPath = _pendingWorkingDir,
                     terminalName = _pendingTerminalName ?? "Unknown"
                 });
-                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                using var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 var response = await client.PostAsync("http://localhost:5050/api/session-memory/index-project", content);
                 LogTrace($"Session memory flush after /clear: {(int)response.StatusCode}");
             }
@@ -755,7 +755,7 @@ namespace MultiTerminal.Controls
                     projectPath = _pendingWorkingDir,
                     terminalName = _pendingTerminalName ?? "Unknown"
                 });
-                var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                using var content = new System.Net.Http.StringContent(json, System.Text.Encoding.UTF8, "application/json");
                 var response = await client.PostAsync("http://localhost:5050/api/session-lineage/sync-project", content);
                 LogTrace($"Session lineage sync after /clear: {(int)response.StatusCode}");
             }

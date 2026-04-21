@@ -43,6 +43,7 @@ namespace MultiTerminal.Services
             var result = _db.ExecuteQuery(sqlExact, parms);
             if (result.Rows.Count > 0)
                 return result;
+            result.Dispose();
 
             string sqlLike = $@"
                 SELECT s.id, s.name, s.type, s.file_path, s.line_number,

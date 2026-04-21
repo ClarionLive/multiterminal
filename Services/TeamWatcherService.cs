@@ -263,12 +263,15 @@ namespace MultiTerminal.Services
             string teamDir = Path.Combine(_teamsDir, teamName);
             if (!Directory.Exists(teamDir)) return;
 
+            // CA2000: Watcher captured by Created handler closure and disposed inside that handler on first fire.
+#pragma warning disable CA2000
             var watcher = new FileSystemWatcher(teamDir)
             {
                 Filter = "config.json",
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime,
                 EnableRaisingEvents = true
             };
+#pragma warning restore CA2000
             watcher.Created += (s, e) =>
             {
                 watcher.Dispose();
@@ -1870,11 +1873,14 @@ namespace MultiTerminal.Services
                 }
                 foreach (var key in orphansToRemove)
                 {
+                    // CA2000: orphanTailer retrieved from dictionary via Remove(out); disposed within this scope.
+#pragma warning disable CA2000
                     if (_orphanTailers.Remove(key, out var orphanTailer))
                     {
                         LogInfo($"Stopping orphan tailer for team agent: {orphanTailer.AgentName}");
                         try { orphanTailer.Dispose(); } catch { }
                     }
+#pragma warning restore CA2000
                 }
             }
 

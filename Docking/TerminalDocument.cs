@@ -1186,6 +1186,8 @@ namespace MultiTerminal.Docking
         {
             LoadDiffPopupSettings();
 
+            // CA2000: Form shown non-modally; disposed in FormClosed handler below.
+#pragma warning disable CA2000
             var form = new Form
             {
                 Text = $"Diff: {fileName}",
@@ -1196,6 +1198,7 @@ namespace MultiTerminal.Docking
                     : FormStartPosition.CenterParent,
                 Icon = FindForm()?.Icon
             };
+#pragma warning restore CA2000
 
             if (_diffPopupBounds.HasValue)
                 form.Location = _diffPopupBounds.Value.Location;
@@ -1230,6 +1233,7 @@ namespace MultiTerminal.Docking
 
                 SaveDiffPopupSettings();
                 webView.Dispose();
+                form.Dispose();
             };
 
             form.Show(FindForm());

@@ -194,9 +194,12 @@ namespace MultiTerminal.Services
                 });
 
                 // Query symbols for this file from code graph (cg_symbols uses forward-slash paths)
-                var symbols = SafeGetFileSymbols(absFileForward)
+                // CA2000: `??` short-circuit guarantees at most one non-null DataTable is created; `using var` disposes it. Analyzer can't track short-circuit semantics across chained SafeGetFileSymbols calls.
+#pragma warning disable CA2000
+                using var symbols = SafeGetFileSymbols(absFileForward)
                     ?? SafeGetFileSymbols(absFile)
                     ?? SafeGetFileSymbols(relFile);
+#pragma warning restore CA2000
                 if (symbols != null)
                 {
                     CollectSymbols(article, symbols, relFile);
@@ -335,7 +338,10 @@ namespace MultiTerminal.Services
                 var symbolIds = SafeFindSymbolIds(sym.Name);
                 foreach (var id in symbolIds)
                 {
-                    var callers = SafeGetCallers(id);
+                    // CA2000: analyzer false-positive on private method returning IDisposable via try/catch; `using var` disposes on all paths.
+#pragma warning disable CA2000
+                    using var callers = SafeGetCallers(id);
+#pragma warning restore CA2000
                     if (callers == null) continue;
 
                     foreach (DataRow row in callers.Rows)
@@ -381,7 +387,7 @@ namespace MultiTerminal.Services
             try
             {
                 var justName = name.Contains('.') ? name.Substring(name.LastIndexOf('.') + 1) : name;
-                var result = _codeGraph?.FindSymbol(justName);
+                using var result = _codeGraph?.FindSymbol(justName);
                 if (result == null) return ids;
                 foreach (DataRow row in result.Rows)
                 {

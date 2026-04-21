@@ -33,7 +33,7 @@ namespace MultiTerminal.API.Controllers
             if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
             if (string.IsNullOrWhiteSpace(query)) return BadRequest(new { error = "query is required" });
 
-            var dt = q.FindSymbol(query, type);
+            using var dt = q.FindSymbol(query, type);
             return Ok(new { success = true, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -50,7 +50,7 @@ namespace MultiTerminal.API.Controllers
             long id = ResolveSymbolId(symbolId, symbolName);
             if (id < 0) return NotFound(new { error = "Symbol not found" });
 
-            var dt = q.GetCallers(id);
+            using var dt = q.GetCallers(id);
             return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -67,7 +67,7 @@ namespace MultiTerminal.API.Controllers
             long id = ResolveSymbolId(symbolId, symbolName);
             if (id < 0) return NotFound(new { error = "Symbol not found" });
 
-            var dt = q.GetCallees(id);
+            using var dt = q.GetCallees(id);
             return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -84,7 +84,7 @@ namespace MultiTerminal.API.Controllers
             long id = ResolveSymbolId(symbolId, symbolName);
             if (id < 0) return NotFound(new { error = "Symbol not found" });
 
-            var dt = q.GetImpact(id, maxDepth);
+            using var dt = q.GetImpact(id, maxDepth);
             return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -101,7 +101,7 @@ namespace MultiTerminal.API.Controllers
             long id = ResolveSymbolId(symbolId, symbolName);
             if (id < 0) return NotFound(new { error = "Symbol not found" });
 
-            var dt = q.GetInheritanceTree(id);
+            using var dt = q.GetInheritanceTree(id);
             return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -115,7 +115,7 @@ namespace MultiTerminal.API.Controllers
             var q = GetQuery();
             if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
 
-            var dt = q.GetDeadCode(projectId);
+            using var dt = q.GetDeadCode(projectId);
             return Ok(new { success = true, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -130,7 +130,7 @@ namespace MultiTerminal.API.Controllers
             if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
             if (string.IsNullOrWhiteSpace(filePath)) return BadRequest(new { error = "filePath is required" });
 
-            var dt = q.GetFileSymbols(filePath);
+            using var dt = q.GetFileSymbols(filePath);
             return Ok(new { success = true, filePath, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
@@ -176,7 +176,7 @@ namespace MultiTerminal.API.Controllers
             var q = GetQuery();
             if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
 
-            var dt = q.GetStats();
+            using var dt = q.GetStats();
             if (dt.Rows.Count == 0) return Ok(new { success = true, indexed = false });
 
             var row = dt.Rows[0];

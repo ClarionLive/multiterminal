@@ -62,12 +62,18 @@ namespace MultiTerminal
             PlanSeeder.EnsureSeeded();
 
             // Show splash screen immediately
+            // CA2000: SplashScreen lifetime spans async init; disposed in TryShowMainForm after gates close.
+#pragma warning disable CA2000
             var splash = new SplashScreen();
+#pragma warning restore CA2000
             splash.Show();
             Application.DoEvents();
 
             // Create main form (starts hidden via Opacity=0)
+            // CA2000: MainForm ownership transferred to Application.Run (disposes on message-loop exit).
+#pragma warning disable CA2000
             var mainForm = new MainForm();
+#pragma warning restore CA2000
 
             // Track three startup gates: loading, animation, and dashboard WebView2
             bool animationDone = false;
