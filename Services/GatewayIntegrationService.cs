@@ -492,12 +492,20 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             if (_disposed) return;
             _disposed = true;
-
-            try { _connection?.Close(); } catch { }
-            try { _connection?.Dispose(); } catch { }
-            _connection = null;
+            if (disposing)
+            {
+                try { _connection?.Close(); } catch { }
+                try { _connection?.Dispose(); } catch { }
+                _connection = null;
+            }
         }
     }
 }

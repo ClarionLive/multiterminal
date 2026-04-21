@@ -213,11 +213,18 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
-            if (_isDisposed)
-                return;
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
 
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
+            {
+                Stop();
+            }
             _isDisposed = true;
-            Stop();
         }
     }
 

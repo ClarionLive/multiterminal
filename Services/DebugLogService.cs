@@ -313,23 +313,30 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
-            if (_isDisposed)
-                return;
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
 
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
             _isDisposed = true;
-            StopSystemWideCapture();
-
-            lock (_fileLock)
+            if (disposing)
             {
-                if (_logWriter != null)
+                StopSystemWideCapture();
+
+                lock (_fileLock)
                 {
-                    try
+                    if (_logWriter != null)
                     {
-                        _logWriter.Flush();
-                        _logWriter.Dispose();
+                        try
+                        {
+                            _logWriter.Flush();
+                            _logWriter.Dispose();
+                        }
+                        catch { }
+                        _logWriter = null;
                     }
-                    catch { }
-                    _logWriter = null;
                 }
             }
         }

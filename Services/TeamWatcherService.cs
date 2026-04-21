@@ -1905,9 +1905,18 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             if (_disposed) return;
             _disposed = true;
-            StopWatching();
+            if (disposing)
+            {
+                StopWatching();
+            }
         }
 
         /// <summary>

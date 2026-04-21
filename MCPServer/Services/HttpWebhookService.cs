@@ -18,6 +18,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly MessageBroker _broker;
         private CancellationTokenSource _cancellationTokenSource;
         private Task _listenerTask;
+        private bool _isDisposed;
         private const int Port = 5000;
 
         /// <summary>
@@ -307,9 +308,20 @@ namespace MultiTerminal.MCPServer.Services
 
         public void Dispose()
         {
-            Stop();
-            _listener?.Close();
-            _cancellationTokenSource?.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
+            {
+                Stop();
+                _listener?.Close();
+                _cancellationTokenSource?.Dispose();
+            }
+            _isDisposed = true;
         }
     }
 

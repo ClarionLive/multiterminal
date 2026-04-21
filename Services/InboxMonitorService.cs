@@ -132,13 +132,22 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             lock (_lock)
             {
                 if (_disposed) return;
                 _disposed = true;
             }
-            StopWatching();
-            _lastEventTime.Clear();
+            if (disposing)
+            {
+                StopWatching();
+                _lastEventTime.Clear();
+            }
         }
     }
 }

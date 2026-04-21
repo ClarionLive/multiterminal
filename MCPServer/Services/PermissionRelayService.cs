@@ -778,15 +778,23 @@ namespace MultiTerminal.MCPServer.Services
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             if (_disposed) return;
             _disposed = true;
-
-            foreach (var kvp in _active)
+            if (disposing)
             {
-                try { kvp.Value.Cts.Cancel(); kvp.Value.Cts.Dispose(); } catch { }
+                foreach (var kvp in _active)
+                {
+                    try { kvp.Value.Cts.Cancel(); kvp.Value.Cts.Dispose(); } catch { }
+                }
+                _active.Clear();
+                _http.Dispose();
             }
-            _active.Clear();
-            _http.Dispose();
         }
 
         // ===================================================================

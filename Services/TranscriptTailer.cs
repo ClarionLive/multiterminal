@@ -565,12 +565,20 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
 
-            IsActive = false;
-            DisposeWatchers();
-            Stopped?.Invoke(this, -1);
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed) return;
+            if (disposing)
+            {
+                IsActive = false;
+                DisposeWatchers();
+                Stopped?.Invoke(this, -1);
+            }
+            _disposed = true;
         }
 
         /// <summary>

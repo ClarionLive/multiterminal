@@ -800,9 +800,65 @@ namespace MultiTerminal.Terminal
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             if (_isDisposed) return;
             _isDisposed = true;
-            Cleanup();
+            if (disposing)
+            {
+                // Full teardown — safe to touch managed disposables + join threads.
+                Cleanup();
+            }
+            else
+            {
+                // Finalizer path — only release unmanaged OS handles. Managed disposables
+                // and threads are finalized separately by the GC; touching them here is
+                // undefined behavior.
+                CloseUnmanagedHandles();
+            }
+        }
+
+        // Unmanaged-only handle release. Safe from both Dispose(true) via Cleanup and
+        // Dispose(false) from the finalizer. Idempotent — each handle is nulled after close.
+        private void CloseUnmanagedHandles()
+        {
+            if (_pseudoConsoleHandle != IntPtr.Zero)
+            {
+                NativeMethods.ClosePseudoConsole(_pseudoConsoleHandle);
+                _pseudoConsoleHandle = IntPtr.Zero;
+            }
+            if (_processHandle != IntPtr.Zero)
+            {
+                NativeMethods.CloseHandle(_processHandle);
+                _processHandle = IntPtr.Zero;
+            }
+            if (_threadHandle != IntPtr.Zero)
+            {
+                NativeMethods.CloseHandle(_threadHandle);
+                _threadHandle = IntPtr.Zero;
+            }
+            if (_jobHandle != IntPtr.Zero)
+            {
+                NativeMethods.CloseHandle(_jobHandle);
+                _jobHandle = IntPtr.Zero;
+            }
+            if (_attributeList != IntPtr.Zero)
+            {
+                NativeMethods.DeleteProcThreadAttributeList(_attributeList);
+                Marshal.FreeHGlobal(_attributeList);
+                _attributeList = IntPtr.Zero;
+            }
+        }
+
+        // Required by CA2216: owning unmanaged handles obliges us to release them even if
+        // Dispose() was never called. Finalizer path only runs CloseUnmanagedHandles().
+        ~ConPtyTerminal()
+        {
+            Dispose(false);
         }
     }
 }

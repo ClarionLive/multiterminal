@@ -332,9 +332,18 @@ When you receive a bootstrap message about the daily digest:
 
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
             if (_isDisposed) return;
             _isDisposed = true;
-            Shutdown();
+            if (disposing)
+            {
+                Shutdown();
+            }
         }
     }
 }

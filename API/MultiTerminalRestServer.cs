@@ -29,6 +29,7 @@ namespace MultiTerminal.API
         private SpawnService _spawnService;
         private TerminalStreamService _terminalStreamService;
         private CompanionProcessManager _companionProcessManager;
+        private bool _isDisposed;
 
         /// <summary>
         /// The message broker for routing messages between terminals.
@@ -433,11 +434,22 @@ namespace MultiTerminal.API
 
         public void Dispose()
         {
-            _staleTaskTimer?.Dispose();
-            _staleTaskTimer = null;
-            _staleAgentTimer?.Dispose();
-            _staleAgentTimer = null;
-            StopAsync().GetAwaiter().GetResult();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
+            {
+                _staleTaskTimer?.Dispose();
+                _staleTaskTimer = null;
+                _staleAgentTimer?.Dispose();
+                _staleAgentTimer = null;
+                StopAsync().GetAwaiter().GetResult();
+            }
+            _isDisposed = true;
         }
     }
 }

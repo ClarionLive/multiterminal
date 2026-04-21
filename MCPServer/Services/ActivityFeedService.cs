@@ -347,12 +347,19 @@ namespace MultiTerminal.MCPServer.Services
 
         public void Dispose()
         {
-            if (!_isDisposed)
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
             {
                 _connection?.Close();
                 _connection?.Dispose();
-                _isDisposed = true;
             }
+            _isDisposed = true;
         }
     }
 

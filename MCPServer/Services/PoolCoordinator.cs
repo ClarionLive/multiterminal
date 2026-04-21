@@ -416,12 +416,16 @@ namespace MultiTerminal.MCPServer.Services
             return "## Recent Pool Activity\n" + string.Join("\n", lines);
         }
 
-        /// <summary>
-        /// Dispose resources including the file watcher.
-        /// </summary>
         public void Dispose()
         {
-            if (!_isDisposed)
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
             {
                 if (_fileWatcher != null)
                 {
@@ -430,8 +434,8 @@ namespace MultiTerminal.MCPServer.Services
                     _fileWatcher.Dispose();
                     _fileWatcher = null;
                 }
-                _isDisposed = true;
             }
+            _isDisposed = true;
         }
     }
 

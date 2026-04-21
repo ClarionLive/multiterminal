@@ -484,21 +484,28 @@ namespace MultiTerminal.Services
 
         public void Dispose()
         {
-            if (_isDisposed)
-                return;
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
 
-            _cts?.Cancel();
-            _cts?.Dispose();
-
-            try { _stdinWriter?.Dispose(); } catch { }
-            try
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
             {
-                if (_process != null && !_process.HasExited)
-                    _process.Kill(entireProcessTree: true);
-            }
-            catch { }
+                _cts?.Cancel();
+                _cts?.Dispose();
 
-            _process?.Dispose();
+                try { _stdinWriter?.Dispose(); } catch { }
+                try
+                {
+                    if (_process != null && !_process.HasExited)
+                        _process.Kill(entireProcessTree: true);
+                }
+                catch { }
+
+                _process?.Dispose();
+            }
             _isDisposed = true;
         }
     }
