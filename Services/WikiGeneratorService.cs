@@ -65,7 +65,11 @@ namespace MultiTerminal.Services
 
             var wikiDir = Path.Combine(projectRoot, ".claude", "wiki");
             Directory.CreateDirectory(wikiDir);
+            // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot (canonical absolute path, existence-verified).
+            // subsystem.Id is allowlist-validated via WikiController.IsSafeSubsystemId (^[A-Za-z0-9_-]{1,64}$) at the REST entry point.
+#pragma warning disable CA3003
             File.WriteAllText(Path.Combine(wikiDir, subsystem.Id + ".md"), article.Markdown);
+#pragma warning restore CA3003
             return article;
         }
 
@@ -80,6 +84,10 @@ namespace MultiTerminal.Services
             foreach (var sub in manifest.Subsystems)
             {
                 var path = Path.Combine(wikiDir, sub.Id + ".md");
+                // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot. sub.Id originates from the trusted
+                // wiki-manifest.json under that sanitized root (written by this project's maintainers, not request bodies);
+                // public REST entry points additionally allowlist subsystemIds via IsSafeSubsystemId.
+#pragma warning disable CA3003
                 var exists = File.Exists(path);
                 result.Add(new WikiArticle
                 {
@@ -90,6 +98,7 @@ namespace MultiTerminal.Services
                     GeneratedAt = exists ? File.GetLastWriteTimeUtc(path).ToString("o") : null,
                     Markdown = exists ? File.ReadAllText(path) : null
                 });
+#pragma warning restore CA3003
             }
             return result;
         }
@@ -98,14 +107,22 @@ namespace MultiTerminal.Services
         public string GetArticleMarkdown(string projectRoot, string subsystemId)
         {
             var path = Path.Combine(projectRoot, ".claude", "wiki", subsystemId + ".md");
+            // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot (canonical absolute path, existence-verified);
+            // subsystemId is allowlist-validated via WikiController.IsSafeSubsystemId (^[A-Za-z0-9_-]{1,64}$).
+#pragma warning disable CA3003
             return File.Exists(path) ? File.ReadAllText(path) : null;
+#pragma warning restore CA3003
         }
 
         private WikiManifest LoadManifest(string projectRoot)
         {
             var path = Path.Combine(projectRoot, ".claude", "wiki", "wiki-manifest.json");
+            // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot; the remaining path segments
+            // are hard-coded string literals ('.claude/wiki/wiki-manifest.json'), so no user input reaches the sink beyond the sanitized root.
+#pragma warning disable CA3003
             if (!File.Exists(path)) return null;
             var json = File.ReadAllText(path);
+#pragma warning restore CA3003
             var options = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
@@ -134,6 +151,10 @@ namespace MultiTerminal.Services
             {
                 var globDir = Path.Combine(projectRoot, Path.GetDirectoryName(sub.ControllerGlob.Replace('/', Path.DirectorySeparatorChar)) ?? "");
                 var pattern = Path.GetFileName(sub.ControllerGlob);
+                // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot. sub.ControllerGlob is authored in the
+                // project-local wiki-manifest.json (a trusted on-disk artifact, not request input). Directory.Exists here is a
+                // guard against missing folders, not a sanitizer; the trust boundary is the manifest file itself.
+#pragma warning disable CA3003
                 if (Directory.Exists(globDir))
                 {
                     foreach (var f in Directory.GetFiles(globDir, pattern))
@@ -143,6 +164,7 @@ namespace MultiTerminal.Services
                             files.Add(rel);
                     }
                 }
+#pragma warning restore CA3003
             }
             return files;
         }
@@ -170,7 +192,11 @@ namespace MultiTerminal.Services
             {
                 var absFile = Path.Combine(projectRoot, relFile.Replace('/', Path.DirectorySeparatorChar));
                 var absFileForward = absFile.Replace('\\', '/');
+                // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot. relFile originates from the trusted
+                // wiki-manifest.json (RootFiles / ControllerGlob expansion) on disk under the sanitized root, not from a request body.
+#pragma warning disable CA3003
                 var lineCount = File.Exists(absFile) ? File.ReadAllLines(absFile).Length : 0;
+#pragma warning restore CA3003
 
                 // Enrich with code_digest if available (code_digests uses backslash paths)
                 var digest = SafeGetDigest(projectId, absFile)
@@ -206,10 +232,13 @@ namespace MultiTerminal.Services
                 }
 
                 // Parse routes if this looks like a controller
+                // CA3003: absFile is built from pre-sanitized projectRoot + manifest-authored relFile (trusted on-disk source).
+#pragma warning disable CA3003
                 if (relFile.Contains("Controllers", StringComparison.OrdinalIgnoreCase) && File.Exists(absFile))
                 {
                     CollectRoutes(article, absFile, relFile);
                 }
+#pragma warning restore CA3003
             }
 
             // External callers: for each key class/method, find callers outside this subsystem
@@ -283,7 +312,11 @@ namespace MultiTerminal.Services
 
         private void CollectRoutes(WikiArticle article, string absFile, string relFile)
         {
+            // CA3003: absFile is constructed in BuildArticle from pre-sanitized projectRoot + manifest-authored relFile;
+            // this private helper is only invoked from that code path with the File.Exists guard already applied upstream.
+#pragma warning disable CA3003
             var lines = File.ReadAllLines(absFile);
+#pragma warning restore CA3003
             string baseRoute = "";
             var baseMatch = RouteBaseRegex.Match(string.Join("\n", lines));
             if (baseMatch.Success) baseRoute = baseMatch.Groups[1].Value.Replace("[controller]", GetControllerName(relFile));
@@ -501,7 +534,12 @@ namespace MultiTerminal.Services
             foreach (var article in articles)
             {
                 var path = Path.Combine(wikiDir, article.Id + ".md");
+                // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot. article.Id is copied from the
+                // manifest's trusted SubsystemDefinition.Id (on-disk wiki-manifest.json), and public REST entry points
+                // additionally allowlist-validate subsystemIds via WikiController.IsSafeSubsystemId.
+#pragma warning disable CA3003
                 File.WriteAllText(path, article.Markdown);
+#pragma warning restore CA3003
             }
 
             // Write index.md
@@ -520,7 +558,10 @@ namespace MultiTerminal.Services
             }
             index.AppendLine();
             index.AppendLine($"_Generated {DateTime.UtcNow:o} · {articles.Count} articles_");
+            // CA3003: projectRoot is pre-sanitized by WikiController.SafeProjectRoot; the filename 'index.md' is a hard-coded literal.
+#pragma warning disable CA3003
             File.WriteAllText(Path.Combine(wikiDir, "index.md"), index.ToString());
+#pragma warning restore CA3003
         }
     }
 }

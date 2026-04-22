@@ -138,12 +138,16 @@ namespace MultiTerminal.Services
                 return null;
 
             string configPath = GetProjectConfigPath(projectPath);
+            // CA3003: projectPath is an app-managed project root (from registered projects
+            // registry or user-selected folder dialog), not attacker-controlled web input.
+#pragma warning disable CA3003
             if (!File.Exists(configPath))
                 return null;
 
             try
             {
                 string json = File.ReadAllText(configPath);
+#pragma warning restore CA3003
                 var project = ParseProjectJson(json);
                 if (project != null)
                 {
@@ -182,6 +186,9 @@ namespace MultiTerminal.Services
 
             // Ensure .claude folder exists
             string claudeFolder = Path.Combine(project.Path, ".claude");
+            // CA3003: project.Path is an app-managed Project object path, assigned at
+            // registration time from a user-selected folder — not attacker-controlled input.
+#pragma warning disable CA3003
             if (!Directory.Exists(claudeFolder))
                 Directory.CreateDirectory(claudeFolder);
 
@@ -189,6 +196,7 @@ namespace MultiTerminal.Services
             string configPath = GetProjectConfigPath(project.Path);
             string json = SerializeProjectJson(project);
             File.WriteAllText(configPath, json);
+#pragma warning restore CA3003
 
             // Upsert into SQLite (SQLite is now the authoritative registry)
             _projectDb.SaveRichProject(project);

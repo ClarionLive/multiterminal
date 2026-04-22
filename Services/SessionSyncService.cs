@@ -150,11 +150,17 @@ namespace MultiTerminal.Services
 
             // Try exact match first
             string claudePath = Path.Combine(_claudeProjectsRoot, folderName);
+            // CA3003: claudePath is Path.Combine(_claudeProjectsRoot, folderName) where _claudeProjectsRoot
+            // is Environment.GetFolderPath(UserProfile)+".claude/projects" and folderName is produced by
+            // GetClaudeProjectFolderName, which replaces every ':' with "--" and every '\' with '-' —
+            // making path-traversal segments impossible in the appended component. Existence check only.
+#pragma warning disable CA3003
             if (Directory.Exists(claudePath))
                 return claudePath;
 
             // Case-insensitive search (Windows paths are case-insensitive)
             if (Directory.Exists(_claudeProjectsRoot))
+#pragma warning restore CA3003
             {
                 try
                 {

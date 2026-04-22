@@ -185,11 +185,19 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Reads lines from a log file. Returns the last N lines by default.
+        /// Callers are responsible for ensuring <paramref name="filePath"/> is sanitized
+        /// (the sole caller — DebugController.ReadLogFile — canonicalizes and root-checks
+        /// against <see cref="LogDirectory"/> before invoking).
         /// </summary>
         public static List<string> ReadLogFile(string filePath, int lastNLines = 200)
         {
+            // CA3003: filePath is sanitized by the caller (DebugController validates via
+            // Path.GetFullPath + StartsWith(LogDirectory) before passing here). No direct user
+            // input reaches this sink.
+#pragma warning disable CA3003
             if (!File.Exists(filePath))
                 return new List<string>();
+#pragma warning restore CA3003
 
             try
             {

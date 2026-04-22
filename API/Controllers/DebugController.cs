@@ -171,8 +171,13 @@ namespace MultiTerminal.API.Controllers
             if (!Path.GetFullPath(filePath).StartsWith(DebugLogService.LogDirectory, StringComparison.OrdinalIgnoreCase))
                 return BadRequest(new { error = "Invalid file name" });
 
+            // CA3003: filePath is already canonicalized by Path.GetFullPath above and confirmed to
+            // be rooted in DebugLogService.LogDirectory; any traversal attempt was rejected with
+            // BadRequest before reaching here.
+#pragma warning disable CA3003
             if (!System.IO.File.Exists(filePath))
                 return NotFound(new { error = $"Log file not found: {fileName}" });
+#pragma warning restore CA3003
 
             var logLines = DebugLogService.ReadLogFile(filePath, lines > 0 ? lines : 0);
 

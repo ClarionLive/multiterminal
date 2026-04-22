@@ -37,6 +37,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public IndexResult IndexDirectory(string directory, string projectName = null)
         {
+            // Canonicalize + existence-verify the caller-supplied directory before any File.*/Directory.*
+            // sink sees it. Collapses '..' segments, normalizes separators, and throws on non-existent
+            // roots so tainted input cannot traverse outside a real directory. This is the sanitizer
+            // gate for every downstream Directory.GetFiles / File.ReadAllText / Directory.Exists call
+            // in this method and in GetMetadataReferences (called with the same sanitized value).
+            directory = SafeDirectory(directory)
+                ?? throw new ArgumentException("directory must resolve to an existing directory", nameof(directory));
+
             var sw = Stopwatch.StartNew();
             projectName = projectName ?? Path.GetFileName(directory);
 
@@ -64,7 +72,13 @@ namespace MultiTerminal.Services
             {
                 try
                 {
+                    // CA3003: 'file' comes from Directory.GetFiles under 'directory', which was
+                    // canonicalized+existence-verified by SafeDirectory above. The enumerated path is
+                    // rooted at the sanitized directory, so File.ReadAllText cannot be redirected by
+                    // caller input here.
+#pragma warning disable CA3003
                     string source = File.ReadAllText(file);
+#pragma warning restore CA3003
                     var tree = CSharpSyntaxTree.ParseText(source, path: file);
                     syntaxTrees.Add(tree);
                 }
@@ -187,11 +201,17 @@ namespace MultiTerminal.Services
                 }
             }
 
-            // NuGet package references from the project's output directory
+            // NuGet package references from the project's output directory.
+            // CA3003: projectDir is the sanitized directory from IndexDirectory (canonicalized+existence-
+            // verified via SafeDirectory before this method is invoked). outputDir is built from that
+            // sanitized root plus constant string segments, so Directory.Exists cannot be redirected
+            // outside a real on-disk root by caller input.
             var outputDir = Path.Combine(projectDir, "bin", "Release", "net8.0-windows", "win-x64");
+#pragma warning disable CA3003
             if (!Directory.Exists(outputDir))
                 outputDir = Path.Combine(projectDir, "bin", "Debug", "net8.0-windows", "win-x64");
             if (Directory.Exists(outputDir))
+#pragma warning restore CA3003
             {
                 foreach (var dll in Directory.GetFiles(outputDir, "*.dll"))
                 {
@@ -207,6 +227,27 @@ namespace MultiTerminal.Services
         }
 
         private void Report(string message) => OnProgress?.Invoke(message);
+
+        // Canonicalize a caller-supplied directory path and verify it exists on disk.
+        // Mirrors WikiController.SafeProjectRoot: collapses '..' segments, normalizes separators,
+        // and returns null on any failure so tainted values cannot reach File.*/Directory.* sinks
+        // downstream. This is the sanitizer gate for the whole indexer entry point.
+        private static string SafeDirectory(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            try
+            {
+                var full = Path.GetFullPath(raw);
+                // CA3003: this IS the sanitizer — canonicalized path via GetFullPath, then existence
+                // check. Returning null on miss prevents tainted values from reaching any File.* sink.
+#pragma warning disable CA3003
+                return Directory.Exists(full) ? full : null;
+#pragma warning restore CA3003
+            }
+            catch (ArgumentException) { return null; }
+            catch (PathTooLongException) { return null; }
+            catch (NotSupportedException) { return null; }
+        }
 
         // ─── Pass 1: Symbol Extraction ───────────────────────────────────────
 

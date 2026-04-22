@@ -5340,6 +5340,10 @@ namespace MultiTerminal.MCPServer.Services
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "multiterminal", "attachments", taskId);
 
+                // CA3003: attachmentsDir is built from %APPDATA% + app-generated taskId (GUID);
+                // storedFileName is prefixed with the attachment's own generated Id and the
+                // user-supplied name is stripped to GetFileName only — no traversal reachable.
+#pragma warning disable CA3003
                 if (!Directory.Exists(attachmentsDir))
                 {
                     Directory.CreateDirectory(attachmentsDir);
@@ -5348,6 +5352,7 @@ namespace MultiTerminal.MCPServer.Services
                 // Write file to disk
                 string filePath = Path.Combine(attachmentsDir, attachment.StoredFileName);
                 File.WriteAllBytes(filePath, imageData);
+#pragma warning restore CA3003
 
                 // Persist metadata to database
                 _taskDb.SaveAttachment(attachment);
@@ -5525,10 +5530,14 @@ namespace MultiTerminal.MCPServer.Services
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "multiterminal", "attachments", taskId);
 
+                // CA3003: attachmentsDir is built from %APPDATA% + app-generated taskId (GUID) —
+                // taskId is a KanbanTask primary key, never attacker-supplied free text.
+#pragma warning disable CA3003
                 if (Directory.Exists(attachmentsDir))
                 {
                     Directory.Delete(attachmentsDir, recursive: true);
                 }
+#pragma warning restore CA3003
 
                 LogInfo($"Cleaned up attachments directory for deleted task {taskId}");
             }

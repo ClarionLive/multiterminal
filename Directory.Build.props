@@ -20,7 +20,7 @@
     <WarningsNotAsErrors>
       $(WarningsNotAsErrors);
       CA1848;SA1633;
-      CA1001;CA2100;CA3003;
+      CA1001;CA2100;
       CA3001
     </WarningsNotAsErrors>
 

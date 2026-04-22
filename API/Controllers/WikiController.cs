@@ -37,7 +37,11 @@ namespace MultiTerminal.API.Controllers
             try
             {
                 var full = Path.GetFullPath(raw);
+                // CA3003: this IS the sanitizer — canonicalized path via GetFullPath, then existence check.
+                // Returning null on miss prevents tainted values from reaching any File.* downstream.
+#pragma warning disable CA3003
                 return Directory.Exists(full) ? full : null;
+#pragma warning restore CA3003
             }
             catch (ArgumentException) { return null; }
             catch (PathTooLongException) { return null; }

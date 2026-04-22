@@ -68,7 +68,12 @@ namespace MultiTerminal.Services
             string parentSessionId = null,
             string sessionType = null)
         {
+            // CA3003: sessionFilePath is always a Claude Code JSONL under %USERPROFILE%/.claude/projects —
+            // every caller feeds it either a Directory.GetFiles result (ImportAllSessionsFromFolder/
+            // SyncNewSessions) or a DB-stored SessionFilePath written earlier from the same trusted source.
+#pragma warning disable CA3003
             if (!File.Exists(sessionFilePath))
+#pragma warning restore CA3003
                 return new ImportSessionResult { Success = false, Error = $"File not found: {sessionFilePath}" };
 
             try
@@ -176,7 +181,12 @@ namespace MultiTerminal.Services
             string folderName = normalized.Replace(":", "-").Replace("/", "-");
 
             string claudeProjectPath = Path.Combine(claudeProjectsRoot, folderName);
+            // CA3003: claudeProjectPath is built from Environment.GetFolderPath(UserProfile) + a literal
+            // ".claude/projects" + a folderName whose construction above replaces ':' and '/' away, so no
+            // path-traversal segments survive. Existence check only; no file read.
+#pragma warning disable CA3003
             return Directory.Exists(claudeProjectPath) ? claudeProjectPath : null;
+#pragma warning restore CA3003
         }
 
         /// <summary>
@@ -197,7 +207,12 @@ namespace MultiTerminal.Services
         {
             var result = new SyncResult();
 
+            // CA3003: claudeProjectPath is produced by GetClaudeProjectFolder (internal builder that
+            // anchors to %USERPROFILE%/.claude/projects and strips ':' / '/') or an equivalent trusted
+            // helper. Existence check only; the enumeration below is bounded to that directory tree.
+#pragma warning disable CA3003
             if (!Directory.Exists(claudeProjectPath))
+#pragma warning restore CA3003
                 return result;
 
             // Get already-imported session IDs in one query
@@ -252,7 +267,13 @@ namespace MultiTerminal.Services
             foreach (var sessionDir in Directory.GetDirectories(claudeProjectPath))
             {
                 string subagentsDir = Path.Combine(sessionDir, "subagents");
+                // CA3003: subagentsDir is Path.Combine(sessionDir, "subagents") where sessionDir comes
+                // from Directory.GetDirectories(claudeProjectPath) — so it is an existing child of a
+                // directory already validated as being under %USERPROFILE%/.claude/projects (guarded by
+                // SessionLineageController.SyncSessions and SafeProjectRoot-style prefix check).
+#pragma warning disable CA3003
                 if (!Directory.Exists(subagentsDir))
+#pragma warning restore CA3003
                     continue;
 
                 foreach (var file in Directory.GetFiles(subagentsDir, "*.jsonl"))

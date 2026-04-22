@@ -50,10 +50,33 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("{date}")]
         public IActionResult GetByDate(string date)
         {
-            if (string.IsNullOrEmpty(date) || date.Length != 10)
+            if (!IsValidDateSegment(date))
                 return BadRequest(new { error = "Date must be YYYY-MM-DD format" });
 
             return GetDigestForDate(date);
+        }
+
+        /// <summary>
+        /// Strict YYYY-MM-DD validator — rejects anything that is not exactly 10 chars of
+        /// digits in positions 0-3/5-6/8-9 with '-' at positions 4 and 7. Guarantees no path
+        /// separators, drive letters, or traversal sequences can reach <see cref="GetDigestForDate"/>.
+        /// </summary>
+        private static bool IsValidDateSegment(string date)
+        {
+            if (string.IsNullOrEmpty(date) || date.Length != 10) return false;
+            for (int i = 0; i < 10; i++)
+            {
+                char c = date[i];
+                if (i == 4 || i == 7)
+                {
+                    if (c != '-') return false;
+                }
+                else if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /// <summary>
@@ -135,9 +158,19 @@ namespace MultiTerminal.API.Controllers
 
         private IActionResult GetDigestForDate(string date)
         {
+            // Defense-in-depth: even though GetByDate validates, GetLatest feeds in directory
+            // names read off disk. Re-validate so every path into this method is strict
+            // YYYY-MM-DD with no separators / traversal.
+            if (!IsValidDateSegment(date))
+                return BadRequest(new { error = "Invalid date" });
+
             var dateDir = System.IO.Path.Combine(DigestRoot, date);
+            // CA3003: `date` is guaranteed strict YYYY-MM-DD by IsValidDateSegment above; no path
+            // separators or traversal sequences can appear in dateDir.
+#pragma warning disable CA3003
             if (!System.IO.Directory.Exists(dateDir))
                 return NotFound(new { error = $"No digest for {date}" });
+#pragma warning restore CA3003
 
             var digestPath = System.IO.Path.Combine(dateDir, "digest.md");
             var rawPath = System.IO.Path.Combine(dateDir, "raw-data.json");
@@ -145,16 +178,26 @@ namespace MultiTerminal.API.Controllers
             string digestMd = null;
             object rawStats = null;
 
+            // CA3003: digestPath = DigestRoot + strict-YYYY-MM-DD + constant "digest.md"; all
+            // components are validated/constant, no user input can steer the path.
+#pragma warning disable CA3003
             if (System.IO.File.Exists(digestPath))
                 digestMd = System.IO.File.ReadAllText(digestPath);
+#pragma warning restore CA3003
 
             object[] sources = null;
 
+            // CA3003: rawPath = DigestRoot + strict-YYYY-MM-DD + constant "raw-data.json"; same
+            // sanitization argument as digestPath above. Applies to both File.Exists and
+            // File.ReadAllText below.
+#pragma warning disable CA3003
             if (System.IO.File.Exists(rawPath))
             {
                 try
                 {
                     var rawJson = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(rawPath));
+#pragma warning restore CA3003
+
                     var root = rawJson.RootElement;
 
                     // Extract stats without sending the full raw data
