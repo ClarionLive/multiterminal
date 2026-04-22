@@ -2815,56 +2815,49 @@ namespace MultiTerminal
         /// <summary>
         /// Waits for the WebView2 renderer to be ready.
         /// </summary>
-        private Task<bool> WaitForRendererReadyAsync(TerminalDocument doc, int timeoutMs = 5000)
+        private async Task<bool> WaitForRendererReadyAsync(TerminalDocument doc, int timeoutMs = 5000)
         {
             // Check if already ready (event may have already fired)
             if (doc.IsRendererReady)
             {
-                return Task.FromResult(true);
+                return true;
             }
 
             var tcs = new TaskCompletionSource<bool>();
-            System.Threading.CancellationTokenSource cts = null;
 
             void handler(object s, EventArgs e)
             {
                 doc.RendererReady -= handler;
-                cts?.Cancel();
                 tcs.TrySetResult(true);
             }
 
             doc.RendererReady += handler;
 
-            // Timeout fallback
-            // CA2000: CTS ownership transferred to Task.Delay/ContinueWith chain; lifetime bound to timeout task, not this method.
-#pragma warning disable CA2000
-            cts = new System.Threading.CancellationTokenSource();
-#pragma warning restore CA2000
-            Task.Delay(timeoutMs, cts.Token).ContinueWith(t =>
-            {
-                if (!t.IsCanceled)
-                {
-                    doc.RendererReady -= handler;
-                    tcs.TrySetResult(false);
-                }
-            });
+            using var cts = new System.Threading.CancellationTokenSource();
+            var delayTask = Task.Delay(timeoutMs, cts.Token);
 
-            return tcs.Task;
+            var winner = await Task.WhenAny(tcs.Task, delayTask);
+            if (winner == delayTask)
+            {
+                doc.RendererReady -= handler;
+                return false;
+            }
+
+            cts.Cancel();
+            return true;
         }
 
         /// <summary>
         /// Starts a terminal and waits for PowerShell to be confirmed running.
         /// The DirectoryChanged event fires when PowerShell sets its title, confirming it's operational.
         /// </summary>
-        private Task StartTerminalAndWaitAsync(TerminalDocument doc, string workingDirectory, string terminalName = null, int timeoutMs = 3000)
+        private async Task StartTerminalAndWaitAsync(TerminalDocument doc, string workingDirectory, string terminalName = null, int timeoutMs = 3000)
         {
             var tcs = new TaskCompletionSource<bool>();
-            System.Threading.CancellationTokenSource cts = null;
 
             void directoryChangedHandler(object s, DirectoryChangedEventArgs e)
             {
                 doc.DirectoryChanged -= directoryChangedHandler;
-                cts?.Cancel();
                 tcs.TrySetResult(true);
             }
 
@@ -2873,21 +2866,18 @@ namespace MultiTerminal
             // Start the terminal with optional pre-registered name
             doc.StartTerminal(workingDirectory, terminalName);
 
-            // Timeout fallback - don't wait forever
-            // CA2000: CTS ownership transferred to Task.Delay/ContinueWith chain; lifetime bound to timeout task, not this method.
-#pragma warning disable CA2000
-            cts = new System.Threading.CancellationTokenSource();
-#pragma warning restore CA2000
-            Task.Delay(timeoutMs, cts.Token).ContinueWith(t =>
-            {
-                if (!t.IsCanceled)
-                {
-                    doc.DirectoryChanged -= directoryChangedHandler;
-                    tcs.TrySetResult(false); // Timed out, but continue anyway
-                }
-            });
+            using var cts = new System.Threading.CancellationTokenSource();
+            var delayTask = Task.Delay(timeoutMs, cts.Token);
 
-            return tcs.Task;
+            var winner = await Task.WhenAny(tcs.Task, delayTask);
+            if (winner == delayTask)
+            {
+                // Timed out — unsubscribe and continue anyway (caller doesn't treat timeout as error).
+                doc.DirectoryChanged -= directoryChangedHandler;
+                return;
+            }
+
+            cts.Cancel();
         }
 
         private void OnTerminalFontSizeChanged(object sender, FontSizeChangedEventArgs e)
