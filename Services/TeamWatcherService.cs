@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using MultiTerminal.Models;
 
@@ -263,18 +264,46 @@ namespace MultiTerminal.Services
             string teamDir = Path.Combine(_teamsDir, teamName);
             if (!Directory.Exists(teamDir)) return;
 
-            // CA2000: Watcher captured by Created handler closure and disposed inside that handler on first fire.
-#pragma warning disable CA2000
+            // Ensure the TeamState exists so the watcher is owned by state.Watchers
+            // and CleanupTeam/StopWatching dispose it deterministically — even if
+            // the Created event never fires (no config.json ever appears).
+            if (!_activeTeams.ContainsKey(teamName))
+                _activeTeams[teamName] = new TeamState { TeamName = teamName };
+            var state = _activeTeams[teamName];
+
+            // Construct with events OFF so we can wire the Created handler before
+            // any event can fire. This closes the construct-to-subscribe race
+            // where an event could be raised and lost between construction and
+            // `watcher.Created += handler`.
             var watcher = new FileSystemWatcher(teamDir)
             {
                 Filter = "config.json",
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime,
-                EnableRaisingEvents = true
+                EnableRaisingEvents = false
             };
-#pragma warning restore CA2000
-            watcher.Created += (s, e) =>
+            state.Watchers.Add(watcher);
+
+            // Interlocked guard: FileSystemWatcher can raise Created multiple times
+            // for one file, and we must not Dispose() twice or re-enqueue processing.
+            // The guard is also what makes the post-enable File.Exists recheck safe —
+            // whichever of (real event, synchronous re-entry) wins, the other is a no-op.
+            int handled = 0;
+            FileSystemEventHandler handler = null;
+            handler = (s, e) =>
             {
-                watcher.Dispose();
+                if (Interlocked.Exchange(ref handled, 1) != 0) return;
+
+                // Stop events and unsubscribe before Dispose so a queued duplicate
+                // cannot re-enter this handler on another thread. Do NOT remove from
+                // state.Watchers here — mutation races CleanupTeam's foreach on a
+                // different thread. CleanupTeam's try/catch tolerates the already-
+                // disposed watcher (FileSystemWatcher.Dispose is idempotent).
+                watcher.Created -= handler;
+                try { watcher.EnableRaisingEvents = false; } catch { }
+                try { watcher.Dispose(); } catch { }
+
+                if (_disposed) return;
+
                 Task.Run(async () =>
                 {
                     await Task.Delay(100);
@@ -282,6 +311,22 @@ namespace MultiTerminal.Services
                     ProcessTeamDirectory(teamName);
                 });
             };
+            watcher.Created += handler;
+
+            // Subscription is wired — now turn events on. Any activation failure here
+            // (directory gone, permissions, OS refusal) should propagate to the caller's
+            // catch (ProcessTeamDirectory wraps us in try/catch and logs), rather than
+            // leaving a silently-disabled watcher in state.Watchers.
+            watcher.EnableRaisingEvents = true;
+
+            // Close the residual TOCTOU window: if config.json appeared between
+            // Directory.Exists and EnableRaisingEvents=true, FSW will never raise
+            // Created for it. Drive the handler synchronously; the Interlocked guard
+            // ensures it only runs once whether or not a real event also arrives.
+            if (File.Exists(Path.Combine(teamDir, "config.json")))
+            {
+                handler(null, null);
+            }
         }
 
         /// <summary>
