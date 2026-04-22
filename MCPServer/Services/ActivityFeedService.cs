@@ -253,7 +253,11 @@ namespace MultiTerminal.MCPServer.Services
             var sql = $@"SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                     FROM activity_feed {whereClause} ORDER BY timestamp DESC LIMIT @limit";
 
+            // CA2100: whereClause is composed solely from the hardcoded literals "plan_id = @planId" / "project_id = @projectId";
+            // all user-supplied values flow through SQLiteParameter.
+            #pragma warning disable CA2100
             using var command = new SQLiteCommand(sql, _connection);
+            #pragma warning restore CA2100
             command.Parameters.AddWithValue("@limit", limit);
             if (planId != null) command.Parameters.AddWithValue("@planId", planId);
             if (projectId != null) command.Parameters.AddWithValue("@projectId", projectId);

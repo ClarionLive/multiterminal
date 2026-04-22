@@ -785,7 +785,11 @@ namespace MultiTerminal.Services
 
             sql += " ORDER BY hit_count DESC, created_at DESC LIMIT @limit";
 
+            // CA2100: SQL is composed from static literals and loop-generated parameter placeholders (@kwN);
+            // all user values (keywords, projectPath, agentName, limit) flow through SQLiteParameter.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             for (int i = 0; i < keywords.Count; i++)
             {
                 string escaped = keywords[i].Replace(@"\", @"\\").Replace("%", @"\%").Replace("_", @"\_");

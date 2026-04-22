@@ -98,7 +98,11 @@ namespace MultiTerminal.Services
                 return 0; // No valid fields provided
             }
 
+            // CA2100: Column names in setClauses are whitelist-validated against `allowed` (line 85);
+            // all user values flow through SQLiteParameter (@pN, @id).
+#pragma warning disable CA2100
             cmd.CommandText = $"UPDATE knowledge_entries SET {string.Join(", ", setClauses)} WHERE id = @id";
+#pragma warning restore CA2100
             cmd.Parameters.AddWithValue("@id", id);
 
             int rows = cmd.ExecuteNonQuery();
@@ -231,7 +235,10 @@ namespace MultiTerminal.Services
 
             sql += $" ORDER BY ke.updated_at DESC LIMIT {limit}";
 
+            // CA2100: SQL is composed from static literals + an int `limit`; all user values flow through SQLiteParameter.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             // Sanitize FTS5 query: strip double-quotes and wrap in phrase quotes to prevent
             // FTS5 expression injection (OR, NOT, NEAR operators). This forces literal matching.
             var sanitizedQuery = "\"" + query.Replace("\"", " ") + "\"";
@@ -266,7 +273,10 @@ namespace MultiTerminal.Services
 
             sql += $" ORDER BY updated_at DESC LIMIT {limit}";
 
+            // CA2100: SQL is composed from static literals + an int `limit`; all user values flow through SQLiteParameter.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             if (!string.IsNullOrWhiteSpace(query)) cmd.Parameters.AddWithValue("@query", $"%{query}%");
             if (category != null)  cmd.Parameters.AddWithValue("@category", category);
             if (projectId != null) cmd.Parameters.AddWithValue("@projectId", projectId);

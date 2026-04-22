@@ -128,7 +128,10 @@ namespace MultiTerminal.Services
                 if (!existingColumns.Contains(colName))
                 {
                     string alterSql = $"ALTER TABLE projects ADD COLUMN {colName} {colDef}";
+                    // CA2100: colName/colDef come from the hardcoded newColumns tuple list above — no user input reaches this SQL.
+                    #pragma warning disable CA2100
                     using var alterCommand = new SQLiteCommand(alterSql, _connection);
+                    #pragma warning restore CA2100
                     alterCommand.ExecuteNonQuery();
                 }
             }
@@ -384,7 +387,13 @@ namespace MultiTerminal.Services
             // Safe to interpolate fieldName here because it passed the whitelist check above
             string sql = $"UPDATE projects SET {fieldName} = @value, updated_at = @updatedAt WHERE id = @id";
 
+            // CA2100 / CA3001: fieldName is whitelist-validated against _allowedProjectFields above (rejected if not present);
+            // all user-supplied values (projectId, paramValue) flow through SQLiteParameter.
+            #pragma warning disable CA2100
+            #pragma warning disable CA3001
             using var command = new SQLiteCommand(sql, _connection);
+            #pragma warning restore CA3001
+            #pragma warning restore CA2100
             command.Parameters.AddWithValue("@id", projectId);
             command.Parameters.AddWithValue("@value", paramValue);
             command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);

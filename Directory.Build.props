@@ -11,17 +11,13 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 
     <!--
-      Rules that are visible as warnings but don't break the build.
-      Two categories:
-        1. Rules we accept long-term (logging API, XML doc headers).
-        2. Rules we plan to fix in Item 4 of the lint task — once fixed, delete
-           them from this list so they're load-bearing again.
+      Permanent carve-outs: rules we accept long-term.
+        CA1848: logging API microperf (use LoggerMessage delegates) — not load-bearing.
+        SA1633: XML doc file headers — not used in this repo.
     -->
     <WarningsNotAsErrors>
       $(WarningsNotAsErrors);
-      CA1848;SA1633;
-      CA1001;CA2100;
-      CA3001
+      CA1848;SA1633
     </WarningsNotAsErrors>
 
     <!-- Default to nullable-enabled for NEW projects. Existing csprojs that set

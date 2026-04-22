@@ -331,7 +331,10 @@ namespace MultiTerminal.Services
         {
             lock (_syncLock)
             {
+                // CA2100: internal helper — all callers (CodeGraphQuery.cs) pass hardcoded SQL literals and route user values through the parameters dictionary.
+                #pragma warning disable CA2100
                 using var cmd = new SQLiteCommand(sql, _connection);
+                #pragma warning restore CA2100
                 if (parameters != null)
                 {
                     foreach (var kvp in parameters)

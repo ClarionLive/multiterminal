@@ -3839,7 +3839,11 @@ namespace MultiTerminal.Services
             if (agentName != null) sql += " AND sm.agent_name = @agentName";
             sql += " ORDER BY sm.session_id, sm.message_index LIMIT @limit";
 
+            // CA2100: SQL is composed from static literal fragments only (no user input concatenated);
+            // all user-supplied values flow through SQLiteParameter via AddWithValue below.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             cmd.Parameters.AddWithValue("@query", query);
             if (sessionId != null) cmd.Parameters.AddWithValue("@sessionId", sessionId);
             if (taskId != null) cmd.Parameters.AddWithValue("@taskId", taskId);
@@ -3874,7 +3878,11 @@ namespace MultiTerminal.Services
             if (agentName != null) sql += " AND agent_name = @agentName";
             sql += " ORDER BY session_id, message_index LIMIT @limit";
 
+            // CA2100: SQL is composed from static literal fragments only (no user input concatenated);
+            // all user-supplied values flow through SQLiteParameter via AddWithValue below.
+#pragma warning disable CA2100
             using var cmd = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             cmd.Parameters.AddWithValue("@query", $"%{query}%");
             if (sessionId != null) cmd.Parameters.AddWithValue("@sessionId", sessionId);
             if (taskId != null) cmd.Parameters.AddWithValue("@taskId", taskId);
@@ -3955,7 +3963,12 @@ namespace MultiTerminal.Services
                 ORDER BY ended_at DESC, created_at DESC
                 LIMIT 1 OFFSET {Math.Max(0, skip)}";
 
+            // CA2100: SQL is composed from static literals plus an int-clamped OFFSET
+            // (Math.Max(0, skip) forces a non-negative int, not a string); all user-supplied
+            // string values flow through SQLiteParameter via AddWithValue below.
+#pragma warning disable CA2100
             using var command = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             command.Parameters.AddWithValue("@folder", folderPrefix);
             command.Parameters.AddWithValue("@projectPath", claudeProjectFolder.TrimEnd('\\', '/'));
             if (!string.IsNullOrEmpty(agentName))
@@ -4026,10 +4039,24 @@ namespace MultiTerminal.Services
         {
             string sql = "UPDATE session_lineage SET processing_status = @status";
             if (!string.IsNullOrEmpty(timestampColumn))
+            {
+                // Whitelist: timestampColumn is only ever "indexed_at" or "summarized_at"
+                // from internal callers in SessionLineageService. Reject anything else to
+                // make this explicit at the SQL-composition boundary.
+                if (timestampColumn != "indexed_at" && timestampColumn != "summarized_at")
+                    throw new ArgumentException(
+                        "timestampColumn must be 'indexed_at' or 'summarized_at'.",
+                        nameof(timestampColumn));
                 sql += $", {timestampColumn} = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+            }
             sql += " WHERE session_id = @sessionId";
 
+            // CA2100: SQL column fragment comes from a hard-coded whitelist above
+            // ("indexed_at"/"summarized_at"); all user-supplied values flow through
+            // SQLiteParameter via AddWithValue below.
+#pragma warning disable CA2100
             using var command = new SQLiteCommand(sql, _connection);
+#pragma warning restore CA2100
             command.Parameters.AddWithValue("@status", status);
             command.Parameters.AddWithValue("@sessionId", sessionId);
             return command.ExecuteNonQuery();
