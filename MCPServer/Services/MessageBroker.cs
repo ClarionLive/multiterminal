@@ -486,6 +486,98 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
+        // Lock used to make "probe for unique name + register" an atomic pair
+        // (see RegisterTerminalUnique). Only covers the narrow critical section
+        // where a racing launch could choose the same candidate suffix; the
+        // regular RegisterTerminal path is unaffected.
+        private readonly object _uniqueRegistrationLock = new object();
+
+        /// <summary>
+        /// Returns a name safe to use for a fresh terminal registration.
+        ///
+        /// If <paramref name="requested"/> is not currently held by any connected
+        /// terminal, returns it unchanged. Otherwise appends a numeric suffix
+        /// (<c>-2</c>, <c>-3</c>, ...) until it finds one that's free.
+        ///
+        /// NOTE: This is a preflight check only — the returned name is NOT
+        /// reserved. If callers have a concurrency concern (e.g. two Codex
+        /// launches with the same default-agent name), they must use
+        /// <see cref="RegisterTerminalUnique"/> instead, which probes and
+        /// registers atomically under a broker-level lock.
+        /// </summary>
+        public string GetUniqueNameFor(string requested)
+        {
+            if (string.IsNullOrWhiteSpace(requested)) return requested;
+            return FindUniqueCandidate(requested);
+        }
+
+        /// <summary>
+        /// Probes for a unique name AND registers the terminal with it in a single
+        /// atomic critical section. Use this (not GetUniqueNameFor + RegisterTerminal
+        /// in two steps) when two concurrent callers could race on the same
+        /// requested name — e.g. two Codex launches each using the per-user
+        /// Codex default-agent setting.
+        ///
+        /// The returned <see cref="RegisterResult"/> carries the actual name used
+        /// (via <see cref="TerminalInfo.Name"/> on the broker record — callers that
+        /// need to surface the final name to other code paths should read it from
+        /// the broker or from the result's <c>TerminalId</c> lookup).
+        /// </summary>
+        public RegisterResult RegisterTerminalUnique(
+            string requested,
+            out string resolvedName,
+            string docId = null,
+            bool isTeamLead = false,
+            int? channelPort = null)
+        {
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                resolvedName = requested;
+                return RegisterTerminal(requested, docId, isTeamLead, channelPort);
+            }
+
+            // "Unassigned" is a deliberate shared sentinel — multiple anonymous
+            // terminals are allowed to share it. Suffixing would break that.
+            if (requested.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedName = requested;
+                return RegisterTerminal(requested, docId, isTeamLead, channelPort);
+            }
+
+            lock (_uniqueRegistrationLock)
+            {
+                resolvedName = FindUniqueCandidate(requested);
+                return RegisterTerminal(resolvedName, docId, isTeamLead, channelPort);
+            }
+        }
+
+        /// <summary>
+        /// Core uniqueness scan shared by <see cref="GetUniqueNameFor"/> and
+        /// <see cref="RegisterTerminalUnique"/>. Returns the requested name
+        /// unchanged if free; otherwise appends the first free numeric suffix.
+        /// </summary>
+        private string FindUniqueCandidate(string requested)
+        {
+            bool IsHeld(string candidate) => _terminals.Values.Any(t =>
+                t.IsConnected &&
+                !string.IsNullOrEmpty(t.Name) &&
+                t.Name.Equals(candidate, StringComparison.OrdinalIgnoreCase));
+
+            if (!IsHeld(requested)) return requested;
+
+            // Arbitrary cap — if we've actually got 998 connected terminals sharing
+            // a base name, something else is wrong and a numeric suffix won't help.
+            const int MaxUniqueNameSuffixAttempts = 1000;
+            for (int i = 2; i < MaxUniqueNameSuffixAttempts; i++)
+            {
+                string candidate = $"{requested}-{i}";
+                if (!IsHeld(candidate))
+                    return candidate;
+            }
+
+            return $"{requested}-{Guid.NewGuid().ToString("N").Substring(0, 4)}";
+        }
+
         /// <summary>
         /// Register a terminal with the broker.
         /// </summary>
