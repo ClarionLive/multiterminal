@@ -49,6 +49,7 @@ Thumbs.db
 
 # Transient agent/runtime state (regeneratable, not team-wide)
 .claude/scheduled_tasks.lock
+.claude/tmp/
 memory/
 .codesight/
 
