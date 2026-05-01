@@ -7,7 +7,7 @@ paths:
 
 | Folder | Purpose | Key Files |
 |--------|---------|-----------|
-| `Services/` | Business logic & SQLite persistence | TaskDatabase, ProjectService, ProjectDatabase, ProjectContextService, KnowledgeDatabase, CodeGraphDatabase, CodeGraphQuery, CSharpCodeGraphIndexer, TerminalSpawner, SettingsService, CompanionProcessManager, GatewayIntegrationService, OwnerProfileService, RipgrepService, TerminalStreamService, SessionLineageService, SessionSyncService, TranscriptTailer |
+| `Services/` | Business logic & SQLite persistence | TaskDatabase, ProjectService, ProjectDatabase, ProjectContextService, KnowledgeDatabase, CodeGraphDatabase, CodeGraphQuery, CSharpCodeGraphIndexer, TerminalSpawner, SettingsService, CompanionProcessManager, GatewayIntegrationService, OwnerProfileService, RipgrepService, TerminalStreamService, SessionLineageService, SessionSyncService, TranscriptTailer, GitRepoService, GitRepoManager, GitRepoWatcher |
 | `MCPServer/Services/` | MCP server services | **MessageBroker**, PoolCoordinator, ActivityService, StaleTaskService, SpawnService, HttpWebhookService, SessionDiscovery, ComplexityDetector, SummaryService |
 | `MCPServer/Models/` | Data models (19 files) | KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, ActivityEvent, TaskHelper, ComplexityStats, CodeDigest, KnowledgeEntry, TaskAttachment, CodeSymbol, CodeRelationship |
 | `Models/` | App-level models (10 files) | TerminalSessionInfo, SpawnedTeammate, ProjectRegistryEntry, Project, ProjectAssociations, OwnerProfile, CompanionProcess, ClaudeCommand, DebugLogEntry, AgentMessage |
