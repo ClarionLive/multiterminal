@@ -103,6 +103,18 @@ namespace MultiTerminal.TasksPanel
             _control?.SetFontSize(size);
         }
 
+        /// <summary>
+        /// Open the Code Review overlay for a task. Triggered externally (e.g. from
+        /// the Git tab's diff popup escalation button). The webview JS handles the
+        /// actual overlay open via its existing <c>openCodeReview(taskId)</c> path.
+        /// When <paramref name="filePath"/> is non-empty, the overlay pre-selects
+        /// the matching linked-file tab instead of defaulting to the first file.
+        /// </summary>
+        public void OpenCodeReview(string taskId, string filePath = null)
+        {
+            _control?.OpenCodeReview(taskId, filePath);
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)

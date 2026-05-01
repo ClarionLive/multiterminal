@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using MultiTerminal.Controls;
+using MultiTerminal.Controls.Shared;
 using MultiTerminal.Dialogs;
 using MultiTerminal.Terminal;
 using MultiTerminal.MCPServer.Services;
@@ -41,6 +42,7 @@ namespace MultiTerminal.Docking
         private HudDashboardRenderer _hudDashboard;
         private HudNotesRenderer _hudNotes;
         private HudKnowledgeRenderer _hudKnowledge;
+        private HudGitRenderer _hudGit;
         private HudSessionsRenderer _hudSessions;
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
@@ -422,8 +424,17 @@ namespace MultiTerminal.Docking
             _hudSessions = new HudSessionsRenderer();
             _hudTabContainer.AddPermanentTab("__sessions__", "\ud83d\udd52 Sessions", _hudSessions);
 
-            // Set desired tab order: Dashboard first, then Tasks, Notes, Knowledge, Sessions
-            _hudTabContainer.ReorderPermanentTabs("__dashboard__", "__tasks__", "__notes__", "__knowledge__", "__sessions__");
+            // \ud83d\udd00 Git \u2014 per-project read-only git tab. Lives after Tasks per the
+            // design lock so it's adjacent to the workflow ("pick task \u2192 see its
+            // impact in git"). Backed by GitRepoService via the broker's
+            // GitRepoManager DI; multi-repo aware (no-remote vs has-remote
+            // header variants), with empty-states for worktree/submodule and
+            // not-a-repo cases.
+            _hudGit = new HudGitRenderer();
+            _hudTabContainer.AddPermanentTab("__git__", "\ud83d\udd00 Git", _hudGit);
+
+            // Set desired tab order: Dashboard, Tasks, Git, Notes, Knowledge, Sessions
+            _hudTabContainer.ReorderPermanentTabs("__dashboard__", "__tasks__", "__git__", "__notes__", "__knowledge__", "__sessions__");
 
             // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
             taskHudRenderer.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
@@ -977,6 +988,7 @@ namespace MultiTerminal.Docking
             _hudDispatchedFolder = workingDirectory;
             _hudNotes?.SetProject(workingDirectory);
             _hudKnowledge?.SetProject(projectId);
+            _hudGit?.SetProject(workingDirectory);
             _hudSessions?.SetProject(workingDirectory);
             // Switch HUD to dashboard tab by default when starting a terminal
             _hudTabContainer?.SwitchToTabById("__dashboard__");
@@ -1101,6 +1113,26 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Handles the dashboard widget's dirty-state click — deep-links to this
+        /// project's HUD Git tab (item [12]). Marshals to UI thread because
+        /// HudTabContainer.SwitchToTabById manipulates WinForms control visibility.
+        /// Graceful no-op if the Git tab isn't registered (SwitchToTabById guards on
+        /// the tab-id lookup internally).
+        /// </summary>
+        private void OnOpenGitTabRequested(object sender, EventArgs e)
+        {
+            if (_isDisposing) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(() => OnOpenGitTabRequested(sender, e))); }
+                catch { }
+                return;
+            }
+            try { _hudTabContainer?.SwitchToTabById("__git__"); }
+            catch { }
+        }
+
+        /// <summary>
         /// Handles a diff request from the dashboard activity feed.
         /// Finds the file in the project, runs git diff, and opens a browser tab with the diff.
         /// </summary>
@@ -1167,9 +1199,9 @@ namespace MultiTerminal.Docking
                 string displayName = Path.GetFileName(fileName);
                 string html;
                 if (string.IsNullOrEmpty(diffResult.diff))
-                    html = GenerateDiffHtml(displayName, diffResult.fullPath, "(no changes found)");
+                    html = DiffRenderer.RenderUnifiedDiff(displayName, diffResult.fullPath, "(no changes found)");
                 else
-                    html = GenerateDiffHtml(displayName, diffResult.fullPath, diffResult.diff);
+                    html = DiffRenderer.RenderUnifiedDiff(displayName, diffResult.fullPath, diffResult.diff);
 
                 ShowDiffPopup(displayName, html);
             }
@@ -1180,9 +1212,134 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Opens a standalone popup window showing diff HTML content.
+        /// Routes the Git tab's "Open in pop-up diff editor" right-click menu to a
+        /// Code-Review-styled popup (line numbers, hunk navigator, dark Code Review
+        /// theme) — read-only for casual exploration. When the file is linked to an
+        /// active task, the popup includes an "Open Code Review" button that escalates
+        /// into the task-bound Code Review overlay in the Tasks panel.
+        ///
+        /// <para>Design rationale: the Git tab popup is exploratory ("what's in this
+        /// file?") while the Code Review overlay is the formal sign-off gate (comments,
+        /// pass/fail verdict tied to a task). They serve different purposes and don't
+        /// share one heavyweight UI; the "Open Code Review" button is the single
+        /// discoverable bridge between them when a task linkage exists.</para>
         /// </summary>
-        private async void ShowDiffPopup(string fileName, string html)
+        private async void OnHudGitOpenDiffPopupRequested(object sender, string repoRelativePath)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnHudGitOpenDiffPopupRequested(sender, repoRelativePath)));
+                return;
+            }
+            if (string.IsNullOrEmpty(repoRelativePath)) return;
+
+            string workDir = GetWorkingDirectory();
+            if (string.IsNullOrEmpty(workDir) || !Directory.Exists(workDir)) return;
+
+            var manager = _messageBroker?.GitRepos;
+            if (manager == null) return;
+
+            // Capture broker-owned services into locals before the background pass —
+            // same race-mitigation pattern as HudGitRenderer.RefreshAsync (item [11]
+            // debugger finding). The auto-property on MessageBroker has no volatile or
+            // lock; freezing the reference here ensures we use one stable service for
+            // the duration of this call.
+            var attributionSvc = _messageBroker?.GitAttribution;
+
+            try
+            {
+                var diffResult = await System.Threading.Tasks.Task.Run(() =>
+                {
+                    var svc = manager.GetOrCreate(workDir);
+                    if (svc == null) return (diff: "", fullPath: "", repoRoot: "");
+                    string diff = svc.GetFileDiff(repoRelativePath) ?? "";
+                    string repoRoot = svc.RepoRoot ?? "";
+                    string fullPath = string.IsNullOrEmpty(repoRoot)
+                        ? repoRelativePath
+                        : Path.Combine(repoRoot, repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                    return (diff, fullPath, repoRoot);
+                });
+
+                // File→task linkage lookup (Phase 2 attribution). Empty result is the
+                // common case (most working-tree files aren't linked to any active
+                // task); the popup just hides the "Open Code Review" button.
+                string taskId = null;
+                string taskTitle = null;
+                if (attributionSvc != null && !string.IsNullOrEmpty(diffResult.repoRoot))
+                {
+                    try
+                    {
+                        var attrs = await System.Threading.Tasks.Task.Run(() =>
+                            attributionSvc.GetAttributionForFiles(
+                                diffResult.repoRoot,
+                                new[] { repoRelativePath }));
+                        if (attrs != null && attrs.Count > 0)
+                        {
+                            taskId = attrs[0].TaskId;
+                            taskTitle = attrs[0].TaskTitle;
+                        }
+                    }
+                    catch
+                    {
+                        // Degrade silently — popup just renders without the task button.
+                    }
+                }
+
+                string displayName = Path.GetFileName(repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                string html = DiffRenderer.RenderCodeReviewStylePopup(
+                    displayName,
+                    diffResult.fullPath,
+                    string.IsNullOrEmpty(diffResult.diff) ? "(no changes found)" : diffResult.diff,
+                    taskId,
+                    taskTitle);
+
+                ShowDiffPopup(displayName, html, OnDiffPopupWebMessage);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[TerminalDocument] OnHudGitOpenDiffPopupRequested failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Webmessage handler for the diff popup. Currently routes a single message:
+        /// <c>{type:'open_code_review', taskId:'...', filePath:'...'}</c> from the
+        /// popup's "Open Code Review" button. Forwards through MessageBroker so
+        /// MainForm can activate the Tasks panel and trigger the task-bound Code
+        /// Review overlay pre-selected on the originating file.
+        /// </summary>
+        private void OnDiffPopupWebMessage(JsonElement message)
+        {
+            if (_isDisposing) return;
+            try
+            {
+                if (!message.TryGetProperty("type", out var typeProp)) return;
+                string type = typeProp.GetString();
+                if (type != "open_code_review") return;
+                if (!message.TryGetProperty("taskId", out var taskIdProp)) return;
+                string taskId = taskIdProp.GetString();
+                if (string.IsNullOrEmpty(taskId)) return;
+                string filePath = message.TryGetProperty("filePath", out var filePathProp)
+                    ? filePathProp.GetString()
+                    : null;
+                _messageBroker?.RequestOpenTasksCodeReview(taskId, filePath);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[TerminalDocument] OnDiffPopupWebMessage failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Opens a standalone popup window showing diff HTML content. When
+        /// <paramref name="onWebMessage"/> is supplied, the popup's WebView2
+        /// forwards JSON messages from JavaScript (e.g. the new Code-Review-styled
+        /// popup's "Open Code Review" button) to the caller. Pass <c>null</c> for
+        /// the legacy read-only popups (dashboard activity-feed flow).
+        /// </summary>
+        private async void ShowDiffPopup(string fileName, string html, Action<JsonElement> onWebMessage = null)
         {
             LoadDiffPopupSettings();
 
@@ -1206,6 +1363,8 @@ namespace MultiTerminal.Docking
             var webView = new WebView2 { Dock = DockStyle.Fill };
             form.Controls.Add(webView);
 
+            EventHandler<Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs> webMsgHandler = null;
+
             try
             {
                 var environment = await WebView2EnvironmentCache.GetEnvironmentAsync();
@@ -1216,6 +1375,26 @@ namespace MultiTerminal.Docking
 
                 if (Math.Abs(_diffPopupZoom - 1.0) > 0.01)
                     webView.ZoomFactor = _diffPopupZoom;
+
+                if (onWebMessage != null)
+                {
+                    webMsgHandler = (s, args) =>
+                    {
+                        try
+                        {
+                            string json = args.WebMessageAsJson;
+                            if (string.IsNullOrEmpty(json)) return;
+                            using var doc = JsonDocument.Parse(json);
+                            onWebMessage(doc.RootElement.Clone());
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[TerminalDocument] Diff popup WebMessage parse failed: {ex.Message}");
+                        }
+                    };
+                    webView.CoreWebView2.WebMessageReceived += webMsgHandler;
+                }
 
                 webView.CoreWebView2.NavigateToString(html);
             }
@@ -1229,7 +1408,11 @@ namespace MultiTerminal.Docking
                     : form.RestoreBounds;
 
                 if (webView.CoreWebView2 != null)
+                {
                     _diffPopupZoom = webView.ZoomFactor;
+                    if (webMsgHandler != null)
+                        webView.CoreWebView2.WebMessageReceived -= webMsgHandler;
+                }
 
                 SaveDiffPopupSettings();
                 webView.Dispose();
@@ -1322,81 +1505,6 @@ namespace MultiTerminal.Docking
                 return output;
             }
             catch { return null; }
-        }
-
-        private static string GenerateDiffHtml(string fileName, string fullPath, string diff)
-        {
-            string escapedName = System.Net.WebUtility.HtmlEncode(fileName);
-            string escapedPath = System.Net.WebUtility.HtmlEncode(fullPath);
-
-            // Parse diff lines into styled HTML
-            var lines = diff.Split('\n');
-            var sb = new System.Text.StringBuilder();
-            foreach (var line in lines)
-            {
-                string escaped = System.Net.WebUtility.HtmlEncode(line);
-                if (line.StartsWith("+++") || line.StartsWith("---"))
-                    sb.Append($"<div class=\"diff-meta\">{escaped}</div>");
-                else if (line.StartsWith("@@"))
-                    sb.Append($"<div class=\"diff-hunk\">{escaped}</div>");
-                else if (line.StartsWith("+"))
-                    sb.Append($"<div class=\"diff-add\">{escaped}</div>");
-                else if (line.StartsWith("-"))
-                    sb.Append($"<div class=\"diff-del\">{escaped}</div>");
-                else
-                    sb.Append($"<div class=\"diff-ctx\">{escaped}</div>");
-            }
-
-            return $@"<!DOCTYPE html>
-<html><head><meta charset=""UTF-8""><style>
-body {{
-    margin: 0; padding: 12px;
-    font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
-    font-size: 12px;
-    background: #1a1a2e;
-    color: #e0e0e0;
-}}
-.diff-header {{
-    padding: 8px 12px;
-    background: #16213e;
-    border: 1px solid #2a2a4a;
-    border-radius: 6px;
-    margin-bottom: 12px;
-}}
-.diff-header h2 {{
-    margin: 0 0 4px 0;
-    font-size: 14px;
-    color: #89b4fa;
-}}
-.diff-header .path {{
-    font-size: 10px;
-    color: #707088;
-}}
-.diff-content {{
-    border: 1px solid #2a2a4a;
-    border-radius: 4px;
-    overflow-x: auto;
-    background: #12122a;
-}}
-.diff-content > div {{
-    padding: 1px 10px;
-    white-space: pre;
-    line-height: 1.5;
-}}
-.diff-add {{ background: rgba(166, 227, 161, 0.12); color: #a6e3a1; }}
-.diff-del {{ background: rgba(243, 139, 168, 0.12); color: #f38ba8; }}
-.diff-hunk {{ background: rgba(137, 180, 250, 0.08); color: #89b4fa; font-style: italic; }}
-.diff-meta {{ color: #707088; font-weight: bold; }}
-.diff-ctx {{ color: #a0a0b8; }}
-</style></head><body>
-<div class=""diff-header"">
-    <h2>{escapedName}</h2>
-    <div class=""path"">{escapedPath}</div>
-</div>
-<div class=""diff-content"">
-{sb}
-</div>
-</body></html>";
         }
 
         /// <summary>
@@ -1987,8 +2095,16 @@ body {{
             _hudDashboard?.Initialize(broker);
             _hudDashboard.ShowDiffRequested -= OnShowDiffRequested;
             _hudDashboard.ShowDiffRequested += OnShowDiffRequested;
+            _hudDashboard.OpenGitTabRequested -= OnOpenGitTabRequested;
+            _hudDashboard.OpenGitTabRequested += OnOpenGitTabRequested;
             _hudNotes?.Initialize(broker);
             _hudKnowledge?.Initialize(broker);
+            _hudGit?.Initialize(broker);
+            if (_hudGit != null)
+            {
+                _hudGit.OpenDiffPopupRequested -= OnHudGitOpenDiffPopupRequested;
+                _hudGit.OpenDiffPopupRequested += OnHudGitOpenDiffPopupRequested;
+            }
             _hudSessions?.Initialize(broker);
             if (!string.IsNullOrEmpty(CustomTitle))
                 _hudDashboard?.SetTerminalName(CustomTitle);
@@ -2347,6 +2463,7 @@ body {{
                             _hudDashboard?.SetProject(resolvedProjectId, folderForUi, resolvedProjectName);
                             _hudNotes?.SetProject(folderForUi);
                             _hudKnowledge?.SetProject(resolvedProjectId);
+                            _hudGit?.SetProject(folderForUi);
                             _hudSessions?.SetProject(folderForUi);
                             _hudDispatchedFolder = folderForUi;
                             UpdateStatusBar();

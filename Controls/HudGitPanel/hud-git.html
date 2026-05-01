@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+:root {
+    --bg: #1a1a2e;
+    --bg-elevated: #16213e;
+    --border: #2a2a4a;
+    --fg: #e0e0e0;
+    --fg-muted: #707088;
+    --fg-dim: #4a4a6a;
+    --accent: #89b4fa;
+    --green: #a6e3a1;
+    --red: #f38ba8;
+    --yellow: #fab387;
+    --pink: #f5c2e7;
+    --select-bg: rgba(137, 180, 250, 0.18);
+}
+body.light {
+    --bg: #f5f5f5;
+    --bg-elevated: #ffffff;
+    --border: #d0d0d0;
+    --fg: #222;
+    --fg-muted: #666;
+    --fg-dim: #999;
+    --accent: #4a90e2;
+    --green: #2e8540;
+    --red: #c5282f;
+    --yellow: #b35900;
+    --pink: #a83a82;
+    --select-bg: rgba(74, 144, 226, 0.18);
+}
+html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 12px;
+    background: var(--bg);
+    color: var(--fg);
+    overflow: hidden;
+}
+
+/* ------- Header strip (item [7]) ------- */
+.header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    flex: 0 0 auto;
+}
+.header .branch { font-weight: 600; color: var(--fg); }
+.header .changes { color: var(--fg-muted); }
+.header .ahead-behind { color: var(--accent); }
+.header .fetch-info { color: var(--fg-muted); }
+.header .spacer { flex: 1; }
+.header button {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 3px 9px;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 11px;
+    line-height: 1.3;
+}
+.header button:hover { background: var(--border); }
+.header button[disabled] { opacity: 0.45; cursor: default; }
+.header button[disabled]:hover { background: var(--bg); }
+.dot-sep { color: var(--fg-dim); }
+
+/* ------- Empty state ------- */
+#empty {
+    display: none;
+    padding: 32px 24px;
+    text-align: center;
+    color: var(--fg-muted);
+}
+#empty h3 { color: var(--fg); margin: 0 0 8px 0; font-size: 13px; font-weight: 600; }
+#empty p { margin: 0 auto; max-width: 420px; line-height: 1.55; }
+
+/* ------- Body split (item [8] + smoke-1 polish [15]) ------- */
+#body { display: none; flex: 1; min-height: 0; }
+.body-split { display: flex; height: 100%; min-height: 0; }
+.body-left {
+    /* Width is driven by a CSS variable so the user-draggable splitter
+       can persist a custom value via localStorage. Defaults to 40% on
+       first run; clamps applied during drag (260px..70% viewport). */
+    width: var(--left-width, 40%);
+    flex: 0 0 auto;
+    min-width: 200px;
+    /* Smoke-2 #2: explicit overflow-x: hidden plus per-row truncation
+       prevents file-row chip overflow from spilling into the splitter / right
+       pane when the user drags the splitter narrow. The path inside each row
+       still ellipsis-truncates via .file-path { min-width: 0; ellipsis }. */
+    overflow-x: hidden;
+    overflow-y: auto;
+    background: var(--bg);
+}
+.body-right { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+/* Draggable splitter between left + right panes. 4px hit-area is small
+   so it doesn't intrude visually, but its hover / dragging states widen
+   the visible accent band so the user gets clear feedback. */
+.splitter {
+    flex: 0 0 4px;
+    cursor: col-resize;
+    background: var(--border);
+    position: relative;
+    user-select: none;
+}
+.splitter:hover,
+.splitter.dragging { background: var(--accent); }
+body.dragging-splitter { cursor: col-resize; user-select: none; }
+
+/* ------- Section headers (left column) ------- */
+.section-header {
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 1;
+}
+.section-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--fg-muted);
+    font-style: italic;
+    font-size: 11px;
+}
+
+/* ------- File rows (working changes) ------- */
+.file-list { padding: 0; margin: 0; }
+.file-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    cursor: pointer;
+    border-bottom: 1px solid transparent;
+    user-select: none;
+}
+.file-row:hover { background: var(--border); }
+.file-row.selected { background: var(--select-bg); }
+/* Subtle group separator inserted between status-kind groups (smoke-1
+   polish [15] fix #4) — a 1px top border on the first row of each
+   non-leading group renders as a hairline divider between M / A / D /
+   R / T / C / U clusters without screaming for attention. */
+.file-row.group-start { border-top: 1px solid var(--border); }
+.file-marker {
+    width: 16px; height: 16px;
+    border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 700;
+    flex: 0 0 16px;
+    font-family: 'Cascadia Code', monospace;
+}
+.file-marker.M { background: rgba(137, 180, 250, 0.18); color: var(--accent); }
+.file-marker.A { background: rgba(166, 227, 161, 0.18); color: var(--green); }
+.file-marker.D { background: rgba(243, 139, 168, 0.18); color: var(--red); }
+.file-marker.U { background: rgba(112, 112, 136, 0.18); color: var(--fg-muted); }
+.file-marker.R { background: rgba(245, 194, 231, 0.18); color: var(--pink); }
+.file-marker.T { background: rgba(250, 179, 135, 0.18); color: var(--yellow); }
+.file-marker.C { background: rgba(243, 139, 168, 0.32); color: var(--red); }
+.file-marker.UNK { background: rgba(112, 112, 136, 0.10); color: var(--fg-dim); }
+.file-path {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 11px;
+}
+.file-stats { font-size: 10px; color: var(--fg-dim); flex: 0 0 auto; }
+.file-stats .added { color: var(--green); }
+.file-stats .deleted { color: var(--red); }
+.file-chips { display: flex; gap: 2px; flex: 0 0 auto; align-items: center; }
+.chip {
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 2px;
+    background: transparent;
+    color: var(--fg-dim);
+    border: 1px solid var(--fg-dim);
+    line-height: 1.2;
+}
+.chip:empty { display: none; }
+
+/* ------- Commit rows (item [9]) ------- */
+.commits-list { padding: 0; margin: 0; }
+.commit-row {
+    padding: 6px 10px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+}
+.commit-row:hover { background: var(--border); }
+.commit-row.selected { background: var(--select-bg); }
+.commit-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+.commit-sha {
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 10px;
+    color: var(--accent);
+    flex: 0 0 auto;
+}
+.commit-subject {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+.commit-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: 10px;
+    color: var(--fg-muted);
+    overflow: hidden;
+}
+.commit-author { color: var(--fg-muted); }
+.commit-coauthors { color: var(--fg-dim); font-style: italic; }
+.commit-time { color: var(--fg-dim); margin-left: auto; flex: 0 0 auto; }
+
+/* ------- Cross-task contamination banner (item [11]) ------- */
+.contam-banner {
+    padding: 8px 12px;
+    background: rgba(243, 139, 168, 0.18);
+    border-bottom: 1px solid var(--red);
+    color: var(--red);
+    font-size: 11px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.contam-banner::before {
+    content: '⚠';
+    font-size: 14px;
+    line-height: 1;
+}
+
+/* ------- Branch rows (item [10]) ------- */
+.branches-list { padding: 0; margin: 0; }
+.branch-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+}
+.branch-row.stale { opacity: 0.5; }
+.branch-row.current { background: var(--select-bg); }
+.branch-marker {
+    width: 10px;
+    flex: 0 0 10px;
+    color: var(--fg-dim);
+    font-size: 9px;
+    line-height: 1;
+}
+.branch-row.current .branch-marker { color: var(--accent); }
+.branch-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 11px;
+}
+.branch-row.current .branch-name { font-weight: 600; color: var(--fg); }
+.branch-tag {
+    font-size: 9px;
+    color: var(--fg-dim);
+    background: transparent;
+    border: 1px solid var(--fg-dim);
+    border-radius: 2px;
+    padding: 0 4px;
+    line-height: 1.4;
+    flex: 0 0 auto;
+}
+.branch-time { color: var(--fg-dim); font-size: 10px; flex: 0 0 auto; }
+
+/* ------- Body stubs ------- */
+.body-stub {
+    padding: 20px;
+    color: var(--fg-dim);
+    font-style: italic;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+}
+.body-stub strong { color: var(--fg-muted); font-style: normal; display: block; margin-bottom: 4px; }
+.body-stub small { font-size: 10px; }
+
+/* ------- Diff pane ------- */
+#diff-pane-empty {
+    padding: 32px;
+    text-align: center;
+    color: var(--fg-muted);
+    font-style: italic;
+}
+.diff-pane-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    flex: 0 0 auto;
+}
+.diff-pane-path {
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    color: var(--accent);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; min-width: 0;
+}
+.diff-pane-header .spacer { flex: 0 0 8px; }
+.diff-pane-header button {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 11px;
+}
+.diff-pane-header button:hover { background: var(--border); }
+.diff-pane-header button.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+#diff-lines {
+    flex: 1;
+    /* Smoke-2 #2: force both scrollbars permanently visible so users see
+       (and can use) them without hovering or experimenting. `overflow: scroll`
+       always-on is friendlier for the casual "what's in this file" use case
+       than `auto` which only shows bars when content overflows AND the user
+       has hovered. WebView2's Chromium honors this. */
+    overflow: scroll;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    background: var(--bg);
+}
+
+/* Unified mode */
+.diff-line {
+    padding: 0 10px;
+    white-space: pre;
+}
+.diff-line.add { background: rgba(166, 227, 161, 0.12); color: var(--green); }
+.diff-line.del { background: rgba(243, 139, 168, 0.12); color: var(--red); }
+.diff-line.hunk { background: rgba(137, 180, 250, 0.10); color: var(--accent); font-style: italic; }
+.diff-line.meta { color: var(--fg-dim); font-weight: 600; }
+.diff-line.ctx { color: var(--fg-muted); }
+
+/* Side-by-side mode */
+.diff-side-row {
+    display: flex;
+    align-items: stretch;
+    /* Smoke-2 #2: rows must size to their natural content width so #diff-lines'
+       horizontal scrollbar reflects the longest row. Without this the row
+       shrinks to fit the visible width and long lines clip silently inside
+       individual cells. */
+    min-width: max-content;
+}
+.diff-side-cell {
+    flex: 1; min-width: 0;
+    padding: 0 10px;
+    white-space: pre;
+    /* Smoke-2 #2: dropped per-cell overflow-x:auto (smoke-1 polish #6
+       reverted). The parent #diff-lines now provides ONE shared horizontal
+       scrollbar at the bottom of the right pane, matching what the smoke
+       walk asked for. Synced left/right scroll comes for free since both
+       cells live in the same overflowing container. */
+    overflow: visible;
+}
+.diff-side-cell:first-child { border-right: 1px solid var(--border); }
+.diff-side-cell.add { background: rgba(166, 227, 161, 0.12); color: var(--green); }
+.diff-side-cell.del { background: rgba(243, 139, 168, 0.12); color: var(--red); }
+.diff-side-cell.empty { background: rgba(112, 112, 136, 0.06); }
+.diff-side-cell.ctx { color: var(--fg-muted); }
+.diff-side-row.full {
+    /* Hunk + meta lines span both columns */
+}
+.diff-side-row.full > .diff-side-cell {
+    flex: 1 1 100%;
+    border-right: none;
+}
+
+/* ------- File-row context menu (smoke-1 polish [15] fix #7) -------
+   Custom HTML menu replacing the WebView's default browser context menu
+   (disabled at the C# layer for security: no copy-image, no inspect, no
+   navigate-to-source-as-URL). Anchored at the click coordinates and
+   clamped to the panel bounds. Only one entry in v1: "Open in pop-up
+   diff editor", which routes via `open_diff_popup` message → C# →
+   TerminalDocument.ShowDiffPopup with the same renderer the inline pane
+   uses. */
+.context-menu {
+    position: fixed;
+    z-index: 100;
+    min-width: 200px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    padding: 4px 0;
+    font-size: 11px;
+    display: none;
+}
+.context-menu-item {
+    padding: 6px 14px;
+    cursor: pointer;
+    color: var(--fg);
+    user-select: none;
+}
+.context-menu-item:hover { background: var(--select-bg); color: var(--accent); }
+.context-menu-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+}
+
+/* Defense-in-depth (auditor LOW finding from item [8]): isolate bidi codepoints
+   in user-controlled text so filenames containing U+202E (RLO) etc. can't visually
+   spoof file extensions or rearrange diff line text. `unicode-bidi: isolate`
+   prevents bidi controls inside a span from affecting siblings or the surrounding
+   layout; `direction: ltr` pins the rendering direction so paths and diff text
+   render in code-conventional order. Pure presentation fix — content is unchanged.
+   Forward-applies to commits log [9], branches [10], and chip values [11] by
+   precedent: any user-controlled text rendered into these classes inherits the
+   protection automatically. */
+.file-path,
+.file-stats,
+.diff-pane-path,
+.diff-line,
+.diff-side-cell,
+.chip,
+.commit-subject,
+.commit-author,
+.commit-coauthors,
+.branch-name {
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+</style>
+</head>
+<body>
+<div style="display: flex; flex-direction: column; height: 100vh;">
+
+<!-- Header strip (item [7]) -->
+<div class="header" id="header" style="display: none;">
+    <span class="branch" id="branch">—</span>
+    <span class="dot-sep">·</span>
+    <span class="changes" id="changes">—</span>
+    <span class="dot-sep" id="sep-ahead-behind" style="display: none;">·</span>
+    <span class="ahead-behind" id="ahead-behind" style="display: none;"></span>
+    <span class="dot-sep" id="sep-fetch" style="display: none;">·</span>
+    <span class="fetch-info" id="fetch-info"></span>
+    <span class="spacer"></span>
+    <button id="fetch-button" style="display: none;" title="Fetch remote refs (read-only)">⤓ Fetch</button>
+    <button id="refresh-button" title="Refresh">↻</button>
+</div>
+
+<!-- Empty state -->
+<div id="empty">
+    <h3 id="empty-title">Loading…</h3>
+    <p id="empty-message"></p>
+</div>
+
+<!-- Body — split layout (item [8]) -->
+<div id="body">
+    <div class="body-split">
+        <div class="body-left">
+            <div id="working-changes-section">
+                <div class="section-header">Working Changes (<span id="changes-count">0</span>)</div>
+                <div id="contamination-banner" class="contam-banner" style="display: none;"></div>
+                <div id="file-list" class="file-list"></div>
+                <div id="working-changes-empty" class="section-empty" style="display: none;">No uncommitted changes</div>
+            </div>
+            <div id="commits-section">
+                <div class="section-header">Recent Commits (<span id="commits-count">0</span>)</div>
+                <div id="commits-list" class="commits-list"></div>
+                <div id="commits-empty" class="section-empty" style="display: none;">No commits yet</div>
+            </div>
+            <div id="branches-section">
+                <div class="section-header">Branches (<span id="branches-count">0</span>)</div>
+                <div id="branches-list" class="branches-list"></div>
+                <div id="branches-empty" class="section-empty" style="display: none;">No branches</div>
+            </div>
+        </div>
+        <div class="splitter" id="splitter" title="Drag to resize"></div>
+        <div class="body-right">
+            <div id="diff-pane-empty">Select a file to view its diff</div>
+            <div class="diff-pane-header" id="diff-pane-header" style="display: none;">
+                <span class="diff-pane-path" id="diff-pane-path"></span>
+                <span class="spacer"></span>
+                <button id="toggle-side-by-side" class="active" title="Side-by-side view">⫶⫶</button>
+                <button id="toggle-unified" title="Unified view">≡</button>
+            </div>
+            <div id="diff-lines" style="display: none;"></div>
+        </div>
+    </div>
+</div>
+
+</div>
+
+<!-- File-row context menu (smoke-1 polish [15] fix #7) -->
+<div class="context-menu" id="file-context-menu">
+    <div class="context-menu-item" id="ctx-open-diff-popup">Open in pop-up diff editor</div>
+</div>
+
+<script>
+(function () {
+    const $ = id => document.getElementById(id);
+
+    // --- State ---
+    let diffMode = 'side-by-side'; // 'side-by-side' | 'unified'
+    let selectedPath = null;       // currently selected working-tree file
+    let selectedSha = null;        // currently selected commit SHA
+    let lastWorkingTree = [];
+    let lastRecentCommits = [];
+    let lastBranches = [];
+    let lastDiffLines = [];
+    let lastDiffPath = null;
+    let lastRepoRoot = '';         // repo root from C# git_state — used to compose
+                                   // absolute-path tooltips (smoke-1 polish [15] fix #3)
+    let contextMenuPath = null;    // path the file-row context menu was raised on
+    const SPLITTER_KEY = 'mt.git.leftWidthPx';
+
+    // --- Theme ---
+    function applyTheme(isDark) {
+        document.body.classList.toggle('light', !isDark);
+    }
+
+    // --- Outbound messages ---
+    function send(msg) {
+        try { window.chrome.webview.postMessage(msg); } catch (e) {}
+    }
+
+    // --- Empty state / standard render dispatch ---
+    function showEmpty(title, message) {
+        $('header').style.display = 'none';
+        $('body').style.display = 'none';
+        $('empty').style.display = 'block';
+        $('empty-title').textContent = title;
+        $('empty-message').textContent = message;
+    }
+
+    function showStandard(s) {
+        $('empty').style.display = 'none';
+        $('header').style.display = 'flex';
+        $('body').style.display = 'flex';
+
+        // Capture repoRoot before renderWorkingTree so file rows can compose
+        // absolute-path tooltips on first render (no second pass needed).
+        lastRepoRoot = s.repoRoot || '';
+
+        renderHeader(s);
+        renderContaminationBanner(s.workingTree || [], s.contamTaskIds || []);
+        renderWorkingTree(s.workingTree || []);
+        renderRecentCommits(s.recentCommits || []);
+        renderBranches(s.branches || []);
+    }
+
+    // --- Cross-task contamination banner (item [11]) ---
+    // Renders only when uncommitted files belong to >1 active kanban task.
+    // The ONLY place red/⚠ iconography appears in this panel — earns its alarm.
+    // Wording per Oracle's correction: "two tasks' uncommitted work in this tree"
+    // (commit-bundling risk), NOT "auto-commit risk" — there is no auto-commit;
+    // commits require explicit user approval.
+    function renderContaminationBanner(workingTree, contamTaskIds) {
+        const banner = $('contamination-banner');
+        if (!contamTaskIds || contamTaskIds.length <= 1) {
+            banner.style.display = 'none';
+            banner.textContent = '';
+            return;
+        }
+        // Count files contributing to the contamination (those with a task assignment).
+        let claimedFiles = 0;
+        for (const f of workingTree) {
+            if (f.taskId) claimedFiles++;
+        }
+        const msg = claimedFiles + ' uncommitted file' + (claimedFiles === 1 ? '' : 's')
+            + ' span ' + contamTaskIds.length + ' active tasks — commit-bundling risk.';
+        banner.textContent = msg;
+        banner.style.display = 'flex';
+    }
+
+    // --- Header strip (item [7]) ---
+    function renderHeader(s) {
+        $('branch').textContent = s.branch || '—';
+
+        const c = s.changes | 0;
+        let changesText;
+        if (c === 0) changesText = 'clean';
+        else if (c === 1) changesText = '1 uncommitted change';
+        else changesText = c + ' uncommitted changes';
+        $('changes').textContent = changesText;
+
+        if (s.hasRemote) {
+            $('sep-ahead-behind').style.display = 'inline';
+            $('ahead-behind').style.display = 'inline';
+            $('ahead-behind').textContent = '↑' + (s.ahead | 0) + ' ↓' + (s.behind | 0);
+            $('sep-fetch').style.display = 'inline';
+            $('fetch-info').textContent = s.lastFetch ? 'fetched ' + s.lastFetch : 'never fetched';
+            $('fetch-button').style.display = 'inline-block';
+        } else {
+            $('sep-ahead-behind').style.display = 'none';
+            $('ahead-behind').style.display = 'none';
+            $('sep-fetch').style.display = 'inline';
+            $('fetch-info').textContent = 'no remote configured';
+            $('fetch-button').style.display = 'none';
+        }
+    }
+
+    // --- Working changes file tree (item [8] + smoke-1 polish [15]) ---
+    const KIND_TO_MARKER = {
+        Modified: 'M', Added: 'A', Deleted: 'D', Untracked: 'U',
+        Renamed: 'R', TypeChanged: 'T', Conflicted: 'C', Unknown: 'UNK',
+    };
+    const KIND_TO_LETTER = {
+        Modified: 'M', Added: 'A', Deleted: 'D', Untracked: 'U',
+        Renamed: 'R', TypeChanged: 'T', Conflicted: 'C', Unknown: '?',
+    };
+    // Full-name lookup feeds the marker tooltip (smoke-1 polish [15] fix #1)
+    // so the M/A/D/U/R/T/C/UNK badge is self-explanatory on hover.
+    const KIND_TO_FULLNAME = {
+        Modified: 'Modified', Added: 'Added', Deleted: 'Deleted',
+        Untracked: 'Untracked (new file, not yet added)',
+        Renamed: 'Renamed', TypeChanged: 'Type changed',
+        Conflicted: 'Conflicted (merge conflict)', Unknown: 'Unknown status',
+    };
+    // Group/sort order (smoke-1 polish [15] fix #4) — clusters similar
+    // changes together. Modified/Added/Deleted lead because they're the
+    // most common review focus; Untracked sinks to the bottom because
+    // codex-temp output and screenshots tend to dominate that bucket.
+    const KIND_SORT_RANK = {
+        Modified: 0, Added: 1, Deleted: 2, Renamed: 3,
+        TypeChanged: 4, Conflicted: 5, Untracked: 6, Unknown: 7,
+    };
+
+    function composeAbsolutePath(repoRoot, relPath) {
+        // Compose `repoRoot + sep + relPath` for the row hover tooltip
+        // (smoke-1 polish [15] fix #3). Repo root from C# uses native
+        // separators (Windows backslashes); relPath from LibGit2Sharp uses
+        // forward slashes. Normalize the join only — preserve the rest of
+        // each segment exactly so bidi/case-sensitivity round-trip.
+        if (!repoRoot) return relPath || '';
+        const trimmedRoot = repoRoot.replace(/[\\/]+$/, '');
+        const sep = trimmedRoot.indexOf('\\') >= 0 ? '\\' : '/';
+        const normRel = (relPath || '').replace(/\//g, sep);
+        return trimmedRoot + sep + normRel;
+    }
+
+    function renderWorkingTree(files) {
+        lastWorkingTree = files;
+        const list = $('file-list');
+        list.innerHTML = '';
+
+        $('changes-count').textContent = String(files.length);
+
+        if (files.length === 0) {
+            $('working-changes-empty').style.display = 'block';
+            list.style.display = 'none';
+            return;
+        }
+        $('working-changes-empty').style.display = 'none';
+        list.style.display = 'block';
+
+        // Sort by KIND_SORT_RANK then by path so each kind is a contiguous
+        // group (smoke-1 polish [15] fix #4). `sortedFiles` is a copy so
+        // we don't mutate the caller's array (mostly defensive — the snapshot
+        // is freshly minted by C# each refresh).
+        const sortedFiles = [...files].sort((a, b) => {
+            const ar = KIND_SORT_RANK[a.kind] ?? 99;
+            const br = KIND_SORT_RANK[b.kind] ?? 99;
+            if (ar !== br) return ar - br;
+            return (a.path || '').localeCompare(b.path || '');
+        });
+
+        let prevKind = null;
+        for (const f of sortedFiles) {
+            const row = document.createElement('div');
+            row.className = 'file-row';
+            row.dataset.path = f.path;
+            if (f.path === selectedPath) row.classList.add('selected');
+            // First row of each non-leading kind group gets a 1px divider
+            // so M / A / D / U buckets read as visually distinct clusters
+            // without resorting to full sub-headers.
+            if (prevKind !== null && f.kind !== prevKind) row.classList.add('group-start');
+            prevKind = f.kind;
+
+            const cls = KIND_TO_MARKER[f.kind] || 'UNK';
+            const letter = KIND_TO_LETTER[f.kind] || '?';
+
+            const marker = document.createElement('span');
+            marker.className = 'file-marker ' + cls;
+            marker.textContent = letter;
+            // Self-explanatory tooltip on the badge — the letter alone
+            // is opaque to anyone who hasn't memorized git status codes.
+            marker.title = KIND_TO_FULLNAME[f.kind] || ('Status: ' + f.kind);
+
+            const path = document.createElement('span');
+            path.className = 'file-path';
+            path.textContent = f.path;
+            // Full absolute path on hover — even short relative paths get
+            // useful info now (previously the title repeated the visible
+            // text). Composed from repoRoot + path for native-separator
+            // display so the user can paste it straight into Explorer.
+            path.title = composeAbsolutePath(lastRepoRoot, f.path);
+
+            const stats = document.createElement('span');
+            stats.className = 'file-stats';
+            const addedCount = (f.linesAdded | 0);
+            const deletedCount = (f.linesDeleted | 0);
+            // Stats tooltip (smoke-1 polish [15] fix #2) — disambiguates
+            // the +N -N notation for users not steeped in git diff syntax.
+            stats.title = addedCount + ' lines added, ' + deletedCount + ' lines removed';
+            const added = document.createElement('span');
+            added.className = 'added';
+            added.textContent = '+' + addedCount;
+            const deleted = document.createElement('span');
+            deleted.className = 'deleted';
+            deleted.textContent = ' −' + deletedCount;
+            stats.appendChild(added);
+            stats.appendChild(deleted);
+
+            // Per-row chips (item [11] Phase 2 overlays) — agent / task / pipeline-status.
+            // Empty chips collapse via .chip:empty { display: none } so files without
+            // attribution data don't show empty boxes.
+            const chips = document.createElement('span');
+            chips.className = 'file-chips';
+            const chipAgent = document.createElement('span');
+            chipAgent.className = 'chip chip-agent';
+            if (f.agent) {
+                // Prefix with kanban glyph so the visual cue is "task-attributed"
+                // not "edit-attributed" — the chip surfaces the active task's
+                // ASSIGNEE, which may differ from the actual file editor in
+                // multi-agent / sub-agent / helper scenarios. Tooltip discloses
+                // the limitation explicitly.
+                chipAgent.textContent = '📋 ' + f.agent;
+                chipAgent.title = 'Task assignee — may not be the file’s actual editor. '
+                    + 'Per-line attribution from activity_feed coming in a follow-up item.';
+            }
+            const chipTask = document.createElement('span');
+            chipTask.className = 'chip chip-task';
+            if (f.taskId) {
+                // Show short task id (first 8 chars) to keep the chip compact.
+                // Hover reveals the full task title for context.
+                chipTask.textContent = f.taskId.length > 8 ? f.taskId.substring(0, 8) : f.taskId;
+                chipTask.title = f.taskTitle ? (f.taskId + ' — ' + f.taskTitle) : f.taskId;
+            }
+            const chipStatus = document.createElement('span');
+            chipStatus.className = 'chip chip-status';
+            if (f.pipelineStatus) {
+                const verdictGlyph = pipelineGlyph(f.pipelineStatus);
+                chipStatus.textContent = verdictGlyph + ' ' + f.pipelineStatus;
+                chipStatus.title = 'Latest pipeline verdict for ' + (f.taskId || 'this file');
+            }
+            chips.appendChild(chipAgent);
+            chips.appendChild(chipTask);
+            chips.appendChild(chipStatus);
+
+            row.appendChild(marker);
+            row.appendChild(path);
+            row.appendChild(stats);
+            row.appendChild(chips);
+
+            row.addEventListener('click', () => onSelectFile(f.path));
+            row.addEventListener('contextmenu', e => {
+                e.preventDefault();
+                showFileContextMenu(e.clientX, e.clientY, f.path);
+            });
+
+            list.appendChild(row);
+        }
+    }
+
+    function pipelineGlyph(verdict) {
+        // Map common verdict strings to a small inline glyph. Order matters:
+        // failure/warning tokens MUST be checked before success tokens so
+        // "PASS WITH WARNINGS" renders as ⚠ not ✅ — adversary HIGH finding.
+        // Reviewer-vocabulary tokens (revise/rework/concern) added per
+        // reviewer SUGGEST. Fallback is a neutral dot so unknown verdicts
+        // still render visibly without implying a status they don't carry.
+        const v = (verdict || '').toLowerCase();
+        if (v.indexOf('fail') >= 0 || v.indexOf('block') >= 0 || v.indexOf('error') >= 0
+            || v.indexOf('warning') >= 0 || v.indexOf('concern') >= 0
+            || v.indexOf('revise') >= 0 || v.indexOf('rework') >= 0) return '⚠';
+        if (v.indexOf('pending') >= 0 || v.indexOf('progress') >= 0
+            || v.indexOf('coding') >= 0 || v.indexOf('testing') >= 0) return '⏳';
+        if (v.indexOf('pass') >= 0 || v.indexOf('lgtm') >= 0 || v === 'done' || v === 'ok') return '✅';
+        return '·';
+    }
+
+    function onSelectFile(path) {
+        if (selectedPath === path && selectedSha === null) return;
+        selectedPath = path;
+        selectedSha = null;
+        // Update row highlight on file list and clear commit list highlight.
+        const fl = $('file-list');
+        for (const row of fl.children) {
+            row.classList.toggle('selected', row.dataset.path === path);
+        }
+        const cl = $('commits-list');
+        for (const row of cl.children) {
+            row.classList.remove('selected');
+        }
+        send({ type: 'select_file', path });
+    }
+
+    // --- Recent commits log (item [9]) ---
+    function renderRecentCommits(commits) {
+        lastRecentCommits = commits;
+        const list = $('commits-list');
+        list.innerHTML = '';
+
+        $('commits-count').textContent = String(commits.length);
+
+        if (commits.length === 0) {
+            $('commits-empty').style.display = 'block';
+            list.style.display = 'none';
+            return;
+        }
+        $('commits-empty').style.display = 'none';
+        list.style.display = 'block';
+
+        for (const c of commits) {
+            const row = document.createElement('div');
+            row.className = 'commit-row';
+            row.dataset.sha = c.fullSha || c.shortSha;
+            if (selectedSha && row.dataset.sha === selectedSha) row.classList.add('selected');
+
+            const line = document.createElement('div');
+            line.className = 'commit-line';
+            const sha = document.createElement('span');
+            sha.className = 'commit-sha';
+            sha.textContent = c.shortSha || '';
+            const subj = document.createElement('span');
+            subj.className = 'commit-subject';
+            subj.textContent = c.subject || '';
+            subj.title = c.subject || '';
+            line.appendChild(sha);
+            line.appendChild(subj);
+
+            const meta = document.createElement('div');
+            meta.className = 'commit-meta';
+            const author = document.createElement('span');
+            author.className = 'commit-author';
+            author.textContent = c.authorName || '';
+            meta.appendChild(author);
+            if (c.coAuthors && c.coAuthors.length > 0) {
+                const co = document.createElement('span');
+                co.className = 'commit-coauthors';
+                co.textContent = '+ ' + c.coAuthors.join(', ');
+                meta.appendChild(co);
+            }
+            const time = document.createElement('span');
+            time.className = 'commit-time';
+            time.textContent = formatRelativeTime(c.when);
+            meta.appendChild(time);
+
+            row.appendChild(line);
+            row.appendChild(meta);
+
+            row.addEventListener('click', () => onSelectCommit(c.fullSha || c.shortSha, c.shortSha + ' — ' + (c.subject || '')));
+
+            list.appendChild(row);
+        }
+    }
+
+    function onSelectCommit(sha, displayName) {
+        if (!sha) return;
+        if (selectedSha === sha && selectedPath === null) return;
+        selectedSha = sha;
+        selectedPath = null;
+        // Update row highlight on commit list and clear file list highlight.
+        const cl = $('commits-list');
+        for (const row of cl.children) {
+            row.classList.toggle('selected', row.dataset.sha === sha);
+        }
+        const fl = $('file-list');
+        for (const row of fl.children) {
+            row.classList.remove('selected');
+        }
+        send({ type: 'select_commit', sha, displayName });
+    }
+
+    // --- Branches (item [10]) ---
+    const STALE_MS = 30 * 86400 * 1000;
+
+    function renderBranches(branches) {
+        lastBranches = branches;
+        const list = $('branches-list');
+        list.innerHTML = '';
+
+        $('branches-count').textContent = String(branches.length);
+
+        if (branches.length === 0) {
+            $('branches-empty').style.display = 'block';
+            list.style.display = 'none';
+            return;
+        }
+        $('branches-empty').style.display = 'none';
+        list.style.display = 'block';
+
+        // Sort: current first, then by last-commit time DESC, with no-time
+        // entries at the end. Stable for branches sharing timestamps.
+        const now = Date.now();
+        const sorted = [...branches].sort((a, b) => {
+            if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+            const at = a.when ? Date.parse(a.when) : 0;
+            const bt = b.when ? Date.parse(b.when) : 0;
+            return (bt || 0) - (at || 0);
+        });
+
+        for (const b of sorted) {
+            const row = document.createElement('div');
+            row.className = 'branch-row';
+            if (b.isCurrent) row.classList.add('current');
+            const branchTime = b.when ? Date.parse(b.when) : NaN;
+            if (!isNaN(branchTime) && (now - branchTime) > STALE_MS && !b.isCurrent) {
+                row.classList.add('stale');
+            }
+
+            const marker = document.createElement('span');
+            marker.className = 'branch-marker';
+            marker.textContent = b.isCurrent ? '●' : '○';
+
+            const name = document.createElement('span');
+            name.className = 'branch-name';
+            name.textContent = b.name || '';
+            name.title = b.name || '';
+
+            row.appendChild(marker);
+            row.appendChild(name);
+
+            if (b.isRemote) {
+                const tag = document.createElement('span');
+                tag.className = 'branch-tag';
+                tag.textContent = 'remote';
+                row.appendChild(tag);
+            }
+
+            const time = document.createElement('span');
+            time.className = 'branch-time';
+            time.textContent = formatRelativeTime(b.when);
+            row.appendChild(time);
+
+            list.appendChild(row);
+        }
+    }
+
+    function formatRelativeTime(isoString) {
+        if (!isoString) return '';
+        const t = Date.parse(isoString);
+        if (isNaN(t)) return '';
+        const deltaSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (deltaSec < 60) return 'just now';
+        if (deltaSec < 3600) return Math.floor(deltaSec / 60) + ' min ago';
+        if (deltaSec < 86400) return Math.floor(deltaSec / 3600) + ' hr ago';
+        if (deltaSec < 30 * 86400) return Math.floor(deltaSec / 86400) + ' d ago';
+        if (deltaSec < 365 * 86400) return Math.floor(deltaSec / (30 * 86400)) + ' mo ago';
+        return Math.floor(deltaSec / (365 * 86400)) + ' yr ago';
+    }
+
+    // --- Diff pane (item [8]) ---
+    function renderDiff(path, lines, selectionKey) {
+        // Stale-click guard (originally deferred from item [8] reviewer SUGGEST,
+        // refined in [11] cleanup): the C# side echoes back `selectionKey` =
+        // the exact path or SHA the request was issued for. Compare on the
+        // exact identifier instead of parsing the displayName format —
+        // robust to displayName changes, rebase/cherry-pick short-SHA
+        // collisions, and the selectedSha-shorter-than-7 degenerate case.
+        const expecting = selectedSha
+            ? (selectionKey === selectedSha)
+            : (selectionKey === selectedPath);
+        if (!expecting) return;
+
+        lastDiffPath = path;
+        lastDiffLines = lines;
+
+        $('diff-pane-empty').style.display = 'none';
+        $('diff-pane-header').style.display = 'flex';
+        $('diff-lines').style.display = 'block';
+        $('diff-pane-path').textContent = path;
+        $('diff-pane-path').title = path;
+
+        renderDiffLines();
+    }
+
+    function renderDiffLines() {
+        const container = $('diff-lines');
+        container.innerHTML = '';
+
+        if (!lastDiffLines || lastDiffLines.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'diff-line ctx';
+            empty.textContent = '(no changes found)';
+            container.appendChild(empty);
+            return;
+        }
+
+        if (diffMode === 'unified') {
+            renderUnified(container, lastDiffLines);
+        } else {
+            renderSideBySide(container, lastDiffLines);
+        }
+    }
+
+    function renderUnified(container, lines) {
+        for (const line of lines) {
+            const div = document.createElement('div');
+            div.className = 'diff-line ' + cssKind(line.kind);
+            div.textContent = line.text;
+            container.appendChild(div);
+        }
+    }
+
+    function renderSideBySide(container, lines) {
+        // Pairing algorithm: walk lines; group consecutive Del runs and Add runs;
+        // emit row by row pairing lefts with rights (pad with empty cells); flush
+        // pairs on context / hunk-header / meta lines (which span both columns).
+        let leftBuf = [];
+        let rightBuf = [];
+
+        function flushPairs() {
+            const n = Math.max(leftBuf.length, rightBuf.length);
+            for (let i = 0; i < n; i++) {
+                const row = document.createElement('div');
+                row.className = 'diff-side-row';
+                const lc = document.createElement('div');
+                if (i < leftBuf.length) {
+                    lc.className = 'diff-side-cell del';
+                    lc.textContent = leftBuf[i];
+                } else {
+                    lc.className = 'diff-side-cell empty';
+                    lc.textContent = '';
+                }
+                const rc = document.createElement('div');
+                if (i < rightBuf.length) {
+                    rc.className = 'diff-side-cell add';
+                    rc.textContent = rightBuf[i];
+                } else {
+                    rc.className = 'diff-side-cell empty';
+                    rc.textContent = '';
+                }
+                row.appendChild(lc);
+                row.appendChild(rc);
+                container.appendChild(row);
+            }
+            leftBuf = [];
+            rightBuf = [];
+        }
+
+        function emitFullRow(text, cls) {
+            flushPairs();
+            const row = document.createElement('div');
+            row.className = 'diff-side-row full';
+            const cell = document.createElement('div');
+            cell.className = 'diff-side-cell ' + cls;
+            cell.textContent = text;
+            row.appendChild(cell);
+            container.appendChild(row);
+        }
+
+        for (const line of lines) {
+            const k = line.kind;
+            if (k === 'Add') {
+                rightBuf.push(line.text);
+            } else if (k === 'Del') {
+                leftBuf.push(line.text);
+            } else if (k === 'Hunk') {
+                emitFullRow(line.text, 'hunk');
+            } else if (k === 'Meta') {
+                emitFullRow(line.text, 'meta');
+            } else {
+                // Ctx: flush, then emit context spanning both columns.
+                flushPairs();
+                const row = document.createElement('div');
+                row.className = 'diff-side-row';
+                const lc = document.createElement('div');
+                lc.className = 'diff-side-cell ctx';
+                lc.textContent = line.text;
+                const rc = document.createElement('div');
+                rc.className = 'diff-side-cell ctx';
+                rc.textContent = line.text;
+                row.appendChild(lc);
+                row.appendChild(rc);
+                container.appendChild(row);
+            }
+        }
+        flushPairs();
+    }
+
+    function cssKind(kind) {
+        switch (kind) {
+            case 'Add':  return 'add';
+            case 'Del':  return 'del';
+            case 'Hunk': return 'hunk';
+            case 'Meta': return 'meta';
+            default:     return 'ctx';
+        }
+    }
+
+    function setMode(mode) {
+        if (diffMode === mode) return;
+        diffMode = mode;
+        $('toggle-side-by-side').classList.toggle('active', mode === 'side-by-side');
+        $('toggle-unified').classList.toggle('active', mode === 'unified');
+        renderDiffLines();
+    }
+
+    // --- Inbound messages ---
+    window.chrome.webview.addEventListener('message', e => {
+        const m = e.data || {};
+        switch (m.type) {
+            case 'theme':
+                applyTheme(m.isDark !== false);
+                break;
+            case 'git_state':
+                showStandard(m);
+                break;
+            case 'diff_loaded':
+                renderDiff(m.path, m.lines || [], m.selectionKey);
+                break;
+            case 'empty_linked':
+                showEmpty('Linked git directory',
+                    "This project's .git is a submodule or worktree gitlink. The Git tab can only inspect standard repositories. Open the parent repository to view git state.");
+                break;
+            case 'empty_no_repo':
+                showEmpty('No git repository',
+                    'This project has no git repository. Initialize one with `git init` to use the Git tab.');
+                break;
+            case 'empty_no_project':
+                showEmpty('No project', 'Select a project to view its git state.');
+                break;
+        }
+    });
+
+    // --- Toolbar bindings ---
+    $('refresh-button').addEventListener('click', () => send({ type: 'refresh' }));
+    $('fetch-button').addEventListener('click', () => send({ type: 'fetch' }));
+    $('toggle-side-by-side').addEventListener('click', () => setMode('side-by-side'));
+    $('toggle-unified').addEventListener('click', () => setMode('unified'));
+
+    // --- Splitter drag (smoke-1 polish [15] fix #5) ---
+    // Persists chosen width to localStorage so the user's preferred
+    // pane balance survives across sessions. Clamps applied: at least
+    // 200px on the left (matches CSS min-width), and at least 200px
+    // remaining on the right so the diff pane never disappears.
+    (function initSplitter() {
+        const splitter = $('splitter');
+        const bodyLeft = document.querySelector('.body-left');
+        const bodySplit = document.querySelector('.body-split');
+        if (!splitter || !bodyLeft || !bodySplit) return;
+
+        // Restore saved width on load.
+        try {
+            const saved = parseInt(localStorage.getItem(SPLITTER_KEY) || '', 10);
+            if (!isNaN(saved) && saved >= 200) {
+                bodyLeft.style.width = saved + 'px';
+            }
+        } catch (e) { /* localStorage may be unavailable */ }
+
+        let dragging = false;
+        splitter.addEventListener('mousedown', e => {
+            dragging = true;
+            splitter.classList.add('dragging');
+            document.body.classList.add('dragging-splitter');
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', e => {
+            if (!dragging) return;
+            const rect = bodySplit.getBoundingClientRect();
+            // Width = mouse X relative to the split container's left edge.
+            // Clamp: left ≥ 200px, right ≥ 200px (so neither side collapses).
+            let w = e.clientX - rect.left;
+            const minLeft = 200;
+            const minRight = 200;
+            const splitterWidth = 4;
+            const maxLeft = rect.width - minRight - splitterWidth;
+            if (w < minLeft) w = minLeft;
+            if (w > maxLeft) w = maxLeft;
+            bodyLeft.style.width = w + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!dragging) return;
+            dragging = false;
+            splitter.classList.remove('dragging');
+            document.body.classList.remove('dragging-splitter');
+            // Persist the resolved px width.
+            try {
+                const px = bodyLeft.getBoundingClientRect().width;
+                localStorage.setItem(SPLITTER_KEY, String(Math.round(px)));
+            } catch (e) { /* localStorage may be unavailable */ }
+        });
+    })();
+
+    // --- File-row context menu (smoke-1 polish [15] fix #7) ---
+    function showFileContextMenu(x, y, path) {
+        contextMenuPath = path;
+        const menu = $('file-context-menu');
+        // Position first with display: block so we can measure, then
+        // clamp to the viewport so the menu doesn't render off-screen
+        // when the click is near the right/bottom edges.
+        menu.style.display = 'block';
+        menu.style.left = '0px';
+        menu.style.top = '0px';
+        const rect = menu.getBoundingClientRect();
+        const maxX = window.innerWidth - rect.width - 4;
+        const maxY = window.innerHeight - rect.height - 4;
+        menu.style.left = Math.min(x, Math.max(0, maxX)) + 'px';
+        menu.style.top = Math.min(y, Math.max(0, maxY)) + 'px';
+    }
+    function hideFileContextMenu() {
+        const menu = $('file-context-menu');
+        if (menu) menu.style.display = 'none';
+        contextMenuPath = null;
+    }
+    $('ctx-open-diff-popup').addEventListener('click', () => {
+        const p = contextMenuPath;
+        hideFileContextMenu();
+        if (p) send({ type: 'open_diff_popup', path: p });
+    });
+    // Hide on outside click, escape, scroll, or window blur — covers all
+    // the standard "user moved on" gestures so the menu doesn't linger.
+    document.addEventListener('mousedown', e => {
+        const menu = $('file-context-menu');
+        if (menu && menu.style.display === 'block' && !menu.contains(e.target)) {
+            hideFileContextMenu();
+        }
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') hideFileContextMenu();
+    });
+    window.addEventListener('blur', hideFileContextMenu);
+    window.addEventListener('scroll', hideFileContextMenu, true);
+
+    send({ type: 'ready' });
+})();
+</script>
+</body>
+</html>

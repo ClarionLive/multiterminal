@@ -46,6 +46,7 @@
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.119" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+    <PackageReference Include="LibGit2Sharp" Version="0.30.0" />
   </ItemGroup>
 
   <!-- Analyzers: build-time only, not a runtime dependency. -->
@@ -113,6 +114,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Controls\HudKnowledgePanel\hud-knowledge.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Controls\HudGitPanel\hud-git.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Controls\HudSessionsPanel\hud-sessions.html">

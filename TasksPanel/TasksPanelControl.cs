@@ -944,6 +944,22 @@ namespace MultiTerminal.TasksPanel
             PostWebMessage($"fontSize:{size}");
         }
 
+        /// <summary>
+        /// Tell the WebView2 to open the Code Review overlay for a task. The HTML
+        /// already implements <c>openCodeReview(taskId)</c> for in-panel button clicks
+        /// (the &lt;&gt; review icon on a task card); this just triggers the same path
+        /// from outside the panel via a JSON message. When <paramref name="filePath"/>
+        /// is non-empty, the JS handler picks the matching linked-file tab on open
+        /// (used by the Git tab's diff popup so the overlay lands on the file the
+        /// user was already looking at, not file 0).
+        /// </summary>
+        public void OpenCodeReview(string taskId, string filePath = null)
+        {
+            if (!_isInitialized || string.IsNullOrEmpty(taskId)) return;
+            string payload = JsonSerializer.Serialize(new { type = "open_code_review_external", taskId, filePath });
+            PostMessage(payload);
+        }
+
         private void PostWebMessage(string message)
         {
             if (_webView?.CoreWebView2 != null)

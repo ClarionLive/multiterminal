@@ -338,6 +338,8 @@ namespace MultiTerminal.Controls
                     notes.ApplyTheme(isDark);
                 else if (tab.Control is HudKnowledgeRenderer knowledge)
                     knowledge.ApplyTheme(isDark);
+                else if (tab.Control is HudGitRenderer git)
+                    git.ApplyTheme(isDark);
                 else if (tab.Control is HudSessionsRenderer sessions)
                     sessions.ApplyTheme(isDark);
             }
@@ -360,6 +362,8 @@ namespace MultiTerminal.Controls
                     notes.SetZoomFactor(zoom);
                 else if (tab.Control is HudKnowledgeRenderer knowledge)
                     knowledge.SetZoomFactor(zoom);
+                else if (tab.Control is HudGitRenderer git)
+                    git.SetZoomFactor(zoom);
                 else if (tab.Control is HudSessionsRenderer sessions)
                     sessions.SetZoomFactor(zoom);
             }

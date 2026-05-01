@@ -1417,6 +1417,16 @@
                         fetchTaskReports(data.taskId);
                     }
                     break;
+                case 'open_code_review_external':
+                    // External request (from the Git tab's diff popup) to open the
+                    // Code Review overlay for a task. Reuses the same path as the
+                    // in-panel <> review icon on a task card. data.filePath, when
+                    // present, asks the overlay to pre-select that linked-file tab
+                    // instead of defaulting to file 0.
+                    if (data.taskId) {
+                        openCodeReview(data.taskId, data.filePath || null);
+                    }
+                    break;
             }
         }
 
@@ -1724,7 +1734,7 @@
             }
         }
 
-        async function openCodeReview(taskId) {
+        async function openCodeReview(taskId, targetFilePath) {
             try {
                 const resp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/code-review');
                 if (!resp.ok) { alert('Failed to load code review data'); return; }
@@ -1750,7 +1760,7 @@
                     console.log('No agent report available:', re.message);
                 }
 
-                showCodeReviewOverlay(taskId, data);
+                showCodeReviewOverlay(taskId, data, targetFilePath);
             } catch(e) {
                 console.error('Failed to load code review:', e);
                 alert('Code review endpoint not available');
@@ -1789,7 +1799,7 @@
         let _crHunkSummaries = {};  // { fileIndex: [{ oldStart, oldCount, newStart, newCount, addedLines, removedLines, hunkId, hunkIndex, changeType, basicSummary }] }
         let _crAgentSummaries = null;  // parsed from code-reviewer report, keyed by file path
 
-        function showCodeReviewOverlay(taskId, data) {
+        function showCodeReviewOverlay(taskId, data, targetFilePath) {
             const files = data.files || [];
             if (files.length === 0) {
                 showOverlay('Code Review — No Files', '<div style="padding:20px;color:var(--text-color,#ddd);">No linked files found for this task. Agents should use <code>link_task_file</code> to track changed files.</div>');
@@ -1803,15 +1813,28 @@
             _crHunkSummaries = {};
             _crAgentSummaries = null;
 
+            // Resolve the file tab to land on. Default = 0; when the caller passed
+            // a target path (Git-tab popup escalation), find the linked file whose
+            // path matches it and select that one instead. Match is normalized
+            // (lowercase + forward slashes) since Windows is case-insensitive and
+            // the popup uses backslash separators.
+            const normalizePath = p => (p || '').replace(/\\/g, '/').toLowerCase();
+            let initialIndex = 0;
+            if (targetFilePath) {
+                const target = normalizePath(targetFilePath);
+                const found = files.findIndex(f => normalizePath(f.filePath) === target);
+                if (found >= 0) initialIndex = found;
+            }
+
             const fileListHtml = files.map((f, i) => {
                 const shortPath = f.filePath.split(/[/\\]/).slice(-2).join('/');
                 const statusIcon = f.hasDiff ? '&#x1F4DD;' : '&#x2796;';
-                return `<div class="cr-file-item ${i === 0 ? 'active' : ''}" id="cr-file-tab-${i}" onclick="showFileDiff(${i})" title="${escapeHtml(f.filePath)}">${statusIcon} ${escapeHtml(shortPath)}<span class="cr-file-badge" id="cr-file-badge-${i}"></span></div>`;
+                return `<div class="cr-file-item ${i === initialIndex ? 'active' : ''}" id="cr-file-tab-${i}" onclick="showFileDiff(${i})" title="${escapeHtml(f.filePath)}">${statusIcon} ${escapeHtml(shortPath)}<span class="cr-file-badge" id="cr-file-badge-${i}"></span></div>`;
             }).join('');
 
             const diffHtml = files.map((f, i) => {
-                if (!f.diff) return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===0?'block':'none'};padding:16px;color:var(--text-color,#ddd);">No changes detected for this file.</div>`;
-                return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===0?'block':'none'};">${renderUnifiedDiff(f.diff, f.filePath, i)}</div>`;
+                if (!f.diff) return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===initialIndex?'block':'none'};padding:16px;color:var(--text-color,#ddd);">No changes detected for this file.</div>`;
+                return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===initialIndex?'block':'none'};">${renderUnifiedDiff(f.diff, f.filePath, i)}</div>`;
             }).join('');
 
             const html = `
@@ -1929,8 +1952,10 @@
                 _crAgentSummaries = crParseAgentReport(data.agentReport);
             }
 
-            // Render initial summary cards for first file and start scroll tracking
-            crRenderSummaryCards(0);
+            // Render initial summary cards for the selected file (file 0 by
+            // default, or the file the caller asked us to land on) and start
+            // scroll tracking.
+            crRenderSummaryCards(initialIndex);
             crSetupScrollTracking();
         }
 
