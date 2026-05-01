@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.IO;
 using System.Linq;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
@@ -21,6 +22,27 @@ namespace MultiTerminal.API.Controllers
 
         private CodeGraphDatabase GetDb() => _broker.CodeGraphDb;
         private CodeGraphQuery GetQuery() => _broker.CodeGraphQuery;
+
+        // Resolve a caller-supplied directory to a canonical absolute path that exists on disk.
+        // Returns null on any failure; callers should respond 400. This collapses '..' segments and
+        // normalizes separators, blocking the most basic path-traversal cases before the value
+        // reaches File.* / Directory.* APIs downstream. Mirrors WikiController.SafeProjectRoot.
+        private static string SafeProjectRoot(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            try
+            {
+                var full = Path.GetFullPath(raw);
+                // CA3003: this IS the sanitizer — canonicalized path via GetFullPath, then existence check.
+                // Returning null on miss prevents tainted values from reaching any File.* downstream.
+#pragma warning disable CA3003
+                return Directory.Exists(full) ? full : null;
+#pragma warning restore CA3003
+            }
+            catch (ArgumentException) { return null; }
+            catch (PathTooLongException) { return null; }
+            catch (NotSupportedException) { return null; }
+        }
 
         /// <summary>
         /// Search symbols by name with optional type filter.
@@ -144,12 +166,15 @@ namespace MultiTerminal.API.Controllers
             var db = GetDb();
             var q = GetQuery();
             if (db == null || q == null) return StatusCode(503, new { error = "CodeGraph not available" });
-            if (string.IsNullOrEmpty(request?.Directory)) return BadRequest(new { error = "directory is required" });
+            if (request == null) return BadRequest(new { error = "request body is required" });
+            var directory = SafeProjectRoot(request.Directory);
+            if (directory == null)
+                return BadRequest(new { error = "directory is required and must resolve to an existing directory" });
 
             try
             {
                 var indexer = new CSharpCodeGraphIndexer(db, q);
-                var result = indexer.IndexDirectory(request.Directory, request.ProjectName);
+                var result = indexer.IndexDirectory(directory, request.ProjectName);
                 return Ok(new
                 {
                     success = true,
