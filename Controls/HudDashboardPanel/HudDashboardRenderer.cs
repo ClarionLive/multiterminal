@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
@@ -41,10 +42,34 @@ namespace MultiTerminal.Controls
         // gives the DB write time to complete before we read back.
         private System.Windows.Forms.Timer _activityDebounce;
 
+        // Analytics aggregation — Project Analytics (KPI strip + Health
+        // Timeline + Progress Over Time). Separate debounce from activity
+        // because the trigger event is TasksUpdated/ProjectsUpdated, not
+        // ActivityRecorded, and the compute is heavier (30-day window).
+        private ProjectAnalyticsService _analyticsService;
+        private System.Windows.Forms.Timer _analyticsDebounce;
+        private CancellationTokenSource _analyticsCts;
+
+        // CamelCase JSON for the analytics payload — record property names
+        // (Kpis.Open, KpiCard.Value, HealthDay.Date, ProgressPoint.Total)
+        // need to land in the WebView as open/value/date/total.
+        private static readonly JsonSerializerOptions s_camelCaseJsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
+
         /// <summary>
         /// Raised when the WebView2 zoom factor changes (e.g. Ctrl+wheel).
         /// </summary>
         public event EventHandler<double> ZoomChanged;
+
+        /// <summary>
+        /// Raised when the user clicks the dirty-state changes badge in the dashboard
+        /// widget. Subscribers (typically TerminalDocument) deep-link to the project's
+        /// HUD Git tab so the dashboard widget acts as a glance summary that escalates
+        /// to the full Git tab on demand.
+        /// </summary>
+        public event EventHandler OpenGitTabRequested;
 
         /// <summary>
         /// Raised when the user clicks a file name in the activity feed to view its diff.
@@ -171,6 +196,10 @@ namespace MultiTerminal.Controls
                             ShowDiffRequested?.Invoke(this, fileName);
                     }
                 }
+                else if (msgType == "showGitTab")
+                {
+                    OpenGitTabRequested?.Invoke(this, EventArgs.Empty);
+                }
             }
             catch { }
         }
@@ -211,6 +240,23 @@ namespace MultiTerminal.Controls
                     RefreshActivity();
                 };
             }
+
+            // Analytics service is constructed once per broker; subsequent
+            // Initialize() calls (theme reload, etc.) reuse the same instance.
+            if (_analyticsService == null && _broker.TaskDb != null)
+            {
+                _analyticsService = new ProjectAnalyticsService(_broker.TaskDb);
+            }
+
+            if (_analyticsDebounce == null)
+            {
+                _analyticsDebounce = new System.Windows.Forms.Timer { Interval = 250 };
+                _analyticsDebounce.Tick += async (s, e) =>
+                {
+                    _analyticsDebounce.Stop();
+                    await RefreshAnalyticsAsync();
+                };
+            }
         }
 
         /// <summary>
@@ -218,8 +264,17 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void SetProject(string projectId, string projectPath, string projectName)
         {
+            bool changed = !string.Equals(_projectId, projectId, StringComparison.Ordinal);
             _projectId = projectId;
             _projectPath = projectPath;
+
+            // Project switch — cancel any in-flight analytics compute immediately
+            // so the previous project's snapshot can't post into the new view.
+            // (RefreshAll() below kicks off a fresh compute with a new CTS.)
+            if (changed)
+            {
+                _analyticsCts?.Cancel();
+            }
 
             if (_isInitialized)
             {
@@ -254,7 +309,7 @@ namespace MultiTerminal.Controls
         // -------------------------------------------------------------------------
 
         /// <summary>
-        /// Refreshes all dashboard data: project info, task stats, git, activity.
+        /// Refreshes all dashboard data: project info, task stats, git, activity, analytics.
         /// </summary>
         public void RefreshAll()
         {
@@ -263,6 +318,7 @@ namespace MultiTerminal.Controls
             RefreshProjectInfo();
             RefreshTaskStats();
             RefreshActivity();
+            RequestAnalyticsRefresh();
         }
 
         private async void RefreshProjectInfo()
@@ -291,42 +347,49 @@ namespace MultiTerminal.Controls
                 projectName = Path.GetFileName(_projectPath.TrimEnd('\\', '/'));
             }
 
-            // Git info — run on background thread to avoid UI freeze
+            // Git info — read through the shared GitRepoService so this dashboard
+            // widget and the HUD Git tab use one source of truth. Runs on a
+            // background thread to keep LibGit2Sharp work off the UI.
             string branch = "";
             int changes = 0;
             string lastCommitMsg = "";
             string lastCommitHash = "";
             string lastCommitTime = "";
 
-            string projectPath = _projectPath; // capture for background thread
             try
             {
-                var gitData = await System.Threading.Tasks.Task.Run(() =>
+                var gitSvc = _broker?.GitRepos?.GetOrCreate(_projectPath);
+                if (gitSvc != null)
                 {
-                    string b = RunGitCommand("rev-parse --abbrev-ref HEAD");
-                    var statusOutput = RunGitCommand("status --porcelain");
-                    int c = string.IsNullOrEmpty(statusOutput) ? 0 :
-                        statusOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
-
-                    // Use record separator (\x1e) instead of pipe — commit subjects can contain |
-                    var logOutput = RunGitCommand("log -1 --format=%H%x1e%s%x1e%aI");
-                    string hash = "", msg = "", time = "";
-                    if (!string.IsNullOrEmpty(logOutput))
+                    var gitData = await System.Threading.Tasks.Task.Run(() =>
                     {
-                        var parts = logOutput.Split('\x1e', 3);
-                        if (parts.Length >= 1) hash = parts[0].Trim();
-                        if (parts.Length >= 2) msg = parts[1].Trim();
-                        if (parts.Length >= 3) time = parts[2].Trim();
-                    }
+                        string b = gitSvc.CurrentBranch ?? "";
+                        var status = gitSvc.GetWorkingTreeStatus();
+                        int c = status?.Count ?? 0;
 
-                    return new { branch = b, changes = c, hash, msg, time };
-                });
+                        var commits = gitSvc.GetRecentCommits(1);
+                        string hash = "", msg = "", time = "";
+                        if (commits != null && commits.Count > 0)
+                        {
+                            var head = commits[0];
+                            hash = head.FullSha ?? "";
+                            msg = head.Subject ?? "";
+                            // Format matches git's %aI exactly (no fractional seconds) so the
+                            // wire format is byte-equivalent to the previous RunGitCommand path
+                            // and existing JS that parses by string (rather than Date.parse) keeps working.
+                            time = head.When != DateTimeOffset.MinValue
+                                ? head.When.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)
+                                : "";
+                        }
+                        return new { branch = b, changes = c, hash, msg, time };
+                    });
 
-                branch = gitData.branch;
-                changes = gitData.changes;
-                lastCommitHash = gitData.hash;
-                lastCommitMsg = gitData.msg;
-                lastCommitTime = gitData.time;
+                    branch = gitData.branch;
+                    changes = gitData.changes;
+                    lastCommitHash = gitData.hash;
+                    lastCommitMsg = gitData.msg;
+                    lastCommitTime = gitData.time;
+                }
             }
             catch { }
 
@@ -377,6 +440,102 @@ namespace MultiTerminal.Controls
                 done,
                 suggestions
             });
+        }
+
+        /// <summary>
+        /// Schedules an analytics recompute via the 250 ms debounce. Called from
+        /// TasksUpdated / ProjectsUpdated / project switch — bursts of related
+        /// events coalesce into one ComputeAsync invocation.
+        /// </summary>
+        private void RequestAnalyticsRefresh()
+        {
+            if (_analyticsDebounce == null) return;
+            _analyticsDebounce.Stop();
+            _analyticsDebounce.Start();
+        }
+
+        /// <summary>
+        /// Computes the analytics snapshot off the UI thread (ComputeAsync wraps
+        /// in Task.Run internally) and posts it to the WebView. Cancels any
+        /// in-flight compute when a newer request arrives. Drops the result if
+        /// the user switched projects between dispatch and completion.
+        /// </summary>
+        private async Task RefreshAnalyticsAsync()
+        {
+            if (_broker == null || _analyticsService == null) return;
+
+            // Replace any in-flight compute with the latest one.
+            var oldCts = _analyticsCts;
+            _analyticsCts = new CancellationTokenSource();
+            var ct = _analyticsCts.Token;
+            oldCts?.Cancel();
+            oldCts?.Dispose();
+
+            // Capture projectId at dispatch — used both to scope the broker query
+            // and to verify the snapshot still matches the active view before
+            // posting (project switch during the 250 ms debounce window can
+            // otherwise leak the old project's data into the new view).
+            string capturedProjectId = _projectId;
+            if (string.IsNullOrEmpty(capturedProjectId))
+            {
+                // No project context — blank the analytics section so the
+                // previous project's KPI strip / charts don't linger.
+                SendAnalyticsClearMessage();
+                return;
+            }
+
+            try
+            {
+                var tasks = _broker.GetTasks(capturedProjectId);
+                if (tasks == null) return;
+
+                var snapshot = await _analyticsService.ComputeAsync(capturedProjectId, tasks, ct);
+                if (ct.IsCancellationRequested) return;
+                if (!string.Equals(_projectId, capturedProjectId, StringComparison.Ordinal))
+                {
+                    // The user switched projects between dispatch and result —
+                    // drop this snapshot rather than render stale data.
+                    return;
+                }
+
+                // CamelCase the record property names so the WebView handler
+                // (data.kpis.open.value, data.health[].date, etc.) reads cleanly.
+                var payload = new
+                {
+                    type = "analytics",
+                    kpis = snapshot.Kpis,
+                    health = snapshot.Health,
+                    progress = snapshot.Progress,
+                    degraded = snapshot.Degraded
+                };
+                string json = JsonSerializer.Serialize(payload, s_camelCaseJsonOptions);
+                if (_isInitialized)
+                    PostRawJson(json);
+                else
+                    _pendingMessages.Enqueue(json);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when a newer request supersedes this one.
+            }
+            catch
+            {
+                // Analytics is non-critical — never let it blank the dashboard.
+            }
+        }
+
+        /// <summary>
+        /// Posts a "clear analytics" message so the WebView can blank the KPI
+        /// strip and both Canvas charts when the dashboard loses project
+        /// context (terminal detached, project deleted).
+        /// </summary>
+        private void SendAnalyticsClearMessage()
+        {
+            string json = JsonSerializer.Serialize(new { type = "analytics", clear = true });
+            if (_isInitialized)
+                PostRawJson(json);
+            else
+                _pendingMessages.Enqueue(json);
         }
 
         private void RefreshActivity()
@@ -436,36 +595,6 @@ namespace MultiTerminal.Controls
             };
         }
 
-        private string RunGitCommand(string args)
-        {
-            if (string.IsNullOrEmpty(_projectPath)) return "";
-
-            try
-            {
-                if (!Directory.Exists(_projectPath)) return "";
-
-                var psi = new ProcessStartInfo("git", args)
-                {
-                    WorkingDirectory = _projectPath,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = false,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                using var process = Process.Start(psi);
-                if (process == null) return "";
-
-                string output = process.StandardOutput.ReadToEnd().Trim();
-                process.WaitForExit(3000);
-                return output;
-            }
-            catch
-            {
-                return "";
-            }
-        }
-
         // -------------------------------------------------------------------------
         // Event handlers
         // -------------------------------------------------------------------------
@@ -478,6 +607,7 @@ namespace MultiTerminal.Controls
                 return;
             }
             RefreshTaskStats();
+            RequestAnalyticsRefresh();
         }
 
         private void OnProjectsUpdated(object sender, List<Project> projects)
@@ -488,6 +618,7 @@ namespace MultiTerminal.Controls
                 return;
             }
             RefreshProjectInfo();
+            RequestAnalyticsRefresh();
         }
 
         private void OnBrokerActivityRecorded(object sender, MCPServer.Models.ActivityEvent activity)
@@ -552,6 +683,14 @@ namespace MultiTerminal.Controls
                 _activityDebounce?.Stop();
                 _activityDebounce?.Dispose();
                 _activityDebounce = null;
+
+                _analyticsDebounce?.Stop();
+                _analyticsDebounce?.Dispose();
+                _analyticsDebounce = null;
+
+                _analyticsCts?.Cancel();
+                _analyticsCts?.Dispose();
+                _analyticsCts = null;
 
                 if (_broker != null)
                 {
