@@ -14,6 +14,12 @@ namespace MultiTerminal.Services
     {
         private readonly string _databasePath;
         private SQLiteConnection _connection;
+
+        // Scoped lock for the new GitAttribution-related methods only — TaskDatabase
+        // overall has not been hardened for concurrent connection access and broader
+        // protection is filed as a follow-up. Item [11]'s FileSystemWatcher-debounced
+        // refresh on background threads is the first call site to need this.
+        private readonly object _dbLock = new object();
         private bool _isDisposed;
 
         // FTS5 availability flag — checked once at init, falls back to LIKE queries if unavailable
@@ -1334,6 +1340,154 @@ namespace MultiTerminal.Services
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
             cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Query active-task linkage for a batch of file paths. Returns the most
+        /// recent active-task association per file (file_path → (TaskId, Title,
+        /// Assignee)). Used by the HUD Git tab's Phase 2 attribution overlays
+        /// — feeds the `[task-id]` and `[agent]` chips on uncommitted-file rows
+        /// and underlies the cross-task contamination banner.
+        ///
+        /// <para>Only matches tasks where <c>status = 'in_progress'</c> — completed
+        /// or paused tasks are excluded so stale linkages don't bleed onto fresh
+        /// uncommitted work.</para>
+        /// </summary>
+        public Dictionary<string, (string TaskId, string Title, string Assignee)> GetActiveTaskLinkageForFiles(
+            System.Collections.Generic.IReadOnlyList<string> absolutePaths)
+        {
+            var result = new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
+            if (absolutePaths == null || absolutePaths.Count == 0) return result;
+
+            // Lock the shared SQLiteConnection — TaskDatabase doesn't have a
+            // global lock today, but this method runs on Task.Run threads from
+            // HudGitRenderer's FileSystemWatcher-debounced refresh. Without the
+            // lock concurrent commands on the same connection produce undefined
+            // reader state (debugger BLOCKER finding from item [11]).
+            // Broader TaskDatabase concurrency hardening filed as follow-up.
+            lock (_dbLock)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, f.created_at ");
+                sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
+                sb.Append("WHERE t.status = 'in_progress' AND f.file_path IN (");
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append("@p").Append(i);
+                }
+                // Deterministic tie-break via rowid so chip selection doesn't flicker
+                // between agents when two links share a created_at second.
+                sb.Append(") ORDER BY f.created_at DESC, f.rowid DESC");
+
+                // Only the parameter name suffixes (@p0, @p1, ...) are concatenated;
+                // file path VALUES bind via SQLiteParameter below, so no injection.
+#pragma warning disable CA2100
+                using var cmd = new SQLiteCommand(sb.ToString(), _connection);
+#pragma warning restore CA2100
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
+                }
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    string filePath = reader.GetString(0);
+                    // First row per file_path wins (most recent + deterministic
+                    // tie-break). When the same file is claimed by multiple
+                    // active tasks, only the primary chip is shown — the
+                    // contamination banner uses GetDistinctActiveTaskIdsForFiles
+                    // (separate query) to detect the multi-claim case, since
+                    // this dedup would otherwise hide it.
+                    if (result.ContainsKey(filePath)) continue;
+                    string taskId = reader.GetString(1);
+                    string title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
+                    string assignee = reader.IsDBNull(3) ? null : reader.GetString(3);
+                    result[filePath] = (taskId, title, assignee);
+                }
+                return result;
+            }
+        }
+
+        /// <summary>
+        /// Returns the distinct active (in_progress) task IDs that have a
+        /// linkage to ANY of the given files. Unlike
+        /// <see cref="GetActiveTaskLinkageForFiles"/> this does NOT dedupe to
+        /// a single primary task per file — it surfaces every active claim,
+        /// which is what cross-task contamination detection needs.
+        ///
+        /// <para>Adversary finding from item [11]: a file claimed by tasks A
+        /// AND B should make the contamination banner fire even though the
+        /// per-file chip can only show one. This separate query closes the
+        /// gap.</para>
+        /// </summary>
+        public System.Collections.Generic.IReadOnlyList<string> GetDistinctActiveTaskIdsForFiles(
+            System.Collections.Generic.IReadOnlyList<string> absolutePaths)
+        {
+            var result = new System.Collections.Generic.List<string>();
+            if (absolutePaths == null || absolutePaths.Count == 0) return result;
+
+            lock (_dbLock)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append("SELECT DISTINCT t.id ");
+                sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
+                sb.Append("WHERE t.status = 'in_progress' AND f.file_path IN (");
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append("@p").Append(i);
+                }
+                sb.Append(")");
+
+#pragma warning disable CA2100
+                using var cmd = new SQLiteCommand(sb.ToString(), _connection);
+#pragma warning restore CA2100
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
+                }
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    result.Add(reader.GetString(0));
+                }
+                return result;
+            }
+        }
+
+        /// <summary>
+        /// Returns the most recent <c>task_reports.verdict</c> string for a task,
+        /// or <c>null</c> if the task has no reports. Drives the pipeline-status
+        /// badge on uncommitted-file rows in the HUD Git tab.
+        ///
+        /// <para>If the task has cycled coding↔testing multiple times the
+        /// most-recent-cycle verdict wins (newest <c>created_at</c> first).
+        /// Empty / null verdicts are skipped.</para>
+        /// </summary>
+        public string GetLatestVerdictForTask(string taskId)
+        {
+            if (string.IsNullOrEmpty(taskId)) return null;
+            // Re-validate that the task is still in_progress at query time
+            // (adversary finding: linkage and verdict reads are not in the same
+            // transaction, so the task could transition to done between them
+            // — chip would advertise a verdict for a closed task). The EXISTS
+            // clause makes the verdict drop to null if the task moved on.
+            // Deterministic tie-break via rowid for same-second writes.
+            const string sql = @"
+                SELECT verdict
+                FROM task_reports
+                WHERE task_id = @taskId
+                  AND verdict IS NOT NULL AND verdict <> ''
+                  AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = @taskId AND t.status = 'in_progress')
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1";
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                return cmd.ExecuteScalar() as string;
+            }
         }
 
         #endregion
