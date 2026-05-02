@@ -30,6 +30,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly TaskDatabase _taskDb;
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
         private readonly MultiTerminal.Services.WorktreeAutoCommitService _autoCommit;
+        private readonly MultiTerminal.Services.WorktreeMergeService _merge;
 
         // Project storage
         private readonly ConcurrentDictionary<string, Project> _projects = new ConcurrentDictionary<string, Project>();
@@ -399,6 +400,7 @@ namespace MultiTerminal.MCPServer.Services
 
             _worktrees = new MultiTerminal.Services.WorktreeManager(_taskDb);
             _autoCommit = new MultiTerminal.Services.WorktreeAutoCommitService(_taskDb);
+            _merge = new MultiTerminal.Services.WorktreeMergeService(_taskDb);
 
             try
             {
@@ -2900,16 +2902,93 @@ namespace MultiTerminal.MCPServer.Services
                     });
                 }
 
+                bool prunedOK = false;
                 if (shouldPrune)
                 {
                     try
                     {
                         _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                        prunedOK = true;
                     }
                     catch (Exception ex)
                     {
                         System.Diagnostics.Debug.WriteLine(
                             $"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                    }
+                }
+
+                // Phase 3 auto-merge — fires only after a successful prune.
+                // Prune releases the branch lock so git can merge the task
+                // branch into the main checkout's current trunk. Merge failure
+                // does NOT roll back commit or prune (those are durable); the
+                // dev resolves the merge manually.
+                if (prunedOK)
+                {
+                    try
+                    {
+                        var mergeResult = _merge.MergeForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+
+                        if (mergeResult.Success)
+                        {
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[MessageBroker] Auto-merge for {taskId}: " +
+                                (mergeResult.SkippedReason ?? $"merged into {mergeResult.MergedInto}"));
+
+                            if (!string.IsNullOrEmpty(mergeResult.SkippedReason))
+                            {
+                                RecordActivity(new ActivityEvent
+                                {
+                                    Terminal = task.Assignee ?? "System",
+                                    Type = "worktree",
+                                    Action = "auto_merge_skipped",
+                                    Content = $"Auto-merge skipped for '{task.Title}': {mergeResult.SkippedReason}",
+                                    RelatedId = taskId
+                                });
+                            }
+                            else
+                            {
+                                RecordActivity(new ActivityEvent
+                                {
+                                    Terminal = task.Assignee ?? "System",
+                                    Type = "worktree",
+                                    Action = "auto_merge",
+                                    Content = $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; task branch deleted.",
+                                    RelatedId = taskId
+                                });
+                            }
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[MessageBroker] Auto-merge for {taskId} FAILED" +
+                                (mergeResult.HadConflicts ? " (conflict)" : "") +
+                                $": {mergeResult.Stderr}");
+                            string trimmedMergeStderr = mergeResult.Stderr?.Length > 500
+                                ? mergeResult.Stderr.Substring(0, 500) + "..."
+                                : mergeResult.Stderr;
+                            string conflictTag = mergeResult.HadConflicts ? "Merge conflict" : "Merge failed";
+                            RecordActivity(new ActivityEvent
+                            {
+                                Terminal = task.Assignee ?? "System",
+                                Type = "worktree",
+                                Action = "auto_merge_failed",
+                                Content = $"{conflictTag} for '{task.Title}'. Task branch preserved for manual resolution. Error: {trimmedMergeStderr}",
+                                RelatedId = taskId
+                            });
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Auto-merge threw for task {taskId}: {ex.Message}");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "auto_merge_failed",
+                            Content = $"Auto-merge threw for '{task.Title}'. Task branch preserved for manual resolution. Error: {ex.Message}",
+                            RelatedId = taskId
+                        });
                     }
                 }
             }
