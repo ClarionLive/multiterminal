@@ -122,6 +122,27 @@ body.light {
     min-width: 0;
 }
 
+/* Clickable title affordances (only when data-task-id is set) — Path C */
+.task-title[data-task-id],
+.available-task-title[data-task-id] {
+    cursor: pointer;
+    outline: none;
+}
+.task-title[data-task-id]:hover,
+.task-title[data-task-id]:focus-visible,
+.available-task-title[data-task-id]:hover,
+.available-task-title[data-task-id]:focus-visible {
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+}
+.task-title[data-task-id]:focus-visible,
+.available-task-title[data-task-id]:focus-visible {
+    outline: 1px dotted #3B82F6;
+    outline-offset: 2px;
+}
+
 .task-description {
     font-size: 11px;
     color: var(--text-muted);
@@ -549,10 +570,17 @@ body.empty .no-task       { display: flex; }
 // ============================================================
 //  Helpers
 // ============================================================
+// Escapes all 5 HTML5 attribute-significant characters (& < > " '), so the
+// output is safe for both element-text and double/single-quoted attribute
+// contexts. Use whenever the value is interpolated into innerHTML — for
+// setAttribute/textContent calls escaping is unnecessary but harmless.
 function escapeHtml(text) {
-    const d = document.createElement('div');
-    d.textContent = text || '';
-    return d.innerHTML;
+    return String(text == null ? '' : text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // ============================================================
@@ -592,8 +620,14 @@ function renderEmptyState(data) {
     let html = '';
     tasks.forEach(t => {
         const priority = (t.priority || 'normal').toLowerCase();
+        const id = escapeHtml(t.id || '');
+        const title = escapeHtml(t.title || '');
+        // Title is clickable when t.id is present — opens Lifecycle Board for that task
+        const titleAttrs = id
+            ? `data-task-id="${id}" role="link" tabindex="0" aria-label="Open Lifecycle Board for ${title}"`
+            : '';
         html += `<div class="available-task-card">
-            <div class="available-task-title">${escapeHtml(t.title)}</div>
+            <div class="available-task-title" ${titleAttrs}>${title}</div>
             <span class="chip chip-priority ${priority}" style="font-size:9px;padding:0 4px;margin-top:3px">${priority}</span>
         </div>`;
     });
@@ -606,8 +640,20 @@ function renderEmptyState(data) {
 function renderTask(task) {
     document.body.classList.remove('empty');
 
-    // --- Header: title ---
-    document.getElementById('task-title').textContent = task.title || 'Untitled Task';
+    // --- Header: title (clickable when task.id is present — opens Lifecycle Board) ---
+    const titleEl = document.getElementById('task-title');
+    titleEl.textContent = task.title || 'Untitled Task';
+    if (task.id) {
+        titleEl.setAttribute('data-task-id', task.id);
+        titleEl.setAttribute('role', 'link');
+        titleEl.setAttribute('tabindex', '0');
+        titleEl.setAttribute('aria-label', `Open Lifecycle Board for ${task.title || 'task'}`);
+    } else {
+        titleEl.removeAttribute('data-task-id');
+        titleEl.removeAttribute('role');
+        titleEl.removeAttribute('tabindex');
+        titleEl.removeAttribute('aria-label');
+    }
 
     // --- Header: description ---
     document.getElementById('task-description').textContent = task.description || '';
@@ -685,6 +731,40 @@ function renderColumn(status, items) {
 
     body.innerHTML = html;
 }
+
+// ============================================================
+//  Click-to-open Lifecycle Board (Path C)
+//  Delegated listener on document.body so it covers both the
+//  active-task title and empty-state available-task titles in
+//  one place. Triggers on click and on Enter/Space when the
+//  element has keyboard focus (a11y).
+// ============================================================
+function postOpenLifecycle(taskId) {
+    if (!taskId) return;
+    if (window.chrome && window.chrome.webview) {
+        // Matches the protocol name used by TasksPanel/TasksPanelControl.cs:353
+        window.chrome.webview.postMessage({ type: 'open_lifecycle_board', taskId });
+    }
+}
+
+document.body.addEventListener('click', (e) => {
+    const link = e.target.closest('[data-task-id]');
+    if (!link) return;
+    // Defensive: skip checklist-item cards (they should never have data-task-id, but guard anyway)
+    if (link.classList.contains('card-text')) return;
+    e.stopPropagation();
+    postOpenLifecycle(link.getAttribute('data-task-id'));
+});
+
+document.body.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const link = e.target.closest('[data-task-id]');
+    if (!link) return;
+    if (link.classList.contains('card-text')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    postOpenLifecycle(link.getAttribute('data-task-id'));
+});
 
 // ============================================================
 //  WebView2 message protocol

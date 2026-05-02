@@ -9,6 +9,7 @@ using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
+using MultiTerminal.TaskLifecycleBoard;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Controls
@@ -195,13 +196,25 @@ namespace MultiTerminal.Controls
 
         private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
+            // Defensive marshalling — WebView2 raises this on the UI thread today, but
+            // matches the InvokeRequired pattern used by OnTasksUpdated/OnActivityUpdated
+            // in this file so a future configuration change can't silently break us.
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnWebMessageReceived(sender, e)));
+                return;
+            }
+
             try
             {
                 string json = e.WebMessageAsJson;
                 var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
-                if (root.TryGetProperty("type", out var typeEl) && typeEl.GetString() == "ready")
+                if (!root.TryGetProperty("type", out var typeEl)) return;
+                var messageType = typeEl.GetString();
+
+                if (messageType == "ready")
                 {
                     _isInitialized = true;
                     _isInitializing = false;
@@ -216,14 +229,46 @@ namespace MultiTerminal.Controls
                         _pendingMessageJson = null;
                     }
 
-                    _webView.ZoomFactorChanged += (s, e) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
+                    _webView.ZoomFactorChanged += (s, ev) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
                     if (Math.Abs(_pendingZoom - 1.0) > 0.01)
                         _webView.ZoomFactor = _pendingZoom;
+                }
+                else if (messageType == "open_lifecycle_board")
+                {
+                    HandleOpenLifecycle(root);
                 }
             }
             catch
             {
                 // Ignore malformed messages from WebView2
+            }
+        }
+
+        /// <summary>
+        /// Opens the standalone Lifecycle Board window for the given task. Called when the
+        /// HUD JS posts {type:"open_lifecycle_board", taskId} after a click on a task title.
+        /// Reuses TaskLifecycleBoardForm.OpenForTask which already handles dedup,
+        /// theme propagation, and bounds persistence.
+        /// </summary>
+        private void HandleOpenLifecycle(JsonElement root)
+        {
+            if (!root.TryGetProperty("taskId", out var idEl)) return;
+            string taskId = idEl.GetString();
+            if (string.IsNullOrWhiteSpace(taskId)) return;
+            if (_broker == null) return;
+
+            try
+            {
+                // settings: null is intentional — Form falls back to SettingsService.Default,
+                // which is the same singleton TasksPanelControl.cs:357 already passes explicitly.
+                // Plumbing _settings through Initialize would require touching MainForm and
+                // TerminalDocument; deferred as out-of-scope for Path C's two-file edit envelope.
+                TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Trace("TaskHud", $"OpenLifecycle failed for taskId='{taskId}': {ex.Message}");
+                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.HandleOpenLifecycle] Failed for taskId='{taskId}': {ex.Message}");
             }
         }
 
