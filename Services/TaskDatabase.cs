@@ -1410,6 +1410,86 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Query completed-task linkage for a batch of file paths. Returns the
+        /// most recent <c>done</c>-task association per file. Used as the
+        /// fallback layer for the HUD Git tab's per-file chips: when an
+        /// uncommitted file has no active-task claim but WAS linked to a task
+        /// that has since shipped, the chip surfaces the shipped task in a
+        /// muted/greyed state ("done — commit when ready").
+        ///
+        /// <para>Mirrors <see cref="GetActiveTaskLinkageForFiles"/> exactly
+        /// except for the status filter (<c>'done'</c> vs <c>'in_progress'</c>).
+        /// Same lock, same parameterized IN-list, same deterministic tie-break.
+        /// Contamination logic does NOT use this — completed tasks are
+        /// intentionally excluded from cross-task contamination since shipped
+        /// work landing before its files commit is a normal in-flight state,
+        /// not a banner-worthy collision.</para>
+        /// </summary>
+        public Dictionary<string, (string TaskId, string Title, string Assignee)> GetCompletedTaskLinkageForFiles(
+            System.Collections.Generic.IReadOnlyList<string> absolutePaths)
+        {
+            var result = new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
+            if (absolutePaths == null || absolutePaths.Count == 0) return result;
+
+            lock (_dbLock)
+            {
+                var sb = new System.Text.StringBuilder();
+                // Order by tasks.updated_at, NOT task_file_links.created_at:
+                // a task linked 6 months ago and shipped yesterday must outrank
+                // a task linked yesterday and shipped 6 months ago. The link's
+                // created_at reflects when the agent first attached the file
+                // to the task, which can predate completion by an arbitrary
+                // amount.
+                //
+                // Caveat: tasks.updated_at is a proxy for completion time, not
+                // the completion time itself — the schema doesn't have a
+                // dedicated completed_at column on the tasks table (see the
+                // CREATE TABLE at TaskDatabase.cs:120 and the ALTER TABLE
+                // chain through ~line 1063 — none add completed_at). Any edit
+                // to a done task after completion bumps updated_at, so a task
+                // completed long ago but recently edited will outrank one
+                // completed yesterday and untouched. This is still strictly
+                // better than f.created_at (which is link-creation time, not
+                // completion-related at all). Wiring up a real CompletedAt
+                // through KanbanTask + MessageBroker + SaveTask + migration is
+                // a separate ticket. Adversary CRITICAL Run 2 fix.
+                //
+                // f.created_at + f.rowid kept as secondary tie-breaks for
+                // tasks updated in the same second.
+                sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, t.updated_at ");
+                sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
+                sb.Append("WHERE t.status = 'done' AND f.file_path IN (");
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append("@p").Append(i);
+                }
+                sb.Append(") ORDER BY t.updated_at DESC, f.created_at DESC, f.rowid DESC");
+
+                // Only the parameter name suffixes (@p0, @p1, ...) are concatenated;
+                // file path VALUES bind via SQLiteParameter below, so no injection.
+#pragma warning disable CA2100
+                using var cmd = new SQLiteCommand(sb.ToString(), _connection);
+#pragma warning restore CA2100
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
+                }
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    string filePath = reader.GetString(0);
+                    if (result.ContainsKey(filePath)) continue;
+                    string taskId = reader.GetString(1);
+                    string title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
+                    string assignee = reader.IsDBNull(3) ? null : reader.GetString(3);
+                    result[filePath] = (taskId, title, assignee);
+                }
+                return result;
+            }
+        }
+
+        /// <summary>
         /// Returns the distinct active (in_progress) task IDs that have a
         /// linkage to ANY of the given files. Unlike
         /// <see cref="GetActiveTaskLinkageForFiles"/> this does NOT dedupe to
@@ -1465,27 +1545,43 @@ namespace MultiTerminal.Services
         /// most-recent-cycle verdict wins (newest <c>created_at</c> first).
         /// Empty / null verdicts are skipped.</para>
         /// </summary>
-        public string GetLatestVerdictForTask(string taskId)
+        public string GetLatestVerdictForTask(string taskId, string requiredStatus = "in_progress")
         {
             if (string.IsNullOrEmpty(taskId)) return null;
-            // Re-validate that the task is still in_progress at query time
-            // (adversary finding: linkage and verdict reads are not in the same
-            // transaction, so the task could transition to done between them
-            // — chip would advertise a verdict for a closed task). The EXISTS
-            // clause makes the verdict drop to null if the task moved on.
+
+            // Coerce requiredStatus to a known closed set. Anything else
+            // would produce an EXISTS clause that matches nothing and silently
+            // returns null — a future caller passing "todo" / "" / arbitrary
+            // would get a dead chip with no error. Adversary LOW Run 2 fix.
+            if (requiredStatus != "in_progress" && requiredStatus != "done")
+                requiredStatus = "in_progress";
+            // Re-validate that the task is still at the expected status at
+            // query time (original adversary finding: linkage and verdict reads
+            // are not in the same transaction, so a task could transition
+            // between them — chip would advertise a verdict for a task that
+            // moved on). The EXISTS clause drops the verdict to null if the
+            // task no longer matches the expected status.
+            //
+            // requiredStatus parameterized so the shipped-tier path (chip
+            // surfaces verdict for status='done' tasks) can opt into the same
+            // freshness gate while reading verdicts for completed tasks.
+            // Default 'in_progress' preserves prior behavior at every existing
+            // call site. Run 2 fix for adversary CRITICAL Run 1.
+            //
             // Deterministic tie-break via rowid for same-second writes.
             const string sql = @"
                 SELECT verdict
                 FROM task_reports
                 WHERE task_id = @taskId
                   AND verdict IS NOT NULL AND verdict <> ''
-                  AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = @taskId AND t.status = 'in_progress')
+                  AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = @taskId AND t.status = @requiredStatus)
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1";
             lock (_dbLock)
             {
                 using var cmd = new SQLiteCommand(sql, _connection);
                 cmd.Parameters.AddWithValue("@taskId", taskId);
+                cmd.Parameters.AddWithValue("@requiredStatus", requiredStatus);
                 return cmd.ExecuteScalar() as string;
             }
         }

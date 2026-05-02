@@ -87,16 +87,23 @@ html, body {
 .body-left {
     /* Width is driven by a CSS variable so the user-draggable splitter
        can persist a custom value via localStorage. Defaults to 40% on
-       first run; clamps applied during drag (260px..70% viewport). */
+       first run; clamps applied during drag (280px..70% viewport).
+       Min-width bumped from 200px to 280px during the tab-strip change
+       (cross-model adversary MEDIUM, run 1) — three flex tabs at 200px
+       collapsed to ~66px each and truncated "Recent Commits 30" labels. */
     width: var(--left-width, 40%);
     flex: 0 0 auto;
-    min-width: 200px;
-    /* Smoke-2 #2: explicit overflow-x: hidden plus per-row truncation
-       prevents file-row chip overflow from spilling into the splitter / right
-       pane when the user drags the splitter narrow. The path inside each row
-       still ellipsis-truncates via .file-path { min-width: 0; ellipsis }. */
+    min-width: 280px;
+    /* Flex column so the tab strip pins at the top and only the active
+       panel scrolls (overflow-y is on .git-tab-panels, not here).
+       Smoke-2 #2: explicit overflow-x: hidden plus per-row truncation
+       prevents file-row chip overflow from spilling into the splitter /
+       right pane. The path inside each row still ellipsis-truncates via
+       .file-path { min-width: 0; ellipsis }. */
+    display: flex;
+    flex-direction: column;
     overflow-x: hidden;
-    overflow-y: auto;
+    overflow-y: hidden;
     background: var(--bg);
 }
 .body-right { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -134,6 +141,82 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     font-style: italic;
     font-size: 11px;
 }
+
+/* ------- Tab strip (left column) — replaces the stacked .section-header
+   layout so users can switch between Working Changes / Recent Commits /
+   Branches without scrolling past the previous section. ------- */
+.git-tabs {
+    display: flex;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+}
+.git-tab {
+    flex: 1;
+    padding: 8px 10px;
+    text-align: center;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-right: 1px solid var(--border);
+    border-bottom: 2px solid transparent;
+    user-select: none;
+    /* Truncate long labels gracefully when the splitter is dragged narrow. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    /* Anchor for the .contam-active::after badge so it sits in the corner
+       outside the text flow — otherwise the ::after participates in the
+       same inline flow as the label and gets eaten by text-overflow:ellipsis
+       at narrow splitter widths (cross-model adversary HIGH, run 2). */
+    position: relative;
+}
+.git-tab:last-child { border-right: none; }
+.git-tab:hover { color: var(--fg); background: var(--bg-elevated); }
+.git-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    background: var(--bg-elevated);
+}
+.git-tab .tab-count {
+    color: var(--fg-dim);
+    font-weight: 400;
+    margin-left: 5px;
+}
+.git-tab.active .tab-count { color: var(--accent); }
+.git-tab:focus-visible { outline: 1px dotted var(--accent); outline-offset: -2px; }
+/* Cross-tab contamination signal — when >1 active tasks span the working
+   tree, the contamination banner inside the Working Changes panel is the
+   only red iconography. With tabs gating visibility, a user parked on the
+   Recent Commits or Branches tab would never see it. This badge on the
+   Working Changes tab label fires whenever the banner does. (Adversary
+   MEDIUM, run 1.)
+   Badge is absolute-positioned in the top-right corner of the tab so it
+   sits outside the text flow — otherwise the surrounding ellipsis truncation
+   at narrow splitter widths would clip the glyph (adversary HIGH, run 2). */
+.git-tab.contam-active::after {
+    content: '\26A0'; /* ⚠ */
+    color: var(--red);
+    font-weight: 700;
+    position: absolute;
+    top: 2px;
+    right: 4px;
+    line-height: 1;
+    font-size: 11px;
+    pointer-events: none;
+}
+
+.git-tab-panels {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+}
+[data-tab-panel] { display: none; }
+[data-tab-panel].active { display: block; }
 
 /* ------- File rows (working changes) ------- */
 .file-list { padding: 0; margin: 0; }
@@ -190,11 +273,24 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     padding: 1px 4px;
     border-radius: 2px;
     background: transparent;
-    color: var(--fg-dim);
-    border: 1px solid var(--fg-dim);
+    color: var(--fg);
+    border: 1px solid var(--fg-muted);
     line-height: 1.2;
 }
 .chip:empty { display: none; }
+/* Muted variant for files whose owning task has shipped (status='done') but
+   the file isn't committed yet. Distinguished from active chips by three
+   independent cues: italic text + dashed border + leading ✓ glyph on the
+   chipTask (added in the JS render block). Color tier stays at --fg so the
+   chip remains readable in dark mode — earlier opacity-0.55 + --fg-dim
+   approach failed user smoke walk on highlighted rows where the translucent
+   selection bg crushed contrast further. v2 ratified via local browser
+   mockup (scripts/_chip-mockup.html) before applying. */
+.chip.chip--shipped {
+    border-style: dashed;
+    border-color: var(--fg-dim);
+    font-style: italic;
+}
 
 /* ------- Commit rows (item [9]) ------- */
 .commits-list { padding: 0; margin: 0; }
@@ -489,21 +585,25 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
 <div id="body">
     <div class="body-split">
         <div class="body-left">
-            <div id="working-changes-section">
-                <div class="section-header">Working Changes (<span id="changes-count">0</span>)</div>
-                <div id="contamination-banner" class="contam-banner" style="display: none;"></div>
-                <div id="file-list" class="file-list"></div>
-                <div id="working-changes-empty" class="section-empty" style="display: none;">No uncommitted changes</div>
+            <div class="git-tabs" role="tablist" aria-label="Git sections">
+                <div class="git-tab active" id="working-changes-tab" data-tab="working-changes" role="tab" aria-selected="true" aria-controls="working-changes-section" tabindex="0">Working Changes<span class="tab-count" id="changes-count">0</span></div>
+                <div class="git-tab" id="commits-tab" data-tab="commits" role="tab" aria-selected="false" aria-controls="commits-section" tabindex="0">Recent Commits<span class="tab-count" id="commits-count">0</span></div>
+                <div class="git-tab" id="branches-tab" data-tab="branches" role="tab" aria-selected="false" aria-controls="branches-section" tabindex="0">Branches<span class="tab-count" id="branches-count">0</span></div>
             </div>
-            <div id="commits-section">
-                <div class="section-header">Recent Commits (<span id="commits-count">0</span>)</div>
-                <div id="commits-list" class="commits-list"></div>
-                <div id="commits-empty" class="section-empty" style="display: none;">No commits yet</div>
-            </div>
-            <div id="branches-section">
-                <div class="section-header">Branches (<span id="branches-count">0</span>)</div>
-                <div id="branches-list" class="branches-list"></div>
-                <div id="branches-empty" class="section-empty" style="display: none;">No branches</div>
+            <div class="git-tab-panels">
+                <div id="working-changes-section" class="active" data-tab-panel="working-changes" role="tabpanel" aria-labelledby="working-changes-tab">
+                    <div id="contamination-banner" class="contam-banner" style="display: none;"></div>
+                    <div id="file-list" class="file-list"></div>
+                    <div id="working-changes-empty" class="section-empty" style="display: none;">No uncommitted changes</div>
+                </div>
+                <div id="commits-section" data-tab-panel="commits" role="tabpanel" aria-labelledby="commits-tab">
+                    <div id="commits-list" class="commits-list"></div>
+                    <div id="commits-empty" class="section-empty" style="display: none;">No commits yet</div>
+                </div>
+                <div id="branches-section" data-tab-panel="branches" role="tabpanel" aria-labelledby="branches-tab">
+                    <div id="branches-list" class="branches-list"></div>
+                    <div id="branches-empty" class="section-empty" style="display: none;">No branches</div>
+                </div>
             </div>
         </div>
         <div class="splitter" id="splitter" title="Drag to resize"></div>
@@ -542,6 +642,12 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     let lastDiffPath = null;
     let lastRepoRoot = '';         // repo root from C# git_state — used to compose
                                    // absolute-path tooltips (smoke-1 polish [15] fix #3)
+    let lastShownProjectPath = ''; // separate state for project-switch tab-reset
+                                   // detection. Only updated when s.repoRoot is
+                                   // non-empty so a transient empty-root git_state
+                                   // can't poison the comparison and silently
+                                   // disable the next legitimate switch reset
+                                   // (cross-model adversary MEDIUM, run 2).
     let contextMenuPath = null;    // path the file-row context menu was raised on
     const SPLITTER_KEY = 'mt.git.leftWidthPx';
 
@@ -569,8 +675,29 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
         $('header').style.display = 'flex';
         $('body').style.display = 'flex';
 
+        // Project-switch tab reset (cross-model adversary HIGH, run 1; refined
+        // for empty-root robustness in run 2):
+        // HudGitRenderer.SetProject does NOT navigate the WebView2 — it just
+        // unsubscribes the old service and pushes new git_state messages.
+        // Without this guard, the user's last-selected tab persists across
+        // project switches, contradicting the "default tab is Working Changes
+        // per project" promise. Detect via repoRoot change against a separate
+        // `lastShownProjectPath` cache that is only updated when s.repoRoot is
+        // non-empty — that way a transient empty-root git_state can't poison
+        // the next legitimate switch comparison. Reset fires only on actual
+        // project change, not on every refresh.
+        if (lastShownProjectPath && s.repoRoot && s.repoRoot !== lastShownProjectPath) {
+            setActiveGitTab('working-changes');
+        }
+        if (s.repoRoot) {
+            lastShownProjectPath = s.repoRoot;
+        }
+
         // Capture repoRoot before renderWorkingTree so file rows can compose
         // absolute-path tooltips on first render (no second pass needed).
+        // Tooltip composition needs the CURRENT project's path even if it's
+        // empty, so this assignment is unconditional — separate from the
+        // project-switch detection above.
         lastRepoRoot = s.repoRoot || '';
 
         renderHeader(s);
@@ -588,7 +715,27 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     // commits require explicit user approval.
     function renderContaminationBanner(workingTree, contamTaskIds) {
         const banner = $('contamination-banner');
-        if (!contamTaskIds || contamTaskIds.length <= 1) {
+        // Mirror the contamination state onto the Working Changes tab itself
+        // so users parked on Recent Commits or Branches still see the cross-
+        // task warning glyph (cross-model adversary MEDIUM, run 1). Banner
+        // text-content is gated by the active panel; the tab badge isn't.
+        // Also expose the state to assistive tech via aria-label so screen-
+        // reader users get parity with the visual ⚠ glyph (adversary LOW,
+        // run 2). When contamination resolves, remove the override so the
+        // tab's natural accessible name (text + count) is restored.
+        const wcTab = document.querySelector('.git-tab[data-tab="working-changes"]');
+        const isContam = !!(contamTaskIds && contamTaskIds.length > 1);
+        if (wcTab) {
+            wcTab.classList.toggle('contam-active', isContam);
+            if (isContam) {
+                wcTab.setAttribute('aria-label',
+                    'Working Changes (cross-task contamination warning — ' +
+                    contamTaskIds.length + ' active tasks span the working tree)');
+            } else {
+                wcTab.removeAttribute('aria-label');
+            }
+        }
+        if (!isContam) {
             banner.style.display = 'none';
             banner.textContent = '';
             return;
@@ -746,10 +893,15 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             // Per-row chips (item [11] Phase 2 overlays) — agent / task / pipeline-status.
             // Empty chips collapse via .chip:empty { display: none } so files without
             // attribution data don't show empty boxes.
+            // When linkageState === 'shipped', all three chips get the muted
+            // .chip--shipped variant — the owning task is done but the file
+            // isn't committed yet. Active linkage (default) renders normally.
+            const isShipped = f.linkageState === 'shipped';
+            const shippedSuffix = ' Task done — commit when ready.';
             const chips = document.createElement('span');
             chips.className = 'file-chips';
             const chipAgent = document.createElement('span');
-            chipAgent.className = 'chip chip-agent';
+            chipAgent.className = isShipped ? 'chip chip-agent chip--shipped' : 'chip chip-agent';
             if (f.agent) {
                 // Prefix with kanban glyph so the visual cue is "task-attributed"
                 // not "edit-attributed" — the chip surfaces the active task's
@@ -758,22 +910,29 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                 // the limitation explicitly.
                 chipAgent.textContent = '📋 ' + f.agent;
                 chipAgent.title = 'Task assignee — may not be the file’s actual editor. '
-                    + 'Per-line attribution from activity_feed coming in a follow-up item.';
+                    + 'Per-line attribution from activity_feed coming in a follow-up item.'
+                    + (isShipped ? shippedSuffix : '');
             }
             const chipTask = document.createElement('span');
-            chipTask.className = 'chip chip-task';
+            chipTask.className = isShipped ? 'chip chip-task chip--shipped' : 'chip chip-task';
             if (f.taskId) {
                 // Show short task id (first 8 chars) to keep the chip compact.
                 // Hover reveals the full task title for context.
-                chipTask.textContent = f.taskId.length > 8 ? f.taskId.substring(0, 8) : f.taskId;
-                chipTask.title = f.taskTitle ? (f.taskId + ' — ' + f.taskTitle) : f.taskId;
+                // Shipped rows get a ✓ glyph prefix so the state is announced
+                // not just implied — italic+opacity alone reads as "disabled"
+                // at 9px on monospace fonts (adversary MEDIUM Run 1).
+                const shortId = f.taskId.length > 8 ? f.taskId.substring(0, 8) : f.taskId;
+                chipTask.textContent = isShipped ? ('✓ ' + shortId) : shortId;
+                const baseTitle = f.taskTitle ? (f.taskId + ' — ' + f.taskTitle) : f.taskId;
+                chipTask.title = isShipped ? (baseTitle + ' (' + shippedSuffix.trim() + ')') : baseTitle;
             }
             const chipStatus = document.createElement('span');
-            chipStatus.className = 'chip chip-status';
+            chipStatus.className = isShipped ? 'chip chip-status chip--shipped' : 'chip chip-status';
             if (f.pipelineStatus) {
                 const verdictGlyph = pipelineGlyph(f.pipelineStatus);
                 chipStatus.textContent = verdictGlyph + ' ' + f.pipelineStatus;
-                chipStatus.title = 'Latest pipeline verdict for ' + (f.taskId || 'this file');
+                chipStatus.title = 'Latest pipeline verdict for ' + (f.taskId || 'this file')
+                    + (isShipped ? shippedSuffix : '');
             }
             chips.appendChild(chipAgent);
             chips.appendChild(chipTask);
@@ -1162,22 +1321,67 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     $('toggle-side-by-side').addEventListener('click', () => setMode('side-by-side'));
     $('toggle-unified').addEventListener('click', () => setMode('unified'));
 
+    // --- Tab strip (left column) — Working Changes / Recent Commits / Branches ---
+    // Replaces the prior stacked-section layout so users can swap sections
+    // without scrolling past the previous one. Default tab is Working Changes
+    // (set as `.active` in the initial HTML).
+    function setActiveGitTab(tabId) {
+        document.querySelectorAll('.git-tab').forEach(t => {
+            const isActive = t.dataset.tab === tabId;
+            t.classList.toggle('active', isActive);
+            t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        });
+        document.querySelectorAll('[data-tab-panel]').forEach(p => {
+            p.classList.toggle('active', p.dataset.tabPanel === tabId);
+        });
+    }
+    document.querySelectorAll('.git-tab').forEach(tab => {
+        tab.addEventListener('click', () => setActiveGitTab(tab.dataset.tab));
+        tab.addEventListener('keydown', e => {
+            // Enter/Space activate the focused tab. Arrow-key roving is a
+            // nice-to-have deferred to a follow-up; tab/shift-tab still
+            // moves focus in DOM order across the three tabs.
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                setActiveGitTab(tab.dataset.tab);
+            }
+        });
+    });
+    // Defensive runtime assertion (cross-model adversary LOW, run 1):
+    // Flag a silent break if any tab's data-tab string doesn't have a
+    // matching panel. Helps catch typos when future agents add tabs —
+    // otherwise the click would do nothing with no error feedback.
+    document.querySelectorAll('.git-tab').forEach(t => {
+        if (!document.querySelector('[data-tab-panel="' + t.dataset.tab + '"]')) {
+            console.warn('Git tab "' + t.dataset.tab + '" has no matching panel');
+        }
+    });
+
     // --- Splitter drag (smoke-1 polish [15] fix #5) ---
     // Persists chosen width to localStorage so the user's preferred
     // pane balance survives across sessions. Clamps applied: at least
-    // 200px on the left (matches CSS min-width), and at least 200px
-    // remaining on the right so the diff pane never disappears.
+    // 280px on the left (matches CSS min-width — bumped from 200px when
+    // the tab strip landed; 3 flex tabs at 200px collapse to ~66px each
+    // and truncate "Recent Commits 30"), and at least 200px remaining
+    // on the right so the diff pane never disappears. Pre-tab saved
+    // values below 280px are clamped UP to 280 instead of dropped to the
+    // CSS default — preserves the user's "narrow pane" intent within the
+    // new minimum (cross-model adversary MEDIUM, run 2; would otherwise
+    // surprise users by jumping their saved 220px to ~768px on launch).
     (function initSplitter() {
         const splitter = $('splitter');
         const bodyLeft = document.querySelector('.body-left');
         const bodySplit = document.querySelector('.body-split');
         if (!splitter || !bodyLeft || !bodySplit) return;
 
-        // Restore saved width on load.
+        // Restore saved width on load. Clamp up to the 280px minimum so a
+        // pre-tab-strip saved value (e.g. 220px) doesn't fall through to
+        // the CSS default (40%, often 600+px on widescreen) and surprise
+        // the user with a much wider pane than they chose.
         try {
             const saved = parseInt(localStorage.getItem(SPLITTER_KEY) || '', 10);
-            if (!isNaN(saved) && saved >= 200) {
-                bodyLeft.style.width = saved + 'px';
+            if (!isNaN(saved)) {
+                bodyLeft.style.width = Math.max(saved, 280) + 'px';
             }
         } catch (e) { /* localStorage may be unavailable */ }
 
@@ -1192,9 +1396,10 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             if (!dragging) return;
             const rect = bodySplit.getBoundingClientRect();
             // Width = mouse X relative to the split container's left edge.
-            // Clamp: left ≥ 200px, right ≥ 200px (so neither side collapses).
+            // Clamp: left ≥ 280px (matches CSS min-width — see init comment),
+            // right ≥ 200px (so the diff pane never collapses).
             let w = e.clientX - rect.left;
-            const minLeft = 200;
+            const minLeft = 280;
             const minRight = 200;
             const splitterWidth = 4;
             const maxLeft = rect.width - minRight - splitterWidth;

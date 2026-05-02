@@ -28,6 +28,17 @@ namespace MultiTerminal.Services
 
         /// <summary>Latest verdict string from <c>task_reports</c> for the owning task (e.g. "PASS", "LGTM", "BLOCK").</summary>
         public string PipelineStatus { get; set; }
+
+        /// <summary>
+        /// Indicates which lookup tier produced this attribution:
+        /// <c>"active"</c> = matched an in-progress task,
+        /// <c>"shipped"</c> = no active claim but matched a done task (file is uncommitted but the work has shipped),
+        /// <c>"none"</c> = no task linkage at all.
+        /// Renderer uses this to pick the chip styling variant. Contamination
+        /// banner ignores this — it only counts <c>"active"</c> rows via the
+        /// separate <c>GetCrossTaskActiveTaskIds</c> query.
+        /// </summary>
+        public string LinkageState { get; set; } = "none";
     }
 
     /// <summary>
@@ -104,9 +115,55 @@ namespace MultiTerminal.Services
                 linkage = new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
             }
 
+            // Fallback layer: for any file with no active claim, look up its
+            // most recent done-task linkage. This surfaces "shipped but
+            // uncommitted" work in the Git tab — files whose owning task
+            // moved testing→done minutes ago and haven't committed yet.
+            // Only queries the residual file set (paths not already mapped
+            // by the active-linkage pass) to keep the SQL footprint minimal.
+            // Contamination logic does NOT use this — see GetCrossTaskActiveTaskIds.
+            Dictionary<string, (string TaskId, string Title, string Assignee)> shippedLinkage =
+                new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
+            var residual = new List<string>();
+            foreach (var abs in absolutePaths)
+            {
+                if (string.IsNullOrEmpty(abs)) continue;
+                if (!linkage.ContainsKey(abs)) residual.Add(abs);
+            }
+            if (residual.Count > 0)
+            {
+                try
+                {
+                    shippedLinkage = _taskDb.GetCompletedTaskLinkageForFiles(residual);
+                }
+                catch (Exception ex)
+                {
+                    // Bare catch turned a missing-column crash into an
+                    // invisible no-op during cycle 2 development (adversary
+                    // MEDIUM Run 2). Use Trace.WriteLine, NOT Debug.WriteLine
+                    // — the latter is [Conditional("DEBUG")] and gets stripped
+                    // from Release builds (which the installer ships per
+                    // installer/build-installer.ps1). Trace.WriteLine is gated
+                    // on TRACE which is defined in both Debug and Release by
+                    // SDK default, so the diagnostic survives production.
+                    // Existing Trace precedent: Services/RipgrepService.cs and
+                    // Services/SessionIndexingService.cs. Adversary MEDIUM Run 3.
+                    System.Diagnostics.Trace.WriteLine(
+                        "GitAttributionService.GetCompletedTaskLinkageForFiles failed: " + ex.Message);
+                    shippedLinkage = new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
+                }
+            }
+
             // Cache verdicts per task to avoid duplicate SQL when many files
-            // belong to the same task.
-            var verdictCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            // belong to the same task. Split per tier: GetLatestVerdictForTask
+            // takes a requiredStatus gate ("in_progress" by default vs "done"
+            // for shipped) and a single shared cache keyed only by taskId
+            // would let an active-tier null mask a real done-tier hit when
+            // the same task moves in_progress→done between the two linkage
+            // queries (TOCTOU window — debugger LOW Run 3). Two dicts cost a
+            // handful of bytes and remove the wrong-bucket cache return.
+            var activeVerdictCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var shippedVerdictCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             var result = new List<GitFileAttribution>(repoRelativePaths.Count);
             for (int i = 0; i < repoRelativePaths.Count; i++)
@@ -120,18 +177,43 @@ namespace MultiTerminal.Services
                     attr.TaskId = link.TaskId;
                     attr.TaskTitle = link.Title;
                     attr.Agent = link.Assignee;
+                    attr.LinkageState = "active";
 
                     if (!string.IsNullOrEmpty(link.TaskId))
                     {
-                        if (!verdictCache.TryGetValue(link.TaskId, out var verdict))
+                        if (!activeVerdictCache.TryGetValue(link.TaskId, out var verdict))
                         {
                             try { verdict = _taskDb.GetLatestVerdictForTask(link.TaskId); }
                             catch { verdict = null; }
-                            verdictCache[link.TaskId] = verdict;
+                            activeVerdictCache[link.TaskId] = verdict;
                         }
                         attr.PipelineStatus = verdict;
                     }
                 }
+                else if (shippedLinkage.TryGetValue(abs, out var shipped))
+                {
+                    attr.TaskId = shipped.TaskId;
+                    attr.TaskTitle = shipped.Title;
+                    attr.Agent = shipped.Assignee;
+                    attr.LinkageState = "shipped";
+
+                    if (!string.IsNullOrEmpty(shipped.TaskId))
+                    {
+                        if (!shippedVerdictCache.TryGetValue(shipped.TaskId, out var verdict))
+                        {
+                            // Pass requiredStatus="done" — GetLatestVerdictForTask
+                            // gates verdict freshness on the task's current status,
+                            // and shipped-tier ids by definition have status='done'.
+                            // Defaulting would silently null every shipped verdict
+                            // (adversary CRITICAL Run 1).
+                            try { verdict = _taskDb.GetLatestVerdictForTask(shipped.TaskId, "done"); }
+                            catch { verdict = null; }
+                            shippedVerdictCache[shipped.TaskId] = verdict;
+                        }
+                        attr.PipelineStatus = verdict;
+                    }
+                }
+                // else: no linkage, LinkageState stays "none" from the default initializer.
                 result.Add(attr);
             }
             return result;

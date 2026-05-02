@@ -385,6 +385,10 @@ namespace MultiTerminal.Controls
                                 taskId = a?.TaskId ?? "",
                                 taskTitle = a?.TaskTitle ?? "",
                                 pipelineStatus = a?.PipelineStatus ?? "",
+                                // "active" | "shipped" | "none" — drives the
+                                // muted chip variant for files whose owning
+                                // task has shipped but the file isn't committed yet.
+                                linkageState = a?.LinkageState ?? "none",
                             };
                         })
                         .ToArray();
