@@ -29,6 +29,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly ConcurrentDictionary<string, KanbanTask> _tasks = new ConcurrentDictionary<string, KanbanTask>();
         private readonly TaskDatabase _taskDb;
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
+        private readonly MultiTerminal.Services.WorktreeAutoCommitService _autoCommit;
 
         // Project storage
         private readonly ConcurrentDictionary<string, Project> _projects = new ConcurrentDictionary<string, Project>();
@@ -397,6 +398,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             _worktrees = new MultiTerminal.Services.WorktreeManager(_taskDb);
+            _autoCommit = new MultiTerminal.Services.WorktreeAutoCommitService(_taskDb);
 
             try
             {
@@ -2808,24 +2810,107 @@ namespace MultiTerminal.MCPServer.Services
                 });
             }
 
-            // Phase 1 worktree prune — gated by MULTITERMINAL_WORKTREE_MODE.
-            // Removes the on-disk worktree and marks the DB record pruned. Phase 1
-            // does NOT pass --force, so uncommitted changes will throw and leave
-            // the record active for manual cleanup. Phase 2 auto-commit will
-            // close that gap.
+            // Phase 2 worktree commit-then-prune — gated by MULTITERMINAL_WORKTREE_MODE.
+            // Auto-commit any changes in the worktree FIRST so the prune step
+            // (which doesn't use --force) doesn't refuse on dirty state. If the
+            // commit fails, skip prune so the dev can resolve manually; the DB
+            // record stays 'active' for the next attempt.
             if (status == "done"
                 && MultiTerminal.Services.WorktreeConfig.IsEnabled
                 && !string.IsNullOrEmpty(task.ProjectId)
                 && _projects.TryGetValue(task.ProjectId, out var doneProj)
                 && !string.IsNullOrEmpty(doneProj.Path))
             {
+                bool shouldPrune = false;
+                MultiTerminal.Services.AutoCommitResult commitResult = null;
                 try
                 {
-                    _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                    commitResult = _autoCommit.CommitForTaskAsync(
+                        taskId,
+                        doneProj.Path,
+                        task.Title,
+                        task.ImplementationSummary,
+                        task.Assignee).GetAwaiter().GetResult();
+
+                    if (commitResult.Success)
+                    {
+                        shouldPrune = true;
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Auto-commit for {taskId}: " +
+                            (commitResult.SkippedReason ?? $"committed {commitResult.CommitHash}"));
+
+                        if (!string.IsNullOrEmpty(commitResult.SkippedReason))
+                        {
+                            RecordActivity(new ActivityEvent
+                            {
+                                Terminal = task.Assignee ?? "System",
+                                Type = "worktree",
+                                Action = "auto_commit_skipped",
+                                Content = $"Worktree for '{task.Title}' had no changes to commit ({commitResult.SkippedReason}).",
+                                RelatedId = taskId
+                            });
+                        }
+                        else
+                        {
+                            string shortHash = !string.IsNullOrEmpty(commitResult.CommitHash) && commitResult.CommitHash.Length >= 7
+                                ? commitResult.CommitHash.Substring(0, 7)
+                                : commitResult.CommitHash;
+                            int fileCount = commitResult.ChangedFiles?.Count ?? 0;
+                            string unlinkedNote = (commitResult.UnlinkedFiles != null && commitResult.UnlinkedFiles.Count > 0)
+                                ? $" {commitResult.UnlinkedFiles.Count} of those weren't pre-linked via link_task_file: {string.Join(", ", commitResult.UnlinkedFiles.Take(5))}{(commitResult.UnlinkedFiles.Count > 5 ? ", ..." : "")}"
+                                : "";
+                            RecordActivity(new ActivityEvent
+                            {
+                                Terminal = task.Assignee ?? "System",
+                                Type = "worktree",
+                                Action = "auto_commit",
+                                Content = $"Auto-committed {fileCount} file(s) as {shortHash} for '{task.Title}'.{unlinkedNote}",
+                                RelatedId = taskId
+                            });
+                        }
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Auto-commit for {taskId} FAILED: {commitResult.Stderr}");
+                        string trimmedStderr = commitResult.Stderr?.Length > 500
+                            ? commitResult.Stderr.Substring(0, 500) + "..."
+                            : commitResult.Stderr;
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "auto_commit_failed",
+                            Content = $"Auto-commit failed for '{task.Title}'. Worktree NOT pruned. Error: {trimmedStderr}",
+                            RelatedId = taskId
+                        });
+                    }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Auto-commit threw for task {taskId}: {ex.Message}");
+                    RecordActivity(new ActivityEvent
+                    {
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = "auto_commit_failed",
+                        Content = $"Auto-commit threw for '{task.Title}'. Worktree NOT pruned. Error: {ex.Message}",
+                        RelatedId = taskId
+                    });
+                }
+
+                if (shouldPrune)
+                {
+                    try
+                    {
+                        _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                    }
                 }
             }
 

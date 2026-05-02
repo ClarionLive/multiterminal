@@ -283,6 +283,109 @@ No-regression check (gate OFF):
 
 ---
 
-## End of audit
+## 11. Phase 2 Rollout — auto-commit at task done
 
-Audit + spike complete. Codebase was already mostly worktree-friendly. The two real surprises came from the smoke (FINDINGS 10.1 + 10.2), both small. Phase 1 is functional with `MULTITERMINAL_WORKTREE_MODE=on`. Phase 2-4 build directly on top of this foundation.
+**Task `1211ba68`** — Phase 2 of 4. Closes Phase 1's "prune refuses on dirty worktree" gap by auto-committing any changes in the task's worktree before the existing prune step runs. Same env-var gate (`MULTITERMINAL_WORKTREE_MODE=on`); default OFF.
+
+### Architecture shipped
+
+- **`Services/WorktreeAutoCommitService.cs`** (NEW, ~250 lines) — wraps `git status / add / commit / rev-parse` via `Process` invocation. Stateless; takes `TaskDatabase`. Returns structured `AutoCommitResult` (Success / CommitHash / ChangedFiles / UnlinkedFiles / Stderr / SkippedReason) instead of throwing, so the lifecycle hook can branch cleanly. Commit message templated from task title + `ImplementationSummary` + `Task: {taskId}` trailer + `Co-Authored-By: {agentName}`.
+- **`MCPServer/Services/MessageBroker.cs`** — instantiates `WorktreeAutoCommitService` alongside `WorktreeManager` in ctor. Phase 1's prune-only block in `UpdateTaskStatus` replaced with **commit-then-prune**: auto-commit fires first; on Success (committed or skipped-clean) → prune runs; on Failure → prune skipped, record stays `active` for manual recovery. Four `RecordActivity` entries cover all outcomes (`auto_commit` / `auto_commit_skipped` / `auto_commit_failed`).
+
+### Decisions ratified during planning
+
+1. Zero changes in worktree at done time → skip commit, run prune normally.
+2. Existing manual commits + zero new uncommitted → skip commit, run prune.
+3. **Stage explicit file list parsed from `git status --porcelain`** — NOT `git add -A`. (Reason: safety hook + repo policy. See Finding 11.1.)
+4. Single squash commit (no per-checklist-item history reconstruction).
+5. Pre-commit hooks honored — no `--no-verify` ever. Hook rejection surfaces as commit failure → activity feed → dev resolves and re-marks done → retry.
+
+### Smoke test results (mechanics)
+
+End-to-end smoke run on **2026-05-02** against branch `task/p2smoke` off `master` HEAD `e211ab4`. Replicated the exact git sequence `WorktreeAutoCommitService.CommitForTaskAsync` runs.
+
+| Step | Outcome | Notes |
+|---|---|---|
+| `git worktree add ../MultiTerminal-worktrees/p2smoke -b task/p2smoke` | PASS | Worktree at expected path. |
+| Empty-changes guard (`git status --porcelain` on clean worktree) | PASS | Empty output → service would return Success+SkippedReason='no changes', lifecycle proceeds to prune. |
+| Edit fixture file + create new untracked file | PASS | `git status --porcelain` returns ` M README.md\n?? _phase2_marker.txt`. |
+| Branch assertion (`git rev-parse --abbrev-ref HEAD` matches record) | PASS | Returned `task/p2smoke`. |
+| `git add -- README.md _phase2_marker.txt` (explicit file list, not `-A`) | PASS | Both staged. (See Finding 11.1.) |
+| `git commit -m {templated message}` (no `--no-verify`) | PASS | Commit `be8914e` created. Message matched template: subject / body / `Task: phase2smoketest` trailer / `Co-Authored-By: Alice`. Repo's git identity (`peterparker57 <psc.john@gmail.com>`) used as primary author. |
+| `git rev-parse HEAD` to capture commit hash | PASS | Returned `be8914eb2819156905afca66834b9db445cda09a`. |
+| Branch verification (`git log --oneline -2`) | PASS | Commit landed on `task/p2smoke` only — `master` unchanged. |
+| **Post-commit `git worktree remove` (NO `--force`)** | **PASS — Phase 1's gap closed** | Phase 1 alone would have refused on the dirty worktree; now it succeeds because the auto-commit cleaned it up. |
+| Full cleanup (worktree dir + branch + parent dir) | PASS | `git worktree list` shows only main; `git branch --list "task/*"` empty. |
+
+### FINDING 11.1 — `git add -A` blocked by safety policy
+
+The repo's safety hook (`safety-hook.js` in the MultiTerminal plugin) blocks `git add -A` and `git add .` with the message: *"git add ./ -A stages everything including secrets. Stage specific files instead."* This is consistent with `CLAUDE.md`'s Git Safety Protocol: *"prefer adding specific files by name rather than using 'git add -A' or 'git add .', which can accidentally include sensitive files (.env, credentials) or large binaries."*
+
+The initial `WorktreeAutoCommitService.CommitForTaskAsync` implementation used `git add -A`; the safety hook caught it during the smoke run. **Mitigation:** the service now parses `git status --porcelain` output, then stages with `git add -- {f1} {f2} ...` (explicit list, `--` separator to prevent flag interpretation). The same parsing was already needed for the unlinked-files note, so no extra cost. Decision (3) above ratified.
+
+**Severity:** would-have-been-blocker if discovered in production. **Mitigated** in code.
+
+### Negative-path smoke (pre-commit hook rejection)
+
+Tested the failure path by installing a temporary hostile `pre-commit` hook in `.git/hooks/`, attempting the same commit sequence on a fresh `task/p2neg` worktree, then removing the hook and retrying.
+
+| Step | Outcome | Notes |
+|---|---|---|
+| Install `.git/hooks/pre-commit` that exits non-zero | PASS | Hook printed `PRE-COMMIT REJECTED: ...` to stderr and exited 7. |
+| Create fresh worktree + edit + `git add -- _neg_marker.txt` | PASS | File staged. |
+| `git commit -m "..."` | **PASS — rejected as expected** | Exit code 1; stderr captured: `PRE-COMMIT REJECTED: smoke fixture rejection (auto-test)`. The service's `commitResult.Stderr` would carry this exact text; lifecycle hook sets `shouldPrune=false`. |
+| Worktree state after rejection | PASS | File staged but not committed; worktree still "dirty" → Phase 1 prune would refuse. |
+| Remove hook (simulate dev fixing the issue) | PASS | `rm .git/hooks/pre-commit`. |
+| Retry commit (simulates dev re-marking task done) | PASS | Commit `47136a7` created cleanly. |
+| Post-retry-commit prune (no `--force`) | PASS | Worktree removed; branch deleted. |
+| Full cleanup verified | PASS | No worktrees, no `task/*` branches, hook gone. |
+
+**Confirms:** (a) pre-commit hooks DO run on worktree commits (worktrees share the main repo's `.git/hooks/`); (b) the service's stderr capture surfaces the failure cleanly; (c) the lifecycle hook's `shouldPrune=false` branch protects the worktree for retry; (d) after the dev resolves the issue and re-marks the task done, the retry succeeds end-to-end.
+
+### FINDING 11.2 — Pre-commit hook latency not surfaced at start time
+
+The activity feed currently logs auto-commit results AFTER the operation completes. If the repo has long-running pre-commit hooks, the dev sees no "running…" state in the meantime — they just observe a delay. Phase 2.x can add a `auto_commit_started` activity entry. **Severity:** nice-to-have polish.
+
+### Lifecycle integration verification (deferred)
+
+The C#/MT integration of the auto-commit lifecycle hook (the `_autoCommit.CommitForTaskAsync(...).GetAwaiter().GetResult()` call inside `MessageBroker.UpdateTaskStatus`) was NOT exercised live in this session — same constraint as Phase 1 (the gate flag is read once at MT startup; current MT instance has it OFF).
+
+User-runnable verification recipe (post-handoff):
+
+```powershell
+# 1. Set the gate in a fresh PowerShell session
+$env:MULTITERMINAL_WORKTREE_MODE = 'on'
+
+# 2. Launch MT from THAT session
+.\bin\Debug\net8.0-windows\win-x64\MultiTerminal.exe
+
+# 3. Create a fixture task linked to the MultiTerminal project, claim+activate.
+#    Watch: a worktree appears at MultiTerminal-worktrees/<8charId>/
+
+# 4. Edit a file inside the worktree (use any tool — terminal, an agent, manually).
+
+# 5. Mark the task done.
+#    Watch: (a) a commit lands on branch task/<8charId> with the templated message;
+#           (b) the worktree directory is removed;
+#           (c) the SQLite row in task_worktrees flips to 'pruned';
+#           (d) the Activity panel shows a 'worktree / auto_commit' entry with the hash.
+
+# 6. Inspect:
+sqlite3 "$env:APPDATA\multiterminal\multiterminal.db" "SELECT * FROM task_worktrees ORDER BY created_at DESC LIMIT 5;"
+git log --all --oneline -10
+```
+
+No-regression check (gate OFF):
+- Launch MT without setting the env var. Activate a task, mark it done. Confirm `task_worktrees` is empty, no worktree directories appeared, no `auto_commit` activity entries fired.
+
+### Implications for Phase 3
+
+- **Auto-merge into main**: needs to switch to the main checkout (NOT the worktree) and run `git merge task/{taskIdShort}`. The task branch's commit(s) are guaranteed clean by Phase 2; merge conflicts are the only remaining hazard.
+- **Branch cleanup at Phase 3**: after a successful merge, delete `task/{taskIdShort}` (`git branch -d`). On merge failure, leave the branch around so the dev can resolve.
+- **Empty-commit detection**: Phase 2 returns Success with SkippedReason='no changes' when there's nothing to commit. Phase 3 should treat that as "nothing to merge" and skip the merge step entirely — the worktree was already pruned by Phase 2 so there's no cleanup needed either.
+
+---
+
+## End of audit + Phase 2 rollout
+
+Phase 1 + Phase 2 functional. Codebase was already mostly worktree-friendly; the few real surprises came from smoke runs (FINDINGS 10.1, 10.2, 11.1) and were mitigated in code. With `MULTITERMINAL_WORKTREE_MODE=on`, a kanban task now: spawns a worktree on activate → accumulates work → auto-commits and prunes on done. Phase 3 (auto-merge) and Phase 4 (panel aggregation + contamination retirement) build directly on this.
