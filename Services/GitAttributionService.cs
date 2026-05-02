@@ -237,6 +237,18 @@ namespace MultiTerminal.Services
             if (repoRelativePaths == null || repoRelativePaths.Count == 0)
                 return Array.Empty<string>();
 
+            // Phase 4 Track 2: contamination retirement under per-task worktrees.
+            // With MULTITERMINAL_WORKTREE_MODE=on, two active tasks CANNOT share
+            // working-tree state — each task has its own worktree on its own
+            // branch off main. Cross-task contamination is structurally
+            // impossible by construction (Phases 1-3). The heuristic below stays
+            // intact for projects NOT using worktree mode (default behavior),
+            // where shared working tree is still the norm and the banner adds
+            // value. When worktrees are on, return empty so the banner remains
+            // dormant.
+            if (WorktreeConfig.IsEnabled)
+                return Array.Empty<string>();
+
             string normalizedRoot;
             try { normalizedRoot = Path.GetFullPath(projectRoot); }
             catch { normalizedRoot = projectRoot; }

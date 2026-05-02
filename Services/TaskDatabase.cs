@@ -1689,6 +1689,38 @@ namespace MultiTerminal.Services
             return results;
         }
 
+        /// <summary>
+        /// List worktree records that are <c>pruned</c> but whose owning task is
+        /// <c>done</c>. These are the rows the Phase 4 janitor inspects: if the
+        /// task branch (<c>task/{taskIdShort}</c>) still exists in git, the merge
+        /// never happened and the dev needs to resolve manually.
+        /// </summary>
+        public List<MCPServer.Models.TaskWorktree> ListPrunedWorktreesForDoneTasks()
+        {
+            const string sql = @"
+                SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status
+                FROM task_worktrees w
+                JOIN tasks t ON t.id = w.task_id
+                WHERE w.status = 'pruned' AND t.status = 'done'
+                ORDER BY w.created_at DESC
+            ";
+            var results = new List<MCPServer.Models.TaskWorktree>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new MCPServer.Models.TaskWorktree
+                {
+                    TaskId = reader.GetString(0),
+                    WorktreePath = reader.GetString(1),
+                    BranchName = reader.GetString(2),
+                    CreatedAt = DateTime.Parse(reader.GetString(3)),
+                    Status = reader.GetString(4)
+                });
+            }
+            return results;
+        }
+
         #endregion
 
         /// <summary>

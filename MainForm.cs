@@ -74,6 +74,10 @@ namespace MultiTerminal
         private DebugPanel _debugPanel;
         private ToolStripButton _debugPanelButton;
         private DebugLogService _debugLogService;
+
+        // Phase 4 Track 3 worktree janitor — periodic 5-min sweep with 30-sec
+        // startup delay. Disposed in OnFormClosing.
+        private System.Threading.Timer _worktreeJanitorTimer;
         private ProfilePanel.ProfilePanelDocument _profilePanel;
         private ToolStripButton _profilePanelButton;
         private InboxPanelDocument _inboxPanel;
@@ -173,7 +177,59 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine("[MainForm] ===== SHOWN EVENT FIRED =====");
                 ShowOwnerProfileDialogIfNeeded();
                 RestoreSession();
+                StartWorktreeJanitor();
             };
+        }
+
+        /// <summary>
+        /// Spin up the Phase 4 Track 3 janitor timer: first fire 30 seconds
+        /// after startup, then every 5 minutes. The janitor reconciles
+        /// task_worktrees rows against on-disk and git state. Disposed in
+        /// OnFormClosing.
+        /// </summary>
+        private void StartWorktreeJanitor()
+        {
+            try
+            {
+                var broker = _mcpServer?.Broker;
+                if (broker?.WorktreeJanitor == null) return;
+                _worktreeJanitorTimer = new System.Threading.Timer(
+                    _ =>
+                    {
+                        try
+                        {
+                            broker.WorktreeJanitor.SweepAsync(
+                                getProjectPathForTask: id => broker.TryGetProjectPathForTask(id),
+                                recordActivity: (action, content, relatedId) =>
+                                {
+                                    try
+                                    {
+                                        broker.RecordActivity(new MCPServer.Models.ActivityEvent
+                                        {
+                                            Terminal = "Janitor",
+                                            Type = "worktree",
+                                            Action = action,
+                                            Content = content,
+                                            RelatedId = relatedId,
+                                        });
+                                    }
+                                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[Janitor] activity log failed: {ex.Message}"); }
+                                }).GetAwaiter().GetResult();
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[Janitor] Sweep threw: {ex.Message}");
+                        }
+                    },
+                    state: null,
+                    dueTime: TimeSpan.FromSeconds(30),
+                    period: TimeSpan.FromMinutes(5));
+                System.Diagnostics.Trace.WriteLine("[MainForm] Worktree janitor timer started (30s startup, 5m cadence).");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] Failed to start worktree janitor: {ex.Message}");
+            }
         }
 
         private void InitializeComponent()
@@ -3383,6 +3439,11 @@ namespace MultiTerminal
 
         private async void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            // Stop the worktree janitor before any other shutdown work \u2014 its
+            // timer thread should not fire mid-shutdown.
+            try { _worktreeJanitorTimer?.Dispose(); _worktreeJanitorTimer = null; }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Janitor timer dispose: {ex.Message}"); }
+
             // Save session context for all active terminals before closing
             if (!_sessionSaveCompleted)
             {

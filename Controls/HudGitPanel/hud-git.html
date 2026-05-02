@@ -292,6 +292,64 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     font-style: italic;
 }
 
+/* ------- Phase 4 worktree groups -------
+   Renders when groupedByTask is non-empty (i.e. one or more files have
+   active/shipped task linkage). Each group is a <details> with a header
+   summary (task title + file count + agent chip) and the file rows
+   nested inside. Falls back to the original flat list when no group
+   data is present. */
+.wt-group {
+    margin: 4px 0;
+    border-radius: 4px;
+}
+.wt-group-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    background: var(--border);
+    user-select: none;
+    list-style: none;
+    font-size: 11px;
+}
+.wt-group-summary::-webkit-details-marker { display: none; }
+.wt-group-summary::before {
+    content: '▶';
+    font-size: 8px;
+    opacity: 0.6;
+    transition: transform 0.15s ease;
+    width: 10px;
+    flex: 0 0 auto;
+    display: inline-block;
+}
+.wt-group[open] > .wt-group-summary::before {
+    transform: rotate(90deg);
+}
+.wt-group-title {
+    font-weight: 600;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.wt-group-count {
+    color: var(--fg-dim);
+    font-size: 10px;
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+.wt-group--shipped > .wt-group-summary {
+    opacity: 0.7;
+    border: 1px dashed var(--fg-dim);
+    background: transparent;
+}
+.wt-group--unlinked > .wt-group-summary {
+    font-style: italic;
+    opacity: 0.85;
+}
+.wt-group .file-row { padding-left: 24px; }
+
 /* ------- Commit rows (item [9]) ------- */
 .commits-list { padding: 0; margin: 0; }
 .commit-row {
@@ -702,7 +760,19 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
 
         renderHeader(s);
         renderContaminationBanner(s.workingTree || [], s.contamTaskIds || []);
-        renderWorkingTree(s.workingTree || []);
+
+        // Phase 4: dispatch to grouped render when the renderer emits group
+        // data; fall back to the original flat list otherwise. Both paths
+        // share the same files-array data.
+        const grouped = s.groupedByTask || [];
+        const unlinked = s.unlinked || [];
+        const flat = s.workingTree || [];
+        if (grouped.length > 0) {
+            renderWorkingTreeGrouped(grouped, unlinked, flat.length);
+        } else {
+            renderWorkingTree(flat);
+        }
+
         renderRecentCommits(s.recentCommits || []);
         renderBranches(s.branches || []);
     }
@@ -951,6 +1021,219 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
 
             list.appendChild(row);
         }
+    }
+
+    // --- Phase 4: grouped render ---
+    // Mirrors renderWorkingTree but groups files by task (using the
+    // server-side groupedByTask + unlinked arrays). Each task group is a
+    // <details>; the task-id chip is suppressed inside groups since the
+    // group header carries it. Expand/collapse state persists in
+    // localStorage so users keep their layout across refreshes.
+    function renderWorkingTreeGrouped(groupedByTask, unlinked, totalCount) {
+        const list = $('file-list');
+        list.innerHTML = '';
+
+        $('changes-count').textContent = String(totalCount);
+
+        if (totalCount === 0) {
+            $('working-changes-empty').style.display = 'block';
+            list.style.display = 'none';
+            return;
+        }
+        $('working-changes-empty').style.display = 'none';
+        list.style.display = 'block';
+
+        // Cache the flat array on the rendering surface so context-menu
+        // helpers + other consumers that read lastWorkingTree still see
+        // the union of all files (preserves existing global behavior).
+        const allFiles = [];
+        for (const g of groupedByTask) {
+            for (const f of (g.files || [])) allFiles.push(f);
+        }
+        for (const f of (unlinked || [])) allFiles.push(f);
+        lastWorkingTree = allFiles;
+
+        for (const group of groupedByTask) {
+            list.appendChild(buildGroupDetails(group, false));
+        }
+        if (unlinked && unlinked.length > 0) {
+            list.appendChild(buildUnlinkedDetails(unlinked));
+        }
+    }
+
+    function buildGroupDetails(group, isUnlinked) {
+        const details = document.createElement('details');
+        let cls = 'wt-group';
+        if (group.linkageState === 'shipped') cls += ' wt-group--shipped';
+        details.className = cls;
+
+        // Persist expand/collapse keyed by taskId; default open on first sight.
+        const storageKey = 'worktree-group-' + (group.taskId || 'group');
+        const stored = (function () { try { return localStorage.getItem(storageKey); } catch (e) { return null; } })();
+        details.open = stored !== 'closed';
+        details.addEventListener('toggle', () => {
+            try { localStorage.setItem(storageKey, details.open ? 'open' : 'closed'); } catch (e) { /* ignore quota / private mode */ }
+        });
+
+        const summary = document.createElement('summary');
+        summary.className = 'wt-group-summary';
+
+        const title = document.createElement('span');
+        title.className = 'wt-group-title';
+        title.textContent = (group.linkageState === 'shipped' ? '✓ ' : '')
+            + (group.taskTitle || 'Task ' + group.taskIdShort);
+        title.title = (group.taskId || '') + (group.taskTitle ? (' — ' + group.taskTitle) : '');
+        summary.appendChild(title);
+
+        if (group.agent) {
+            const agentChip = document.createElement('span');
+            agentChip.className = group.linkageState === 'shipped'
+                ? 'chip chip-agent chip--shipped'
+                : 'chip chip-agent';
+            agentChip.textContent = '📋 ' + group.agent;
+            agentChip.title = 'Task assignee';
+            summary.appendChild(agentChip);
+        }
+
+        const count = document.createElement('span');
+        count.className = 'wt-group-count';
+        const n = group.fileCount | 0;
+        count.textContent = n + (n === 1 ? ' file' : ' files');
+        summary.appendChild(count);
+
+        details.appendChild(summary);
+
+        const sortedFiles = [...(group.files || [])].sort((a, b) => {
+            const ar = KIND_SORT_RANK[a.kind] ?? 99;
+            const br = KIND_SORT_RANK[b.kind] ?? 99;
+            if (ar !== br) return ar - br;
+            return (a.path || '').localeCompare(b.path || '');
+        });
+        for (const f of sortedFiles) {
+            details.appendChild(buildFileRow(f, /*suppressTaskChip*/ true));
+        }
+        return details;
+    }
+
+    function buildUnlinkedDetails(unlinked) {
+        const details = document.createElement('details');
+        details.className = 'wt-group wt-group--unlinked';
+        const storageKey = 'worktree-group-unlinked';
+        const stored = (function () { try { return localStorage.getItem(storageKey); } catch (e) { return null; } })();
+        details.open = stored !== 'closed';
+        details.addEventListener('toggle', () => {
+            try { localStorage.setItem(storageKey, details.open ? 'open' : 'closed'); } catch (e) { /* ignore */ }
+        });
+
+        const summary = document.createElement('summary');
+        summary.className = 'wt-group-summary';
+
+        const title = document.createElement('span');
+        title.className = 'wt-group-title';
+        title.textContent = 'Ad-hoc changes';
+        title.title = 'Files with no active task linkage';
+        summary.appendChild(title);
+
+        const count = document.createElement('span');
+        count.className = 'wt-group-count';
+        count.textContent = unlinked.length + (unlinked.length === 1 ? ' file' : ' files');
+        summary.appendChild(count);
+
+        details.appendChild(summary);
+
+        const sortedFiles = [...unlinked].sort((a, b) => {
+            const ar = KIND_SORT_RANK[a.kind] ?? 99;
+            const br = KIND_SORT_RANK[b.kind] ?? 99;
+            if (ar !== br) return ar - br;
+            return (a.path || '').localeCompare(b.path || '');
+        });
+        for (const f of sortedFiles) {
+            details.appendChild(buildFileRow(f, /*suppressTaskChip*/ false));
+        }
+        return details;
+    }
+
+    function buildFileRow(f, suppressTaskChip) {
+        const row = document.createElement('div');
+        row.className = 'file-row';
+        row.dataset.path = f.path;
+        if (f.path === selectedPath) row.classList.add('selected');
+
+        const cls = KIND_TO_MARKER[f.kind] || 'UNK';
+        const letter = KIND_TO_LETTER[f.kind] || '?';
+
+        const marker = document.createElement('span');
+        marker.className = 'file-marker ' + cls;
+        marker.textContent = letter;
+        marker.title = KIND_TO_FULLNAME[f.kind] || ('Status: ' + f.kind);
+
+        const path = document.createElement('span');
+        path.className = 'file-path';
+        path.textContent = f.path;
+        path.title = composeAbsolutePath(lastRepoRoot, f.path);
+
+        const stats = document.createElement('span');
+        stats.className = 'file-stats';
+        const addedCount = (f.linesAdded | 0);
+        const deletedCount = (f.linesDeleted | 0);
+        stats.title = addedCount + ' lines added, ' + deletedCount + ' lines removed';
+        const added = document.createElement('span');
+        added.className = 'added';
+        added.textContent = '+' + addedCount;
+        const deleted = document.createElement('span');
+        deleted.className = 'deleted';
+        deleted.textContent = ' −' + deletedCount;
+        stats.appendChild(added);
+        stats.appendChild(deleted);
+
+        const isShipped = f.linkageState === 'shipped';
+        const shippedSuffix = ' Task done — commit when ready.';
+        const chips = document.createElement('span');
+        chips.className = 'file-chips';
+
+        const chipAgent = document.createElement('span');
+        chipAgent.className = isShipped ? 'chip chip-agent chip--shipped' : 'chip chip-agent';
+        if (f.agent) {
+            chipAgent.textContent = '📋 ' + f.agent;
+            chipAgent.title = 'Task assignee — may not be the file’s actual editor.'
+                + (isShipped ? shippedSuffix : '');
+        }
+        chips.appendChild(chipAgent);
+
+        if (!suppressTaskChip) {
+            const chipTask = document.createElement('span');
+            chipTask.className = isShipped ? 'chip chip-task chip--shipped' : 'chip chip-task';
+            if (f.taskId) {
+                const shortId = f.taskId.length > 8 ? f.taskId.substring(0, 8) : f.taskId;
+                chipTask.textContent = isShipped ? ('✓ ' + shortId) : shortId;
+                const baseTitle = f.taskTitle ? (f.taskId + ' — ' + f.taskTitle) : f.taskId;
+                chipTask.title = isShipped ? (baseTitle + ' (' + shippedSuffix.trim() + ')') : baseTitle;
+            }
+            chips.appendChild(chipTask);
+        }
+
+        const chipStatus = document.createElement('span');
+        chipStatus.className = isShipped ? 'chip chip-status chip--shipped' : 'chip chip-status';
+        if (f.pipelineStatus) {
+            const verdictGlyph = pipelineGlyph(f.pipelineStatus);
+            chipStatus.textContent = verdictGlyph + ' ' + f.pipelineStatus;
+            chipStatus.title = 'Latest pipeline verdict for ' + (f.taskId || 'this file')
+                + (isShipped ? shippedSuffix : '');
+        }
+        chips.appendChild(chipStatus);
+
+        row.appendChild(marker);
+        row.appendChild(path);
+        row.appendChild(stats);
+        row.appendChild(chips);
+
+        row.addEventListener('click', () => onSelectFile(f.path));
+        row.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            showFileContextMenu(e.clientX, e.clientY, f.path);
+        });
+
+        return row;
     }
 
     function pipelineGlyph(verdict) {

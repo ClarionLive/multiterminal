@@ -487,6 +487,92 @@ Conflict variant: deliberately edit the same file in the main checkout between a
 
 ---
 
-## End of audit + Phase 1, 2, 3 rollout
+## 13. Phase 4 Rollout — panel grouping + contamination retirement + janitor
 
-Phase 1 + Phase 2 + Phase 3 functional. With `MULTITERMINAL_WORKTREE_MODE=on`, a kanban task now: spawns a worktree on activate → accumulates work → auto-commits → prunes the worktree → merges into trunk → deletes the task branch. The user's vision — "productivity without git worry" — is materially delivered for the happy path. Conflict path surfaces cleanly via activity feed; dev resolves manually. Phase 4 (panel aggregation + contamination retirement + janitor) is the final polish layer.
+**Task `c3ba0ced`** — final layer of the worktree initiative. Three independent tracks delivered together because they share an audit/test surface.
+
+### Track 1 — HUD Git panel grouping (server-side projection + client render)
+
+`Controls/HudGitPanel/HudGitRenderer.cs::RefreshAsync` now emits a `groupedByTask[]` projection alongside the existing flat `workingTree` array. Each group element: `{taskId, taskIdShort, taskTitle, agent, linkageState, fileCount, files: [...]}`. Files with `linkageState='active'` go to active groups; `'shipped'` to shipped groups (sorted after active); `'none'` go to a separate `unlinked[]` array.
+
+`Controls/HudGitPanel/hud-git.html` got a new render branch: when `groupedByTask.length > 0`, the panel renders `<details>` per task group with summary header (✓ prefix on shipped, task title, agent chip, file count) and sorted file rows inside (task-id chip suppressed since the header carries it). Bottom "Ad-hoc changes" `<details>` for unlinked files (hidden when empty). Expand/collapse state persists via `localStorage` (key `worktree-group-{taskId}`). Falls back to the existing flat render when no group data is present.
+
+**Smoke:** rendered the new path in a browser tab via `open_browser_tab` with a synthetic snapshot (2 active groups + 1 shipped group + 1 ad-hoc bucket). Visual review confirmed correct grouping, count badges, shipped styling (dashed border + italic), and chip suppression inside groups.
+
+### Track 2 — Contamination retirement
+
+`Services/GitAttributionService.GetCrossTaskActiveTaskIds` now early-returns an empty list when `WorktreeConfig.IsEnabled`. Inline comment explains the structural reasoning (Phases 1-3 make cross-task contamination impossible by construction since each active task lives in its own worktree on its own branch). Heuristic kept for projects NOT using worktree mode where shared working tree is still the norm and the banner adds value.
+
+**Smoke:** code review confirmed the early-return runs BEFORE any path normalization or DB query, so the cost of the gate is one boolean check. Under `WORKTREE_MODE=on`, the contamination banner stays dormant; under `=off`, behavior is byte-for-byte unchanged.
+
+### Track 3 — Periodic janitor
+
+`Services/WorktreeJanitorService.cs` (NEW, ~165 lines) runs a 2-pass sweep:
+- **Pass 1** — `task_worktrees` rows in `status='active'` whose `WorktreePath` doesn't exist on disk get marked pruned (manual `rm`, OS cleanup, drive remount, etc).
+- **Pass 2** — rows in `status='pruned'` whose owning task is `done` AND whose `task/{id}` branch still exists in git get logged as `pending_merge` reminders. **Does NOT auto-retry** to avoid infinite-retry loops on persistent conflicts.
+
+`Services/TaskDatabase.cs` got a new `ListPrunedWorktreesForDoneTasks()` SQL JOIN method to support Pass 2. `MessageBroker` exposes the janitor via `WorktreeJanitor` property and a `TryGetProjectPathForTask(taskId)` helper that walks `_tasks → _projects → Path` for the project-resolver delegate.
+
+`MainForm` spins a `System.Threading.Timer` in the `Shown` handler: first fire 30 seconds after startup, then every 5 minutes. Disposed FIRST in `OnFormClosing` so its thread doesn't fire mid-shutdown.
+
+Activity feed entries: `janitor_reconciled_missing` (Pass 1 hit), `janitor_pending_merge` (Pass 2 hit), `janitor_sweep` (summary, only when something notable happened).
+
+**Smoke:** mechanics verified via direct SQL + git operations:
+- ✅ Schema CREATE TABLE matches the migration definition.
+- ✅ INSERT synthetic stale Pass-1 row → Pass 1 SELECT picks it up.
+- ✅ `Directory.Exists` correctly reports missing path → janitor would mark pruned.
+- ✅ Simulated `MarkWorktreePruned` UPDATE flips the row.
+- ✅ Pass 2 JOIN query syntactically valid; returns rows when the joined task is `done`.
+- ✅ `git branch --list` mechanics: detects existing branch, returns empty for deleted branch.
+- ✅ Cleanup leaves no leftover state.
+
+### Decisions ratified during planning
+
+1. Server-side group projection (cleaner shape; simpler HTML).
+2. Ad-hoc group at bottom; hidden when empty.
+3. Drop redundant task-id chip in grouped view.
+4. Janitor 5-min cadence (tunable later).
+5. Contamination heuristic actively gated to no-op under `WORKTREE_MODE=on`.
+
+### Findings
+
+No new code-level blockers. Two notes:
+
+**FINDING 13.1 (UX, not blocking):** the JS render code in `hud-git.html` now has some duplication between the flat `renderWorkingTree` and the grouped `renderWorkingTreeGrouped` path (specifically the file-row construction). Phase 4 chose duplication over refactor because the build can't validate JS. Phase 4.x can DRY by extracting a shared `buildFileRow` helper used by both paths. **Severity:** maintenance polish.
+
+**FINDING 13.2 (operational, not blocking):** the Phase 4 janitor's project-path resolver runs synchronously inside the sweep loop. For pathological cases with hundreds of pending-merge rows + slow project lookups, this could feel sluggish. In practice MT's `_projects` cache is a `Dictionary` (O(1) lookups) and the typical pending-merge count is small. **Severity:** worth re-checking if telemetry shows long sweep durations.
+
+### Lifecycle integration verification (deferred per user path-B preference)
+
+```powershell
+# 1. Set the gate in a fresh PowerShell session
+$env:MULTITERMINAL_WORKTREE_MODE = 'on'
+
+# 2. Launch MT from THAT session
+.\bin\Debug\net8.0-windows\win-x64\MultiTerminal.exe
+
+# 3. Open the HUD Git panel — verify the panel is rendering with grouping.
+#    With pre-Phase 4 data: groups appear for any tasks with active linkage,
+#    bottom "Ad-hoc changes" group catches unlinked files, contamination banner
+#    stays dormant.
+
+# 4. Wait at least 5 minutes 30 seconds; the janitor should have fired at
+#    least once. Inspect the activity feed for any 'worktree' entries.
+
+# 5. Force a janitor scenario: manually delete a worktree directory while MT
+#    is running. Wait for the next sweep. Verify task_worktrees row flipped
+#    to 'pruned' and an activity entry appeared.
+sqlite3 "$env:APPDATA\multiterminal\multiterminal.db" "SELECT * FROM task_worktrees ORDER BY created_at DESC LIMIT 10;"
+```
+
+---
+
+## End of audit — four-phase worktree initiative complete
+
+Phase 1 (per-task worktree) → Phase 2 (auto-commit) → Phase 3 (auto-merge) → Phase 4 (panel + contamination + janitor). With `MULTITERMINAL_WORKTREE_MODE=on`, a kanban task now does the full lifecycle:
+
+> Activate → MT spawns worktree → agent does work → mark done → MT auto-commits → prunes worktree → merges into trunk → deletes task branch. HUD Git panel groups in-flight work by task. Periodic janitor catches drift between DB and reality. Contamination heuristic retires structurally because shared-state contamination can no longer happen.
+
+The user's vision is delivered for the happy path. Conflict path and orphaned merges surface cleanly via activity feed; dev resolves manually. The OFF path is byte-for-byte unchanged from pre-Phase-1 behavior, so the rollout can be opt-in until everyone is comfortable.
+
+Phase X.x polish opportunities documented across audit Sections 10-13 for future cleanup work.

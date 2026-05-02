@@ -31,6 +31,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
         private readonly MultiTerminal.Services.WorktreeAutoCommitService _autoCommit;
         private readonly MultiTerminal.Services.WorktreeMergeService _merge;
+        private readonly MultiTerminal.Services.WorktreeJanitorService _janitor;
 
         // Project storage
         private readonly ConcurrentDictionary<string, Project> _projects = new ConcurrentDictionary<string, Project>();
@@ -369,6 +370,28 @@ namespace MultiTerminal.MCPServer.Services
         public MultiTerminal.Services.WorktreeManager Worktrees => _worktrees;
 
         /// <summary>
+        /// Phase 4 Track 3 janitor — periodic reconciliation of
+        /// <c>task_worktrees</c> rows against on-disk + git state. Wired up by
+        /// <c>MainForm</c> via a <see cref="System.Threading.Timer"/>.
+        /// </summary>
+        public MultiTerminal.Services.WorktreeJanitorService WorktreeJanitor => _janitor;
+
+        /// <summary>
+        /// Resolve a task id to its project's filesystem path, going through
+        /// the cached <c>_tasks</c> + <c>_projects</c> dictionaries. Returns
+        /// null when the task is unknown, has no project, or the project has
+        /// no path. Used by the janitor's project-path resolver delegate.
+        /// </summary>
+        public string TryGetProjectPathForTask(string taskId)
+        {
+            if (string.IsNullOrEmpty(taskId)) return null;
+            if (!_tasks.TryGetValue(taskId, out var task)) return null;
+            if (string.IsNullOrEmpty(task.ProjectId)) return null;
+            if (!_projects.TryGetValue(task.ProjectId, out var project)) return null;
+            return string.IsNullOrEmpty(project.Path) ? null : project.Path;
+        }
+
+        /// <summary>
         /// Phase 2 attribution overlays for the HUD Git tab — file-level agent +
         /// active-task linkage + pipeline status. Backed by <see cref="TaskDb"/>.
         /// Set via DI after broker is created.
@@ -401,6 +424,7 @@ namespace MultiTerminal.MCPServer.Services
             _worktrees = new MultiTerminal.Services.WorktreeManager(_taskDb);
             _autoCommit = new MultiTerminal.Services.WorktreeAutoCommitService(_taskDb);
             _merge = new MultiTerminal.Services.WorktreeMergeService(_taskDb);
+            _janitor = new MultiTerminal.Services.WorktreeJanitorService(_taskDb);
 
             try
             {

@@ -393,6 +393,39 @@ namespace MultiTerminal.Controls
                         })
                         .ToArray();
 
+                    // Phase 4 Track 1: server-side grouping projection. Files
+                    // with active or shipped linkage are grouped by taskId so
+                    // the panel can render <details> sections per task instead
+                    // of a flat list. Files with linkageState='none' go to the
+                    // unlinked array (rendered as a bottom group, hidden when
+                    // empty). Group is additive — workingTree flat array is
+                    // preserved for fallback / backward compat.
+                    var groupedByTask = workingTree
+                        .Where(f => f.linkageState == "active" || f.linkageState == "shipped")
+                        .Where(f => !string.IsNullOrEmpty(f.taskId))
+                        .GroupBy(f => f.taskId)
+                        .Select(g =>
+                        {
+                            var first = g.First();
+                            return new
+                            {
+                                taskId = g.Key,
+                                taskIdShort = g.Key.Length >= 8 ? g.Key.Substring(0, 8) : g.Key,
+                                taskTitle = first.taskTitle,
+                                agent = first.agent,
+                                linkageState = first.linkageState,
+                                fileCount = g.Count(),
+                                files = g.ToArray(),
+                            };
+                        })
+                        .OrderByDescending(g => g.linkageState == "active") // active groups first, shipped after
+                        .ThenBy(g => g.taskTitle, StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+
+                    var unlinked = workingTree
+                        .Where(f => f.linkageState == "none")
+                        .ToArray();
+
                     // Cross-task contamination: distinct active task IDs across ALL
                     // active claims (multi-claim aware). Uses a separate query
                     // (GetCrossTaskActiveTaskIds) instead of the dedup'd attribution
@@ -457,6 +490,8 @@ namespace MultiTerminal.Controls
                         behind,
                         lastFetch,
                         workingTree,
+                        groupedByTask,
+                        unlinked,
                         recentCommits,
                         branches,
                         contamTaskIds,
