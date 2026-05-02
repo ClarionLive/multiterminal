@@ -189,7 +189,8 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
             string agentName,
             string agentType,
             string workingDir = null,
-            string initialPrompt = null)
+            string initialPrompt = null,
+            string taskWorktreePath = null)
         {
             ValidateAgentName(agentName);
             ValidateAgentName(agentType); // Same whitelist — alphanumeric, spaces, hyphens, underscores
@@ -243,6 +244,13 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
                 claudeFlags += $" --mcp-config '{safeMcpConfig}'";
             }
 
+            // Phase 1 worktree isolation: pass the worktree path through to the
+            // spawned agent for introspection. Empty when no task worktree is in
+            // play (i.e. WORKTREE_MODE=off or this terminal isn't task-scoped).
+            string safeWorktreePath = string.IsNullOrEmpty(taskWorktreePath)
+                ? string.Empty
+                : SanitizeForPowerShell(taskWorktreePath);
+
             // Build PowerShell command that sets environment variables and launches Claude Code
             // The startup hook will detect these variables and auto-register
             string command = $@"
@@ -250,6 +258,7 @@ $env:MULTITERMINAL_NAME='{safeName}';
 $env:MULTITERMINAL_DOC_ID='{safeDocId}';
 $env:MULTITERMINAL_ROLE='{safeType}';
 $env:MULTITERMINAL_SPAWNER='{SanitizeForPowerShell(Environment.GetEnvironmentVariable("MULTITERMINAL_NAME") ?? "host")}';
+$env:MULTITERMINAL_TASK_WORKTREE='{safeWorktreePath}';
 $env:CHANNEL_PORT='{channelPort}';
 $env:CLAUDE_CODE_NO_FLICKER='1';
 cd '{safeDir}';

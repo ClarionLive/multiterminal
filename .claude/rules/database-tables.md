@@ -26,6 +26,7 @@ paths:
 | `task_helpers` | task_id, helper_name, added_by | Helper assignments |
 | `task_relationships` | task_id, related_task_id, relationship_type | Task dependencies/links |
 | `task_file_links` | task_id, file_path, added_by, description | Files associated with tasks |
+| `task_worktrees` | task_id (PK), worktree_path, branch_name, created_at, status | Per-task git worktree records (Phase 1 worktree isolation, gated by MULTITERMINAL_WORKTREE_MODE) |
 | `task_reports` | id, task_id, invocation_id, agent_name, report_type, report_content, verdict, score, created_at, created_by | Persisted agent reports |
 | `task_summaries` | task_id, summary_at, previous_status, new_status | Progress snapshots |
 | `task_attachments` | id, task_id, checklist_item_index, file_name, content_type, image_data | Images/files on checklist items |

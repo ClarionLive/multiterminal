@@ -28,6 +28,7 @@ namespace MultiTerminal.MCPServer.Services
         // Kanban task storage
         private readonly ConcurrentDictionary<string, KanbanTask> _tasks = new ConcurrentDictionary<string, KanbanTask>();
         private readonly TaskDatabase _taskDb;
+        private readonly MultiTerminal.Services.WorktreeManager _worktrees;
 
         // Project storage
         private readonly ConcurrentDictionary<string, Project> _projects = new ConcurrentDictionary<string, Project>();
@@ -357,6 +358,15 @@ namespace MultiTerminal.MCPServer.Services
         public MultiTerminal.Services.GitRepoManager GitRepos { get; set; }
 
         /// <summary>
+        /// Per-task git worktree manager (Phase 1 worktree isolation).
+        /// Created in the broker ctor since it only needs <see cref="TaskDb"/>.
+        /// Lifecycle hooks in <see cref="SetTaskActive"/> and
+        /// <see cref="UpdateTaskStatus"/> use this when
+        /// <see cref="MultiTerminal.Services.WorktreeConfig.IsEnabled"/> is true.
+        /// </summary>
+        public MultiTerminal.Services.WorktreeManager Worktrees => _worktrees;
+
+        /// <summary>
         /// Phase 2 attribution overlays for the HUD Git tab — file-level agent +
         /// active-task linkage + pipeline status. Backed by <see cref="TaskDb"/>.
         /// Set via DI after broker is created.
@@ -385,6 +395,8 @@ namespace MultiTerminal.MCPServer.Services
             {
                 throw new InvalidOperationException($"Failed to create TaskDatabase: {ex.Message}", ex);
             }
+
+            _worktrees = new MultiTerminal.Services.WorktreeManager(_taskDb);
 
             try
             {
@@ -2796,6 +2808,27 @@ namespace MultiTerminal.MCPServer.Services
                 });
             }
 
+            // Phase 1 worktree prune — gated by MULTITERMINAL_WORKTREE_MODE.
+            // Removes the on-disk worktree and marks the DB record pruned. Phase 1
+            // does NOT pass --force, so uncommitted changes will throw and leave
+            // the record active for manual cleanup. Phase 2 auto-commit will
+            // close that gap.
+            if (status == "done"
+                && MultiTerminal.Services.WorktreeConfig.IsEnabled
+                && !string.IsNullOrEmpty(task.ProjectId)
+                && _projects.TryGetValue(task.ProjectId, out var doneProj)
+                && !string.IsNullOrEmpty(doneProj.Path))
+            {
+                try
+                {
+                    _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                }
+            }
+
             // Generate changelog entry if task is marked as done and associated with a project
             if (status == "done" && !string.IsNullOrEmpty(task.ProjectId) && ChangelogService != null)
             {
@@ -3373,6 +3406,26 @@ namespace MultiTerminal.MCPServer.Services
 
             try { _taskDb.SaveTask(task); }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to set task active: {ex.Message}"); }
+
+            // Phase 1 worktree isolation — gated by MULTITERMINAL_WORKTREE_MODE.
+            // Materialize a fresh worktree on `git worktree add` so subsequent agent
+            // spawns can be rooted there. Idempotent: returns the existing record
+            // when one already exists. Failure is non-fatal — the task still goes
+            // active so the user is not blocked by git issues.
+            if (MultiTerminal.Services.WorktreeConfig.IsEnabled
+                && !string.IsNullOrEmpty(task.ProjectId)
+                && _projects.TryGetValue(task.ProjectId, out var activeProj)
+                && !string.IsNullOrEmpty(activeProj.Path))
+            {
+                try
+                {
+                    _worktrees.CreateForTaskAsync(taskId, activeProj.Path).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Worktree create failed for task {taskId}: {ex.Message}");
+                }
+            }
 
             BroadcastTaskUpdate();
 

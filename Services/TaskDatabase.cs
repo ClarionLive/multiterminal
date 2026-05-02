@@ -106,6 +106,7 @@ namespace MultiTerminal.Services
             MigrateAddKnowledgeQueryHash();
             MigrateAddKnowledgeAttentionDecay();
             MigrateAddSessionLifecycleStatus();
+            MigrateAddTaskWorktrees();
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -369,6 +370,15 @@ namespace MultiTerminal.Services
                     UNIQUE(task_id, file_path)
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_file_links(task_id);
+
+                CREATE TABLE IF NOT EXISTS task_worktrees (
+                    task_id TEXT PRIMARY KEY,
+                    worktree_path TEXT NOT NULL,
+                    branch_name TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    status TEXT NOT NULL DEFAULT 'active'
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_worktrees_status ON task_worktrees(status);
 
                 CREATE TABLE IF NOT EXISTS project_notes (
                     id TEXT PRIMARY KEY,
@@ -1584,6 +1594,99 @@ namespace MultiTerminal.Services
                 cmd.Parameters.AddWithValue("@requiredStatus", requiredStatus);
                 return cmd.ExecuteScalar() as string;
             }
+        }
+
+        #endregion
+
+        #region Task Worktrees
+
+        /// <summary>
+        /// Save (or replace) a worktree record for a task. Called when a worktree
+        /// is materialized via <c>git worktree add</c> at task-activate time.
+        /// Phase 1 of per-task worktree isolation — gated by
+        /// <c>MULTITERMINAL_WORKTREE_MODE</c>.
+        /// </summary>
+        public void SaveWorktreeRecord(string taskId, string worktreePath, string branchName)
+        {
+            const string sql = @"
+                INSERT OR REPLACE INTO task_worktrees (task_id, worktree_path, branch_name, created_at, status)
+                VALUES (@taskId, @worktreePath, @branchName, @createdAt, 'active')
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@worktreePath", worktreePath);
+            cmd.Parameters.AddWithValue("@branchName", branchName);
+            cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Look up the worktree record for a specific task. Returns null when
+        /// no record exists (i.e., the task has never been activated under
+        /// worktree mode).
+        /// </summary>
+        public MCPServer.Models.TaskWorktree GetWorktreeForTask(string taskId)
+        {
+            const string sql = @"
+                SELECT task_id, worktree_path, branch_name, created_at, status
+                FROM task_worktrees
+                WHERE task_id = @taskId
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return new MCPServer.Models.TaskWorktree
+            {
+                TaskId = reader.GetString(0),
+                WorktreePath = reader.GetString(1),
+                BranchName = reader.GetString(2),
+                CreatedAt = DateTime.Parse(reader.GetString(3)),
+                Status = reader.GetString(4)
+            };
+        }
+
+        /// <summary>
+        /// Mark a worktree record as pruned. Called after <c>git worktree remove</c>
+        /// succeeds at task-done time. The record itself is retained for audit /
+        /// history (Phase 1 keeps pruned rows; a separate janitor may sweep them
+        /// in a later phase).
+        /// </summary>
+        public void MarkWorktreePruned(string taskId)
+        {
+            const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// List all worktree records currently in <c>status='active'</c>, ordered
+        /// most-recent first. Used by panel aggregation and lifecycle reconciliation.
+        /// </summary>
+        public List<MCPServer.Models.TaskWorktree> ListActiveWorktrees()
+        {
+            const string sql = @"
+                SELECT task_id, worktree_path, branch_name, created_at, status
+                FROM task_worktrees
+                WHERE status = 'active'
+                ORDER BY created_at DESC
+            ";
+            var results = new List<MCPServer.Models.TaskWorktree>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new MCPServer.Models.TaskWorktree
+                {
+                    TaskId = reader.GetString(0),
+                    WorktreePath = reader.GetString(1),
+                    BranchName = reader.GetString(2),
+                    CreatedAt = DateTime.Parse(reader.GetString(3)),
+                    Status = reader.GetString(4)
+                });
+            }
+            return results;
         }
 
         #endregion
@@ -4961,6 +5064,33 @@ namespace MultiTerminal.Services
                     "CREATE INDEX IF NOT EXISTS idx_session_lineage_project_status ON session_lineage(project_path, processing_status)", _connection);
                 idxCmd.ExecuteNonQuery();
             }
+        }
+
+        /// <summary>
+        /// Migration: ensure the <c>task_worktrees</c> table exists for installs
+        /// that predate Phase 1 worktree isolation. The same table is also created
+        /// inline in <see cref="CreateSchema"/> for fresh installs; this safety
+        /// net handles existing databases that miss the initial run.
+        /// </summary>
+        private void MigrateAddTaskWorktrees()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='task_worktrees'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS task_worktrees (
+                    task_id TEXT PRIMARY KEY,
+                    worktree_path TEXT NOT NULL,
+                    branch_name TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    status TEXT NOT NULL DEFAULT 'active'
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_worktrees_status ON task_worktrees(status);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
         }
 
         #region Project Notes
