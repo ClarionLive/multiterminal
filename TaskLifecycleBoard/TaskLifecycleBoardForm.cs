@@ -661,6 +661,25 @@ namespace MultiTerminal.TaskLifecycleBoard
             if (!root.TryGetProperty("projectId", out var projectEl))
                 return;
 
+            // ValueKind guard: a malformed message that sends projectId as a
+            // non-string (Number/Array/Object) would throw
+            // InvalidOperationException out of GetString() and be silently
+            // swallowed by the outer message-pump catch. Reject the shape
+            // early with an error toast so the failure is visible. Mirrors
+            // the guard in TasksPanelControl.edit_task added in Run 2.
+            if (projectEl.ValueKind != JsonValueKind.String
+                && projectEl.ValueKind != JsonValueKind.Null)
+            {
+                var shapePayload = JsonSerializer.Serialize(new
+                {
+                    type = "error",
+                    message = $"Cannot update project: 'projectId' must be a string or null (got {projectEl.ValueKind}).",
+                    authoritativeProjectId = _task?.ProjectId
+                });
+                PostMessage(shapePayload);
+                return;
+            }
+
             var result = _broker?.UpdateTaskProject(_taskId, projectEl.GetString());
             if (result?.Success == false)
             {
