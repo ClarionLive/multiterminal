@@ -500,24 +500,21 @@ namespace MultiTerminal.TasksPanel
                             var testResults = root.TryGetProperty("testResults", out var testEl)
                                 ? testEl.GetString() : null;
 
-                            // Pre-validate projectId BEFORE any state mutation. The
-                            // edit must be atomic w.r.t. an ambiguous project id —
-                            // otherwise title/description/priority/status/assignee/
-                            // continuation would land successfully and only the
-                            // project change would silently fail, producing
-                            // half-applied state. The result-check on
-                            // UpdateTaskProject below covers the narrow race
-                            // where the project registry shifts between validate
-                            // and apply.
+                            // Pre-validate ALL fields BEFORE any state mutation.
+                            // The edit is treated as one user-level operation —
+                            // any invalid input must abort the whole edit so the
+                            // user doesn't see (e.g.) the title rename land
+                            // while a bad priority is silently rejected. The
+                            // existing per-field broker methods each validate
+                            // and return Success=false on bad input but only
+                            // AFTER prior fields already persisted; we close
+                            // that gap here by validating up-front.
                             //
-                            // ValueKind guard: a malformed message that sends
-                            // projectId as a non-string (Number/Array/Object)
-                            // would throw InvalidOperationException out of
-                            // GetString() and be silently swallowed by the outer
-                            // try/catch. Reject the shape early with a toast so
-                            // the failure is visible — and so the value can be
-                            // cached once into editProjectIdRaw and reused at the
-                            // ambiguity-error and apply sites without re-reading.
+                            // ValueKind guard for projectId: a malformed message
+                            // sending projectId as a non-string (Number/Array/
+                            // Object) would throw InvalidOperationException out
+                            // of GetString() and be silently swallowed by the
+                            // outer try/catch. Reject the shape early.
                             bool hasProjectId = root.TryGetProperty("projectId", out var editProjectIdEl);
                             string editProjectIdRaw = null;
                             if (hasProjectId)
@@ -532,6 +529,47 @@ namespace MultiTerminal.TasksPanel
                                 editProjectIdRaw = editProjectIdEl.GetString();
                             }
 
+                            // Title cannot be empty (UpdateTask would reject it
+                            // anyway, but only after we'd have no way to know
+                            // what else might have already partially applied —
+                            // here it's still pre-mutation, so safe to bail).
+                            var editTitleStr = editTitleEl.GetString();
+                            if (string.IsNullOrWhiteSpace(editTitleStr))
+                            {
+                                var titleErr = EscapeJson("Cannot save task: title cannot be empty.");
+                                PostMessage($"{{\"type\":\"error\",\"message\":\"{titleErr}\"}}");
+                                break;
+                            }
+
+                            // Priority must be one of the documented values.
+                            string editPriorityStr = null;
+                            bool hasPriority = root.TryGetProperty("priority", out var editPriorityEl);
+                            if (hasPriority)
+                            {
+                                editPriorityStr = editPriorityEl.GetString();
+                                if (editPriorityStr != "urgent" && editPriorityStr != "normal" && editPriorityStr != "low")
+                                {
+                                    var prioErr = EscapeJson($"Cannot save task: invalid priority '{editPriorityStr}' (expected urgent | normal | low).");
+                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{prioErr}\"}}");
+                                    break;
+                                }
+                            }
+
+                            // Status must be one of the documented values.
+                            string editStatusStr = null;
+                            bool hasStatus = root.TryGetProperty("status", out var editStatusEl);
+                            if (hasStatus)
+                            {
+                                editStatusStr = editStatusEl.GetString();
+                                if (editStatusStr != "todo" && editStatusStr != "in_progress" && editStatusStr != "done" && editStatusStr != "suggestion")
+                                {
+                                    var statusErr = EscapeJson($"Cannot save task: invalid status '{editStatusStr}' (expected todo | in_progress | done | suggestion).");
+                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{statusErr}\"}}");
+                                    break;
+                                }
+                            }
+
+                            // Project ambiguity dry-run.
                             if (hasProjectId && _broker != null)
                             {
                                 _broker.TryNormalizeProjectId(editProjectIdRaw, out bool projectAmbiguous);
@@ -543,13 +581,25 @@ namespace MultiTerminal.TasksPanel
                                 }
                             }
 
+                            // All fields validated. Apply via the existing
+                            // per-field broker methods. Cross-SaveTask atomicity
+                            // for runtime persistence exceptions is NOT
+                            // guaranteed here — the per-field methods each call
+                            // SaveTask and a mid-sequence DB failure can still
+                            // half-apply. Closing that requires either a
+                            // transaction-aware EditTask broker method or
+                            // SQLite transactions across the per-field calls;
+                            // both are out of scope for this task and tracked
+                            // as follow-up. The pre-validation above closes
+                            // the dominant failure mode (invalid input).
+
                             // Update title, description, and documentation fields
-                            _broker?.UpdateTask(taskId, editTitleEl.GetString(), editDescription, editedBy, plan, implementation, testResults);
+                            _broker?.UpdateTask(taskId, editTitleStr, editDescription, editedBy, plan, implementation, testResults);
 
                             // Update priority if provided
-                            if (root.TryGetProperty("priority", out var editPriorityEl))
+                            if (hasPriority)
                             {
-                                _broker?.UpdateTaskPriority(taskId, editPriorityEl.GetString());
+                                _broker?.UpdateTaskPriority(taskId, editPriorityStr);
                             }
 
                             // Update project if provided
@@ -559,8 +609,10 @@ namespace MultiTerminal.TasksPanel
                                 if (projResult?.Success == false)
                                 {
                                     // Race: project registry shifted between
-                                    // pre-validate and apply. Other fields
-                                    // already landed; surface the late failure
+                                    // pre-validate and apply, OR persistence
+                                    // failed (Run 4 fix returns Success=false
+                                    // and reverts the in-memory mutation in
+                                    // that case). Surface the late failure
                                     // so the user knows the project change
                                     // didn't apply.
                                     var lateErr = EscapeJson(projResult.Error ?? "Failed to update project");
@@ -569,9 +621,9 @@ namespace MultiTerminal.TasksPanel
                             }
 
                             // Update status if provided
-                            if (root.TryGetProperty("status", out var editStatusEl))
+                            if (hasStatus)
                             {
-                                _broker?.UpdateTaskStatus(taskId, editStatusEl.GetString());
+                                _broker?.UpdateTaskStatus(taskId, editStatusStr);
                             }
 
                             // Update assignee if provided

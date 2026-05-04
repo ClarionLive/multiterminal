@@ -664,14 +664,20 @@ namespace MultiTerminal.TaskLifecycleBoard
             var result = _broker?.UpdateTaskProject(_taskId, projectEl.GetString());
             if (result?.Success == false)
             {
-                // Surface the failure (e.g., ambiguous short id) as an error
-                // toast via the WebView. Without this, the dropdown change
-                // appears to succeed visually while the binding silently
-                // doesn't update server-side.
+                // Surface the failure (e.g., ambiguous short id) AND include
+                // the authoritative ProjectId so the WebView can roll back
+                // its optimistic local mutation. Without authoritativeProjectId
+                // the dropdown/header would continue rendering the rejected
+                // value until a later refresh — a real state-divergence bug.
+                //
+                // _task.ProjectId is the post-Run-4-revert value: either the
+                // original (when SaveTask threw) or the unchanged stored value
+                // (when the broker fast-failed pre-mutation on ambiguous id).
                 var payload = JsonSerializer.Serialize(new
                 {
                     type = "error",
-                    message = result.Error ?? "Failed to update project"
+                    message = result.Error ?? "Failed to update project",
+                    authoritativeProjectId = _task?.ProjectId
                 });
                 PostMessage(payload);
             }

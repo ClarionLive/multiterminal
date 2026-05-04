@@ -2293,6 +2293,15 @@ body.light .helper-chip {
             }
         } else if (data.type === "error") {
             showErrorToast(data.message);
+            // Roll back optimistic local state when the host sends back an
+            // authoritative value. Today only the project-update path uses
+            // this — the popover save mutates currentTask.projectId before
+            // the host confirms; without rollback the UI would keep showing
+            // the rejected project until a later refresh.
+            if (Object.prototype.hasOwnProperty.call(data, "authoritativeProjectId") && currentTask) {
+                currentTask.projectId = data.authoritativeProjectId || null;
+                renderAll();
+            }
         }
     }
 
