@@ -233,6 +233,19 @@ namespace MultiTerminal.TasksPanel
             return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
         }
 
+        /// <summary>
+        /// Centralized {"type":"error","message":...} payload emit. Multiple
+        /// caller-side gaps (create_task failure, edit_task validation gates,
+        /// edit_task late race-coverage) post the same shape with the same
+        /// EscapeJson dialect; channeling through one helper keeps the wire
+        /// format consistent and avoids 7+ near-identical inline shapes.
+        /// </summary>
+        private void PostErrorMessage(string message)
+        {
+            var escaped = EscapeJson(message ?? "Operation failed");
+            PostMessage($"{{\"type\":\"error\",\"message\":\"{escaped}\"}}");
+        }
+
         private void OnWebViewInitialized(object sender, CoreWebView2InitializationCompletedEventArgs e)
         {
             DebugLog($"OnWebViewInitialized: success={e.IsSuccess}");
@@ -440,8 +453,7 @@ namespace MultiTerminal.TasksPanel
                                 // and skip the checklist/assignee/helpers follow-ups —
                                 // those would target a non-existent task and produce
                                 // additional silent failures.
-                                var errorMessage = EscapeJson(result?.Error ?? "Failed to create task");
-                                PostMessage($"{{\"type\":\"error\",\"message\":\"{errorMessage}\"}}");
+                                PostErrorMessage(result?.Error ?? "Failed to create task");
                             }
                         }
                         break;
@@ -522,8 +534,7 @@ namespace MultiTerminal.TasksPanel
                                 if (editProjectIdEl.ValueKind != JsonValueKind.String
                                     && editProjectIdEl.ValueKind != JsonValueKind.Null)
                                 {
-                                    var shapeErr = EscapeJson($"Cannot save task: 'projectId' must be a string or null (got {editProjectIdEl.ValueKind}).");
-                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{shapeErr}\"}}");
+                                    PostErrorMessage($"Cannot save task: 'projectId' must be a string or null (got {editProjectIdEl.ValueKind}).");
                                     break;
                                 }
                                 editProjectIdRaw = editProjectIdEl.GetString();
@@ -536,8 +547,7 @@ namespace MultiTerminal.TasksPanel
                             var editTitleStr = editTitleEl.GetString();
                             if (string.IsNullOrWhiteSpace(editTitleStr))
                             {
-                                var titleErr = EscapeJson("Cannot save task: title cannot be empty.");
-                                PostMessage($"{{\"type\":\"error\",\"message\":\"{titleErr}\"}}");
+                                PostErrorMessage("Cannot save task: title cannot be empty.");
                                 break;
                             }
 
@@ -549,8 +559,7 @@ namespace MultiTerminal.TasksPanel
                                 editPriorityStr = editPriorityEl.GetString();
                                 if (editPriorityStr != "urgent" && editPriorityStr != "normal" && editPriorityStr != "low")
                                 {
-                                    var prioErr = EscapeJson($"Cannot save task: invalid priority '{editPriorityStr}' (expected urgent | normal | low).");
-                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{prioErr}\"}}");
+                                    PostErrorMessage($"Cannot save task: invalid priority '{editPriorityStr}' (expected urgent | normal | low).");
                                     break;
                                 }
                             }
@@ -563,8 +572,7 @@ namespace MultiTerminal.TasksPanel
                                 editStatusStr = editStatusEl.GetString();
                                 if (editStatusStr != "todo" && editStatusStr != "in_progress" && editStatusStr != "done" && editStatusStr != "suggestion")
                                 {
-                                    var statusErr = EscapeJson($"Cannot save task: invalid status '{editStatusStr}' (expected todo | in_progress | done | suggestion).");
-                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{statusErr}\"}}");
+                                    PostErrorMessage($"Cannot save task: invalid status '{editStatusStr}' (expected todo | in_progress | done | suggestion).");
                                     break;
                                 }
                             }
@@ -575,8 +583,7 @@ namespace MultiTerminal.TasksPanel
                                 _broker.TryNormalizeProjectId(editProjectIdRaw, out bool projectAmbiguous);
                                 if (projectAmbiguous)
                                 {
-                                    var ambErr = EscapeJson($"Project id '{editProjectIdRaw}' is ambiguous (matches multiple registered projects, or is a short prefix of one); edit not applied. Pass the full id.");
-                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{ambErr}\"}}");
+                                    PostErrorMessage($"Project id '{editProjectIdRaw}' is ambiguous (matches multiple registered projects, or is a short prefix of one); edit not applied. Pass the full id.");
                                     break;
                                 }
                             }
@@ -615,8 +622,7 @@ namespace MultiTerminal.TasksPanel
                                     // that case). Surface the late failure
                                     // so the user knows the project change
                                     // didn't apply.
-                                    var lateErr = EscapeJson(projResult.Error ?? "Failed to update project");
-                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{lateErr}\"}}");
+                                    PostErrorMessage(projResult.Error ?? "Failed to update project");
                                 }
                             }
 
