@@ -2493,7 +2493,7 @@ namespace MultiTerminal.MCPServer.Services
                     return new CreateTaskResult
                     {
                         Success = false,
-                        Error = $"Project id '{projectId}' is ambiguous (matches a short key that also prefixes longer keys). Pass the full id."
+                        Error = $"Project id '{projectId}' is ambiguous (matches multiple registered projects, or is a short prefix of one). Pass the full id."
                     };
                 }
             }
@@ -3422,7 +3422,7 @@ namespace MultiTerminal.MCPServer.Services
                     return new UpdateTaskResult
                     {
                         Success = false,
-                        Error = $"Project id '{projectId}' is ambiguous (matches a short key that also prefixes longer keys). Pass the full id."
+                        Error = $"Project id '{projectId}' is ambiguous (matches multiple registered projects, or is a short prefix of one). Pass the full id."
                     };
                 }
                 task.ProjectId = canonical;

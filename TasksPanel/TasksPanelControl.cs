@@ -509,13 +509,35 @@ namespace MultiTerminal.TasksPanel
                             // UpdateTaskProject below covers the narrow race
                             // where the project registry shifts between validate
                             // and apply.
+                            //
+                            // ValueKind guard: a malformed message that sends
+                            // projectId as a non-string (Number/Array/Object)
+                            // would throw InvalidOperationException out of
+                            // GetString() and be silently swallowed by the outer
+                            // try/catch. Reject the shape early with a toast so
+                            // the failure is visible — and so the value can be
+                            // cached once into editProjectIdRaw and reused at the
+                            // ambiguity-error and apply sites without re-reading.
                             bool hasProjectId = root.TryGetProperty("projectId", out var editProjectIdEl);
+                            string editProjectIdRaw = null;
+                            if (hasProjectId)
+                            {
+                                if (editProjectIdEl.ValueKind != JsonValueKind.String
+                                    && editProjectIdEl.ValueKind != JsonValueKind.Null)
+                                {
+                                    var shapeErr = EscapeJson($"Cannot save task: 'projectId' must be a string or null (got {editProjectIdEl.ValueKind}).");
+                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{shapeErr}\"}}");
+                                    break;
+                                }
+                                editProjectIdRaw = editProjectIdEl.GetString();
+                            }
+
                             if (hasProjectId && _broker != null)
                             {
-                                _broker.TryNormalizeProjectId(editProjectIdEl.GetString(), out bool projectAmbiguous);
+                                _broker.TryNormalizeProjectId(editProjectIdRaw, out bool projectAmbiguous);
                                 if (projectAmbiguous)
                                 {
-                                    var ambErr = EscapeJson($"Project id '{editProjectIdEl.GetString()}' is ambiguous (matches multiple registered projects); edit not applied. Pass the full id.");
+                                    var ambErr = EscapeJson($"Project id '{editProjectIdRaw}' is ambiguous (matches multiple registered projects, or is a short prefix of one); edit not applied. Pass the full id.");
                                     PostMessage($"{{\"type\":\"error\",\"message\":\"{ambErr}\"}}");
                                     break;
                                 }
@@ -533,7 +555,7 @@ namespace MultiTerminal.TasksPanel
                             // Update project if provided
                             if (hasProjectId)
                             {
-                                var projResult = _broker?.UpdateTaskProject(taskId, editProjectIdEl.GetString());
+                                var projResult = _broker?.UpdateTaskProject(taskId, editProjectIdRaw);
                                 if (projResult?.Success == false)
                                 {
                                     // Race: project registry shifted between
