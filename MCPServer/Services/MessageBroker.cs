@@ -2343,7 +2343,9 @@ namespace MultiTerminal.MCPServer.Services
         /// creation, emit a create_skipped event so the case is visible".
         ///
         /// Resolution order (each step short-circuits the next):
-        /// 1. null / whitespace input → null.
+        /// 1. null / empty input → null silently.
+        /// 1b. non-empty whitespace input → null + debug warning (probable
+        ///     caller bug; behavior identical to null/empty otherwise).
         /// 2. exact key match found:
         ///    a. AND a longer key also starts with input AND input.Length &lt; 32
         ///       (so input itself is shorter than a canonical GUID) → null
@@ -2351,11 +2353,23 @@ namespace MultiTerminal.MCPServer.Services
         ///    b. otherwise → trimmed (caller intended this exact key).
         /// 3. input shorter than 4 chars → trimmed (don't prefix-match noise).
         /// 4. exactly one key starts with input (OrdinalIgnoreCase) → full key.
-        /// 5. zero or multiple prefix-matches → trimmed + debug warning.
+        /// 5. multiple keys start with input → null + debug warning
+        ///    (genuinely ambiguous; symmetric with case 2a).
+        /// 6. zero prefix-matches → trimmed + debug warning (unknown raw
+        ///    value; let downstream lookups fail loudly rather than swallow).
         /// </summary>
         private string NormalizeProjectId(string raw)
         {
-            if (string.IsNullOrWhiteSpace(raw)) return null;
+            if (string.IsNullOrEmpty(raw)) return null;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                // Non-null, non-empty, but all whitespace. Behavior is the same
+                // as null/empty (no project bound) but log it so caller bugs
+                // (e.g. trimmed-too-aggressively-on-the-frontend) are visible.
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MessageBroker] NormalizeProjectId: input was non-empty whitespace ({raw.Length} chars); treating as no-project intent.");
+                return null;
+            }
             string trimmed = raw.Trim();
 
             // Scan once; record exact match and prefix-match population in a single pass.
@@ -2396,9 +2410,59 @@ namespace MultiTerminal.MCPServer.Services
 
             if (prefixOnlyHits == 1) return prefixOnlyMatch;
 
+            if (prefixOnlyHits >= 2)
+            {
+                // Genuinely ambiguous: input prefixes multiple registered keys.
+                // Symmetric with the aliased-exact-match case above — return
+                // null so callers (CreateTask, UpdateTaskProject) fast-fail
+                // instead of storing a raw value that would silently fail
+                // every downstream _projects lookup.
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MessageBroker] NormalizeProjectId: '{trimmed}' prefixes {prefixOnlyHits} registered keys; ambiguous, returning null. Caller should pass the full id.");
+                return null;
+            }
+
+            // prefixOnlyHits == 0: unknown raw value, no exact and no prefix
+            // match. Storing it preserves caller intent and lets the value
+            // round-trip — downstream lookups fail loudly rather than this
+            // call swallowing a typo silently.
             System.Diagnostics.Debug.WriteLine(
-                $"[MessageBroker] NormalizeProjectId: '{trimmed}' had {prefixOnlyHits} prefix matches in _projects; storing raw value.");
+                $"[MessageBroker] NormalizeProjectId: '{trimmed}' had no prefix match in _projects; storing raw value.");
             return trimmed;
+        }
+
+        /// <summary>
+        /// Public dry-run wrapper over <see cref="NormalizeProjectId"/>. Lets UI
+        /// callers pre-validate a project id before submitting an edit, without
+        /// mutating any state.
+        ///
+        /// Returns the canonical project id when the input resolves cleanly:
+        /// - null/empty/whitespace input → returns null with ambiguous=false
+        ///   (caller intent: "no project bound"; the empty-string and the
+        ///   ambiguous-id paths must stay distinguishable so the UI can choose
+        ///   to clear-the-binding vs. report-an-error).
+        /// - Non-empty input that resolves to null (aliased-exact short id, or
+        ///   — once the multi-prefix-match path is tightened — a short id that
+        ///   prefixes multiple registered projects) → returns null with
+        ///   ambiguous=true. Caller should surface the error to the user
+        ///   instead of submitting the edit.
+        /// - Non-empty input that resolves to a registered key → returns the
+        ///   canonical full key with ambiguous=false.
+        /// - Non-empty input with no exact and no unique-prefix match (unknown
+        ///   raw value) → returns the trimmed input with ambiguous=false. The
+        ///   downstream write path will store the raw value and emit a debug
+        ///   warning, matching the existing fallback behaviour.
+        /// </summary>
+        public string TryNormalizeProjectId(string raw, out bool ambiguous)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                ambiguous = false;
+                return null;
+            }
+            string canonical = NormalizeProjectId(raw);
+            ambiguous = (canonical == null);
+            return canonical;
         }
 
         /// <summary>
@@ -3795,7 +3859,7 @@ namespace MultiTerminal.MCPServer.Services
                     string skipReason;
                     if (string.IsNullOrEmpty(canonicalProjectId))
                     {
-                        skipReason = "id is ambiguous; pass the full project id";
+                        skipReason = "id is ambiguous (matches multiple registered projects, or is a short prefix of one); pass the full project id";
                     }
                     else if (!_projects.ContainsKey(canonicalProjectId))
                     {

@@ -661,7 +661,20 @@ namespace MultiTerminal.TaskLifecycleBoard
             if (!root.TryGetProperty("projectId", out var projectEl))
                 return;
 
-            _broker?.UpdateTaskProject(_taskId, projectEl.GetString());
+            var result = _broker?.UpdateTaskProject(_taskId, projectEl.GetString());
+            if (result?.Success == false)
+            {
+                // Surface the failure (e.g., ambiguous short id) as an error
+                // toast via the WebView. Without this, the dropdown change
+                // appears to succeed visually while the binding silently
+                // doesn't update server-side.
+                var payload = JsonSerializer.Serialize(new
+                {
+                    type = "error",
+                    message = result.Error ?? "Failed to update project"
+                });
+                PostMessage(payload);
+            }
         }
 
         private void HandleHelpersUpdate(JsonElement root)

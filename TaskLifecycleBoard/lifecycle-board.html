@@ -2291,6 +2291,8 @@ body.light .helper-chip {
             if (cardModalOpenIndex !== null) {
                 renderCardModalImages(cardModalOpenIndex);
             }
+        } else if (data.type === "error") {
+            showErrorToast(data.message);
         }
     }
 
@@ -2854,6 +2856,22 @@ body.light .helper-chip {
             toast.classList.remove("visible");
             invalidDropToastTimer = null;
         }, 2000);
+    }
+
+    // Generic error toast — reuses the existing styled element. Errors usually
+    // need more reading time than the invalid-drop hint, so the default
+    // duration is longer.
+    function showErrorToast(message, durationMs) {
+        var toast = document.getElementById("invalidDropToast");
+        if (!toast) return;
+        toast.textContent = message || "Operation failed";
+        toast.classList.add("visible");
+
+        if (invalidDropToastTimer) clearTimeout(invalidDropToastTimer);
+        invalidDropToastTimer = setTimeout(function () {
+            toast.classList.remove("visible");
+            invalidDropToastTimer = null;
+        }, typeof durationMs === "number" ? durationMs : 5000);
     }
 
     function transitionRequiresNotes(fromStatus, toStatus) {

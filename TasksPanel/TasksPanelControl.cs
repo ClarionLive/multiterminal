@@ -434,6 +434,15 @@ namespace MultiTerminal.TasksPanel
                                     }
                                 }
                             }
+                            else
+                            {
+                                // Surface CreateTask failure (e.g., ambiguous projectId)
+                                // and skip the checklist/assignee/helpers follow-ups —
+                                // those would target a non-existent task and produce
+                                // additional silent failures.
+                                var errorMessage = EscapeJson(result?.Error ?? "Failed to create task");
+                                PostMessage($"{{\"type\":\"error\",\"message\":\"{errorMessage}\"}}");
+                            }
                         }
                         break;
 
@@ -491,6 +500,27 @@ namespace MultiTerminal.TasksPanel
                             var testResults = root.TryGetProperty("testResults", out var testEl)
                                 ? testEl.GetString() : null;
 
+                            // Pre-validate projectId BEFORE any state mutation. The
+                            // edit must be atomic w.r.t. an ambiguous project id —
+                            // otherwise title/description/priority/status/assignee/
+                            // continuation would land successfully and only the
+                            // project change would silently fail, producing
+                            // half-applied state. The result-check on
+                            // UpdateTaskProject below covers the narrow race
+                            // where the project registry shifts between validate
+                            // and apply.
+                            bool hasProjectId = root.TryGetProperty("projectId", out var editProjectIdEl);
+                            if (hasProjectId && _broker != null)
+                            {
+                                _broker.TryNormalizeProjectId(editProjectIdEl.GetString(), out bool projectAmbiguous);
+                                if (projectAmbiguous)
+                                {
+                                    var ambErr = EscapeJson($"Project id '{editProjectIdEl.GetString()}' is ambiguous (matches multiple registered projects); edit not applied. Pass the full id.");
+                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{ambErr}\"}}");
+                                    break;
+                                }
+                            }
+
                             // Update title, description, and documentation fields
                             _broker?.UpdateTask(taskId, editTitleEl.GetString(), editDescription, editedBy, plan, implementation, testResults);
 
@@ -501,9 +531,19 @@ namespace MultiTerminal.TasksPanel
                             }
 
                             // Update project if provided
-                            if (root.TryGetProperty("projectId", out var editProjectIdEl))
+                            if (hasProjectId)
                             {
-                                _broker?.UpdateTaskProject(taskId, editProjectIdEl.GetString());
+                                var projResult = _broker?.UpdateTaskProject(taskId, editProjectIdEl.GetString());
+                                if (projResult?.Success == false)
+                                {
+                                    // Race: project registry shifted between
+                                    // pre-validate and apply. Other fields
+                                    // already landed; surface the late failure
+                                    // so the user knows the project change
+                                    // didn't apply.
+                                    var lateErr = EscapeJson(projResult.Error ?? "Failed to update project");
+                                    PostMessage($"{{\"type\":\"error\",\"message\":\"{lateErr}\"}}");
+                                }
                             }
 
                             // Update status if provided
