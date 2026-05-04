@@ -2326,6 +2326,82 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Resolve a caller-supplied project id to the canonical key stored in
+        /// <see cref="_projects"/>. Agents routinely copy the 8-char short id
+        /// from chip-formatted output (e.g. <c>list_projects</c>) instead of
+        /// the full GUID; storing the truncated value would silently break
+        /// every downstream lookup (worktree create-hook gate, project chips,
+        /// filtering).
+        ///
+        /// _projects can hold a mix of 8-char keys (CreateProject default) and
+        /// 36-char dashed GUIDs (project.json sync). When a short exact-match
+        /// also prefixes one or more longer keys, the situation is ambiguous —
+        /// we return null rather than guess and bind the task to the wrong
+        /// project. Callers (CreateTask, UpdateTaskProject) treat null on
+        /// non-empty input as "ambiguous, refuse to bind" and surface a
+        /// failure to the user; SetTaskActive treats it as "skip worktree
+        /// creation, emit a create_skipped event so the case is visible".
+        ///
+        /// Resolution order (each step short-circuits the next):
+        /// 1. null / whitespace input → null.
+        /// 2. exact key match found:
+        ///    a. AND a longer key also starts with input AND input.Length &lt; 32
+        ///       (so input itself is shorter than a canonical GUID) → null
+        ///       + debug warning ("ambiguous, returning null").
+        ///    b. otherwise → trimmed (caller intended this exact key).
+        /// 3. input shorter than 4 chars → trimmed (don't prefix-match noise).
+        /// 4. exactly one key starts with input (OrdinalIgnoreCase) → full key.
+        /// 5. zero or multiple prefix-matches → trimmed + debug warning.
+        /// </summary>
+        private string NormalizeProjectId(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            string trimmed = raw.Trim();
+
+            // Scan once; record exact match and prefix-match population in a single pass.
+            bool exactMatch = false;
+            string prefixOnlyMatch = null;
+            int prefixOnlyHits = 0;
+            foreach (var key in _projects.Keys)
+            {
+                if (string.Equals(key, trimmed, StringComparison.Ordinal))
+                {
+                    exactMatch = true;
+                    continue;
+                }
+                if (trimmed.Length >= 4
+                    && key.StartsWith(trimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    prefixOnlyMatch = key;
+                    prefixOnlyHits++;
+                }
+            }
+
+            if (exactMatch)
+            {
+                // Aliased exact match: input is itself a key but other keys start
+                // with it too. Length < 32 catches both the 8-char short-id case
+                // and any other non-canonical key shorter than a full GUID
+                // (32-char "N" format, 36-char dashed format).
+                if (prefixOnlyHits > 0 && trimmed.Length < 32)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] NormalizeProjectId: '{trimmed}' is a short exact key that also prefixes {prefixOnlyHits} longer key(s); ambiguous, returning null. Caller should pass the full id.");
+                    return null;
+                }
+                return trimmed;
+            }
+
+            if (trimmed.Length < 4) return trimmed;
+
+            if (prefixOnlyHits == 1) return prefixOnlyMatch;
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[MessageBroker] NormalizeProjectId: '{trimmed}' had {prefixOnlyHits} prefix matches in _projects; storing raw value.");
+            return trimmed;
+        }
+
+        /// <summary>
         /// Create a new task on the Kanban board.
         /// </summary>
         public CreateTaskResult CreateTask(string title, string description, string createdBy, string status = "todo", string priority = "normal", string projectId = null)
@@ -2339,6 +2415,25 @@ namespace MultiTerminal.MCPServer.Services
             if (!validPriorities.Contains(priority))
                 priority = "normal";
 
+            // Distinguish "no project" (empty input — caller intent) from
+            // "ambiguous project id" (NormalizeProjectId returned null because
+            // a short input matched a key that ALSO prefixes longer keys).
+            // Failing fast on ambiguity prevents the call from looking like a
+            // success while silently dropping the requested project.
+            string canonicalProjectId = null;
+            if (!string.IsNullOrWhiteSpace(projectId))
+            {
+                canonicalProjectId = NormalizeProjectId(projectId);
+                if (canonicalProjectId == null)
+                {
+                    return new CreateTaskResult
+                    {
+                        Success = false,
+                        Error = $"Project id '{projectId}' is ambiguous (matches a short key that also prefixes longer keys). Pass the full id."
+                    };
+                }
+            }
+
             var task = new KanbanTask
             {
                 Title = title,
@@ -2346,7 +2441,7 @@ namespace MultiTerminal.MCPServer.Services
                 CreatedBy = createdBy,
                 Status = status,
                 Priority = priority,
-                ProjectId = string.IsNullOrEmpty(projectId) ? null : projectId
+                ProjectId = canonicalProjectId
             };
 
             if (_tasks.TryAdd(task.Id, task))
@@ -2899,15 +2994,12 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         System.Diagnostics.Debug.WriteLine(
                             $"[MessageBroker] Auto-commit for {taskId} FAILED: {commitResult.Stderr}");
-                        string trimmedStderr = commitResult.Stderr?.Length > 500
-                            ? commitResult.Stderr.Substring(0, 500) + "..."
-                            : commitResult.Stderr;
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
                             Type = "worktree",
                             Action = "auto_commit_failed",
-                            Content = $"Auto-commit failed for '{task.Title}'. Worktree NOT pruned. Error: {trimmedStderr}",
+                            Content = $"Auto-commit failed for '{task.Title}'. Worktree NOT pruned — see debug log for details.",
                             RelatedId = taskId
                         });
                     }
@@ -2916,12 +3008,17 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     System.Diagnostics.Debug.WriteLine(
                         $"[MessageBroker] Auto-commit threw for task {taskId}: {ex.Message}");
+                    // Activity feed is broadcast to HUD/board/MCP clients; raw
+                    // exception text often leaks absolute paths, branch names,
+                    // or git command details. Keep the full message in
+                    // Debug.WriteLine above (server-side only) and surface a
+                    // generic notice to clients.
                     RecordActivity(new ActivityEvent
                     {
                         Terminal = task.Assignee ?? "System",
                         Type = "worktree",
                         Action = "auto_commit_failed",
-                        Content = $"Auto-commit threw for '{task.Title}'. Worktree NOT pruned. Error: {ex.Message}",
+                        Content = $"Auto-commit threw for '{task.Title}'. Worktree NOT pruned — see debug log for details.",
                         RelatedId = taskId
                     });
                 }
@@ -2938,6 +3035,14 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         System.Diagnostics.Debug.WriteLine(
                             $"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "prune_failed",
+                            Content = $"Worktree prune failed for '{task.Title}'. Auto-merge skipped — see debug log for details.",
+                            RelatedId = taskId
+                        });
                     }
                 }
 
@@ -2987,16 +3092,13 @@ namespace MultiTerminal.MCPServer.Services
                                 $"[MessageBroker] Auto-merge for {taskId} FAILED" +
                                 (mergeResult.HadConflicts ? " (conflict)" : "") +
                                 $": {mergeResult.Stderr}");
-                            string trimmedMergeStderr = mergeResult.Stderr?.Length > 500
-                                ? mergeResult.Stderr.Substring(0, 500) + "..."
-                                : mergeResult.Stderr;
                             string conflictTag = mergeResult.HadConflicts ? "Merge conflict" : "Merge failed";
                             RecordActivity(new ActivityEvent
                             {
                                 Terminal = task.Assignee ?? "System",
                                 Type = "worktree",
                                 Action = "auto_merge_failed",
-                                Content = $"{conflictTag} for '{task.Title}'. Task branch preserved for manual resolution. Error: {trimmedMergeStderr}",
+                                Content = $"{conflictTag} for '{task.Title}'. Task branch preserved for manual resolution — see debug log for details.",
                                 RelatedId = taskId
                             });
                         }
@@ -3010,7 +3112,7 @@ namespace MultiTerminal.MCPServer.Services
                             Terminal = task.Assignee ?? "System",
                             Type = "worktree",
                             Action = "auto_merge_failed",
-                            Content = $"Auto-merge threw for '{task.Title}'. Task branch preserved for manual resolution. Error: {ex.Message}",
+                            Content = $"Auto-merge threw for '{task.Title}'. Task branch preserved for manual resolution — see debug log for details.",
                             RelatedId = taskId
                         });
                     }
@@ -3239,8 +3341,28 @@ namespace MultiTerminal.MCPServer.Services
                 return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
-            // Normalize empty string to null
-            task.ProjectId = string.IsNullOrEmpty(projectId) ? null : projectId;
+            // Distinguish "user cleared the project" (empty input) from "we
+            // refused to bind because the input was ambiguous" (non-empty input
+            // that NormalizeProjectId couldn't resolve). Without this branch an
+            // ambiguous short id would silently overwrite a previously valid
+            // assignment with null and the call would still report Success.
+            if (string.IsNullOrWhiteSpace(projectId))
+            {
+                task.ProjectId = null;
+            }
+            else
+            {
+                string canonical = NormalizeProjectId(projectId);
+                if (canonical == null)
+                {
+                    return new UpdateTaskResult
+                    {
+                        Success = false,
+                        Error = $"Project id '{projectId}' is ambiguous (matches a short key that also prefixes longer keys). Pass the full id."
+                    };
+                }
+                task.ProjectId = canonical;
+            }
 
             // Persist to database
             try { _taskDb.SaveTask(task); }
@@ -3600,18 +3722,98 @@ namespace MultiTerminal.MCPServer.Services
             // spawns can be rooted there. Idempotent: returns the existing record
             // when one already exists. Failure is non-fatal — the task still goes
             // active so the user is not blocked by git issues.
+            //
+            // Normalize ProjectId first: legacy tasks may have a truncated 8-char
+            // short id stored (silent footgun before the CreateTask fix). If we
+            // can resolve it to a full key, opportunistically self-heal the row
+            // so future lookups succeed without repeating the prefix scan.
             if (MultiTerminal.Services.WorktreeConfig.IsEnabled
-                && !string.IsNullOrEmpty(task.ProjectId)
-                && _projects.TryGetValue(task.ProjectId, out var activeProj)
-                && !string.IsNullOrEmpty(activeProj.Path))
+                && !string.IsNullOrEmpty(task.ProjectId))
             {
-                try
+                string canonicalProjectId = NormalizeProjectId(task.ProjectId);
+                bool canCreateWorktree = true;
+
+                if (!string.IsNullOrEmpty(canonicalProjectId)
+                    && !string.Equals(canonicalProjectId, task.ProjectId, StringComparison.Ordinal))
                 {
-                    _worktrees.CreateForTaskAsync(taskId, activeProj.Path).GetAwaiter().GetResult();
+                    string originalProjectId = task.ProjectId;
+                    task.ProjectId = canonicalProjectId;
+                    try
+                    {
+                        _taskDb.SaveTask(task);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Persistence failed — revert in-memory mutation so the
+                        // durable record stays consistent with the in-memory cache,
+                        // and skip worktree creation under a binding the task row
+                        // doesn't actually claim.
+                        task.ProjectId = originalProjectId;
+                        canCreateWorktree = false;
+                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist normalized ProjectId for task {taskId}: {ex.Message}");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "create_skipped",
+                            Content = $"Worktree creation skipped for '{task.Title}': could not persist canonical project id — see debug log for details.",
+                            RelatedId = taskId
+                        });
+                    }
                 }
-                catch (Exception ex)
+
+                if (canCreateWorktree
+                    && !string.IsNullOrEmpty(canonicalProjectId)
+                    && _projects.TryGetValue(canonicalProjectId, out var activeProj)
+                    && !string.IsNullOrEmpty(activeProj.Path))
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Worktree create failed for task {taskId}: {ex.Message}");
+                    try
+                    {
+                        _worktrees.CreateForTaskAsync(taskId, activeProj.Path).GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Worktree create failed for task {taskId}: {ex.Message}");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "create_failed",
+                            Content = $"Worktree creation failed for '{task.Title}' — see debug log for details.",
+                            RelatedId = taskId
+                        });
+                    }
+                }
+                else if (canCreateWorktree)
+                {
+                    // Worktree mode is on AND the task claims a project, but the
+                    // project couldn't be resolved. Distinguish the three causes
+                    // so the user can act on the right one without reading debug
+                    // logs: ambiguous input (caller fix), cold cache or missing
+                    // registration (config fix), or registered-without-path
+                    // (project record fix).
+                    string skipReason;
+                    if (string.IsNullOrEmpty(canonicalProjectId))
+                    {
+                        skipReason = "id is ambiguous; pass the full project id";
+                    }
+                    else if (!_projects.ContainsKey(canonicalProjectId))
+                    {
+                        skipReason = "project not registered or registry not yet loaded";
+                    }
+                    else
+                    {
+                        skipReason = "project is registered but has no filesystem path";
+                    }
+
+                    RecordActivity(new ActivityEvent
+                    {
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = "create_skipped",
+                        Content = $"Worktree creation skipped for '{task.Title}': project '{task.ProjectId}' could not be resolved ({skipReason}).",
+                        RelatedId = taskId
+                    });
                 }
             }
 
