@@ -2510,9 +2510,25 @@ namespace MultiTerminal.MCPServer.Services
 
             if (_tasks.TryAdd(task.Id, task))
             {
-                // Persist to database
-                try { _taskDb.SaveTask(task); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save task: {ex.Message}"); }
+                // Persist to database. If the durable write fails, evict the
+                // in-memory entry so callers don't observe a task that won't
+                // survive a restart, skip the broadcast/activity announcements
+                // (they would advertise a row that doesn't exist), and return
+                // Success=false so the caller-side toast plumbing fires.
+                try
+                {
+                    _taskDb.SaveTask(task);
+                }
+                catch (Exception ex)
+                {
+                    _tasks.TryRemove(task.Id, out _);
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save task: {ex.Message}");
+                    return new CreateTaskResult
+                    {
+                        Success = false,
+                        Error = $"Failed to persist new task: {ex.Message}"
+                    };
+                }
 
                 BroadcastTaskUpdate();
 
@@ -3410,6 +3426,7 @@ namespace MultiTerminal.MCPServer.Services
             // that NormalizeProjectId couldn't resolve). Without this branch an
             // ambiguous short id would silently overwrite a previously valid
             // assignment with null and the call would still report Success.
+            string originalProjectId = task.ProjectId;
             if (string.IsNullOrWhiteSpace(projectId))
             {
                 task.ProjectId = null;
@@ -3428,9 +3445,26 @@ namespace MultiTerminal.MCPServer.Services
                 task.ProjectId = canonical;
             }
 
-            // Persist to database
-            try { _taskDb.SaveTask(task); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update task project: {ex.Message}"); }
+            // Persist to database. If the durable write fails, revert the
+            // in-memory mutation so the cache stays consistent with the row,
+            // skip the broadcast (no one should observe a state we couldn't
+            // commit), and return Success=false so the caller-side toast
+            // plumbing fires — otherwise the UI would display "saved" while
+            // the row stays stale.
+            try
+            {
+                _taskDb.SaveTask(task);
+            }
+            catch (Exception ex)
+            {
+                task.ProjectId = originalProjectId;
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update task project: {ex.Message}");
+                return new UpdateTaskResult
+                {
+                    Success = false,
+                    Error = $"Failed to persist project change: {ex.Message}"
+                };
+            }
 
             BroadcastTaskUpdate();
 
