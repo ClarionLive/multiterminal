@@ -577,15 +577,32 @@ namespace MultiTerminal.TasksPanel
                                 }
                             }
 
-                            // Project ambiguity dry-run.
+                            // Project ambiguity dry-run. Capture the canonical
+                            // id so we pass exactly what we validated to
+                            // UpdateTaskProject, rather than re-resolving the
+                            // raw string at apply time. Without this thread,
+                            // a registry mutation in the microseconds between
+                            // dry-run and apply could resolve the same input
+                            // differently — pedantic check/use split, but
+                            // free to close.
+                            string editProjectIdToApply = editProjectIdRaw;
                             if (hasProjectId && _broker != null)
                             {
-                                _broker.TryNormalizeProjectId(editProjectIdRaw, out bool projectAmbiguous);
+                                string canonicalProjectId = _broker.TryNormalizeProjectId(editProjectIdRaw, out bool projectAmbiguous);
                                 if (projectAmbiguous)
                                 {
                                     PostErrorMessage($"Project id '{editProjectIdRaw}' is ambiguous (matches multiple registered projects, or is a short prefix of one); edit not applied. Pass the full id.");
                                     break;
                                 }
+                                // canonicalProjectId may be null when the input
+                                // was empty/whitespace (caller intent: clear
+                                // binding) — pass null through to preserve
+                                // that semantic. For a registered key or
+                                // unique-prefix expansion, pass the canonical.
+                                // For an unknown raw, canonical equals trimmed
+                                // raw — pass-through is identical to the
+                                // pre-fix behaviour.
+                                editProjectIdToApply = canonicalProjectId;
                             }
 
                             // All fields validated. Apply via the existing
@@ -612,7 +629,7 @@ namespace MultiTerminal.TasksPanel
                             // Update project if provided
                             if (hasProjectId)
                             {
-                                var projResult = _broker?.UpdateTaskProject(taskId, editProjectIdRaw);
+                                var projResult = _broker?.UpdateTaskProject(taskId, editProjectIdToApply);
                                 if (projResult?.Success == false)
                                 {
                                     // Race: project registry shifted between
