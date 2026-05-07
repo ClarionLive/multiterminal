@@ -58,6 +58,16 @@ namespace MultiTerminal
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            // Push WorktreeMode setting into the process env var BEFORE anything reads
+            // WorktreeConfig.IsEnabled (it resolves once, on first static access — first
+            // touch is MessageBroker construction inside MainForm). Externally-set env
+            // var wins so a system override remains a kill switch.
+            string existingWorktreeEnv = Environment.GetEnvironmentVariable(WorktreeConfig.ModeEnvVar);
+            if (string.IsNullOrWhiteSpace(existingWorktreeEnv))
+            {
+                Environment.SetEnvironmentVariable(WorktreeConfig.ModeEnvVar, SettingsService.Default.GetWorktreeMode());
+            }
+
             // Ensure plan database is seeded with initial data
             PlanSeeder.EnsureSeeded();
 

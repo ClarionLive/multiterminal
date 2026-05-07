@@ -98,6 +98,13 @@ namespace MultiTerminal.Dialogs
                 DebuggerProviderCombo.Items.Add(provider);
                 CrossModelAdversaryProviderCombo.Items.Add(provider);
             }
+
+            // Codex reasoning-effort dropdown
+            CodexEffortCombo.Items.Add("(default)");
+            CodexEffortCombo.Items.Add(SettingsService.CodexEffortHigh);
+            CodexEffortCombo.Items.Add(SettingsService.CodexEffortMedium);
+            CodexEffortCombo.Items.Add(SettingsService.CodexEffortLow);
+            CodexEffortCombo.SelectedIndex = 0;
         }
 
         private void LoadSettings()
@@ -139,6 +146,11 @@ namespace MultiTerminal.Dialogs
             // Default working directory
             DefaultWorkingDirText.Text = _settings.GetDefaultWorkingDirectory() ?? "";
 
+            // Git: per-task worktree isolation
+            WorktreeModeCheck.IsChecked = string.Equals(
+                _settings.GetWorktreeMode(), SettingsService.WorktreeModeOn,
+                StringComparison.OrdinalIgnoreCase);
+
             // Claude commands
             _commands = _settings.GetClaudeCommands();
             RefreshCommandsGrid();
@@ -149,6 +161,20 @@ namespace MultiTerminal.Dialogs
             SelectProviderByValue(SecurityAuditorProviderCombo, _settings.GetPipelineSecurityAuditor());
             SelectProviderByValue(DebuggerProviderCombo, _settings.GetPipelineDebugger());
             SelectProviderByValue(CrossModelAdversaryProviderCombo, _settings.GetPipelineCrossModelAdversary());
+
+            // Codex CLI
+            CodexBinaryPathText.Text = _settings.GetCodexBinaryPath() ?? "";
+            CodexModelText.Text = _settings.GetCodexModel() ?? "";
+            CodexDefaultAgentNameText.Text = _settings.GetCodexDefaultAgentName() ?? "";
+            string storedEffort = _settings.GetCodexEffort();
+            if (string.Equals(storedEffort, SettingsService.CodexEffortHigh, StringComparison.OrdinalIgnoreCase))
+                CodexEffortCombo.SelectedIndex = 1;
+            else if (string.Equals(storedEffort, SettingsService.CodexEffortMedium, StringComparison.OrdinalIgnoreCase))
+                CodexEffortCombo.SelectedIndex = 2;
+            else if (string.Equals(storedEffort, SettingsService.CodexEffortLow, StringComparison.OrdinalIgnoreCase))
+                CodexEffortCombo.SelectedIndex = 3;
+            else
+                CodexEffortCombo.SelectedIndex = 0;
         }
 
         private void SaveSettings()
@@ -171,6 +197,11 @@ namespace MultiTerminal.Dialogs
 
                 _settings.SetDefaultWorkingDirectory(DefaultWorkingDirText.Text?.Trim());
 
+                _settings.SetWorktreeMode(
+                    WorktreeModeCheck.IsChecked == true
+                        ? SettingsService.WorktreeModeOn
+                        : SettingsService.WorktreeModeOff);
+
                 _settings.SetClaudeCommands(_commands);
 
                 _settings.SetPipelineVerifier(GetSelectedProvider(VerifierProviderCombo));
@@ -178,6 +209,18 @@ namespace MultiTerminal.Dialogs
                 _settings.SetPipelineSecurityAuditor(GetSelectedProvider(SecurityAuditorProviderCombo));
                 _settings.SetPipelineDebugger(GetSelectedProvider(DebuggerProviderCombo));
                 _settings.SetPipelineCrossModelAdversary(GetSelectedProvider(CrossModelAdversaryProviderCombo));
+
+                _settings.SetCodexBinaryPath(CodexBinaryPathText.Text?.Trim());
+                _settings.SetCodexModel(CodexModelText.Text?.Trim());
+                _settings.SetCodexDefaultAgentName(CodexDefaultAgentNameText.Text?.Trim());
+                // Index 0 is "(default)" — stored as empty.
+                _settings.SetCodexEffort(CodexEffortCombo.SelectedIndex switch
+                {
+                    1 => SettingsService.CodexEffortHigh,
+                    2 => SettingsService.CodexEffortMedium,
+                    3 => SettingsService.CodexEffortLow,
+                    _ => ""
+                });
             }
             finally
             {
@@ -328,6 +371,83 @@ namespace MultiTerminal.Dialogs
 
             selected.IsDefault = true;
             RefreshCommandsGrid();
+        }
+
+        private void ResetCodexBrokerButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Force-reset across ALL workspaces. The user reaches for this when Codex
+            // reports "not authenticated" even though `codex login` succeeded — the
+            // companion's cached broker.json is pointing at a dead pipe and we can't
+            // patch the third-party plugin's auth probe to verify pipe liveness.
+            // Both calls leave live brokers untouched (pipe-alive / PID-alive checks).
+            try
+            {
+                var brokerResult = CodexBrokerHealthService.EnsureFreshBrokerStateForAllWorkspaces();
+                var pruneResult = CodexBrokerHealthService.PruneOrphanSessionDirs(0);
+
+                int totalFiles = brokerResult.CleanedFiles.Count + pruneResult.CleanedFiles.Count;
+                int totalDirs = brokerResult.CleanedDirs.Count + pruneResult.CleanedDirs.Count;
+                int totalErrors = brokerResult.Errors.Count + pruneResult.Errors.Count;
+
+                string message;
+                if (totalFiles == 0 && totalDirs == 0 && totalErrors == 0)
+                {
+                    message = "Broker state is already clean — nothing to reset.";
+                }
+                else
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine($"Cleaned {totalFiles} broker.json file(s) and {totalDirs} session dir(s).");
+
+                    if (brokerResult.CleanedFiles.Count > 0)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine("broker.json removed:");
+                        foreach (string f in brokerResult.CleanedFiles)
+                            sb.AppendLine("  " + f);
+                    }
+
+                    if (brokerResult.CleanedDirs.Count > 0 || pruneResult.CleanedDirs.Count > 0)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine("Session dirs removed:");
+                        foreach (string d in brokerResult.CleanedDirs)
+                            sb.AppendLine("  " + d);
+                        foreach (string d in pruneResult.CleanedDirs)
+                            sb.AppendLine("  " + d);
+                    }
+
+                    if (totalErrors > 0)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine($"Errors ({totalErrors}):");
+                        foreach (string err in brokerResult.Errors)
+                            sb.AppendLine("  " + err);
+                        foreach (string err in pruneResult.Errors)
+                            sb.AppendLine("  " + err);
+                    }
+
+                    sb.AppendLine();
+                    sb.AppendLine("Next Codex launch will spawn a fresh broker.");
+                    message = sb.ToString();
+                }
+
+                MessageBox.Show(
+                    this,
+                    message,
+                    "Reset Codex broker",
+                    MessageBoxButton.OK,
+                    totalErrors > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    this,
+                    "Reset failed: " + ex.Message,
+                    "Reset Codex broker",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
         }
 
         // -----------------------------------------------------------------

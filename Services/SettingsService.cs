@@ -198,6 +198,86 @@ namespace MultiTerminal.Services
         public const string PipelineProviderCodex = "codex";
         public const string PipelineProviderOff = "off";
 
+        // Per-task git worktree isolation. Stored as "on" or "off"; default "on".
+        // Pushed into the process env var MULTITERMINAL_WORKTREE_MODE at app start
+        // so WorktreeConfig (env-driven) sees it. The env var still overrides if set.
+        private const string WorktreeModeKey = "WorktreeMode";
+        private const string DefaultWorktreeMode = "on";
+
+        public const string WorktreeModeOn = "on";
+        public const string WorktreeModeOff = "off";
+
+        /// <summary>
+        /// Returns "on" or "off". Default is "on" — the gate has graduated from spike.
+        /// </summary>
+        public string GetWorktreeMode()
+        {
+            string raw = Get(WorktreeModeKey);
+            if (string.IsNullOrWhiteSpace(raw)) return DefaultWorktreeMode;
+            return string.Equals(raw.Trim(), WorktreeModeOn, StringComparison.OrdinalIgnoreCase)
+                ? WorktreeModeOn
+                : WorktreeModeOff;
+        }
+
+        /// <summary>
+        /// Sets worktree mode. Accepts "on" or "off"; anything else stores "off".
+        /// Takes effect on next app start (WorktreeConfig resolves once).
+        /// </summary>
+        public void SetWorktreeMode(string mode)
+        {
+            string normalized = string.Equals(mode?.Trim(), WorktreeModeOn, StringComparison.OrdinalIgnoreCase)
+                ? WorktreeModeOn
+                : WorktreeModeOff;
+            Set(WorktreeModeKey, normalized);
+        }
+
+        // Codex CLI settings (Phase 1 Codex integration).
+        private const string CodexBinaryPathKey = "CodexBinaryPath";
+        private const string CodexModelKey = "CodexModel";
+        private const string CodexEffortKey = "CodexEffort";
+        private const string CodexDefaultAgentNameKey = "CodexDefaultAgentName";
+
+        public const string CodexEffortHigh = "high";
+        public const string CodexEffortMedium = "medium";
+        public const string CodexEffortLow = "low";
+
+        /// <summary>
+        /// Absolute path to the codex binary. Null/empty means "resolve via PATH".
+        /// </summary>
+        public string GetCodexBinaryPath() => Get(CodexBinaryPathKey);
+        public void SetCodexBinaryPath(string path) => Set(CodexBinaryPathKey, path);
+
+        /// <summary>
+        /// Free-form model string passed to Codex (e.g. "gpt-5", "gpt-5-turbo"). Null/empty
+        /// means Codex uses its own default.
+        /// </summary>
+        /// <remarks>
+        /// NOT YET CONSUMED — Phase 1 only persists this value. Phase 2 writes it into
+        /// the managed block of <c>~/.codex/config.toml</c> via <c>CodexConfigService</c>.
+        /// Wiring this getter into <c>BuildCodexCommand</c> directly (e.g. passing
+        /// <c>--model</c>) would bypass the managed-block contract documented in
+        /// <c>docs/codex-integration.md "Known limitations"</c>.
+        /// </remarks>
+        public string GetCodexModel() => Get(CodexModelKey);
+        public void SetCodexModel(string model) => Set(CodexModelKey, model);
+
+        /// <summary>
+        /// Codex reasoning effort — "high", "medium", or "low". Null/empty means Codex default.
+        /// </summary>
+        /// <remarks>
+        /// NOT YET CONSUMED — see <see cref="GetCodexModel"/> for the same Phase 2 wiring note.
+        /// </remarks>
+        public string GetCodexEffort() => Get(CodexEffortKey);
+        public void SetCodexEffort(string effort) => Set(CodexEffortKey, effort);
+
+        /// <summary>
+        /// Default agent name used when launching a Codex terminal without an explicit
+        /// identity (e.g. from a project card launch with no team lead). Null/empty
+        /// falls back to the Claude Code behavior ("Unassigned").
+        /// </summary>
+        public string GetCodexDefaultAgentName() => Get(CodexDefaultAgentNameKey);
+        public void SetCodexDefaultAgentName(string name) => Set(CodexDefaultAgentNameKey, name);
+
         /// <summary>
         /// Gets the toolbar font size (8-14pt range).
         /// </summary>

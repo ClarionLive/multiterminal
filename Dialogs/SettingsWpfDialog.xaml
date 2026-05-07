@@ -547,6 +547,26 @@
                     </Grid>
                 </GroupBox>
 
+                <!-- SECTION 2b: Git -->
+                <GroupBox Header="Git"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <StackPanel Margin="4,8,4,4">
+                        <CheckBox x:Name="WorktreeModeCheck"
+                                  Content="Per-task worktree isolation"
+                                  Foreground="#E0E0E0"
+                                  FontFamily="Segoe UI"
+                                  FontSize="13"
+                                  VerticalContentAlignment="Center"/>
+                        <TextBlock Text="Each active task runs in its own git worktree on its own branch. Auto-commits at task done and merges into trunk. Requires app restart to take effect. The MULTITERMINAL_WORKTREE_MODE environment variable, if set, overrides this."
+                                   Foreground="#808080"
+                                   FontFamily="Segoe UI"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Margin="22,4,0,0"/>
+                    </StackPanel>
+                </GroupBox>
+
             </StackPanel>
 
             <!-- RIGHT COLUMN -->
@@ -750,6 +770,84 @@
                                Margin="4,0,4,0"
                                TextWrapping="Wrap"
                                Text="Defaults: Verifier / Code Reviewer / Security Auditor / Debugger run on Claude. Cross-Model Adversary is off. Selecting Codex requires the Codex plugin to be installed and authenticated."/>
+                </StackPanel>
+            </TabItem>
+
+            <TabItem Header="Codex" Style="{StaticResource DarkTabItem}">
+                <StackPanel Margin="16,16,16,16">
+                    <TextBlock Text="Configure the Codex CLI used for Codex terminal launches. These values are picked up on the next Codex terminal start."
+                               Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
+                               Margin="4,4,4,16"
+                               TextWrapping="Wrap"/>
+
+                    <GroupBox Header="Codex CLI"
+                              Style="{StaticResource DarkGroupBox}"
+                              Margin="0,0,0,10">
+                        <StackPanel Margin="8,12,8,8">
+
+                            <TextBlock Text="Binary path (optional — blank resolves via PATH)"
+                                       Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,6"/>
+                            <TextBox x:Name="CodexBinaryPathText"
+                                     Style="{StaticResource DarkTextBox}"
+                                     Height="28"
+                                     Margin="0,0,0,12"/>
+
+                            <TextBlock Text="Model (e.g. gpt-5, gpt-5-turbo) — blank uses Codex default"
+                                       Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,6"/>
+                            <TextBox x:Name="CodexModelText"
+                                     Style="{StaticResource DarkTextBox}"
+                                     Height="28"
+                                     Margin="0,0,0,12"/>
+
+                            <TextBlock Text="Reasoning effort"
+                                       Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,6"/>
+                            <ComboBox x:Name="CodexEffortCombo"
+                                      Style="{StaticResource DarkComboBox}"
+                                      Height="28"
+                                      Margin="0,0,0,12"/>
+
+                            <TextBlock Text="Default agent name (used when a Codex terminal launches without a team-lead identity)"
+                                       Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                       FontWeight="SemiBold"
+                                       Margin="0,0,0,6"/>
+                            <TextBox x:Name="CodexDefaultAgentNameText"
+                                     Style="{StaticResource DarkTextBox}"
+                                     Height="28"/>
+
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox Header="Broker Health"
+                              Style="{StaticResource DarkGroupBox}"
+                              Margin="0,0,0,10">
+                        <StackPanel Margin="8,12,8,8">
+
+                            <TextBlock Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                       Margin="0,0,0,8"
+                                       TextWrapping="Wrap"
+                                       Text="If Codex reports 'not authenticated' even after running 'codex login', the companion's cached broker.json may be pointing at a dead pipe (this happens after MT host restarts and machine reboots). Click below to reset the broker state for ALL workspaces."/>
+
+                            <Button x:Name="ResetCodexBrokerButton"
+                                    Content="Reset Codex broker"
+                                    Style="{StaticResource SmallActionButton}"
+                                    Height="28"
+                                    HorizontalAlignment="Left"
+                                    Padding="16,0,16,0"
+                                    Click="ResetCodexBrokerButton_Click"/>
+
+                        </StackPanel>
+                    </GroupBox>
+
+                    <TextBlock Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                               Margin="4,0,4,0"
+                               TextWrapping="Wrap"
+                               Text="Phase 1: the binary path and default agent name are applied on launch. Model / effort are persisted here and can be wired into ~/.codex/config.toml in a follow-up."/>
                 </StackPanel>
             </TabItem>
         </TabControl>
