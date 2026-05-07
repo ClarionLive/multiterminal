@@ -120,6 +120,15 @@ namespace MultiTerminal.Models
         /// </summary>
         public string TeamLead { get; set; }
 
+        /// <summary>
+        /// Storage value for the project's default terminal CLI.
+        /// Valid values: <see cref="TerminalKindHelper.ClaudeCodeValue"/> (default) or
+        /// <see cref="TerminalKindHelper.CodexValue"/>. Null / empty / unknown values
+        /// are treated as ClaudeCode by <see cref="TerminalKindHelper.ParseOrDefault"/>.
+        /// Consumed by the project-card split button and the Project settings form.
+        /// </summary>
+        public string DefaultTerminal { get; set; } = TerminalKindHelper.ClaudeCodeValue;
+
         // ── Git configuration ─────────────────────────────────────────────────
 
         /// <summary>

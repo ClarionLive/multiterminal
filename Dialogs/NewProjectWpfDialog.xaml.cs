@@ -3,13 +3,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Windows;
 using System.Windows.Interop;
+using MultiTerminal.Models;
 
 
 namespace MultiTerminal.Dialogs
 {
     /// <summary>
-    /// WPF replacement for NewProjectDialog. Dark-themed window with three fields:
-    /// project name, project folder (with browse), and team lead dropdown.
+    /// WPF replacement for NewProjectDialog. Dark-themed window with four fields:
+    /// project name, project folder (with browse), team lead dropdown, and
+    /// default-terminal dropdown (Claude Code / Codex).
     /// Uses WindowInteropHelper so it can be owned by the WinForms MainForm handle.
     /// </summary>
     public partial class NewProjectWpfDialog : Window
@@ -25,6 +27,14 @@ namespace MultiTerminal.Dialogs
         /// <summary>Display name of the selected team lead, or null if none chosen.</summary>
         public string SelectedTeamLead { get; private set; }
 
+        /// <summary>
+        /// Canonical storage value for the default terminal the user picked
+        /// (<see cref="TerminalKindHelper.ClaudeCodeValue"/> or
+        /// <see cref="TerminalKindHelper.CodexValue"/>). Always set — defaults
+        /// to ClaudeCode if the user didn't touch the dropdown.
+        /// </summary>
+        public string SelectedDefaultTerminal { get; private set; } = TerminalKindHelper.ClaudeCodeValue;
+
         public NewProjectWpfDialog(
             bool isDark,
             List<(string Id, string DisplayName, string AvatarUrl)> teamLeadProfiles)
@@ -38,6 +48,7 @@ namespace MultiTerminal.Dialogs
                 ApplyLightTheme();
 
             PopulateTeamLeadDropdown();
+            PopulateDefaultTerminalDropdown();
             SetupPlaceholder();
         }
 
@@ -49,6 +60,14 @@ namespace MultiTerminal.Dialogs
                 TeamLeadCombo.Items.Add(displayName ?? "(unnamed)");
             }
             TeamLeadCombo.SelectedIndex = 0;
+        }
+
+        private void PopulateDefaultTerminalDropdown()
+        {
+            // Index 0 → Claude Code (default), Index 1 → Codex.
+            DefaultTerminalCombo.Items.Add("Claude Code");
+            DefaultTerminalCombo.Items.Add("Codex");
+            DefaultTerminalCombo.SelectedIndex = 0;
         }
 
         private void SetupPlaceholder()
@@ -164,6 +183,10 @@ namespace MultiTerminal.Dialogs
                 SelectedTeamLead = _teamLeadProfiles[selectedIndex - 1].DisplayName;
             else
                 SelectedTeamLead = null;
+
+            SelectedDefaultTerminal = DefaultTerminalCombo.SelectedIndex == 1
+                ? TerminalKindHelper.CodexValue
+                : TerminalKindHelper.ClaudeCodeValue;
 
             DialogResult = true;
         }

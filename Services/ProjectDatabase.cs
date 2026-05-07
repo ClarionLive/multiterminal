@@ -120,7 +120,8 @@ namespace MultiTerminal.Services
                 ("git_repo_url",       "TEXT"),
                 ("git_default_branch", "TEXT"),
                 ("git_auto_commit",    "INTEGER DEFAULT 0"),
-                ("team_lead",          "TEXT")
+                ("team_lead",          "TEXT"),
+                ("default_terminal",   "TEXT NOT NULL DEFAULT 'claude-code'")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -324,7 +325,7 @@ namespace MultiTerminal.Services
             "name", "description", "path", "source_path", "deploy_path", "build_output_path",
             "build_command", "deploy_command", "launch_command", "project_type", "current_version",
             "change_log", "icon", "icon_color", "git_repo_url", "git_default_branch", "git_auto_commit",
-            "is_pinned", "status", "created_by", "last_opened_at", "team_lead"
+            "is_pinned", "status", "created_by", "last_opened_at", "team_lead", "default_terminal"
         };
 
         // Map camelCase JS field names to snake_case SQLite column names.
@@ -340,7 +341,7 @@ namespace MultiTerminal.Services
             ["gitRepoUrl"] = "git_repo_url", ["gitDefaultBranch"] = "git_default_branch",
             ["gitAutoCommit"] = "git_auto_commit", ["isPinned"] = "is_pinned",
             ["status"] = "status", ["createdBy"] = "created_by", ["lastOpenedAt"] = "last_opened_at",
-            ["teamLead"] = "team_lead",
+            ["teamLead"] = "team_lead", ["defaultTerminal"] = "default_terminal",
         };
 
         // Fields that map to INTEGER 0/1 booleans in the database.
@@ -468,7 +469,7 @@ namespace MultiTerminal.Services
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
                        launch_command, project_type, current_version, change_log, is_pinned,
                        icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                       team_lead
+                       team_lead, default_terminal
                 FROM projects
                 WHERE id = @id
             ";
@@ -497,7 +498,7 @@ namespace MultiTerminal.Services
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
                        launch_command, project_type, current_version, change_log, is_pinned,
                        icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                       team_lead
+                       team_lead, default_terminal
                 FROM projects
                 ORDER BY is_pinned DESC, created_at DESC
             ";
@@ -527,12 +528,12 @@ namespace MultiTerminal.Services
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
                        launch_command, project_type, current_version, change_log, is_pinned,
                        icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                       team_lead)
+                       team_lead, default_terminal)
                 VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
                        @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
                        @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
                        @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
-                       @teamLead)
+                       @teamLead, @defaultTerminal)
                 ON CONFLICT(id) DO UPDATE SET
                     name = COALESCE(@name, projects.name),
                     description = COALESCE(@description, projects.description),
@@ -554,7 +555,8 @@ namespace MultiTerminal.Services
                     git_repo_url = COALESCE(@gitRepoUrl, projects.git_repo_url),
                     git_default_branch = COALESCE(@gitDefaultBranch, projects.git_default_branch),
                     git_auto_commit = @gitAutoCommit,
-                    team_lead = COALESCE(@teamLead, projects.team_lead)
+                    team_lead = COALESCE(@teamLead, projects.team_lead),
+                    default_terminal = COALESCE(@defaultTerminal, projects.default_terminal)
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -582,6 +584,10 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@gitDefaultBranch", (object)project.GitDefaultBranch ?? DBNull.Value);
             command.Parameters.AddWithValue("@gitAutoCommit", project.GitAutoCommit ? 1 : 0);
             command.Parameters.AddWithValue("@teamLead", (object)project.TeamLead ?? DBNull.Value);
+            // Normalize on write so an unrecognized string can never persist — callers
+            // always see a canonical value on read.
+            command.Parameters.AddWithValue("@defaultTerminal",
+                (object)MultiTerminal.Models.TerminalKindHelper.Normalize(project.DefaultTerminal) ?? DBNull.Value);
 
             command.ExecuteNonQuery();
         }
@@ -613,7 +619,9 @@ namespace MultiTerminal.Services
                 GitRepoUrl = reader.IsDBNull(20) ? null : reader.GetString(20),
                 GitDefaultBranch = reader.IsDBNull(21) ? null : reader.GetString(21),
                 GitAutoCommit = !reader.IsDBNull(22) && reader.GetInt32(22) == 1,
-                TeamLead = reader.IsDBNull(23) ? null : reader.GetString(23)
+                TeamLead = reader.IsDBNull(23) ? null : reader.GetString(23),
+                DefaultTerminal = MultiTerminal.Models.TerminalKindHelper.Normalize(
+                    reader.IsDBNull(24) ? null : reader.GetString(24))
             };
         }
 
