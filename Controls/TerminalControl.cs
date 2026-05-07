@@ -39,6 +39,7 @@ namespace MultiTerminal.Controls
         private string _pendingProjectId;
         private bool _pendingIsTeamLead;
         private string _pendingGatewayProfile;
+        private string _pendingTaskWorktreePath;
         private TerminalTheme _pendingTheme = TerminalTheme.Dark;
         private string _terminalTitle = "PowerShell";
         private DebugLogService _debugLogService;
@@ -171,7 +172,7 @@ namespace MultiTerminal.Controls
             if (_pendingStart)
             {
                 _pendingStart = false;
-                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile);
+                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile, _pendingTaskWorktreePath);
             }
         }
 
@@ -184,7 +185,7 @@ namespace MultiTerminal.Controls
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
-        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
+        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
             if (_terminal != null && _terminal.IsRunning)
             {
@@ -194,7 +195,7 @@ namespace MultiTerminal.Controls
             // If renderer is initialized, start immediately
             if (_renderer.IsInitialized)
             {
-                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
+                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
             }
             else
             {
@@ -208,6 +209,7 @@ namespace MultiTerminal.Controls
                 _pendingProjectId = projectId;
                 _pendingIsTeamLead = isTeamLead;
                 _pendingGatewayProfile = gatewayProfile;
+                _pendingTaskWorktreePath = taskWorktreePath;
             }
         }
 
@@ -216,16 +218,23 @@ namespace MultiTerminal.Controls
             FontSizeChanged?.Invoke(this, e);
         }
 
-        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
+        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
             // Reset Claude Code detection so the event fires again for this new session
             _claudeCodeDetectedThisSession = false;
             _devChannelWarningHandled = false;
             _outputBuffer.Clear();
 
-            // Use size from renderer
-            _cols = Math.Max(80, _renderer.VisibleCols);
-            _rows = Math.Max(24, _renderer.VisibleRows);
+            // Use size from renderer. Trust xterm.js as the source of truth — the post-fit
+            // `ready` message has already populated VisibleCols/VisibleRows by the time
+            // OnRendererInitialized fires. The Math.Max(1, ...) guard is only against 0/negative;
+            // an earlier Math.Max(80, ...) / Math.Max(24, ...) floor here lied to ConPTY when
+            // xterm.js had fitted to <80 cols, producing a permanent col-mismatch that surfaced as
+            // stray characters in the rendered output until a layout reflow forced a real resize.
+            _cols = Math.Max(1, _renderer.VisibleCols);
+            _rows = Math.Max(1, _renderer.VisibleRows);
+
+            System.Diagnostics.Debug.WriteLine($"[TerminalControl] DoStart: launching ConPTY at {_cols}x{_rows} (renderer reported {_renderer.VisibleCols}x{_renderer.VisibleRows})");
 
             // Apply theme
             _renderer.SetTheme(_pendingTheme);
@@ -237,7 +246,7 @@ namespace MultiTerminal.Controls
 
             try
             {
-                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
+                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
             }
             catch (Exception ex)
             {

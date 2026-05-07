@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 
 namespace MultiTerminal.Services
@@ -35,6 +36,196 @@ namespace MultiTerminal.Services
                 AutoRunCommand = autoRunCommand,
                 ProjectId = project?.Id
             };
+        }
+
+        /// <summary>
+        /// Builds the Codex CLI launch command for the given project.
+        /// Refreshes ~/.codex/config.toml so Codex picks up MultiTerminal's MCP servers
+        /// (asymmetric with BuildClaudeCommand because Codex has no --mcp-config flag —
+        /// MCP registration lives in the config file). Project context comes from
+        /// AGENTS.md at the project root (checklist item 4). MultiTerminal env vars
+        /// (MULTITERMINAL_NAME, MULTITERMINAL_DOC_ID, etc.) are injected by
+        /// ConPtyTerminal.StartProcess into the parent PowerShell and inherited by
+        /// the codex child — no extra plumbing required here.
+        ///
+        /// Fail-closed bootstrap: when MCP registration or startup-file scaffolding
+        /// fails, the returned <see cref="LaunchCommand"/> has <c>AutoRunCommand=null</c>
+        /// and <see cref="LaunchCommand.BootstrapError"/> populated with a human-readable
+        /// reason. Callers must check <see cref="LaunchCommand.BootstrapError"/> before
+        /// starting a terminal — launching with a null autorun would drop Codex into an
+        /// unwired shell with no way to reach the team's MCP server, which is worse than
+        /// surfacing an error to the user.
+        /// </summary>
+        /// <param name="project">Project to launch Codex for. May be null (launches in user profile dir).</param>
+        public static LaunchCommand BuildCodexCommand(Models.Project project)
+        {
+            string workingDir = ResolveWorkingDirectory(project);
+            bool workingDirIsProject = IsDistinctProjectRoot(project, workingDir);
+
+            // --- Preflight: clean stale Codex broker state ------------------------
+            // The Codex companion's getCodexAuthStatus uses reuseExistingBroker:true
+            // (lib/app-server.mjs:336-338) which reads the cached broker.json
+            // endpoint without verifying the named pipe is alive. After a machine
+            // reboot or MT host restart the cached endpoint is stale, and every
+            // subsequent codex invocation reports loggedIn:false even though
+            // auth.json is fine. We can't patch the third-party plugin, so probe +
+            // clean the state ourselves before the launch. Synchronous and bounded
+            // (~200ms per stale candidate) — acceptable on the launch path which
+            // already takes seconds for cold start. Wrapped in try/catch: a
+            // preflight error must never block a launch.
+            try
+            {
+                CodexBrokerHealthService.EnsureFreshBrokerState(workingDir);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LaunchCommandBuilder] Codex broker preflight failed: {ex.Message}");
+            }
+
+            // --- Critical step 1: MCP registration --------------------------------
+            // Without this, Codex launches but cannot call register_terminal,
+            // send_message, or any team tool. That's a non-functional terminal —
+            // refuse to launch rather than leave the user confused.
+            string mcpError;
+            try
+            {
+                string written = CodexConfigService.EnsureMcpRegistration();
+                mcpError = written == null
+                    ? "MCP server list not found (expected in ~/.claude.json or %APPDATA%\\multiterminal\\.mcp.json)"
+                    : null;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LaunchCommandBuilder] Codex MCP config refresh failed: {ex.Message}");
+                mcpError = "Writing ~/.codex/config.toml failed: " + ex.Message;
+            }
+
+            // --- Best-effort step: AGENTS.md --------------------------------------
+            // Non-critical: Codex works without it (just loses project context).
+            // Skip entirely when workingDir is the home-dir fallback — we don't
+            // want to plant an AGENTS.md in %USERPROFILE% that subsequent launches
+            // of unrelated projects would inherit.
+            if (workingDirIsProject)
+            {
+                try
+                {
+                    CodexAgentsService.EnsureAgentsMd(workingDir, project?.Name);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[LaunchCommandBuilder] AGENTS.md ensure failed: {ex.Message}");
+                }
+            }
+
+            // --- Critical step 2: startup prompt + launcher script ---------------
+            // Without the launcher script we fall back to running bare `codex`
+            // with no briefing. That's the exact silent-failure mode the adversary
+            // flagged — Codex has a prompt telling it to register as a team
+            // member, without that prompt it never calls register_terminal.
+            //
+            // Validate BOTH files: codex-launch.ps1 AND startup-prompt.md. The
+            // launcher script's own internal fallback runs bare `codex` when the
+            // prompt is missing/unreadable, so checking only the script would
+            // still admit the "plausible-looking terminal with no briefing" case.
+            string launchScriptPath = null;
+            string scriptError = null;
+            try
+            {
+                CodexPromptService.EnsureStartupFiles();
+                launchScriptPath = CodexPromptService.GetLaunchScriptPath();
+                string promptPath = CodexPromptService.GetStartupPromptPath();
+                if (string.IsNullOrEmpty(launchScriptPath) || !File.Exists(launchScriptPath))
+                    scriptError = "Codex launcher script not available at " + (launchScriptPath ?? "<null>");
+                else if (string.IsNullOrEmpty(promptPath) || !File.Exists(promptPath))
+                    scriptError = "Codex startup prompt not available at " + (promptPath ?? "<null>");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LaunchCommandBuilder] Codex startup-files write failed: {ex.Message}");
+                scriptError = "Writing Codex startup files failed: " + ex.Message;
+            }
+
+            // Aggregate bootstrap errors. If either critical step failed, refuse
+            // to launch and let the caller surface the reason.
+            string combinedError = CombineErrors(mcpError, scriptError);
+            if (combinedError != null)
+            {
+                return new LaunchCommand
+                {
+                    WorkingDirectory = workingDir,
+                    AutoRunCommand = null,
+                    ProjectId = project?.Id,
+                    BootstrapError = combinedError
+                };
+            }
+
+            // Codex binary: user-configured path if set, otherwise PATH lookup.
+            string codexBinary = SettingsService.Default?.GetCodexBinaryPath();
+            if (string.IsNullOrWhiteSpace(codexBinary))
+                codexBinary = "codex";
+
+            string safeScript = EscapeSingleQuotes(launchScriptPath);
+            string safeBinary = EscapeSingleQuotes(codexBinary);
+            // Pass the codex binary path into the launcher via env var so the
+            // script can honor the user's custom path without duplicating logic.
+            string autoRunCommand = $"$env:MULTITERMINAL_CODEX_BIN = '{safeBinary}'; & '{safeScript}'; exit";
+
+            return new LaunchCommand
+            {
+                WorkingDirectory = workingDir,
+                AutoRunCommand = autoRunCommand,
+                ProjectId = project?.Id
+            };
+        }
+
+        /// <summary>
+        /// Returns true when <paramref name="workingDir"/> represents an actual
+        /// project directory (not the user-profile fallback). We only want to
+        /// write AGENTS.md (or run project-scoped MCP cleanup) when the working
+        /// directory is a real project root — otherwise a broken/moved project
+        /// would plant a file in %USERPROFILE% that later non-project launches
+        /// would pick up, or mutate <c>~/.mcp.json</c> via
+        /// <c>McpConfigService.WriteMcpJsonToProject</c>.
+        ///
+        /// Public so MainForm launch paths can reuse the same guard when deciding
+        /// whether to call <c>EnsureMcpConfigsForProjectWithGateway</c>.
+        /// </summary>
+        public static bool IsDistinctProjectRoot(Models.Project project, string workingDir)
+        {
+            if (project == null) return false;
+            if (string.IsNullOrWhiteSpace(workingDir)) return false;
+
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.Equals(Path.GetFullPath(workingDir).TrimEnd('\\', '/'),
+                              Path.GetFullPath(home).TrimEnd('\\', '/'),
+                              StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return true;
+        }
+
+        private static string CombineErrors(params string[] errors)
+        {
+            string joined = string.Join("; ", errors.Where(e => !string.IsNullOrEmpty(e)));
+            return joined.Length == 0 ? null : joined;
+        }
+
+        /// <summary>
+        /// Dispatches to the appropriate builder based on terminal kind. Callers
+        /// that honor a project's default-terminal choice (start screen, project
+        /// card split button) should use this instead of calling the per-kind
+        /// builder directly.
+        /// </summary>
+        public static LaunchCommand BuildCommand(Models.TerminalKind kind, Models.Project project)
+        {
+            switch (kind)
+            {
+                case Models.TerminalKind.Codex:
+                    return BuildCodexCommand(project);
+                case Models.TerminalKind.ClaudeCode:
+                default:
+                    return BuildClaudeCommand(project);
+            }
         }
 
         /// <summary>
@@ -101,19 +292,40 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Resolves the working directory for Claude Code to start in.
         /// Priority: project.SourcePath → project.Path → user profile directory.
+        ///
+        /// Applies the same validation that <c>MainForm.OnProjectLaunchRequested</c>
+        /// uses before starting a terminal: the path must be rooted, must not be a
+        /// UNC share, and must exist. Without this parity, Codex bootstrap
+        /// side-effects (AGENTS.md generation in particular) would land on paths
+        /// the UI actively rejects — e.g. an AGENTS.md written to a UNC share while
+        /// the terminal itself starts from the home-directory fallback.
         /// </summary>
         private static string ResolveWorkingDirectory(Models.Project project)
         {
             if (project != null)
             {
-                if (!string.IsNullOrWhiteSpace(project.SourcePath) && Directory.Exists(project.SourcePath))
+                if (IsUsableProjectPath(project.SourcePath))
                     return project.SourcePath;
 
-                if (!string.IsNullOrWhiteSpace(project.Path) && Directory.Exists(project.Path))
+                if (IsUsableProjectPath(project.Path))
                     return project.Path;
             }
 
             return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        }
+
+        /// <summary>
+        /// Validation mirror of the path check used in
+        /// <c>MainForm.OnProjectLaunchRequested</c> (~line 5135). Keeps the builder
+        /// and the UI in sync about what counts as a launchable project root.
+        /// </summary>
+        private static bool IsUsableProjectPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            if (!Path.IsPathRooted(path)) return false;
+            if (path.StartsWith("\\\\", StringComparison.Ordinal)) return false; // UNC share
+            if (!Directory.Exists(path)) return false;
+            return true;
         }
 
         /// <summary>
@@ -189,5 +401,15 @@ namespace MultiTerminal.Services
         /// Enables per-project server filtering in the gateway.
         /// </summary>
         public string GatewayProfile { get; set; }
+
+        /// <summary>
+        /// Populated by <see cref="LaunchCommandBuilder.BuildCodexCommand"/> when a
+        /// critical bootstrap step fails (MCP registration or startup scaffolding).
+        /// When non-null, <see cref="AutoRunCommand"/> is null and callers must
+        /// surface the error to the user instead of starting the terminal —
+        /// launching a Codex session without MCP/prompt wiring would produce a
+        /// plausible-looking but non-functional terminal.
+        /// </summary>
+        public string BootstrapError { get; set; }
     }
 }

@@ -918,7 +918,8 @@ namespace MultiTerminal.Docking
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
-        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
+        /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
+        public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -977,7 +978,7 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _terminal.Start returned");
 
             // Update status bar after terminal starts

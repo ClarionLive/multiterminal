@@ -2140,7 +2140,33 @@ namespace MultiTerminal
             "Quinn", "Ruby", "Sam", "Tara", "Uma", "Vera", "Wade", "Xena", "Yuri", "Zara"
         };
 
-        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
+        // Phase 1 worktree isolation: shared resolver. Every spawn site that
+        // knows the terminal's identity name must call this so the active task's
+        // worktree (if any) is injected as MULTITERMINAL_TASK_WORKTREE and used
+        // as the shell's cwd. Returns null when there's no usable worktree —
+        // callers fall through to the original single-tree behavior.
+        private string ResolveTaskWorktreePath(string terminalName)
+        {
+            if (string.IsNullOrEmpty(terminalName) || _mcpServer?.Broker == null)
+                return null;
+            try
+            {
+                var activeTask = _mcpServer.Broker.GetMyActiveTask(terminalName);
+                if (activeTask == null) return null;
+                string candidate = _mcpServer.Broker.Worktrees?.GetWorktreePathForTask(activeTask.Id);
+                if (string.IsNullOrEmpty(candidate) || !System.IO.Directory.Exists(candidate))
+                    return null;
+                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' -> task '{activeTask.Id}' -> '{candidate}'");
+                return candidate;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' threw: {ex.Message} — falling through to main checkout");
+                return null;
+            }
+        }
+
+        public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false)
         {
             System.Diagnostics.Trace.WriteLine("[AddNewTerminal] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
@@ -2264,7 +2290,7 @@ namespace MultiTerminal
                         System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Team lead naming applied: '{identityName}'");
                     }
 
-                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead);
+                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead, atomicIdentityUniqueness);
                     System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] PreRegisterTerminalWithName returned: '{terminalName}'");
                 }
                 else if (hasLaunchParams)
@@ -2281,12 +2307,21 @@ namespace MultiTerminal
             {
                 // Start the terminal with specified or default directory and optional auto-run command
                 string dir = workingDirectory ?? _settings?.GetLastDirectory();
+
+                // Phase 1 worktree isolation: when this terminal is bound to an identity
+                // that owns an active task with a materialized worktree, redirect cwd to
+                // the worktree and inject MULTITERMINAL_TASK_WORKTREE so the spawned
+                // agent operates inside its own isolated checkout.
+                string taskWorktreePath = ResolveTaskWorktreePath(terminalName);
+                if (taskWorktreePath != null) dir = taskWorktreePath;
+
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Starting terminal...");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead}, gatewayProfile='{gatewayProfile ?? "null"}')...");
-                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   taskWorktreePath: '{taskWorktreePath ?? "null"}'");
+                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead}, gatewayProfile='{gatewayProfile ?? "null"}', taskWorktreePath='{taskWorktreePath ?? "null"}')...");
+                doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
                 System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
             }
             else
@@ -2364,20 +2399,33 @@ namespace MultiTerminal
                 project.LastOpenedAt = DateTime.Now;
                 _sharedProjectDatabase?.SaveRichProject(project);
 
-                // Build Claude Code launch command (resolves working directory, adds MT config flags)
-                var launchCmd = Services.LaunchCommandBuilder.BuildClaudeCommand(project);
+                // Resolve terminal kind. Explicit override from the start-screen split-button
+                // dropdown wins; otherwise fall back to the project's stored default (normalized).
+                var kind = !string.IsNullOrEmpty(e.TerminalKindOverride)
+                    ? TerminalKindHelper.ParseOrDefault(e.TerminalKindOverride)
+                    : TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Resolved kind='{kind}' (override='{e.TerminalKindOverride ?? "(none)"}' projectDefault='{project.DefaultTerminal ?? "(none)"}')");
+
+                // Build launch command for the chosen kind. BuildCommand dispatches to
+                // BuildClaudeCommand/BuildCodexCommand; the Codex path also refreshes
+                // ~/.codex/config.toml + writes the launcher scaffolding as a side-effect.
+                var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, project);
+
+                // Bootstrap gate — see HandleBootstrapErrorIfAny for rationale.
+                if (HandleBootstrapErrorIfAny(launchCmd, onBeforeDialog: () => doc.ShowStartScreen()))
+                    return;
+
                 string launchDir = launchCmd.WorkingDirectory;
                 string autoRunCommand = launchCmd.AutoRunCommand;
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}'");
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}' kind='{kind}'");
 
-                // Register terminal before starting (start screen tabs are unregistered)
-                // If the project has a designated team lead, use their name and flag the terminal accordingly
-                string terminalName = null;
+                // Register terminal before starting (start screen tabs are unregistered).
+                // Identity: team lead if set; else for Codex use the configured default agent
+                // name so headless Codex launches get a stable identity instead of "Unassigned".
                 bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
+                string terminalName = ResolveCodexIdentityName(kind, project) ?? "Unassigned";
                 if (_mcpServer?.Broker != null)
                 {
-                    terminalName = isTeamLead ? project.TeamLead : "Unassigned";
-
                     // Check if this identity is already active in another terminal
                     if (isTeamLead)
                     {
@@ -2404,25 +2452,49 @@ namespace MultiTerminal
                         }
                     }
 
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
-                }
-
-                // Sync MCP configs: gateway-aware path if available, else standard path
-                string gatewayProfile = null;
-                try
-                {
-                    if (_mcpConfigService != null)
+                    // Codex non-team-lead launches route through RegisterTerminalUnique
+                    // so the probe-then-register race (adversary HIGH from Run 3) is
+                    // closed: the broker locks around probe + register, and if a
+                    // concurrent launch took the name since our resolve, we get a
+                    // fresh suffix atomically. Team-lead path keeps the existing
+                    // IdentityPickerDialog flow (dialog is authoritative).
+                    if (!isTeamLead && kind == TerminalKind.Codex)
                     {
-                        _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
-                        if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                            gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, doc.DocId, isTeamLead);
+                        terminalName = resolved;
+                    }
+                    else
+                    {
+                        _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
                     }
                 }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
+
+                // Sync MCP configs: gateway-aware path if available, else standard path.
+                // Skip when launchDir is the user-profile fallback (same guard as
+                // OnProjectLaunchRequested) so a broken project path can't mutate ~/.mcp.json.
+                string gatewayProfile = null;
+                if (Services.LaunchCommandBuilder.IsDistinctProjectRoot(project, launchDir))
+                {
+                    try
+                    {
+                        if (_mcpConfigService != null)
+                        {
+                            _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
+                            if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                                gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                        }
+                    }
+                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
+                }
+
+                // Phase 1 worktree isolation: redirect cwd to the active-task worktree
+                // when this identity owns one. Falls through to launchDir otherwise.
+                string taskWorktreePath = ResolveTaskWorktreePath(terminalName);
+                if (taskWorktreePath != null) launchDir = taskWorktreePath;
 
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead}");
-                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile);
+                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
+                doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath);
                 System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 // Apply current font size
@@ -2515,7 +2587,12 @@ namespace MultiTerminal
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
                 }
 
-                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead);
+                // Phase 1 worktree isolation: redirect cwd to the active-task worktree
+                // when this identity owns one. Falls through to workingDir otherwise.
+                string taskWorktreePath = ResolveTaskWorktreePath(terminalName);
+                if (taskWorktreePath != null) workingDir = taskWorktreePath;
+
+                doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 doc.SetFontSize(terminalFontSize);
@@ -2554,63 +2631,102 @@ namespace MultiTerminal
                 string projectFolder = wpfDialog.ProjectFolder;
                 System.IO.Directory.CreateDirectory(projectFolder); // no-op if already exists
 
-                // Create minimal project record in SQLite
+                // Create project record. Prefer ProjectService.SaveProject over a bare
+                // SaveRichProject here so the portable .claude/project.json gets written
+                // in addition to the SQLite row. Without project.json, DefaultTerminal
+                // only lives in SQLite and falls back to "claude-code" when the project
+                // is rediscovered from disk (e.g. synced to another machine) — that's
+                // the split-brain the Codex adversary flagged.
                 var project = Models.Project.Create(wpfDialog.ProjectName, projectFolder);
                 project.TeamLead = wpfDialog.SelectedTeamLead;
+                project.DefaultTerminal = wpfDialog.SelectedDefaultTerminal;
                 project.CreatedBy = "new-project-dialog";
-                _sharedProjectDatabase?.SaveRichProject(project);
+                if (_projectService != null)
+                    _projectService.SaveProject(project);
+                else
+                    _sharedProjectDatabase?.SaveRichProject(project);
 
-                // Build Claude Code launch command
-                var launchCmd = Services.LaunchCommandBuilder.BuildClaudeCommand(project);
+                // Build launch command for the project's default terminal (Claude Code or Codex)
+                var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
+                var launchCmd = Services.LaunchCommandBuilder.BuildCommand(terminalKind, project);
+
+                // Bootstrap gate — tail message tweaked because the project was created
+                // but no terminal started, so the user can retry from the project card.
+                if (HandleBootstrapErrorIfAny(launchCmd,
+                        tailMessage: "The project was created but no terminal has been started. You can retry launching from the project card."))
+                    return;
+
                 string launchDir = launchCmd.WorkingDirectory;
                 string autoRunCommand = launchCmd.AutoRunCommand;
 
-                // Register terminal before starting
-                string terminalName = null;
+                // Identity: same shape as sibling launch sites. See ResolveCodexIdentityName.
+                // Codex non-team-lead launches use the atomic RegisterTerminalUnique path.
                 bool isTeamLead = !string.IsNullOrEmpty(project.TeamLead);
+                string terminalName = ResolveCodexIdentityName(terminalKind, project) ?? "Unassigned";
                 if (_mcpServer?.Broker != null)
                 {
-                    terminalName = isTeamLead ? project.TeamLead : "Unassigned";
-                    _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead);
+                    if (!isTeamLead && terminalKind == Models.TerminalKind.Codex)
+                    {
+                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, sourceDoc.DocId, isTeamLead);
+                        terminalName = resolved;
+                    }
+                    else
+                    {
+                        _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead);
+                    }
                 }
 
-                // Wire one-shot ClaudeCodeDetected handler to inject /new-project
-                EventHandler newProjectHandler = null;
-                newProjectHandler = async (s, ev) =>
+                // Claude Code only: wire one-shot ClaudeCodeDetected handler to inject /new-project.
+                // Codex has no equivalent onboarding skill — the startup prompt (see CodexPromptService)
+                // handles the "tell the agent its name and first actions" briefing.
+                if (terminalKind == Models.TerminalKind.ClaudeCode)
                 {
-                    sourceDoc.ClaudeCodeDetected -= newProjectHandler;
-
-                    // Wait for Claude Code to settle after standard "initializing..." injection
-                    await Task.Delay(3000);
-                    System.Diagnostics.Trace.WriteLine("[MainForm] New project flow: injecting /new-project");
-
-                    bool injected = await sourceDoc.InjectInputAsync("/new-project");
-                    if (!injected)
+                    EventHandler newProjectHandler = null;
+                    newProjectHandler = async (s, ev) =>
                     {
-                        System.Diagnostics.Trace.WriteLine("[MainForm] /new-project JS injection failed, trying direct write");
-                        try { sourceDoc.Terminal.Write("/new-project\r"); }
-                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] /new-project fallback failed: {ex.Message}"); }
-                    }
-                };
-                sourceDoc.ClaudeCodeDetected += newProjectHandler;
+                        sourceDoc.ClaudeCodeDetected -= newProjectHandler;
 
-                // Sync MCP configs: gateway-aware path if available, else standard path
+                        // Wait for Claude Code to settle after standard "initializing..." injection
+                        await Task.Delay(3000);
+                        System.Diagnostics.Trace.WriteLine("[MainForm] New project flow: injecting /new-project");
+
+                        bool injected = await sourceDoc.InjectInputAsync("/new-project");
+                        if (!injected)
+                        {
+                            System.Diagnostics.Trace.WriteLine("[MainForm] /new-project JS injection failed, trying direct write");
+                            try { sourceDoc.Terminal.Write("/new-project\r"); }
+                            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] /new-project fallback failed: {ex.Message}"); }
+                        }
+                    };
+                    sourceDoc.ClaudeCodeDetected += newProjectHandler;
+                }
+
+                // Sync MCP configs: gateway-aware path if available, else standard path.
+                // Skip when launchDir is the user-profile fallback (same guard as sibling sites).
                 string gatewayProfile2 = null;
-                try
+                if (Services.LaunchCommandBuilder.IsDistinctProjectRoot(project, launchDir))
                 {
-                    if (_mcpConfigService != null)
+                    try
                     {
-                        _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
-                        if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                            gatewayProfile2 = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                        if (_mcpConfigService != null)
+                        {
+                            _mcpConfigService.EnsureMcpConfigsForProjectWithGateway(project.Id, launchDir, project.Name);
+                            if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                                gatewayProfile2 = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
+                        }
                     }
+                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
                 }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
+
+                // Phase 1 worktree isolation: redirect cwd to the active-task worktree
+                // when this identity owns one. Falls through to launchDir otherwise.
+                string taskWorktreePath2 = ResolveTaskWorktreePath(terminalName);
+                if (taskWorktreePath2 != null) launchDir = taskWorktreePath2;
 
                 // Start terminal in project folder
-                System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir}");
+                System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
-                    projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2);
+                    projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2);
 
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
                 sourceDoc.SetFontSize(terminalFontSize);
@@ -2729,15 +2845,77 @@ namespace MultiTerminal
         /// Pre-registers a terminal with a specific identity name.
         /// Used by AddNewTerminalWithIdentity for "Launch as..." feature.
         /// </summary>
-        private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false)
+        /// <summary>
+        /// Central gate for Codex bootstrap failures. Used by the three Codex launch
+        /// paths (start-screen, new-project, project-panel) to show a consistent
+        /// MessageBox when <see cref="Services.LaunchCommand.BootstrapError"/> is
+        /// populated. Returns true when an error was handled (caller should early-return).
+        /// </summary>
+        private bool HandleBootstrapErrorIfAny(Services.LaunchCommand cmd, Action onBeforeDialog = null, string tailMessage = null)
+        {
+            if (cmd == null || string.IsNullOrEmpty(cmd.BootstrapError))
+                return false;
+
+            onBeforeDialog?.Invoke();
+            string tail = tailMessage ?? "The terminal has not been started.";
+            MessageBox.Show(
+                $"Codex cannot launch: {cmd.BootstrapError}\n\n{tail}",
+                "Codex bootstrap failed",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return true;
+        }
+
+        /// <summary>
+        /// Resolves the identity name for a terminal launch. For team-lead launches
+        /// returns the team-lead name directly. For Codex launches without a team
+        /// lead, reads the configured default agent name and applies
+        /// <see cref="MCPServer.Services.MessageBroker.GetUniqueNameFor"/> so two
+        /// concurrent Codex terminals sharing the same default don't alias to one
+        /// broker identity. Returns null when the caller should fall back to
+        /// "Unassigned" (or leave identity unset entirely, as OnProjectLaunchRequested does).
+        /// </summary>
+        private string ResolveCodexIdentityName(Models.TerminalKind kind, Models.Project project)
+        {
+            if (project != null && !string.IsNullOrEmpty(project.TeamLead))
+                return project.TeamLead;
+
+            if (kind != Models.TerminalKind.Codex)
+                return null;
+
+            string codexDefault = _settings?.GetCodexDefaultAgentName();
+            if (string.IsNullOrWhiteSpace(codexDefault))
+                return null;
+
+            // Skip uniqueness suffixing for the "Unassigned" sentinel — it's
+            // intentionally shared across multiple unnamed terminals.
+            if (codexDefault.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+                return codexDefault;
+
+            return _mcpServer?.Broker != null
+                ? _mcpServer.Broker.GetUniqueNameFor(codexDefault)
+                : codexDefault;
+        }
+
+        private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false, bool atomicUniqueness = false)
         {
             try
             {
-                // Register with the specific identity name
-                var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead);
-                if (result.Success)
+                // Register with the specific identity name. When the caller asked
+                // for atomic uniqueness (Codex default-agent launches), route
+                // through RegisterTerminalUnique so the probe + register critical
+                // section is held under a broker-level lock. "Unassigned" is
+                // exempt inside the broker.
+                if (atomicUniqueness && !isTeamLead)
                 {
-                    return identityName;
+                    var uniqueResult = _mcpServer.Broker.RegisterTerminalUnique(identityName, out string resolved, docId, isTeamLead);
+                    if (uniqueResult.Success)
+                        return resolved;
+                }
+                else
+                {
+                    var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead);
+                    if (result.Success)
+                        return identityName;
                 }
             }
             catch (Exception ex)
@@ -2892,59 +3070,23 @@ namespace MultiTerminal
 
             var tcs = new TaskCompletionSource<bool>();
 
-            void handler(object s, EventArgs e)
+            void rendererReadyHandler(object s, EventArgs e)
             {
-                doc.RendererReady -= handler;
+                doc.RendererReady -= rendererReadyHandler;
                 tcs.TrySetResult(true);
             }
 
-            doc.RendererReady += handler;
+            doc.RendererReady += rendererReadyHandler;
 
-            using var cts = new System.Threading.CancellationTokenSource();
-            var delayTask = Task.Delay(timeoutMs, cts.Token);
-
+            var delayTask = Task.Delay(timeoutMs);
             var winner = await Task.WhenAny(tcs.Task, delayTask);
             if (winner == delayTask)
             {
-                doc.RendererReady -= handler;
+                doc.RendererReady -= rendererReadyHandler;
                 return false;
             }
 
-            cts.Cancel();
             return true;
-        }
-
-        /// <summary>
-        /// Starts a terminal and waits for PowerShell to be confirmed running.
-        /// The DirectoryChanged event fires when PowerShell sets its title, confirming it's operational.
-        /// </summary>
-        private async Task StartTerminalAndWaitAsync(TerminalDocument doc, string workingDirectory, string terminalName = null, int timeoutMs = 3000)
-        {
-            var tcs = new TaskCompletionSource<bool>();
-
-            void directoryChangedHandler(object s, DirectoryChangedEventArgs e)
-            {
-                doc.DirectoryChanged -= directoryChangedHandler;
-                tcs.TrySetResult(true);
-            }
-
-            doc.DirectoryChanged += directoryChangedHandler;
-
-            // Start the terminal with optional pre-registered name
-            doc.StartTerminal(workingDirectory, terminalName);
-
-            using var cts = new System.Threading.CancellationTokenSource();
-            var delayTask = Task.Delay(timeoutMs, cts.Token);
-
-            var winner = await Task.WhenAny(tcs.Task, delayTask);
-            if (winner == delayTask)
-            {
-                // Timed out — unsubscribe and continue anyway (caller doesn't treat timeout as error).
-                doc.DirectoryChanged -= directoryChangedHandler;
-                return;
-            }
-
-            cts.Cancel();
         }
 
         private void OnTerminalFontSizeChanged(object sender, FontSizeChangedEventArgs e)
@@ -3417,6 +3559,35 @@ namespace MultiTerminal
             // Register with the new identity name
             string terminalName = PreRegisterTerminalWithName(doc.DocId, identityName);
 
+            // Phase 1 worktree isolation: same logic as AddNewTerminal — when this
+            // identity owns an active task with a materialized worktree, redirect
+            // cwd to the worktree and inject MULTITERMINAL_TASK_WORKTREE so the
+            // re-launched agent operates inside its own isolated checkout. Without
+            // this, "Launch as..." preserves the prior terminal's cwd and the env
+            // var stays empty — bypassing the wiring fix from AddNewTerminal.
+            string taskWorktreePath = null;
+            if (!string.IsNullOrEmpty(terminalName) && _mcpServer?.Broker != null)
+            {
+                try
+                {
+                    var activeTask = _mcpServer.Broker.GetMyActiveTask(terminalName);
+                    if (activeTask != null)
+                    {
+                        string candidate = _mcpServer.Broker.Worktrees?.GetWorktreePathForTask(activeTask.Id);
+                        if (!string.IsNullOrEmpty(candidate) && System.IO.Directory.Exists(candidate))
+                        {
+                            taskWorktreePath = candidate;
+                            workingDirectory = candidate;
+                            System.Diagnostics.Trace.WriteLine($"[OnLaunchAsIdentityRequested] Active task '{activeTask.Id}' for '{terminalName}' has worktree -> overriding dir to '{candidate}'");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.WriteLine($"[OnLaunchAsIdentityRequested] Worktree lookup failed for '{terminalName}': {ex.Message} — falling through to original cwd");
+                }
+            }
+
             // Just launch claude - let the user choose to resume or start fresh
             // Using plain "claude" lets Claude prompt about resuming recent sessions
             // TODO: Make --dangerously-skip-permissions configurable in settings
@@ -3427,7 +3598,7 @@ namespace MultiTerminal
             // Stop current terminal and restart with new identity
             doc.Terminal.Stop();
             doc.CustomTitle = terminalName;
-            doc.StartTerminal(workingDirectory, terminalName, autoRunCommand);
+            doc.StartTerminal(workingDirectory, terminalName, autoRunCommand, taskWorktreePath: taskWorktreePath);
 
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.
@@ -5201,19 +5372,6 @@ namespace MultiTerminal
             _projectPanel?.RefreshPrompts(workingDir);
         }
 
-        private enum ProjectTerminalAction
-        {
-            ReplaceCurrentTerminal,
-            CreateNewTerminal,
-            Cancel
-        }
-
-        private class ProjectDialogResult
-        {
-            public ProjectTerminalAction Action { get; set; }
-            public string ClaudeCommand { get; set; }
-        }
-
         private void OnProjectSelected(object sender, ProjectSelectedEventArgs e)
         {
             if (e.Project == null) return;
@@ -5250,191 +5408,82 @@ namespace MultiTerminal
         {
             if (e.Project == null) return;
 
-            // Show dialog with terminal options
-            var result = ShowProjectTerminalDialog(e.Project.Name);
+            // Resolve terminal kind. Explicit override from the split-button dropdown
+            // wins; otherwise fall back to the project's stored default (normalized).
+            var kind = !string.IsNullOrEmpty(e.TerminalKindOverride)
+                ? Models.TerminalKindHelper.ParseOrDefault(e.TerminalKindOverride)
+                : Models.TerminalKindHelper.ParseOrDefault(e.Project.DefaultTerminal);
 
-            TerminalDocument targetTerminal = null;
+            // Validate working directory (project source > legacy path > user profile),
+            // rejecting UNC paths and non-existent dirs like the prior dialog-based flow.
+            string rawPath = !string.IsNullOrEmpty(e.Project.SourcePath) ? e.Project.SourcePath : e.Project.Path;
+            string workingDir = (!string.IsNullOrEmpty(rawPath) && Path.IsPathRooted(rawPath)
+                                 && !rawPath.StartsWith("\\\\") && Directory.Exists(rawPath))
+                ? rawPath
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-            switch (result.Action)
+            // Build the CLI launch command for the chosen kind. BuildCommand also
+            // refreshes ~/.codex/config.toml and writes the Codex launcher scaffolding
+            // when kind == Codex (side-effect inside BuildCodexCommand).
+            var launchCmd = Services.LaunchCommandBuilder.BuildCommand(kind, e.Project);
+
+            if (HandleBootstrapErrorIfAny(launchCmd))
+                return;
+
+            // Identity: team-lead if set; for Codex, use configured default via
+            // ResolveCodexIdentityName (applies GetUniqueNameFor). For non-team-lead
+            // Claude the resolver returns null and we leave identityName null — the
+            // downstream AddNewTerminal handles that by defaulting to "Unassigned".
+            bool isTeamLead = !string.IsNullOrEmpty(e.Project.TeamLead);
+            string identityName = ResolveCodexIdentityName(kind, e.Project);
+
+            // Resolve gateway profile for per-project MCP server filtering.
+            string gatewayProfile = null;
+            if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
+                gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(e.Project.Name);
+
+            // Ensure the global .mcp.json is up to date (source of truth for both
+            // Claude's --mcp-config and Codex's config.toml translation).
+            //
+            // Guard: only run project-scoped MCP sync when workingDir is the real
+            // project root. If we fell back to %USERPROFILE% because the project
+            // path was missing/invalid, McpConfigService.WriteMcpJsonToProject
+            // would treat ~/ as the project root and could mutate/delete the
+            // user's personal ~/.mcp.json. Mirrors the AGENTS.md guard in
+            // LaunchCommandBuilder.BuildCodexCommand.
+            if (Services.LaunchCommandBuilder.IsDistinctProjectRoot(e.Project, workingDir))
             {
-                case ProjectTerminalAction.ReplaceCurrentTerminal:
-                    // Change directory in active terminal (use source_path as canonical path)
-                    if (_lastActiveTerminal != null)
-                    {
-                        string rawPath = !string.IsNullOrEmpty(e.Project.SourcePath) ? e.Project.SourcePath : e.Project.Path;
-                        // Validate path is a rooted local directory (not a UNC path) that exists
-                        string projectPath = (!string.IsNullOrEmpty(rawPath) && Path.IsPathRooted(rawPath) && !rawPath.StartsWith("\\\\") && Directory.Exists(rawPath))
-                            ? rawPath
-                            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                        _lastActiveTerminal.Terminal.Write($"cd \"{projectPath}\"\r");
-                        // Inject project ID into environment for context hook
-                        if (!string.IsNullOrEmpty(e.Project.Id))
-                            _lastActiveTerminal.Terminal.Write($"$env:MULTITERMINAL_PROJECT_ID = '{e.Project.Id.Replace("'", "''")}'\r");
-                        targetTerminal = _lastActiveTerminal;
-                    }
-                    break;
-
-                case ProjectTerminalAction.CreateNewTerminal:
+                try
                 {
-                    // Create new terminal at project source_path with project ID for context injection
-                    string rawSourcePath = !string.IsNullOrEmpty(e.Project.SourcePath) ? e.Project.SourcePath : e.Project.Path;
-                    // Validate path is a rooted local directory (not a UNC path) that exists
-                    string sourcePath = (!string.IsNullOrEmpty(rawSourcePath) && Path.IsPathRooted(rawSourcePath) && !rawSourcePath.StartsWith("\\\\") && Directory.Exists(rawSourcePath))
-                        ? rawSourcePath
-                        : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                    // Resolve gateway profile for per-project MCP server filtering
-                    string projGatewayProfile = null;
-                    if (_gatewayService != null && _gatewayService.IsGatewayInstalled())
-                        projGatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(e.Project.Name);
-                    AddNewTerminal(sourcePath, projectId: e.Project.Id, gatewayProfile: projGatewayProfile);
-                    targetTerminal = _lastActiveTerminal; // AddNewTerminal sets this
-                    break;
+                    _mcpConfigService?.EnsureMcpConfigsForProjectWithGateway(e.Project.Id, workingDir, e.Project.Name);
                 }
-
-                case ProjectTerminalAction.Cancel:
-                    // Do nothing with terminal
-                    break;
-            }
-
-            // Execute Claude command if selected and we have a terminal
-            if (targetTerminal != null && !string.IsNullOrEmpty(result.ClaudeCommand))
-            {
-                // Small delay to ensure cd command completes first
-                System.Threading.Tasks.Task.Delay(300).ContinueWith(_ =>
+                catch (Exception ex)
                 {
-                    BeginInvoke(new Action(() =>
-                    {
-                        targetTerminal.Terminal.Write($"{result.ClaudeCommand}\r");
-                    }));
-                });
-            }
-
-            // Update project state and panel (unless cancelled)
-            if (result.Action != ProjectTerminalAction.Cancel)
-            {
-                _currentProject = e.Project;
-                _projectService?.MarkProjectOpened(e.Project.Id);
-                _projectPanel?.RefreshForProject(e.Project);
-            }
-        }
-
-        private ProjectDialogResult ShowProjectTerminalDialog(string projectName)
-        {
-            var dialogResult = new ProjectDialogResult { Action = ProjectTerminalAction.Cancel, ClaudeCommand = null };
-
-            using (var form = new Form())
-            {
-                form.Text = "Open Project";
-                form.StartPosition = FormStartPosition.CenterParent;
-                form.FormBorderStyle = FormBorderStyle.FixedDialog;
-                form.MaximizeBox = false;
-                form.MinimizeBox = false;
-                form.Font = new Font("Segoe UI", 10f);
-
-                bool isDark = _currentTheme?.IsDark ?? true;
-                form.BackColor = isDark ? Color.FromArgb(45, 45, 48) : Color.FromArgb(240, 240, 240);
-                form.ForeColor = isDark ? Color.White : Color.FromArgb(30, 30, 30);
-
-                var label = new Label
-                {
-                    Text = $"How would you like to open \"{projectName}\"?",
-                    Location = new Point(20, 20),
-                    AutoSize = true
-                };
-
-                // Calculate form width based on label text length (minimum 460, grows with text)
-                int minWidth = 460;
-                int labelWidth = TextRenderer.MeasureText(label.Text, form.Font).Width + 50;
-                int formWidth = Math.Max(minWidth, labelWidth);
-
-                // Claude command dropdown
-                var claudeLabel = new Label
-                {
-                    Text = "Claude Command:",
-                    Location = new Point(20, 55),
-                    AutoSize = true
-                };
-
-                var claudeCombo = new ComboBox
-                {
-                    Location = new Point(150, 52),
-                    Size = new Size(formWidth - 170, 25),
-                    DropDownStyle = ComboBoxStyle.DropDownList,
-                    BackColor = isDark ? Color.FromArgb(60, 60, 60) : Color.White,
-                    ForeColor = isDark ? Color.White : Color.Black
-                };
-
-                // Populate Claude commands
-                claudeCombo.Items.Add("(None)");
-                var commands = _settings.GetClaudeCommands();
-                int defaultIndex = 0;
-                foreach (var cmd in commands)
-                {
-                    int idx = claudeCombo.Items.Add(cmd.Command);
-                    if (cmd.IsDefault)
-                    {
-                        defaultIndex = idx;
-                    }
+                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] MCP config sync failed: {ex.Message}");
                 }
-                claudeCombo.SelectedIndex = defaultIndex;
-
-                var btnReplace = new Button
-                {
-                    Text = "Replace Current Terminal",
-                    Location = new Point(20, 95),
-                    Size = new Size(180, 34),
-                    BackColor = isDark ? Color.FromArgb(60, 60, 60) : Color.FromArgb(225, 225, 225),
-                    ForeColor = isDark ? Color.White : Color.Black,
-                    FlatStyle = FlatStyle.Flat
-                };
-                btnReplace.FlatAppearance.BorderColor = isDark ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180);
-
-                var btnCreate = new Button
-                {
-                    Text = "Create New Terminal",
-                    Location = new Point(210, 95),
-                    Size = new Size(170, 34),
-                    BackColor = isDark ? Color.FromArgb(60, 60, 60) : Color.FromArgb(225, 225, 225),
-                    ForeColor = isDark ? Color.White : Color.Black,
-                    FlatStyle = FlatStyle.Flat
-                };
-                btnCreate.FlatAppearance.BorderColor = isDark ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180);
-
-                var btnCancel = new Button
-                {
-                    Text = "Cancel",
-                    Location = new Point((formWidth - 100) / 2, 145),
-                    Size = new Size(100, 34),
-                    BackColor = isDark ? Color.FromArgb(60, 60, 60) : Color.FromArgb(225, 225, 225),
-                    ForeColor = isDark ? Color.White : Color.Black,
-                    FlatStyle = FlatStyle.Flat,
-                    DialogResult = DialogResult.Cancel
-                };
-                btnCancel.FlatAppearance.BorderColor = isDark ? Color.FromArgb(80, 80, 80) : Color.FromArgb(180, 180, 180);
-
-                // Handle button clicks to capture the selected command
-                btnReplace.Click += (s, ev) =>
-                {
-                    dialogResult.Action = ProjectTerminalAction.ReplaceCurrentTerminal;
-                    dialogResult.ClaudeCommand = claudeCombo.SelectedIndex > 0 ? claudeCombo.SelectedItem.ToString() : null;
-                    form.DialogResult = DialogResult.OK;
-                };
-
-                btnCreate.Click += (s, ev) =>
-                {
-                    dialogResult.Action = ProjectTerminalAction.CreateNewTerminal;
-                    dialogResult.ClaudeCommand = claudeCombo.SelectedIndex > 0 ? claudeCombo.SelectedItem.ToString() : null;
-                    form.DialogResult = DialogResult.OK;
-                };
-
-                form.ClientSize = new Size(formWidth, 195);
-                form.Controls.AddRange(new Control[] { label, claudeLabel, claudeCombo, btnReplace, btnCreate, btnCancel });
-                form.CancelButton = btnCancel;
-
-                form.ShowDialog(this);
-
-                return dialogResult;
             }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] MCP config sync skipped — workingDir is the user-profile fallback, not a distinct project root.");
+            }
+
+            // Atomic uniqueness for Codex non-team-lead launches so two concurrent
+            // launches with the same per-user default-agent name can't alias to
+            // one broker identity.
+            bool atomicIdentityUniqueness = kind == Models.TerminalKind.Codex && !isTeamLead;
+
+            AddNewTerminal(
+                workingDirectory: workingDir,
+                identityName: identityName,
+                autoRunCommand: launchCmd.AutoRunCommand,
+                projectId: e.Project.Id,
+                isTeamLead: isTeamLead,
+                gatewayProfile: gatewayProfile,
+                atomicIdentityUniqueness: atomicIdentityUniqueness);
+
+            _currentProject = e.Project;
+            _projectService?.MarkProjectOpened(e.Project.Id);
+            _projectPanel?.RefreshForProject(e.Project);
         }
 
         private TerminalDocument FindEmptyTerminal()

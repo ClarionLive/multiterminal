@@ -84,7 +84,8 @@ namespace MultiTerminal.Terminal
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
-        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
+        /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
+        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
             if (_isRunning)
                 throw new InvalidOperationException("Terminal is already running");
@@ -116,7 +117,7 @@ namespace MultiTerminal.Terminal
                 CreatePseudoConsole(cols, rows);
 
                 // Start the shell process
-                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile);
+                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
 
                 // Close the pipe ends that belong to the pseudo console.
                 // CreatePseudoConsole() duplicates these handles internally, so our
@@ -276,7 +277,7 @@ namespace MultiTerminal.Terminal
                     ". Make sure you're running Windows 10 version 1809 or later.");
         }
 
-        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null)
+        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] ===== START =====");
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] shellPath: '{shellPath}'");
@@ -374,6 +375,13 @@ namespace MultiTerminal.Terminal
                 string safeGatewayProfile = gatewayProfile.Replace("'", "''");
                 envSetup += $"$env:MCP_GATEWAY_PROFILE = '{safeGatewayProfile}'; ";
                 System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MCP_GATEWAY_PROFILE = '{gatewayProfile}'");
+            }
+
+            if (!string.IsNullOrEmpty(taskWorktreePath))
+            {
+                string safeWorktreePath = taskWorktreePath.Replace("'", "''");
+                envSetup += $"$env:MULTITERMINAL_TASK_WORKTREE = '{safeWorktreePath}'; ";
+                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_TASK_WORKTREE = '{taskWorktreePath}'");
             }
 
             // Enable flicker-free alternate-screen renderer for Claude Code
