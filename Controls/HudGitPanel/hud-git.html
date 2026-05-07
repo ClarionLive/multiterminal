@@ -348,6 +348,17 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     font-style: italic;
     opacity: 0.85;
 }
+.wt-group-info-icon {
+    color: var(--fg-dim);
+    font-size: 12px;
+    font-style: normal;
+    cursor: help;
+    flex: 0 0 auto;
+    margin-left: 4px;
+    user-select: none;
+    line-height: 1;
+}
+.wt-group-info-icon:hover { color: var(--fg); }
 .wt-group .file-row { padding-left: 24px; }
 .wt-group-open-btn {
     background: none;
@@ -1157,9 +1168,28 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
 
         const title = document.createElement('span');
         title.className = 'wt-group-title';
-        title.textContent = 'Ad-hoc changes';
+        title.textContent = 'Unlinked changes';
         title.title = 'Files with no active task linkage';
         summary.appendChild(title);
+
+        // Info icon documents the 3-day shipped-chip cliff: done tasks
+        // touched within the last 3 days surface as their own "shipped"
+        // group above, anything older falls into this Unlinked group with
+        // no signal explaining why. Tooltip uses "recently-touched" not
+        // "completed" because the SQL gate at TaskDatabase.cs:1513 filters
+        // on tasks.updated_at — and per the caveat at TaskDatabase.cs:1486-
+        // 1503, ANY edit to a done task (pipeline reports, review notes,
+        // summary edits) bumps updated_at. A real completed_at gate is
+        // tracked in ticket a28a3fe6. Native title= keeps it consistent
+        // with the chip tooltip pattern used throughout (no JS popover).
+        // cursor:help on the icon signals it's informational, not
+        // interactive (per task 521f0449).
+        const infoIcon = document.createElement('span');
+        infoIcon.className = 'wt-group-info-icon';
+        infoIcon.textContent = 'ⓘ';
+        infoIcon.title = 'Files with no active task claim. Recently-touched done tasks (last 3 days of activity) appear in their own group above; older done tasks aren’t matched.';
+        infoIcon.setAttribute('aria-label', 'About unlinked changes');
+        summary.appendChild(infoIcon);
 
         const count = document.createElement('span');
         count.className = 'wt-group-count';
