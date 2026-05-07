@@ -15,11 +15,23 @@ namespace MultiTerminal.StartScreen
 {
     /// <summary>
     /// Event args carrying the project ID the user wants to launch.
+    /// TerminalKindOverride is populated when the split-button dropdown picks
+    /// a specific terminal ("claude-code"|"codex"); null means use the project's
+    /// stored DefaultTerminal.
     /// </summary>
     public class StartScreenLaunchEventArgs : EventArgs
     {
         public string ProjectId { get; }
-        public StartScreenLaunchEventArgs(string projectId) { ProjectId = projectId; }
+        public string TerminalKindOverride { get; }
+
+        public StartScreenLaunchEventArgs(string projectId)
+            : this(projectId, null) { }
+
+        public StartScreenLaunchEventArgs(string projectId, string terminalKindOverride)
+        {
+            ProjectId = projectId;
+            TerminalKindOverride = terminalKindOverride;
+        }
     }
 
     /// <summary>
@@ -243,7 +255,10 @@ namespace MultiTerminal.StartScreen
                         {
                             var projectId = launchIdEl.GetString();
                             string clickedName = root.TryGetProperty("projectName", out var nEl) ? nEl.GetString() : "(none)";
-                            System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] launch_project received: id='{projectId}' clickedName='{clickedName}' validLen={(projectId?.Length ?? -1)}");
+                            // Optional per-click terminal override from the split-button dropdown.
+                            // Null/empty means use the project's stored DefaultTerminal.
+                            string terminalOverride = root.TryGetProperty("terminal", out var tEl) ? tEl.GetString() : null;
+                            System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] launch_project received: id='{projectId}' clickedName='{clickedName}' terminalOverride='{terminalOverride ?? "(none)"}' validLen={(projectId?.Length ?? -1)}");
                             // Cross-check with the cached list we sent to JS
                             try
                             {
@@ -255,8 +270,8 @@ namespace MultiTerminal.StartScreen
                             // Validate: non-empty, GUID-length (36 chars max)
                             if (!string.IsNullOrEmpty(projectId) && projectId.Length <= 36)
                             {
-                                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] Firing ProjectLaunched event with id='{projectId}'");
-                                ProjectLaunched?.Invoke(this, new StartScreenLaunchEventArgs(projectId));
+                                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] Firing ProjectLaunched event with id='{projectId}' terminalOverride='{terminalOverride ?? "(none)"}'");
+                                ProjectLaunched?.Invoke(this, new StartScreenLaunchEventArgs(projectId, terminalOverride));
                             }
                         }
                         break;
@@ -339,7 +354,8 @@ namespace MultiTerminal.StartScreen
                             : p.LastOpenedAt.ToString("yyyy-MM-dd HH:mm:ss"),
                         currentVersion = p.CurrentVersion,
                         gitDefaultBranch = p.GitDefaultBranch,
-                        gitRepoUrl = p.GitRepoUrl
+                        gitRepoUrl = p.GitRepoUrl,
+                        defaultTerminal = TerminalKindHelper.Normalize(p.DefaultTerminal)
                     });
                 }
 
