@@ -10,6 +10,7 @@ using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.Controls.Shared;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
+using MultiTerminal.TaskLifecycleBoard;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Controls
@@ -218,9 +219,30 @@ namespace MultiTerminal.Controls
                                 OpenDiffPopupRequested?.Invoke(this, popupPath);
                         }
                         break;
+
+                    case "open_lifecycle_board":
+                        HandleOpenLifecycle(doc.RootElement);
+                        break;
                 }
             }
             catch { }
+        }
+
+        private void HandleOpenLifecycle(JsonElement root)
+        {
+            if (!root.TryGetProperty("taskId", out var idEl)) return;
+            string taskId = idEl.GetString();
+            if (string.IsNullOrWhiteSpace(taskId)) return;
+            if (_broker == null) return;
+
+            try
+            {
+                TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleOpenLifecycle] Failed for taskId='{taskId}': {ex.Message}");
+            }
         }
 
         // -------------------------------------------------------------------------

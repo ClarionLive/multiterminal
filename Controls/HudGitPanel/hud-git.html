@@ -349,6 +349,19 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     opacity: 0.85;
 }
 .wt-group .file-row { padding-left: 24px; }
+.wt-group-open-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--fg-dim);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+}
+.wt-group-open-btn:hover { color: var(--accent); border-color: var(--accent); }
+.wt-group-open-btn:focus-visible { outline: 1px dotted var(--accent); outline-offset: 1px; }
 
 /* ------- Commit rows (item [9]) ------- */
 .commits-list { padding: 0; margin: 0; }
@@ -1093,6 +1106,20 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             agentChip.textContent = '📋 ' + group.agent;
             agentChip.title = 'Task assignee';
             summary.appendChild(agentChip);
+        }
+
+        if (group.taskId) {
+            const openButton = document.createElement('button');
+            openButton.className = 'wt-group-open-btn';
+            openButton.type = 'button';
+            openButton.textContent = '↗';
+            openButton.title = 'Open lifecycle board';
+            openButton.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                send({ type: 'open_lifecycle_board', taskId: group.taskId });
+            });
+            summary.appendChild(openButton);
         }
 
         const count = document.createElement('span');
