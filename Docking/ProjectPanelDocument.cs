@@ -22,10 +22,20 @@ namespace MultiTerminal.Docking
         public Project Project { get; }
         public bool LaunchClaude { get; }
 
-        public ProjectSelectedEventArgs(Project project, bool launchClaude = false)
+        /// <summary>
+        /// Explicit terminal-kind override the user picked from the split-button
+        /// dropdown. Null means 'use project.DefaultTerminal'. Valid values:
+        /// <see cref="TerminalKindHelper.ClaudeCodeValue"/> or
+        /// <see cref="TerminalKindHelper.CodexValue"/> — anything else should be
+        /// coerced via <see cref="TerminalKindHelper.Normalize"/>.
+        /// </summary>
+        public string TerminalKindOverride { get; }
+
+        public ProjectSelectedEventArgs(Project project, bool launchClaude = false, string terminalKindOverride = null)
         {
             Project = project;
             LaunchClaude = launchClaude;
+            TerminalKindOverride = terminalKindOverride;
         }
     }
 
@@ -589,6 +599,9 @@ namespace MultiTerminal.Docking
                 case "changeLog": _currentProject.ChangeLog = value; break;
                 case "teamLead": _currentProject.TeamLead = value; break;
                 case "createdBy": _currentProject.CreatedBy = value; break;
+                case "defaultTerminal":
+                    _currentProject.DefaultTerminal = MultiTerminal.Models.TerminalKindHelper.Normalize(value);
+                    break;
             }
         }
 
@@ -935,11 +948,12 @@ namespace MultiTerminal.Docking
             }
         }
 
-        private void OnRendererLaunchRequested(object sender, EventArgs e)
+        private void OnRendererLaunchRequested(object sender, MultiTerminal.ProjectPanel.LaunchRequestedEventArgs e)
         {
             if (_currentProject != null)
             {
-                ProjectLaunchRequested?.Invoke(this, new ProjectSelectedEventArgs(_currentProject, launchClaude: true));
+                ProjectLaunchRequested?.Invoke(this,
+                    new ProjectSelectedEventArgs(_currentProject, launchClaude: true, terminalKindOverride: e?.TerminalKindOverride));
             }
         }
 

@@ -78,7 +78,7 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler RefreshAssociationsRequested;
 
         /// <summary>Raised when the user clicks "Launch in Terminal" in the project panel.</summary>
-        public event EventHandler LaunchRequested;
+        public event EventHandler<LaunchRequestedEventArgs> LaunchRequested;
 
         /// <summary>
         /// Raised when JS requests a .mcp.json write after committing the MCP servers picker.
@@ -290,7 +290,7 @@ namespace MultiTerminal.ProjectPanel
                         break;
 
                     case "launchProject":
-                        LaunchRequested?.Invoke(this, EventArgs.Empty);
+                        LaunchRequested?.Invoke(this, new LaunchRequestedEventArgs(message.Terminal));
                         break;
 
                     case "writeMcpJson":
@@ -391,6 +391,9 @@ namespace MultiTerminal.ProjectPanel
 
             // Team lead
             sb.Append($"\"teamLead\":\"{EscapeJson(project.TeamLead ?? "")}\",");
+
+            // Default terminal (claude-code | codex) — Normalize guarantees a canonical value.
+            sb.Append($"\"defaultTerminal\":\"{EscapeJson(TerminalKindHelper.Normalize(project.DefaultTerminal))}\",");
 
             // Status / flags (new fields)
             sb.Append($"\"isPinned\":{(project.IsPinned ? "true" : "false")},");
@@ -955,6 +958,9 @@ namespace MultiTerminal.ProjectPanel
                     result.ItemJson = itemEl.ValueKind == JsonValueKind.String
                         ? itemEl.GetString()
                         : itemEl.GetRawText();
+
+                if (root.TryGetProperty("terminal", out var terminalEl) && terminalEl.ValueKind == JsonValueKind.String)
+                    result.Terminal = terminalEl.GetString();
             }
             catch (Exception ex)
             {
@@ -977,6 +983,7 @@ namespace MultiTerminal.ProjectPanel
             public string TableName { get; set; }
             public string Action { get; set; }
             public string ItemJson { get; set; }
+            public string Terminal { get; set; }
         }
 
         protected override void Dispose(bool disposing)
@@ -991,6 +998,21 @@ namespace MultiTerminal.ProjectPanel
                 }
             }
             base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>
+    /// Event arguments for the project-panel launch button. Carries the
+    /// optional terminal-kind override picked from the split-button dropdown;
+    /// null means 'use project.DefaultTerminal'.
+    /// </summary>
+    public class LaunchRequestedEventArgs : EventArgs
+    {
+        public string TerminalKindOverride { get; }
+
+        public LaunchRequestedEventArgs(string terminalKindOverride)
+        {
+            TerminalKindOverride = terminalKindOverride;
         }
     }
 
