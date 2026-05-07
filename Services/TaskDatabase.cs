@@ -1427,8 +1427,12 @@ namespace MultiTerminal.Services
         /// that has since shipped, the chip surfaces the shipped task in a
         /// muted/greyed state ("done — commit when ready").
         ///
-        /// <para>Mirrors <see cref="GetActiveTaskLinkageForFiles"/> exactly
-        /// except for the status filter (<c>'done'</c> vs <c>'in_progress'</c>).
+        /// <para>Mirrors <see cref="GetActiveTaskLinkageForFiles"/> with two
+        /// divergences: the status filter (<c>'done'</c> vs <c>'in_progress'</c>)
+        /// and a 3-day recency cutoff on <c>tasks.updated_at</c> — the active
+        /// path has no recency cutoff because in-progress tasks are by
+        /// definition still in flight. See body comment for the recency
+        /// rationale and its phantom-resurrection caveat.
         /// Same lock, same parameterized IN-list, same deterministic tie-break.
         /// Contamination logic does NOT use this — completed tasks are
         /// intentionally excluded from cross-task contamination since shipped
@@ -1466,9 +1470,47 @@ namespace MultiTerminal.Services
                 //
                 // f.created_at + f.rowid kept as secondary tie-breaks for
                 // tasks updated in the same second.
+                //
+                // Recency cutoff: only surface done-tasks updated within the
+                // last 3 days. Without this, any stale task_file_links row
+                // from a months-old done task whose file is currently
+                // uncommitted in trunk would render as a phantom "shipped"
+                // group in the HUD Git tab — anchored to today's working
+                // tree even though the task shipped half a year ago. The
+                // intent of the shipped chip is "I just marked this done
+                // minutes/hours ago and the files are still uncommitted",
+                // which 3 days covers comfortably (weekend-safe: a task
+                // done Friday afternoon and committed Monday still
+                // surfaces).
+                //
+                // CAVEAT — phantom resurrection: this window does NOT
+                // permanently suppress phantoms. Because t.updated_at
+                // bumps on EVERY task edit via SaveTask (including
+                // system-driven writes — pipeline reports, review_notes,
+                // checklist transitions, summary edits, continuation
+                // notes), any touch of a long-shipped task whose files
+                // are still uncommitted in trunk will re-surface its
+                // shipped chip until 3 more days of quiescence pass. A
+                // real fix needs a dedicated `completed_at` column (see
+                // separate-ticket TODO at lines 1454-1465 above); the
+                // window narrows the surface, but only completed_at
+                // closes the foot-gun. Cross-model adversary Run 1 on
+                // 57a7326f.
+                //
+                // Hardcoded constant rather than a setting: bounded scope,
+                // promote to settings only if users start asking. Ticket
+                // 57a7326f filed by cross-model adversary on a401e082
+                // pipeline Run 1.
                 sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, t.updated_at ");
                 sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
-                sb.Append("WHERE t.status = 'done' AND f.file_path IN (");
+                // Wrap row side in datetime(t.updated_at) so SQLite parses
+                // the timestamp semantically rather than relying on string
+                // lexical compare. Works today via the System.Data.SQLite
+                // ISO8601 default, but a future connection-string change
+                // (e.g. DateTimeFormat=Ticks at TaskDatabase.cs:60-66)
+                // would silently break a raw-string comparison without a
+                // build error. Adversary LOW Run 1 fix.
+                sb.Append("WHERE t.status = 'done' AND datetime(t.updated_at) > datetime('now', '-3 days') AND f.file_path IN (");
                 for (int i = 0; i < absolutePaths.Count; i++)
                 {
                     if (i > 0) sb.Append(',');
