@@ -152,12 +152,90 @@ namespace MultiTerminal.Services
 
             if (exitCode != 0)
             {
+                // Windows partial-prune fallback. When an agent's terminal has
+                // its cwd inside the worktree, `git worktree remove` wipes
+                // contents + unregisters from .git/worktrees/, but cannot
+                // rmdir the directory because the OS holds an open handle
+                // through the child process's cwd. Git then exits non-zero
+                // even though the meaningful work is done — the only residue
+                // is an empty directory shell. This is the *common* case
+                // when worktree mode is on (any agent working in the spawned
+                // shell is naturally cwd'd inside the worktree at task-done
+                // time). Detect by re-querying `git worktree list`; if the
+                // path is gone from git's view, treat as partial success.
+#pragma warning disable CA3003
+                if (await IsWorktreeUnregisteredAsync(repoRoot, record.WorktreePath).ConfigureAwait(false))
+                {
+                    try
+                    {
+                        if (Directory.Exists(record.WorktreePath))
+                        {
+                            Directory.Delete(record.WorktreePath, recursive: false);
+                        }
+                    }
+                    catch (Exception rmdirEx) when (rmdirEx is IOException || rmdirEx is UnauthorizedAccessException)
+                    {
+                        Debug.WriteLine(
+                            $"[WorktreeManager] Worktree '{record.WorktreePath}' unregistered from git but rmdir failed (likely held by child cwd): {rmdirEx.Message}");
+                    }
+#pragma warning restore CA3003
+
+                    _db.MarkWorktreePruned(taskId);
+                    return true;
+                }
+
                 throw new InvalidOperationException(
                     $"git worktree remove failed (exit {exitCode}). stderr: {stderr.Trim()}; stdout: {stdout.Trim()}");
             }
 
             _db.MarkWorktreePruned(taskId);
             return true;
+        }
+
+        /// <summary>
+        /// Returns <c>true</c> when <paramref name="worktreePath"/> is no
+        /// longer listed by <c>git worktree list --porcelain</c> against
+        /// <paramref name="repoRoot"/>. Used as a partial-success signal in
+        /// <see cref="PruneForTaskAsync"/> on Windows when git wiped the
+        /// worktree but couldn't rmdir the empty shell. Returns <c>false</c>
+        /// when the list query itself fails — caller must treat that as a
+        /// real failure.
+        /// </summary>
+        private static async Task<bool> IsWorktreeUnregisteredAsync(string repoRoot, string worktreePath)
+        {
+            var (exitCode, stdout, _) = await RunGitAsync(
+                repoRoot, "worktree", "list", "--porcelain").ConfigureAwait(false);
+            if (exitCode != 0) return false;
+
+            string canonicalTarget = NormalizePath(worktreePath);
+            using var reader = new StringReader(stdout ?? string.Empty);
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (!line.StartsWith("worktree ", StringComparison.Ordinal)) continue;
+                string p = line.Substring("worktree ".Length).Trim();
+                if (string.Equals(NormalizePath(p), canonicalTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static string NormalizePath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            try
+            {
+                return Path.GetFullPath(path)
+                    .Replace('/', Path.DirectorySeparatorChar)
+                    .TrimEnd(Path.DirectorySeparatorChar);
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is PathTooLongException || ex is NotSupportedException)
+            {
+                return path.Replace('/', Path.DirectorySeparatorChar)
+                    .TrimEnd(Path.DirectorySeparatorChar);
+            }
         }
 
         /// <summary>

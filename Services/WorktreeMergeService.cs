@@ -137,9 +137,11 @@ namespace MultiTerminal.Services
                 };
             }
 
-            // Refuse to merge if the main checkout has uncommitted changes —
-            // git would refuse anyway, but our message is clearer.
-            var dirtyCheck = await RunGitAsync(repoRoot, "status", "--porcelain").ConfigureAwait(false);
+            // Refuse to merge if the main checkout has TRACKED uncommitted changes —
+            // git would refuse anyway, but our message is clearer. Use
+            // --untracked-files=no because untracked files don't block merges
+            // unless they'd be overwritten, and git's own check catches that case.
+            var dirtyCheck = await RunGitAsync(repoRoot, "status", "--porcelain", "--untracked-files=no").ConfigureAwait(false);
             if (dirtyCheck.exitCode != 0)
             {
                 return new MergeResult

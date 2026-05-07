@@ -3053,6 +3053,7 @@ namespace MultiTerminal.MCPServer.Services
                 // dev resolves the merge manually.
                 if (prunedOK)
                 {
+                    string taskIdShort = taskId.Substring(0, Math.Min(8, taskId.Length));
                     try
                     {
                         var mergeResult = _merge.MergeForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
@@ -3098,7 +3099,7 @@ namespace MultiTerminal.MCPServer.Services
                                 Terminal = task.Assignee ?? "System",
                                 Type = "worktree",
                                 Action = "auto_merge_failed",
-                                Content = $"{conflictTag} for '{task.Title}'. Task branch preserved for manual resolution — see debug log for details.",
+                                Content = $"{conflictTag} for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                                 RelatedId = taskId
                             });
                         }
@@ -3112,7 +3113,7 @@ namespace MultiTerminal.MCPServer.Services
                             Terminal = task.Assignee ?? "System",
                             Type = "worktree",
                             Action = "auto_merge_failed",
-                            Content = $"Auto-merge threw for '{task.Title}'. Task branch preserved for manual resolution — see debug log for details.",
+                            Content = $"Auto-merge threw for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                             RelatedId = taskId
                         });
                     }
