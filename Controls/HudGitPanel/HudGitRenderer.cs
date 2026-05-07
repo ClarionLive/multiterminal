@@ -422,8 +422,22 @@ namespace MultiTerminal.Controls
                     // unlinked array (rendered as a bottom group, hidden when
                     // empty). Group is additive — workingTree flat array is
                     // preserved for fallback / backward compat.
+                    //
+                    // a401e082: gated on WorktreeConfig.IsEnabled. In mode=OFF,
+                    // stale task_file_links rows from prior cycles surface as
+                    // linkageState='shipped' under done-task groups and
+                    // misattribute fresh trunk edits to old shipped tasks.
+                    // When the gate is OFF, the linkage filter below matches
+                    // nothing and groupedByTask collapses to an empty array;
+                    // hud-git.html:783-787 then routes to the flat-list path
+                    // (renderWorkingTree). The contamination heuristic in
+                    // GitAttributionService.GetCrossTaskActiveTaskIds is gated
+                    // independently with INVERTED polarity (active when
+                    // !IsEnabled), so the two gates straddle the same flag in
+                    // opposite directions — see GitAttributionService.cs:249.
                     var groupedByTask = workingTree
-                        .Where(f => f.linkageState == "active" || f.linkageState == "shipped")
+                        .Where(f => WorktreeConfig.IsEnabled
+                            && (f.linkageState == "active" || f.linkageState == "shipped"))
                         .Where(f => !string.IsNullOrEmpty(f.taskId))
                         .GroupBy(f => f.taskId)
                         .Select(g =>
@@ -444,8 +458,15 @@ namespace MultiTerminal.Controls
                         .ThenBy(g => g.taskTitle, StringComparer.OrdinalIgnoreCase)
                         .ToArray();
 
+                    // a401e082: same gate as groupedByTask above. The unlinked
+                    // bucket is consumed only by renderWorkingTreeGrouped (when
+                    // groupedByTask is non-empty), so in mode=OFF it's never
+                    // read. Gating here keeps the two arrays in lock-step and
+                    // removes a contract-drift trap where future JS could read
+                    // s.unlinked directly without checking groupedByTask.length.
                     var unlinked = workingTree
-                        .Where(f => f.linkageState == "none")
+                        .Where(f => WorktreeConfig.IsEnabled
+                            && f.linkageState == "none")
                         .ToArray();
 
                     // Cross-task contamination: distinct active task IDs across ALL
