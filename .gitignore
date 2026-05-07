@@ -56,3 +56,9 @@ memory/
 # Misc artifacts
 nul
 cq-windows-amd64.exe
+
+# Forensic captures from agent sessions (ephemeral debug data)
+.forensic/
+
+# Scratch HTML mockups (underscore prefix convention)
+scripts/_*.html

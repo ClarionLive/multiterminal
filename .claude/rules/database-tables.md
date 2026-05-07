@@ -51,7 +51,7 @@ paths:
 
 | Table | Key Columns | Purpose |
 |-------|-------------|---------|
-| `projects` | id, name, description, path, source_path, deploy_path, build_command, git_repo_url, git_default_branch, git_auto_commit, is_pinned | Project core record |
+| `projects` | id, name, description, path, source_path, deploy_path, build_command, git_repo_url, git_default_branch, git_auto_commit, is_pinned, default_terminal | Project core record |
 | `project_agents` | project_id, agent_name, role, preferred_model | Agents assigned to project |
 | `project_mcp_servers` | project_id, server_name, is_enabled | MCP servers per project |
 | `project_specialist_agents` | project_id, agent_type, is_enabled, custom_prompt | Specialist agents |
