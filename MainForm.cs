@@ -420,6 +420,10 @@ namespace MultiTerminal
                 // Wire up GitRepoManager — per-project git read-layer cache for HUD Git tab + dashboard widget
                 _mcpServer.Broker.GitRepos = new Services.GitRepoManager();
 
+                // Wire up WorktreeListService — supplies the HUD Git tab's switcher (parent + linked worktrees)
+                _mcpServer.Broker.WorktreeList = new Services.WorktreeListService(
+                    _mcpServer.Broker.TaskDb, _mcpServer.Broker);
+
                 // Wire up GitAttributionService — Phase 2 overlays for the HUD Git tab (agent / task / pipeline-status chips + contamination banner)
                 _mcpServer.Broker.GitAttribution = new Services.GitAttributionService(_mcpServer.Broker.TaskDb);
 

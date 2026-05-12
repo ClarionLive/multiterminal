@@ -165,10 +165,32 @@ namespace MultiTerminal.Services
                     $"GitRepoService: '{repoRoot}' is not a valid git repository.");
 
             RepoRoot = repoRoot;
-            _repo = new Repository(repoRoot);
-            _watcher = new GitRepoWatcher(repoRoot);
-            _watcher.RepoStateChanged += OnInnerWatcherFired;
-            _watcher.Start();
+            try
+            {
+                _repo = new Repository(repoRoot);
+                _watcher = new GitRepoWatcher(repoRoot);
+                _watcher.RepoStateChanged += OnInnerWatcherFired;
+                // Post-Run-4: Watcher.Start() can throw InvalidOperationException
+                // from its TOCTOU revalidation pass. Without the try/catch below,
+                // the throw unwinds the stack with _repo already allocated — and
+                // _repo is a LibGit2Sharp native handle that mmaps .git/index and
+                // holds packfile locks. GitRepoManager.GetOrCreate catches the
+                // throw but its finally { svc?.Dispose(); } sees svc=null because
+                // the ctor never returned a reference. Result: handle leaks until
+                // GC finalisation, potentially blocking subsequent git operations
+                // on the same .git directory.
+                _watcher.Start();
+            }
+            catch
+            {
+                // Partial-init cleanup: dispose in reverse order of allocation.
+                // Each Dispose is best-effort; we still rethrow so the caller
+                // sees the original failure.
+                try { if (_watcher != null) _watcher.RepoStateChanged -= OnInnerWatcherFired; } catch { }
+                try { _watcher?.Dispose(); } catch { }
+                try { _repo?.Dispose(); } catch { }
+                throw;
+            }
         }
 
         /// <summary>
