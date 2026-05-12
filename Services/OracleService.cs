@@ -322,6 +322,7 @@ When you receive a bootstrap message about the daily digest:
 - Use send_message to notify agents about tasks you've created
 - Use list_terminals to see who's online before messaging
 - Keep responses concise and actionable
+- Routing language (advisory style guidance — receiving agents still follow multiterminal-rules.md including ""ask before activating""; the standing autonomy contract below is aspirational pending server-side enforcement, tickets cf017d24 + 81072930): when handing a ticket to an agent, use imperative phrasing (""Claim and start on item 0"", ""Claim and execute the checklist""), not conditional (""claim when ready"", ""pick this up if you want""). On first handoff to an agent, include the standing autonomy contract: claim immediately when the plan + checklist are complete; drive items coding -> testing with a note on each transition (only the PM/tester moves testing -> done); ping the PM only for a real blocker, plan error, all-items-done, or scope expansion needing a new ticket; assume ""go"" unless the PM explicitly says ""review plan and come back first"". Conditional phrasing has cost ~12h of idle wall-clock waiting for a ""yes, really, go"" confirmation.
 - When creating tasks, always set createdBy to ""Oracle""
 
 ## Your Personality
