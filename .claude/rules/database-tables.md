@@ -22,10 +22,10 @@ paths:
 
 | Table | Key Columns | Purpose |
 |-------|-------------|---------|
-| `tasks` | id, title, status, assignee, checklist_json, plan, continuation_notes | Kanban tasks |
+| `tasks` | id, title, status, assignee, checklist_json, plan, continuation_notes, auto_status, review_notes | Kanban tasks. `review_notes` holds the structured human-code-review JSON array (cleared on Pass; snapshot saved to `task_reports` first). |
 | `task_helpers` | task_id, helper_name, added_by | Helper assignments |
 | `task_relationships` | task_id, related_task_id, relationship_type | Task dependencies/links |
-| `task_file_links` | task_id, file_path, added_by, description | Files associated with tasks |
+| `task_file_links` | task_id, file_path, checklist_item_index (nullable), added_by, description | Files associated with tasks. `checklist_item_index` is NULL for task-scoped links (default) or a 0-based item index for item-scoped links (used by per-item review-note routing). |
 | `task_worktrees` | task_id (PK), worktree_path, branch_name, created_at, status | Per-task git worktree records (Phase 1 worktree isolation, gated by MULTITERMINAL_WORKTREE_MODE) |
 | `task_reports` | id, task_id, invocation_id, agent_name, report_type, report_content, verdict, score, created_at, created_by | Persisted agent reports |
 | `task_summaries` | task_id, summary_at, previous_status, new_status | Progress snapshots |
