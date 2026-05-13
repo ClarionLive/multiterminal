@@ -452,6 +452,10 @@ namespace MultiTerminal.MCPServer.Models
         public int? LineEnd { get; set; }
         public string AddedBy { get; set; }
         public DateTime CreatedAt { get; set; }
+        // NULL = task-scoped (default, applies to all items). Index = item-scoped
+        // (only that checklist item touches this file). Drives per-item review-note
+        // routing in HandleCodeReviewVerdict (task 87ee90c3).
+        public int? ChecklistItemIndex { get; set; }
     }
 
     public class LinkFileResult
