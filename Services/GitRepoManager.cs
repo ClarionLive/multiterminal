@@ -13,8 +13,14 @@ namespace MultiTerminal.Services
         /// <summary><c>.git</c> is a directory — a standard repository, openable for direct inspection.</summary>
         Standard,
 
-        /// <summary><c>.git</c> is a file — worktree gitlink or submodule pointer. Not openable for direct inspection in v1; the HUD Git tab renders a friendly empty-state and points the user at the parent repo.</summary>
-        LinkedGitDir,
+        /// <summary><c>.git</c> is a file whose first line is <c>gitdir: …/worktrees/&lt;name&gt;</c>. A linked worktree of some parent repo; LibGit2Sharp opens it fine via the worktree path. The HUD Git tab treats this as a fully inspectable repo (its own branch + working tree) and surfaces a switcher to its parent + sibling worktrees.</summary>
+        Worktree,
+
+        /// <summary><c>.git</c> is a file whose first line is <c>gitdir: …/.git/modules/&lt;name&gt;</c>. A submodule pointer. Not directly inspectable in v1 — the HUD Git tab renders an empty-state pointing the user at the parent repo.</summary>
+        Submodule,
+
+        /// <summary><c>.git</c> is a file whose <c>gitdir:</c> target matches neither the worktree nor submodule shape. Covers legitimate but non-default layouts (e.g. <c>git init --separate-git-dir</c>, externally-relocated gitdirs) as well as malformed metadata. Treated as unsupported in v1 — HUD Git renders the same empty-state as <see cref="Submodule"/> for now; a future ticket could promote these by deriving identity from <c>git rev-parse --git-common-dir</c> instead of relying on the literal path shape.</summary>
+        UnsupportedLink,
 
         /// <summary>No <c>.git</c> file or directory exists at the project root. The HUD Git tab renders an empty-state inviting <c>git init</c>.</summary>
         NotARepo,
@@ -44,17 +50,26 @@ namespace MultiTerminal.Services
         private bool _disposed;
 
         /// <summary>
-        /// Classifies a project root by its on-disk git layout. Cheap (just two
-        /// filesystem stats) and side-effect-free except for an info-level log
-        /// the first time a <see cref="GitRepoLayout.LinkedGitDir"/> case fires
-        /// for a given project — useful telemetry to gauge how often the
-        /// worktree/submodule case shows up in practice without spamming the log
-        /// on every UI refresh.
+        /// Classifies a project root by its on-disk git layout. Cheap (one or two
+        /// filesystem stats plus a small read of the <c>.git</c> file when it's a
+        /// gitlink) and side-effect-free except for an info-level log the first
+        /// time a <see cref="GitRepoLayout.Worktree"/> or
+        /// <see cref="GitRepoLayout.Submodule"/> case fires for a given project —
+        /// useful telemetry to gauge how often the gitlink cases show up in
+        /// practice without spamming the log on every UI refresh.
+        ///
+        /// <para>Discriminates worktree vs submodule by reading the first line of
+        /// the <c>.git</c> file (<c>gitdir: …/.git/worktrees/&lt;name&gt;</c> vs
+        /// <c>gitdir: …/.git/modules/&lt;name&gt;</c>). Any other gitlink shape
+        /// falls back to <see cref="GitRepoLayout.Submodule"/> as the safer
+        /// classification — keeps the HUD Git tab's empty-state behavior intact
+        /// for unknown layouts.</para>
         ///
         /// <para>Used by <c>HudGitRenderer</c> to choose between the normal
-        /// header-and-body rendering, the worktree/submodule empty-state, and
-        /// the no-repo empty-state — without going through the throwing
-        /// <see cref="GitRepoService"/> constructor on the unsupported cases.</para>
+        /// header-and-body rendering, the worktree switcher-enabled rendering,
+        /// the submodule empty-state, and the no-repo empty-state — without
+        /// going through the throwing <see cref="GitRepoService"/> constructor
+        /// on the unsupported cases.</para>
         /// </summary>
         public GitRepoLayout DetectLayout(string projectRoot)
         {
@@ -66,17 +81,92 @@ namespace MultiTerminal.Services
             if (Directory.Exists(gitPath)) return GitRepoLayout.Standard;
             if (File.Exists(gitPath))
             {
+                var classification = ClassifyGitlink(gitPath);
                 lock (_lock)
                 {
                     if (_loggedLinkedDirs.Add(canonical))
                     {
                         Debug.WriteLine(
-                            $"[GitRepoManager] Detected linked .git for '{canonical}' (worktree/submodule). HUD Git tab will render empty-state.");
+                            $"[GitRepoManager] Detected linked .git for '{canonical}' (classified as {classification}).");
                     }
                 }
-                return GitRepoLayout.LinkedGitDir;
+                return classification;
             }
             return GitRepoLayout.NotARepo;
+        }
+
+        /// <summary>
+        /// Reads the first non-empty line of a <c>.git</c> gitlink file and
+        /// classifies it as <see cref="GitRepoLayout.Worktree"/> (gitdir points
+        /// inside a <c>worktrees/</c> admin subdir) or
+        /// <see cref="GitRepoLayout.Submodule"/> (gitdir points inside a
+        /// <c>modules/</c> admin subdir, or shape is unrecognized). Read is
+        /// bounded so a malformed/huge <c>.git</c> file doesn't blow up the
+        /// caller — only the first 1 KB matters, the rest is git's business.
+        ///
+        /// <para>On any I/O failure returns <see cref="GitRepoLayout.Submodule"/>
+        /// as the conservative default — keeps the empty-state UX intact rather
+        /// than accidentally letting an unreadable gitlink flow through the
+        /// worktree path.</para>
+        /// </summary>
+        private static GitRepoLayout ClassifyGitlink(string gitFilePath)
+        {
+            try
+            {
+                using var stream = new FileStream(
+                    gitFilePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                char[] buf = new char[1024];
+                int read = reader.Read(buf, 0, buf.Length);
+                if (read <= 0) return GitRepoLayout.Submodule;
+                string head = new string(buf, 0, read);
+
+                // First non-empty line. The git format is `gitdir: <path>` but be
+                // tolerant of a leading BOM or whitespace.
+                string firstLine = null;
+                foreach (var raw in head.Split('\n'))
+                {
+                    string line = raw.TrimEnd('\r').Trim();
+                    if (line.Length == 0) continue;
+                    firstLine = line;
+                    break;
+                }
+                if (firstLine == null) return GitRepoLayout.Submodule;
+
+                const string Prefix = "gitdir:";
+                int idx = firstLine.IndexOf(Prefix, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) return GitRepoLayout.Submodule;
+
+                string gitDir = firstLine.Substring(idx + Prefix.Length).Trim();
+                if (gitDir.Length == 0) return GitRepoLayout.Submodule;
+
+                // Normalize separators so we can match against canonical
+                // segments regardless of how git wrote the path (forward- or
+                // back-slashes).
+                string normalized = gitDir.Replace('\\', '/');
+                if (normalized.IndexOf("/worktrees/", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return GitRepoLayout.Worktree;
+                if (normalized.IndexOf("/modules/", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return GitRepoLayout.Submodule;
+
+                // Unknown gitlink shape — neither worktree (/worktrees/) nor
+                // submodule (/modules/). Could be a legitimate non-default
+                // layout (separate-git-dir, externally-relocated gitdir) or
+                // malformed metadata. Return UnsupportedLink so the caller
+                // can render a distinct empty-state instead of misclassifying
+                // as a submodule.
+                return GitRepoLayout.UnsupportedLink;
+            }
+            catch
+            {
+                // I/O failure — be conservative and treat as submodule. Same
+                // empty-state UX as UnsupportedLink today, but signals that
+                // we couldn't read the metadata at all.
+                return GitRepoLayout.Submodule;
+            }
         }
 
         /// <summary>

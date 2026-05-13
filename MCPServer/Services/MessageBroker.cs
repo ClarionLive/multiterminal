@@ -332,6 +332,13 @@ namespace MultiTerminal.MCPServer.Services
         public MultiTerminal.Services.GitRepoManager GitRepos { get; set; }
 
         /// <summary>
+        /// Lists the parent + linked worktrees of a repository for the HUD Git
+        /// tab's switcher. Stateless utility; one instance per broker is fine.
+        /// Set via DI after broker is created.
+        /// </summary>
+        public MultiTerminal.Services.WorktreeListService WorktreeList { get; set; }
+
+        /// <summary>
         /// Per-task git worktree manager (Phase 1 worktree isolation).
         /// Created in the broker ctor since it only needs <see cref="TaskDb"/>.
         /// Lifecycle hooks in <see cref="SetTaskActive"/> and

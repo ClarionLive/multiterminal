@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -25,7 +26,8 @@ namespace MultiTerminal.Controls
     /// <para>Multi-repo aware via <see cref="GitRepoManager.DetectLayout"/>:</para>
     /// <list type="bullet">
     ///   <item><description><c>Standard</c> — full header + scaffolded body.</description></item>
-    ///   <item><description><c>LinkedGitDir</c> — empty-state for worktree/submodule (.git is a file).</description></item>
+    ///   <item><description><c>Worktree</c> — full header + scaffolded body, identical to Standard. The switcher (rendered above the header) lists parent + sibling worktrees.</description></item>
+    ///   <item><description><c>Submodule</c> — empty-state pointing the user at the parent repo.</description></item>
     ///   <item><description><c>NotARepo</c> — empty-state inviting <c>git init</c>.</description></item>
     /// </list>
     /// </summary>
@@ -39,6 +41,52 @@ namespace MultiTerminal.Controls
 
         private MessageBroker _broker;
         private string _projectPath;
+
+        /// <summary>
+        /// The project root the panel was originally bound to via
+        /// <see cref="SetProject"/>. Used as the stable identity for the
+        /// per-project "last selected repo" persistence key — switching
+        /// between parent + linked worktrees updates <see cref="_projectPath"/>
+        /// but leaves this field alone, so a future <see cref="SetProject"/>
+        /// to a different project doesn't load the wrong saved choice.
+        /// </summary>
+        private string _originalProjectPath;
+
+        /// <summary>
+        /// Membership set of canonical paths that the most recent
+        /// <c>RefreshWorktreeListAsync</c> reported as legitimate worktrees of
+        /// the current project. <see cref="SwitchToRepo"/> rejects targets not
+        /// in this set so a compromised webview message or poisoned settings
+        /// value can't repoint the panel at an unrelated repository.
+        /// Populated post-fetch; cleared in <see cref="SetProject"/> so a
+        /// stale entry from the prior project cannot authorize a cross-project
+        /// switch during the transition window.
+        /// Access is single-threaded (UI thread only) so no synchronisation.
+        /// </summary>
+        private readonly HashSet<string> _worktreeAllowlist
+            = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Monotonic counter bumped on every <see cref="SetProject"/> call.
+        /// A <see cref="RefreshWorktreeListAsync"/> continuation captures the
+        /// generation at start and ignores its own results if the generation
+        /// has moved on by the time the await completes — defeats the race
+        /// where an old project's list-fetch returns AFTER a new
+        /// <see cref="SetProject"/> has cleared the allowlist for the next
+        /// project.
+        /// </summary>
+        private int _allowlistGeneration;
+
+        /// <summary>
+        /// Restored selection from <see cref="SettingsService"/> waiting to be
+        /// applied. We deliberately do NOT bind <see cref="_projectPath"/> to
+        /// the restored value during <see cref="SetProject"/> — doing so
+        /// would let a poisoned settings entry render an unrelated repo's
+        /// data before the allowlist can validate it. Instead the restore is
+        /// applied only after <see cref="RefreshWorktreeListAsync"/> proves
+        /// the saved value is a member of the validated worktree set.
+        /// </summary>
+        private string _pendingRestoredRepo;
 
         // _currentService is owned by GitRepoManager (the broker DI'd cache),
         // not by this panel. Disposal is the manager's responsibility — this
@@ -85,16 +133,204 @@ namespace MultiTerminal.Controls
         /// Bind this panel to a project root. Detects git layout, subscribes to
         /// <see cref="GitRepoService.RepoStateChanged"/> for live refresh on
         /// Standard repos, or posts the appropriate empty-state message for
-        /// LinkedGitDir / NotARepo paths.
+        /// Worktree / Submodule / NotARepo paths.
         /// </summary>
         public void SetProject(string projectPath)
         {
-            if (_projectPath == projectPath) return;
+            // The "project" identity changes only when SetProject moves us to a
+            // genuinely different root. Switcher-driven moves go through
+            // SwitchToRepo and preserve _originalProjectPath.
+            if (string.Equals(_originalProjectPath, projectPath, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(_projectPath, projectPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
 
             UnsubscribeCurrent();
+            _originalProjectPath = projectPath;
+
+            // Cross-project safety: clear the prior project's allowlist and
+            // bump the generation token so any in-flight RefreshWorktreeListAsync
+            // continuation from the previous project ignores its own result.
+            // Without this, a stale switcher click during the transition
+            // window can submit a path that was valid for the OLD project but
+            // not the new one and pass IsAllowedWorktree.
+            _worktreeAllowlist.Clear();
+            _allowlistGeneration++;
+
+            // Defer the persisted-selection restore until after the allowlist
+            // is validated. Binding _projectPath to a poisoned settings value
+            // here would let an attacker show an unrelated repo's data for
+            // one render cycle before the post-fetch revert fires.
+            _pendingRestoredRepo = TryRestoreSelectedRepo(projectPath);
             _projectPath = projectPath;
 
             if (_isInitialized) ApplyProject();
+        }
+
+        /// <summary>
+        /// Switches the panel to a different repo path from the worktree
+        /// switcher (parent or a linked worktree). Idempotent for the
+        /// already-displayed path. Persists the choice so the next bind
+        /// restores it.
+        ///
+        /// <para>Validates the target against the most recent worktree
+        /// allowlist — a compromised webview message or poisoned settings
+        /// value claiming an arbitrary path is silently rejected so the panel
+        /// cannot be repointed at an unrelated repository. The allowlist is
+        /// populated by <see cref="RefreshWorktreeListAsync"/>, so the very
+        /// first switch attempt before any list fetch will be rejected; that
+        /// edge is acceptable because the switcher UI is only rendered after
+        /// the list arrives.</para>
+        /// </summary>
+        private void SwitchToRepo(string newPath)
+        {
+            if (string.IsNullOrEmpty(newPath)) return;
+            if (string.Equals(_projectPath, newPath, StringComparison.OrdinalIgnoreCase)) return;
+            if (!Directory.Exists(newPath)) return;
+
+            if (!IsAllowedWorktree(newPath))
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.SwitchToRepo] Rejected non-allowlisted path: {newPath}");
+                return;
+            }
+
+            UnsubscribeCurrent();
+            _projectPath = newPath;
+            PersistSelectedRepo(_originalProjectPath, newPath);
+
+            if (_isInitialized) ApplyProject();
+        }
+
+        /// <summary>
+        /// Replaces the membership set used by <see cref="SwitchToRepo"/> and
+        /// <see cref="IsAllowedWorktree"/>. Called from
+        /// <see cref="RefreshWorktreeListAsync"/> with the validated entries
+        /// returned by <see cref="MultiTerminal.Services.WorktreeListService"/>
+        /// (already filtered for safe local paths AND verified to share the
+        /// same common gitdir as the source repo).
+        /// </summary>
+        private void UpdateWorktreeAllowlist(System.Collections.Generic.IReadOnlyList<MultiTerminal.Services.WorktreeEntry> entries)
+        {
+            _worktreeAllowlist.Clear();
+            if (entries == null) return;
+            foreach (var entry in entries)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.Path)) continue;
+                _worktreeAllowlist.Add(CanonicalizeForAllowlist(entry.Path));
+            }
+
+            // Defence-in-depth for a previously-valid switcher selection that
+            // turned out to no longer be a member — e.g. another agent pruned
+            // the worktree between our last refresh and this one. Revert to
+            // the original project and clear the persisted choice.
+            // Note: the persisted-selection restore is handled separately in
+            // RefreshWorktreeListAsync's deferred path, so on first bind this
+            // branch never fires (_projectPath == _originalProjectPath).
+            if (!string.IsNullOrEmpty(_projectPath)
+                && !string.IsNullOrEmpty(_originalProjectPath)
+                && !string.Equals(_projectPath, _originalProjectPath, StringComparison.OrdinalIgnoreCase)
+                && !IsAllowedWorktree(_projectPath))
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.UpdateWorktreeAllowlist] Current path '{_projectPath}' is no longer in the validated worktree set — reverting to original '{_originalProjectPath}'.");
+                PersistSelectedRepo(_originalProjectPath, _originalProjectPath); // removes key
+                UnsubscribeCurrent();
+                _projectPath = _originalProjectPath;
+                if (_isInitialized) ApplyProject();
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="path"/> matches one of the entries from
+        /// the most recent worktree list. Comparison is canonical
+        /// (full-path + forward-slash + trim trailing slash) to absorb
+        /// `\` vs `/`, trailing slashes, and short-form vs long-form
+        /// differences.
+        /// </summary>
+        private bool IsAllowedWorktree(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return _worktreeAllowlist.Contains(CanonicalizeForAllowlist(path));
+        }
+
+        private static string CanonicalizeForAllowlist(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            try
+            {
+                return Path.GetFullPath(path).Replace('\\', '/').TrimEnd('/');
+            }
+            catch
+            {
+                return path.Replace('\\', '/').TrimEnd('/');
+            }
+        }
+
+        /// <summary>
+        /// Returns the persisted "selected repo" for this project, or
+        /// <c>null</c> if none / the value is no longer on disk. The
+        /// key is hashed off the canonical original project path so that
+        /// switching between projects doesn't cross-contaminate.
+        /// </summary>
+        private static string TryRestoreSelectedRepo(string originalProjectPath)
+        {
+            if (string.IsNullOrEmpty(originalProjectPath)) return null;
+            try
+            {
+                string key = MakeSelectedRepoKey(originalProjectPath);
+                string saved = SettingsService.Default.Get(key);
+                if (string.IsNullOrEmpty(saved)) return null;
+                if (!Directory.Exists(saved)) return null;
+                return saved;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.TryRestoreSelectedRepo] {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Persists the user's switcher choice for the given project. When
+        /// <paramref name="selectedRepoPath"/> equals
+        /// <paramref name="originalProjectPath"/>, the key is removed so the
+        /// "no override" default is restored cleanly.
+        /// </summary>
+        private static void PersistSelectedRepo(string originalProjectPath, string selectedRepoPath)
+        {
+            if (string.IsNullOrEmpty(originalProjectPath)) return;
+            try
+            {
+                string key = MakeSelectedRepoKey(originalProjectPath);
+                if (string.IsNullOrEmpty(selectedRepoPath)
+                    || string.Equals(selectedRepoPath, originalProjectPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    SettingsService.Default.Remove(key);
+                }
+                else
+                {
+                    SettingsService.Default.Set(key, selectedRepoPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.PersistSelectedRepo] {ex.Message}");
+            }
+        }
+
+        private static string MakeSelectedRepoKey(string originalProjectPath)
+        {
+            // Canonical form: full path, forward slashes, no trailing slash.
+            // Stable across `\` vs `/` and ad-hoc trailing-slash variations.
+            string canonical;
+            try { canonical = Path.GetFullPath(originalProjectPath); }
+            catch { canonical = originalProjectPath; }
+            canonical = canonical.Replace('\\', '/').TrimEnd('/');
+            return $"hudGit.selectedRepo.{canonical}";
         }
 
         public void ApplyTheme(bool isDark)
@@ -182,6 +418,7 @@ namespace MultiTerminal.Controls
 
                     case "refresh":
                         _ = RefreshAsync();
+                        _ = RefreshWorktreeListAsync();
                         break;
 
                     case "fetch":
@@ -224,6 +461,17 @@ namespace MultiTerminal.Controls
 
                     case "open_lifecycle_board":
                         HandleOpenLifecycle(doc.RootElement);
+                        break;
+
+                    case "switch_repo":
+                        // Posted from the parent/worktrees switcher above the
+                        // header. Re-points the panel at the selected repo
+                        // path and persists the choice for next session.
+                        if (doc.RootElement.TryGetProperty("path", out var switchPathProp))
+                        {
+                            string switchPath = switchPathProp.GetString();
+                            if (!string.IsNullOrEmpty(switchPath)) SwitchToRepo(switchPath);
+                        }
                         break;
                 }
             }
@@ -269,13 +517,27 @@ namespace MultiTerminal.Controls
             var layout = manager.DetectLayout(_projectPath);
             switch (layout)
             {
-                case GitRepoLayout.LinkedGitDir:
+                // Worktrees are fully inspectable repos — LibGit2Sharp opens them
+                // directly via their worktree path. Fall through to the standard
+                // init path so the header + body render normally; the switcher
+                // (item 4) will surface the parent + sibling worktrees on top.
+                case GitRepoLayout.Worktree:
+                case GitRepoLayout.Standard:
+                    break;
+                case GitRepoLayout.Submodule:
+                case GitRepoLayout.UnsupportedLink:
+                    // UnsupportedLink shares the empty-state UX with Submodule
+                    // for now (both are "your .git is a gitlink we can't open
+                    // for direct inspection"). A future ticket could give
+                    // UnsupportedLink its own distinct hint message that
+                    // suggests running `git rev-parse --git-common-dir` to
+                    // diagnose, but the gating behavior is the same: don't
+                    // pretend to support this layout.
                     Send(new { type = "empty_linked" });
                     return;
                 case GitRepoLayout.NotARepo:
                     Send(new { type = "empty_no_repo" });
                     return;
-                case GitRepoLayout.Standard:
                 default:
                     break;
             }
@@ -292,6 +554,98 @@ namespace MultiTerminal.Controls
             }
             _currentService.RepoStateChanged += OnRepoStateChanged;
             _ = RefreshAsync();
+            _ = RefreshWorktreeListAsync();
+        }
+
+        /// <summary>
+        /// Loads the parent + linked-worktree list for the currently-bound
+        /// repository and pushes it to the webview as a separate
+        /// <c>worktrees</c> message — the switcher UI (rendered above the
+        /// header) consumes this independently of the main refresh payload so
+        /// the two surfaces can update on different cadences.
+        ///
+        /// <para>Silently no-ops when the broker hasn't wired a
+        /// <see cref="MultiTerminal.Services.WorktreeListService"/> yet (early
+        /// startup) or when the list comes back empty — the switcher just
+        /// stays hidden in that case.</para>
+        /// </summary>
+        private async System.Threading.Tasks.Task RefreshWorktreeListAsync()
+        {
+            try
+            {
+                var service = _broker?.WorktreeList;
+                if (service == null) return;
+                var projectPath = _projectPath;
+                if (string.IsNullOrEmpty(projectPath)) return;
+
+                // Capture the generation at start. SetProject increments the
+                // counter; if it moves while we're awaiting git, our result
+                // belongs to a stale project and must not touch the new
+                // project's allowlist (otherwise a switcher click could be
+                // authorised against the wrong repo's set).
+                int generationAtStart = _allowlistGeneration;
+
+                // No ConfigureAwait(false) here — the continuation must resume
+                // on the captured WinForms SynchronizationContext so the
+                // subsequent Send → PostWebMessageAsJson call lands on the UI
+                // thread. WebView2 COM proxies are STA-bound; calling them
+                // from a thread-pool continuation throws RPC_E_WRONG_THREAD,
+                // and PostRaw's catch swallows it, leaving the switcher
+                // silently un-rendered. Matches RefreshAsync / LoadDiffAsync /
+                // LoadCommitDiffAsync which deliberately omit ConfigureAwait
+                // for the same reason.
+                var entries = await service.GetWorktreesForRepoAsync(projectPath);
+
+                // Drop stale results: project switched, OR generation token
+                // moved (a SetProject call superseded us even if the path is
+                // somehow identical — covers the project-bounces-A→B→A edge).
+                if (!string.Equals(projectPath, _projectPath, StringComparison.OrdinalIgnoreCase)) return;
+                if (generationAtStart != _allowlistGeneration) return;
+
+                // Cache the validated set so SwitchToRepo can reject paths
+                // the user didn't actually see in the switcher (defends
+                // against compromised webview message rebinding the panel to
+                // an unrelated repo).
+                UpdateWorktreeAllowlist(entries);
+
+                // Deferred restore: SetProject parked the persisted-selection
+                // value in _pendingRestoredRepo without binding _projectPath
+                // to it. Now that we have an authenticated worktree set, apply
+                // the restore only if the saved value is a member; otherwise
+                // clear the now-invalid setting and stay on the original.
+                if (!string.IsNullOrEmpty(_pendingRestoredRepo))
+                {
+                    string pending = _pendingRestoredRepo;
+                    _pendingRestoredRepo = null;
+                    if (IsAllowedWorktree(pending)
+                        && !string.Equals(pending, _projectPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // SwitchToRepo will rebind _projectPath, persist, and
+                        // re-fire ApplyProject + a fresh RefreshWorktreeListAsync.
+                        SwitchToRepo(pending);
+                        return;
+                    }
+                    if (!IsAllowedWorktree(pending))
+                    {
+                        // Saved selection no longer valid (worktree pruned,
+                        // settings poisoned, or project moved on disk). Clear
+                        // the stale key so we don't keep trying every session.
+                        PersistSelectedRepo(_originalProjectPath, _originalProjectPath);
+                    }
+                }
+
+                Send(new
+                {
+                    type = "worktrees",
+                    currentPath = projectPath,
+                    entries = entries,
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.RefreshWorktreeListAsync] {ex.Message}");
+            }
         }
 
         private void UnsubscribeCurrent()
@@ -308,8 +662,18 @@ namespace MultiTerminal.Controls
             if (IsDisposed) return;
             try
             {
-                if (InvokeRequired) BeginInvoke(new Action(() => _ = RefreshAsync()));
-                else _ = RefreshAsync();
+                // Both the main panel state and the switcher chips can drift when
+                // the working tree mutates — kick both refreshes so sibling
+                // worktrees' dirty counts and our own current chip stay accurate.
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action(() => { _ = RefreshAsync(); _ = RefreshWorktreeListAsync(); }));
+                }
+                else
+                {
+                    _ = RefreshAsync();
+                    _ = RefreshWorktreeListAsync();
+                }
             }
             catch (Exception ex)
             {

@@ -142,10 +142,64 @@
     </Content>
   </ItemGroup>
 
-  <!-- Auto-copy build output to staged/ folder after every build (any configuration) -->
+  <!--
+    Shared staged folder: every worktree's build mirrors output here so John can
+    run MultiTerminal\deploy.ps1 from his usual folder regardless of which
+    worktree did the build. Override via env var MULTITERMINAL_STAGED_PATH (or
+    /p:SharedStagedPath=... on the MSBuild command line) for other dev machines
+    / CI; otherwise defaults to the canonical local path.
+  -->
+  <PropertyGroup>
+    <SharedStagedPath Condition="'$(SharedStagedPath)' == ''">$(MULTITERMINAL_STAGED_PATH)</SharedStagedPath>
+    <SharedStagedPath Condition="'$(SharedStagedPath)' == ''">H:\DevLaptop\ClarionPowerShell\staged</SharedStagedPath>
+  </PropertyGroup>
+
+  <!--
+    Defense against command injection: SharedStagedPath flows into robocopy's
+    Exec command line. Reject any value containing shell metacharacters so a
+    hostile env var (e.g. MULTITERMINAL_STAGED_PATH='C:\x" & calc & rem') can't
+    splice extra commands. The powershell invocation below avoids this risk
+    entirely by passing values via EnvironmentVariables instead of the shell.
+  -->
+  <Target Name="ValidateSharedStagedPath" BeforeTargets="CopyToStaged">
+    <!--
+      Reject anything that cmd.exe (the shell behind <Exec>) might interpret.
+      '%' is critical: even inside double-quoted args, cmd expands %VAR% before
+      robocopy sees the path, so '%PAYLOAD%' would resolve to whatever PAYLOAD
+      env var holds, including command-splice characters. '^' is the cmd escape.
+      '<' / '>' are redirection (NTFS-forbidden in filenames anyway).
+      Parens '(' / ')' are deliberately NOT rejected. They're legal in real
+      paths like 'C:\Program Files (x86)\...' and cmd treats them literally
+      inside double quotes.
+      Trade-off documented in task plan: rejecting '%' technically forbids
+      legitimate Windows paths containing literal percent signs. Acceptable
+      because (a) build/deploy staging is a controlled local path, (b) the
+      error message tells users exactly which chars are forbidden, and
+      (c) the proper fix is removing cmd from the trust boundary entirely
+      (follow-up ticket b2d65f84 for transactional shared-staging).
+    -->
+    <Error Condition="$(SharedStagedPath.Contains('&quot;')) Or $(SharedStagedPath.Contains('|')) Or $(SharedStagedPath.Contains('&amp;')) Or $(SharedStagedPath.Contains(';')) Or $(SharedStagedPath.Contains('`')) Or $(SharedStagedPath.Contains('%25')) Or $(SharedStagedPath.Contains('^')) Or $(SharedStagedPath.Contains('&lt;')) Or $(SharedStagedPath.Contains('&gt;'))"
+           Text="SharedStagedPath contains shell metacharacters: '$(SharedStagedPath)'. Use a plain filesystem path with no quotes, pipes, ampersands, semicolons, backticks, percent signs, carets, or angle brackets." />
+  </Target>
+
+  <!-- Auto-mirror build output to the shared staged folder after every build (any configuration) -->
   <Target Name="CopyToStaged" AfterTargets="Build">
-    <Message Importance="high" Text="Copying build output to staged/ ..." />
-    <Exec Command="robocopy $(OutputPath) $(ProjectDir)staged /MIR /XD runtimes /NFL /NDL /NJH /NJS" IgnoreExitCode="true" />
-    <Message Importance="high" Text="Build output copied to staged/" />
+    <Message Importance="high" Text="Mirroring build output to $(SharedStagedPath) ..." />
+    <Exec Command="robocopy &quot;$(OutputPath.TrimEnd('\'))&quot; &quot;$(SharedStagedPath.TrimEnd('\'))&quot; /MIR /XD runtimes /NFL /NDL /NJH /NJS" IgnoreExitCode="true" />
+    <Message Importance="high" Text="Build output mirrored to $(SharedStagedPath)" />
+  </Target>
+
+  <!--
+    Stamp the staged folder with branch/commit/agent/timestamp so deploy.ps1
+    can show John exactly what he's deploying. Values pass through process
+    EnvironmentVariables (not the shell), so SharedStagedPath/Configuration
+    cannot inject commands even if a hostile env var sets them. Script errors
+    are non-fatal so a broken git or missing env var never breaks the build.
+  -->
+  <Target Name="WriteBuildInfo" AfterTargets="CopyToStaged">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)scripts\write-build-info.ps1&quot;"
+          EnvironmentVariables="WBI_STAGED_PATH=$(SharedStagedPath);WBI_CONFIGURATION=$(Configuration)"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(ProjectDir)" />
   </Target>
 </Project>
