@@ -40,80 +40,97 @@ html, body {
     overflow: hidden;
 }
 
-/* ------- Worktree switcher strip (item [4]) -------
-   Sits above the regular header when the renderer reports more than one
-   entry (parent repo + ≥1 worktree). Hidden when entries.length ≤ 1 — a
-   plain checkout with no worktrees gets no extra chrome. Matches the
-   header strip's --bg-elevated/--border palette so the two stack as one
-   visual block. */
-.worktree-switcher {
+/* ------- Worktree tree pane -------
+   Left-side hierarchical pane: parent (IsMain=true) as root with
+   worktrees indented beneath. Hidden when entries.length ≤ 1 (a plain
+   checkout with no worktrees gets no extra chrome — content pane goes
+   full width). Width is user-resizable via .splitter and persisted in
+   localStorage. */
+.tree-pane {
     display: none;
     flex: 0 0 auto;
-    padding: 6px 12px;
+    width: var(--tree-width, 220px);
+    min-width: 180px;
     background: var(--bg-elevated);
-    border-bottom: 1px solid var(--border);
-    gap: 6px;
-    align-items: center;
-    flex-wrap: wrap;
+    border-right: 1px solid var(--border);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 4px 0;
+    font-size: 11px;
 }
-.worktree-switcher.shown { display: flex; }
-.worktree-switcher .label {
+.tree-pane.shown { display: block; }
+.tree-pane .tree-header {
+    padding: 4px 12px 6px;
     font-size: 10px;
     font-weight: 600;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    margin-right: 4px;
     user-select: none;
 }
-.worktree-entry {
-    background: var(--bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    padding: 3px 9px;
-    font-size: 11px;
-    line-height: 1.3;
-    cursor: pointer;
-    border-radius: 3px;
-    display: inline-flex;
+.tree-node {
+    display: flex;
     align-items: center;
-    gap: 5px;
-    max-width: 360px;
-    overflow: hidden;
+    gap: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+    color: var(--fg);
+    line-height: 1.3;
+    user-select: none;
+    border: none;
+    background: none;
+    width: 100%;
+    text-align: left;
     font-family: inherit;
+    font-size: inherit;
 }
-.worktree-entry:hover { background: var(--border); }
-.worktree-entry.current {
+.tree-node:hover { background: var(--border); }
+.tree-node.current {
     background: var(--select-bg);
-    border-color: var(--accent);
     color: var(--accent);
+    font-weight: 600;
     cursor: default;
 }
-.worktree-entry:focus-visible { outline: 1px dotted var(--accent); outline-offset: -2px; }
-.worktree-entry .we-branch { font-weight: 600; }
-.worktree-entry .we-sep { color: var(--fg-dim); }
-.worktree-entry .we-dirty { color: var(--fg-muted); }
-.worktree-entry .we-task {
+.tree-node:focus-visible { outline: 1px dotted var(--accent); outline-offset: -2px; }
+.tree-node.child { padding-left: 24px; }
+.tree-node-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 1.5px solid var(--fg-muted);
+    flex: 0 0 auto;
+    box-sizing: border-box;
+}
+.tree-node.current .tree-node-dot {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.tree-node-branch {
+    font-weight: 600;
+    flex: 0 0 auto;
+    /* Bidi defense — branch names come from user-controlled storage. */
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+.tree-node-dirty { color: var(--fg-muted); flex: 0 0 auto; }
+.tree-node.current .tree-node-dirty { color: var(--accent); }
+.tree-node-task {
     color: var(--fg-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 220px;
-    /* Bidi defense — same posture as .file-path et al below. Task titles
-       and branch names come from user-controlled storage and could carry
-       U+202E etc.; isolate prevents them from rearranging the surrounding
-       chip layout. */
+    flex: 1 1 auto;
+    min-width: 0;
     direction: ltr;
     unicode-bidi: isolate;
 }
-.worktree-entry .we-branch,
-.worktree-entry .we-task {
-    direction: ltr;
-    unicode-bidi: isolate;
+.tree-node.current .tree-node-task { color: var(--accent); }
+.tree-node-badge {
+    color: var(--fg-dim);
+    font-size: 10px;
+    font-weight: normal;
+    flex: 0 0 auto;
 }
-.worktree-entry.current .we-dirty,
-.worktree-entry.current .we-task,
-.worktree-entry.current .we-sep { color: var(--accent); }
 
 /* ------- Header strip (item [7]) ------- */
 .header {
@@ -156,43 +173,34 @@ html, body {
 #empty h3 { color: var(--fg); margin: 0 0 8px 0; font-size: 13px; font-weight: 600; }
 #empty p { margin: 0 auto; max-width: 420px; line-height: 1.55; }
 
-/* ------- Body split (item [8] + smoke-1 polish [15]) ------- */
+/* ------- Body split — tree pane | splitter | content ------- */
 #body { display: none; flex: 1; min-height: 0; }
 .body-split { display: flex; height: 100%; min-height: 0; }
-.body-left {
-    /* Width is driven by a CSS variable so the user-draggable splitter
-       can persist a custom value via localStorage. Defaults to 40% on
-       first run; clamps applied during drag (280px..70% viewport).
-       Min-width bumped from 200px to 280px during the tab-strip change
-       (cross-model adversary MEDIUM, run 1) — three flex tabs at 200px
-       collapsed to ~66px each and truncated "Recent Commits 30" labels. */
-    width: var(--left-width, 40%);
-    flex: 0 0 auto;
-    min-width: 280px;
+.body-content {
     /* Flex column so the tab strip pins at the top and only the active
        panel scrolls (overflow-y is on .git-tab-panels, not here).
-       Smoke-2 #2: explicit overflow-x: hidden plus per-row truncation
-       prevents file-row chip overflow from spilling into the splitter /
-       right pane. The path inside each row still ellipsis-truncates via
-       .file-path { min-width: 0; ellipsis }. */
+       overflow-x: hidden keeps file-row chip overflow from spilling out. */
+    flex: 1;
+    min-width: 320px;
     display: flex;
     flex-direction: column;
     overflow-x: hidden;
     overflow-y: hidden;
     background: var(--bg);
 }
-.body-right { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
 
-/* Draggable splitter between left + right panes. 4px hit-area is small
-   so it doesn't intrude visually, but its hover / dragging states widen
-   the visible accent band so the user gets clear feedback. */
+/* Draggable splitter between tree pane and content. Hidden when the
+   tree pane is hidden (single-entry plain checkout) so the content
+   pane gets a clean edge. */
 .splitter {
+    display: none;
     flex: 0 0 4px;
     cursor: col-resize;
     background: var(--border);
     position: relative;
     user-select: none;
 }
+.splitter.shown { display: block; }
 .splitter:hover,
 .splitter.dragging { background: var(--accent); }
 body.dragging-splitter { cursor: col-resize; user-select: none; }
@@ -718,13 +726,7 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
 <body>
 <div style="display: flex; flex-direction: column; height: 100vh;">
 
-<!-- Worktree switcher strip (item [4]) — populated on `worktrees` messages.
-     Hidden by default; .shown is added when entries.length > 1. -->
-<div class="worktree-switcher" id="worktree-switcher" role="tablist" aria-label="Worktree switcher">
-    <span class="label">Worktree</span>
-</div>
-
-<!-- Header strip (item [7]) -->
+<!-- Header strip -->
 <div class="header" id="header" style="display: none;">
     <span class="branch" id="branch">—</span>
     <span class="dot-sep">·</span>
@@ -744,10 +746,12 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     <p id="empty-message"></p>
 </div>
 
-<!-- Body — split layout (item [8]) -->
+<!-- Body — tree pane | splitter | content -->
 <div id="body">
     <div class="body-split">
-        <div class="body-left">
+        <aside class="tree-pane" id="worktree-tree" aria-label="Worktree tree"></aside>
+        <div class="splitter" id="splitter" title="Drag to resize"></div>
+        <div class="body-content">
             <div class="git-tabs" role="tablist" aria-label="Git sections">
                 <div class="git-tab active" id="working-changes-tab" data-tab="working-changes" role="tab" aria-selected="true" aria-controls="working-changes-section" tabindex="0">Working Changes<span class="tab-count" id="changes-count">0</span></div>
                 <div class="git-tab" id="commits-tab" data-tab="commits" role="tab" aria-selected="false" aria-controls="commits-section" tabindex="0">Recent Commits<span class="tab-count" id="commits-count">0</span></div>
@@ -768,17 +772,6 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                     <div id="branches-empty" class="section-empty" style="display: none;">No branches</div>
                 </div>
             </div>
-        </div>
-        <div class="splitter" id="splitter" title="Drag to resize"></div>
-        <div class="body-right">
-            <div id="diff-pane-empty">Select a file to view its diff</div>
-            <div class="diff-pane-header" id="diff-pane-header" style="display: none;">
-                <span class="diff-pane-path" id="diff-pane-path"></span>
-                <span class="spacer"></span>
-                <button id="toggle-side-by-side" class="active" title="Side-by-side view">⫶⫶</button>
-                <button id="toggle-unified" title="Unified view">≡</button>
-            </div>
-            <div id="diff-lines" style="display: none;"></div>
         </div>
     </div>
 </div>
@@ -812,7 +805,7 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                                    // disable the next legitimate switch reset
                                    // (cross-model adversary MEDIUM, run 2).
     let contextMenuPath = null;    // path the file-row context menu was raised on
-    const SPLITTER_KEY = 'mt.git.leftWidthPx';
+    const SPLITTER_KEY = 'mt.git.treePaneWidthPx';
 
     // --- Theme ---
     function applyTheme(isDark) {
@@ -1562,14 +1555,11 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
         return Math.floor(deltaSec / (365 * 86400)) + ' yr ago';
     }
 
-    // --- Diff pane (item [8]) ---
+    // --- Diff pane (legacy inline pane — DOM dropped with the tree-pane refactor).
+    // Entry points guard against missing DOM so C# can keep emitting diff_loaded
+    // harmlessly. Slated for removal in a follow-up cleanup ticket.
     function renderDiff(path, lines, selectionKey) {
-        // Stale-click guard (originally deferred from item [8] reviewer SUGGEST,
-        // refined in [11] cleanup): the C# side echoes back `selectionKey` =
-        // the exact path or SHA the request was issued for. Compare on the
-        // exact identifier instead of parsing the displayName format —
-        // robust to displayName changes, rebase/cherry-pick short-SHA
-        // collisions, and the selectedSha-shorter-than-7 degenerate case.
+        if (!$('diff-pane-empty')) return;
         const expecting = selectedSha
             ? (selectionKey === selectedSha)
             : (selectionKey === selectedPath);
@@ -1589,6 +1579,7 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
 
     function renderDiffLines() {
         const container = $('diff-lines');
+        if (!container) return;
         container.innerHTML = '';
 
         if (!lastDiffLines || lastDiffLines.length === 0) {
@@ -1704,8 +1695,10 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     function setMode(mode) {
         if (diffMode === mode) return;
         diffMode = mode;
-        $('toggle-side-by-side').classList.toggle('active', mode === 'side-by-side');
-        $('toggle-unified').classList.toggle('active', mode === 'unified');
+        const sbs = $('toggle-side-by-side');
+        const uni = $('toggle-unified');
+        if (sbs) sbs.classList.toggle('active', mode === 'side-by-side');
+        if (uni) uni.classList.toggle('active', mode === 'unified');
         renderDiffLines();
     }
 
@@ -1734,44 +1727,55 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                 showEmpty('No project', 'Select a project to view its git state.');
                 break;
             case 'worktrees':
-                renderWorktreeSwitcher(m.currentPath || '', m.entries || []);
+                renderWorktreeTree(m.currentPath || '', m.entries || []);
                 break;
         }
     });
 
-    // --- Worktree switcher (item [4]) ---
-    // Renders the parent + worktree entries above the main header strip.
-    // Hidden when entries.length ≤ 1 (a plain checkout with no worktrees
-    // gets no extra chrome). Current entry highlighted via case-insensitive
-    // Path equality vs currentPath. Click on a non-current entry posts
-    // {type:'switch_repo', path} — the C# side (item [5]) re-resolves the
-    // GitRepoService and re-emits initial state pointing at the new path.
+    // --- Worktree tree pane ---
+    // Renders parent (IsMain=true) as root with worktrees indented beneath.
+    // Hidden — along with the splitter — when entries.length ≤ 1, so a plain
+    // checkout with no worktrees gets no extra chrome and the content pane
+    // takes full width. Current entry highlighted via case-insensitive Path
+    // equality vs currentPath. Click on a non-current entry posts
+    // {type:'switch_repo', path} — the C# side re-resolves the GitRepoService
+    // and re-emits initial state pointing at the new path.
     //
-    // Schema (matches Alice's wire format):
+    // Wire schema (unchanged from the prior switcher):
     //   currentPath: string (camelCase outer field)
     //   entries: [{ Path, Branch, IsMain, DirtyCount, LinkedTaskId, LinkedTaskTitle }]
-    //   (entries are PascalCase — System.Text.Json default on the WorktreeEntry model)
     //   DirtyCount === -1 → render as '?' (uncomputed)
     //   Branch may be '(detached)' / '(bare)' / '(unknown)' — rendered as-is.
-    function renderWorktreeSwitcher(currentPath, entries) {
-        const sw = $('worktree-switcher');
-        if (!sw) return;
-        // Drop previously-rendered chips, keep the static "Worktree" label
-        // (always the first child).
-        while (sw.children.length > 1) sw.removeChild(sw.lastChild);
+    function renderWorktreeTree(currentPath, entries) {
+        const tree = $('worktree-tree');
+        const splitter = $('splitter');
+        if (!tree) return;
+        tree.innerHTML = '';
 
         if (!Array.isArray(entries) || entries.length <= 1) {
-            sw.classList.remove('shown');
+            tree.classList.remove('shown');
+            if (splitter) splitter.classList.remove('shown');
             return;
         }
 
+        const header = document.createElement('div');
+        header.className = 'tree-header';
+        header.textContent = 'Worktree';
+        tree.appendChild(header);
+
+        // Parent first (IsMain=true), then worktrees in source order.
+        const parent = entries.find(e => e && e.IsMain);
+        const children = entries.filter(e => e && !e.IsMain);
+        const ordered = parent ? [parent, ...children] : entries;
+
         const cur = (currentPath || '').toLowerCase();
-        for (const e of entries) {
+        for (const e of ordered) {
             const path = e && e.Path ? String(e.Path) : '';
             if (!path) continue;
 
             const btn = document.createElement('button');
-            btn.className = 'worktree-entry';
+            btn.className = 'tree-node';
+            if (!e.IsMain) btn.classList.add('child');
             btn.type = 'button';
 
             const isCurrent = path.toLowerCase() === cur;
@@ -1782,41 +1786,39 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             }
 
             const branch = (e.Branch && String(e.Branch)) || '(unknown)';
-            // DirtyCount of -1 = uncomputed → render as '?'. Anything else
-            // numeric → render verbatim. Non-numeric/missing → '?' too.
             let dirtyText = '?';
             if (typeof e.DirtyCount === 'number' && e.DirtyCount >= 0) {
                 dirtyText = String(e.DirtyCount);
             }
             const taskTitle = (e.LinkedTaskTitle && String(e.LinkedTaskTitle)) || '';
-
             btn.title = path + (taskTitle ? '\n' + taskTitle : '');
 
+            const dot = document.createElement('span');
+            dot.className = 'tree-node-dot';
+            btn.appendChild(dot);
+
             const branchSpan = document.createElement('span');
-            branchSpan.className = 'we-branch';
+            branchSpan.className = 'tree-node-branch';
             branchSpan.textContent = branch;
             btn.appendChild(branchSpan);
 
-            const sep1 = document.createElement('span');
-            sep1.className = 'we-sep';
-            sep1.textContent = '·';
-            btn.appendChild(sep1);
-
             const dirtySpan = document.createElement('span');
-            dirtySpan.className = 'we-dirty';
-            dirtySpan.textContent = dirtyText;
+            dirtySpan.className = 'tree-node-dirty';
+            dirtySpan.textContent = '· ' + dirtyText;
             btn.appendChild(dirtySpan);
 
             if (taskTitle) {
-                const sep2 = document.createElement('span');
-                sep2.className = 'we-sep';
-                sep2.textContent = '·';
-                btn.appendChild(sep2);
-
                 const taskSpan = document.createElement('span');
-                taskSpan.className = 'we-task';
-                taskSpan.textContent = taskTitle;
+                taskSpan.className = 'tree-node-task';
+                taskSpan.textContent = '· ' + taskTitle;
                 btn.appendChild(taskSpan);
+            }
+
+            if (e.IsMain) {
+                const badge = document.createElement('span');
+                badge.className = 'tree-node-badge';
+                badge.textContent = '(parent)';
+                btn.appendChild(badge);
             }
 
             if (!isCurrent) {
@@ -1824,17 +1826,22 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                     send({ type: 'switch_repo', path: path });
                 });
             }
-            sw.appendChild(btn);
+            tree.appendChild(btn);
         }
 
-        sw.classList.add('shown');
+        tree.classList.add('shown');
+        if (splitter) splitter.classList.add('shown');
     }
 
     // --- Toolbar bindings ---
     $('refresh-button').addEventListener('click', () => send({ type: 'refresh' }));
     $('fetch-button').addEventListener('click', () => send({ type: 'fetch' }));
-    $('toggle-side-by-side').addEventListener('click', () => setMode('side-by-side'));
-    $('toggle-unified').addEventListener('click', () => setMode('unified'));
+    // Legacy diff-toolbar bindings — DOM was dropped with the tree-pane refactor.
+    // Guarded so the panel boots cleanly until the cleanup follow-up lands.
+    const _sbsBtn = $('toggle-side-by-side');
+    if (_sbsBtn) _sbsBtn.addEventListener('click', () => setMode('side-by-side'));
+    const _uniBtn = $('toggle-unified');
+    if (_uniBtn) _uniBtn.addEventListener('click', () => setMode('unified'));
 
     // --- Tab strip (left column) — Working Changes / Recent Commits / Branches ---
     // Replaces the prior stacked-section layout so users can swap sections
@@ -1872,31 +1879,29 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
         }
     });
 
-    // --- Splitter drag (smoke-1 polish [15] fix #5) ---
-    // Persists chosen width to localStorage so the user's preferred
-    // pane balance survives across sessions. Clamps applied: at least
-    // 280px on the left (matches CSS min-width — bumped from 200px when
-    // the tab strip landed; 3 flex tabs at 200px collapse to ~66px each
-    // and truncate "Recent Commits 30"), and at least 200px remaining
-    // on the right so the diff pane never disappears. Pre-tab saved
-    // values below 280px are clamped UP to 280 instead of dropped to the
-    // CSS default — preserves the user's "narrow pane" intent within the
-    // new minimum (cross-model adversary MEDIUM, run 2; would otherwise
-    // surprise users by jumping their saved 220px to ~768px on launch).
+    // --- Splitter drag (tree pane ↔ content) ---
+    // Persists tree-pane width to localStorage so the user's pane balance
+    // survives across sessions. Clamps: tree pane 180–400px (matches CSS
+    // min-width and keeps the tree slim enough not to crowd the content);
+    // content pane min 320px so the three tab labels never truncate.
     (function initSplitter() {
         const splitter = $('splitter');
-        const bodyLeft = document.querySelector('.body-left');
+        const treePane = document.querySelector('.tree-pane');
         const bodySplit = document.querySelector('.body-split');
-        if (!splitter || !bodyLeft || !bodySplit) return;
+        if (!splitter || !treePane || !bodySplit) return;
 
-        // Restore saved width on load. Clamp up to the 280px minimum so a
-        // pre-tab-strip saved value (e.g. 220px) doesn't fall through to
-        // the CSS default (40%, often 600+px on widescreen) and surprise
-        // the user with a much wider pane than they chose.
+        const MIN_TREE = 180;
+        const MAX_TREE = 400;
+        const MIN_CONTENT = 320;
+
+        // Restore saved width on load. Clamp into [MIN_TREE, MAX_TREE] so a
+        // pre-existing saved value from the old layout (which could be 280+)
+        // doesn't blow the tree pane up.
         try {
             const saved = parseInt(localStorage.getItem(SPLITTER_KEY) || '', 10);
             if (!isNaN(saved)) {
-                bodyLeft.style.width = Math.max(saved, 280) + 'px';
+                const w = Math.min(Math.max(saved, MIN_TREE), MAX_TREE);
+                treePane.style.width = w + 'px';
             }
         } catch (e) { /* localStorage may be unavailable */ }
 
@@ -1910,17 +1915,15 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
         document.addEventListener('mousemove', e => {
             if (!dragging) return;
             const rect = bodySplit.getBoundingClientRect();
-            // Width = mouse X relative to the split container's left edge.
-            // Clamp: left ≥ 280px (matches CSS min-width — see init comment),
-            // right ≥ 200px (so the diff pane never collapses).
+            // Width = mouse X relative to the split container's left edge
+            // (the tree pane is the first child).
             let w = e.clientX - rect.left;
-            const minLeft = 280;
-            const minRight = 200;
             const splitterWidth = 4;
-            const maxLeft = rect.width - minRight - splitterWidth;
-            if (w < minLeft) w = minLeft;
-            if (w > maxLeft) w = maxLeft;
-            bodyLeft.style.width = w + 'px';
+            const maxByContent = rect.width - MIN_CONTENT - splitterWidth;
+            const upper = Math.min(MAX_TREE, maxByContent);
+            if (w < MIN_TREE) w = MIN_TREE;
+            if (w > upper) w = upper;
+            treePane.style.width = w + 'px';
         });
         document.addEventListener('mouseup', () => {
             if (!dragging) return;
@@ -1929,7 +1932,7 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             document.body.classList.remove('dragging-splitter');
             // Persist the resolved px width.
             try {
-                const px = bodyLeft.getBoundingClientRect().width;
+                const px = treePane.getBoundingClientRect().width;
                 localStorage.setItem(SPLITTER_KEY, String(Math.round(px)));
             } catch (e) { /* localStorage may be unavailable */ }
         });
