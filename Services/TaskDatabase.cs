@@ -98,6 +98,7 @@ namespace MultiTerminal.Services
             MigrateAddKnowledgeBase();
             MigrateAddTaskRelationships();
             MigrateAddTaskFileLinks();
+            MigrateAddChecklistItemIndexToFileLinks();
             MigrateAddOwnerProfile();
             MigrateAddAgentInvocations();
             MigrateAddTaskReports();
@@ -1288,11 +1289,11 @@ namespace MultiTerminal.Services
 
         #region Task File Links
 
-        public void AddFileLink(string id, string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy)
+        public void AddFileLink(string id, string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy, int? checklistItemIndex = null)
         {
             const string sql = @"
-                INSERT OR IGNORE INTO task_file_links (id, task_id, file_path, description, line_start, line_end, added_by, created_at)
-                VALUES (@id, @taskId, @filePath, @description, @lineStart, @lineEnd, @addedBy, @createdAt)
+                INSERT OR IGNORE INTO task_file_links (id, task_id, file_path, description, line_start, line_end, added_by, checklist_item_index, created_at)
+                VALUES (@id, @taskId, @filePath, @description, @lineStart, @lineEnd, @addedBy, @checklistItemIndex, @createdAt)
             ";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", id);
@@ -1302,6 +1303,7 @@ namespace MultiTerminal.Services
             cmd.Parameters.AddWithValue("@lineStart", lineStart.HasValue ? (object)lineStart.Value : DBNull.Value);
             cmd.Parameters.AddWithValue("@lineEnd", lineEnd.HasValue ? (object)lineEnd.Value : DBNull.Value);
             cmd.Parameters.AddWithValue("@addedBy", addedBy ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@checklistItemIndex", checklistItemIndex.HasValue ? (object)checklistItemIndex.Value : DBNull.Value);
             cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
             cmd.ExecuteNonQuery();
         }
@@ -1318,7 +1320,7 @@ namespace MultiTerminal.Services
         public List<MCPServer.Models.TaskFileLink> GetFileLinksForTask(string taskId)
         {
             const string sql = @"
-                SELECT id, task_id, file_path, description, line_start, line_end, added_by, created_at
+                SELECT id, task_id, file_path, description, line_start, line_end, added_by, created_at, checklist_item_index
                 FROM task_file_links
                 WHERE task_id = @taskId
                 ORDER BY created_at
@@ -1338,10 +1340,64 @@ namespace MultiTerminal.Services
                     LineStart = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4),
                     LineEnd = reader.IsDBNull(5) ? (int?)null : reader.GetInt32(5),
                     AddedBy = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    CreatedAt = DateTime.Parse(reader.GetString(7))
+                    CreatedAt = DateTime.Parse(reader.GetString(7)),
+                    ChecklistItemIndex = reader.IsDBNull(8) ? (int?)null : reader.GetInt32(8)
                 });
             }
             return results;
+        }
+
+        // Looks up which checklist items are associated with a file path. Used by
+        // per-item review-note routing in HandleCodeReviewVerdict (task 87ee90c3):
+        // a comment about file X only bounces items the routing decides "touch" X.
+        // Returns:
+        //   - non-empty set of item indexes when item-scoped links exist for that file.
+        //   - null when ANY task-scoped link (checklist_item_index IS NULL) exists for
+        //     the file — caller should treat that as "applies to all items"
+        //     (backward-compatible fallback for tasks linked before this column shipped).
+        //   - empty set when no link exists at all — caller decides fallback (typically
+        //     bounce all testing items so notes aren't lost).
+        // Path matching is case-insensitive and tolerates forward/backslash mismatch
+        // because reviewer comments and link_task_file callers don't always agree.
+        public HashSet<int> GetItemsLinkedToFile(string taskId, string filePath)
+        {
+            if (string.IsNullOrEmpty(taskId) || string.IsNullOrEmpty(filePath))
+                return new HashSet<int>();
+
+            const string sql = @"
+                SELECT file_path, checklist_item_index
+                FROM task_file_links
+                WHERE task_id = @taskId
+            ";
+            var indexes = new HashSet<int>();
+            bool sawTaskScoped = false;
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var rowPath = reader.GetString(0);
+                if (!FilePathsEquivalent(rowPath, filePath)) continue;
+
+                if (reader.IsDBNull(1))
+                {
+                    sawTaskScoped = true;
+                }
+                else
+                {
+                    indexes.Add(reader.GetInt32(1));
+                }
+            }
+            return sawTaskScoped ? null : indexes;
+        }
+
+        // Equivalence test for the routing path-match — same file / case / separator
+        // tolerance the HUD Git tab already uses. Reviewers paste paths from the diff
+        // viewer (forward-slash); link_task_file callers may pass backslashes.
+        private static bool FilePathsEquivalent(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            return string.Equals(a.Replace('\\', '/'), b.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase);
         }
 
         public void DeleteFileLinksForTask(string taskId)
@@ -2726,7 +2782,7 @@ namespace MultiTerminal.Services
 
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
-                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
                 FROM tasks
                 WHERE sub_status = 'paused' AND paused_at IS NOT NULL AND paused_at <= @cutoffDate
                 ORDER BY paused_at ASC
@@ -2755,7 +2811,7 @@ namespace MultiTerminal.Services
 
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
-                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status
+                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
                 FROM tasks
                 WHERE assignee = @assignee AND stale_level > 0
                 ORDER BY stale_level DESC, paused_at ASC
@@ -4899,6 +4955,36 @@ namespace MultiTerminal.Services
             ";
             using var createFileLinksCmd = new SQLiteCommand(createSql, _connection);
             createFileLinksCmd.ExecuteNonQuery();
+        }
+
+        // Adds nullable checklist_item_index column so a file link can be either
+        // task-scoped (NULL — applies to all items, default + backward compat)
+        // or item-scoped (0-based index — only that item touches this file).
+        // Used by per-item review-note routing in HandleCodeReviewVerdict
+        // (task 87ee90c3): a comment on file X only bounces items linked to X.
+        private void MigrateAddChecklistItemIndexToFileLinks()
+        {
+            bool hasColumn = false;
+            using (var pragmaCmd = new SQLiteCommand("PRAGMA table_info(task_file_links)", _connection))
+            using (var reader = pragmaCmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    var columnName = reader.GetString(1);
+                    if (columnName.Equals("checklist_item_index", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasColumn = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasColumn)
+            {
+                const string sql = "ALTER TABLE task_file_links ADD COLUMN checklist_item_index INTEGER";
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.ExecuteNonQuery();
+            }
         }
 
         private void MigrateAddOwnerProfile()

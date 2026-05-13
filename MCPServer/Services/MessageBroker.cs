@@ -2296,6 +2296,26 @@ namespace MultiTerminal.MCPServer.Services
             BroadcastTaskUpdate();
         }
 
+        // Persists an agent report and fires ReportSaved so the kanban card
+        // badges refresh. Used by TasksPanelControl when the human reviewer
+        // hits Pass — we snapshot the cleared review_notes block to task_reports
+        // before nulling so the audit trail survives (task 87ee90c3 F5).
+        public string SaveTaskReport(string taskId, string agentName, string reportType, string reportContent, string verdict, int? score, string createdBy)
+        {
+            var id = Guid.NewGuid().ToString("N").Substring(0, 8);
+            try
+            {
+                _taskDb.SaveTaskReport(id, taskId, null, agentName, reportType ?? "markdown", reportContent, verdict, score, createdBy);
+                NotifyReportSaved(taskId, id, agentName, verdict);
+                return id;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] SaveTaskReport failed: {ex.Message}");
+                return null;
+            }
+        }
+
         /// <summary>
         /// Resolve a caller-supplied project id to the canonical key stored in
         /// <see cref="_projects"/>. Agents routinely copy the 8-char short id
@@ -3932,18 +3952,59 @@ namespace MultiTerminal.MCPServer.Services
         // Task File Links
         // =============================================
 
-        public LinkFileResult LinkFile(string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy)
+        public LinkFileResult LinkFile(string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy, int? checklistItemIndex = null)
         {
-            if (!_tasks.ContainsKey(taskId))
+            if (!_tasks.TryGetValue(taskId, out var task))
                 return new LinkFileResult { Success = false, Error = $"Task not found: {taskId}" };
 
             if (string.IsNullOrWhiteSpace(filePath))
                 return new LinkFileResult { Success = false, Error = "File path is required" };
 
+            // checklistItemIndex must be a real 0-based index into the live checklist.
+            // Negative values or out-of-range positives produce phantom rows that survive
+            // forever and silently break per-item routing (Run 2 debugger HIGH / LOW).
+            // Note: this gate is best-effort — a concurrent checklist edit between this
+            // read and the link insert could still produce a phantom row. ComputeItemsToBounce
+            // (TasksPanelControl) filters phantom indexes at routing time as the actual
+            // tolerance layer (adversary Run 3 MEDIUM acknowledged).
+            if (checklistItemIndex.HasValue)
+            {
+                if (checklistItemIndex.Value < 0)
+                {
+                    return new LinkFileResult { Success = false, Error = $"checklistItemIndex must be >= 0 (got {checklistItemIndex.Value}); omit for task-scoped links" };
+                }
+                int itemCount = 0;
+                try
+                {
+                    if (!string.IsNullOrEmpty(task.ChecklistJson))
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(task.ChecklistJson);
+                        if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            itemCount = doc.RootElement.GetArrayLength();
+                        }
+                    }
+                }
+                catch
+                {
+                    // If we can't parse the checklist, fall through and let the row be
+                    // accepted — better than blocking a link on transient parse error.
+                    itemCount = -1;
+                }
+                if (itemCount == 0)
+                {
+                    return new LinkFileResult { Success = false, Error = "task has no checklist items; omit checklistItemIndex for task-scoped links" };
+                }
+                if (itemCount > 0 && checklistItemIndex.Value >= itemCount)
+                {
+                    return new LinkFileResult { Success = false, Error = $"checklistItemIndex {checklistItemIndex.Value} out of range; task has {itemCount} item(s)" };
+                }
+            }
+
             try
             {
                 var id = Guid.NewGuid().ToString("N").Substring(0, 8);
-                _taskDb.AddFileLink(id, taskId, filePath, description, lineStart, lineEnd, addedBy);
+                _taskDb.AddFileLink(id, taskId, filePath, description, lineStart, lineEnd, addedBy, checklistItemIndex);
                 var files = _taskDb.GetFileLinksForTask(taskId);
                 return new LinkFileResult { Success = true, FileCount = files.Count };
             }
@@ -3985,6 +4046,29 @@ namespace MultiTerminal.MCPServer.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetTaskFiles failed: {ex.Message}");
                 return new GetTaskFilesResult { Success = false, Error = ex.Message };
+            }
+        }
+
+        // Returns:
+        //   non-null set of item indexes when item-scoped links exist for the file.
+        //   null when ANY task-scoped link (checklist_item_index IS NULL) exists for
+        //     the file — caller treats as "applies to all items" (backward compat).
+        //   empty set when no link exists at all — caller decides fallback.
+        // On exception: returns null (= same fallback path as task-scoped). Returning
+        // empty would have masked a transient DB hiccup as "no link" and silently
+        // dropped that comment from routing while other comments still computed a
+        // routed set; null instead routes to bulk-bounce so notes never go missing
+        // because of an intermittent SQLite error (Run 2 code-review/debugger LOW).
+        public HashSet<int> GetItemsLinkedToFile(string taskId, string filePath)
+        {
+            try
+            {
+                return _taskDb.GetItemsLinkedToFile(taskId, filePath);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetItemsLinkedToFile failed: {ex.Message}");
+                return null;
             }
         }
 
