@@ -2628,20 +2628,42 @@ namespace MultiTerminal
                 string projectFolder = wpfDialog.ProjectFolder;
                 System.IO.Directory.CreateDirectory(projectFolder); // no-op if already exists
 
-                // Create project record. Prefer ProjectService.SaveProject over a bare
-                // SaveRichProject here so the portable .claude/project.json gets written
-                // in addition to the SQLite row. Without project.json, DefaultTerminal
-                // only lives in SQLite and falls back to "claude-code" when the project
-                // is rediscovered from disk (e.g. synced to another machine) — that's
-                // the split-brain the Codex adversary flagged.
-                var project = Models.Project.Create(wpfDialog.ProjectName, projectFolder);
-                project.TeamLead = wpfDialog.SelectedTeamLead;
-                project.DefaultTerminal = wpfDialog.SelectedDefaultTerminal;
-                project.CreatedBy = "new-project-dialog";
-                if (_projectService != null)
-                    _projectService.SaveProject(project);
+                // Converged creation path: the broker.CreateProject method is the shared
+                // entry point for both this UI dialog and the create_project MCP tool. It
+                // generates the 8-char ID, writes both the SQLite row (rich columns
+                // included) and the portable .claude/project.json, fires ProjectsUpdated
+                // to refresh dashboards, and records an activity feed entry. Falls back
+                // to the legacy ProjectService.SaveProject path if the broker isn't
+                // available (degenerate scenario).
+                Models.Project project;
+                if (_mcpServer?.Broker != null)
+                {
+                    var createResult = _mcpServer.Broker.CreateProject(
+                        name: wpfDialog.ProjectName,
+                        description: null,
+                        createdBy: "new-project-dialog",
+                        path: projectFolder,
+                        teamLead: wpfDialog.SelectedTeamLead,
+                        defaultTerminal: wpfDialog.SelectedDefaultTerminal,
+                        // The UI permits creating a project on an existing folder that
+                        // happens to have a .claude/project.json from a prior session —
+                        // that's a "register existing" intent, not a duplicate-create.
+                        allowReuseExisting: true);
+                    if (!createResult.Success || createResult.CreatedFileProject == null)
+                        throw new InvalidOperationException(createResult.Error ?? "Failed to create project");
+                    project = createResult.CreatedFileProject;
+                }
                 else
-                    _sharedProjectDatabase?.SaveRichProject(project);
+                {
+                    project = Models.Project.Create(wpfDialog.ProjectName, projectFolder);
+                    project.TeamLead = wpfDialog.SelectedTeamLead;
+                    project.DefaultTerminal = wpfDialog.SelectedDefaultTerminal;
+                    project.CreatedBy = "new-project-dialog";
+                    if (_projectService != null)
+                        _projectService.SaveProject(project);
+                    else
+                        _sharedProjectDatabase?.SaveRichProject(project);
+                }
 
                 // Build launch command for the project's default terminal (Claude Code or Codex)
                 var terminalKind = Models.TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);

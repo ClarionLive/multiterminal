@@ -4418,24 +4418,50 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Create a new project.
+        /// Shared entry point for both the UI "New Project" dialog (MainForm) and the
+        /// create_project MCP tool. Generates an 8-char ID, writes both the SQLite row
+        /// (via the simple SaveProject + the richer SaveRichProject through
+        /// ProjectService.SaveProject) AND the portable .claude/project.json, fires
+        /// ProjectsUpdated, and records a "project created" activity event.
+        ///
+        /// Duplicate detection: if allowReuseExisting=false (the default for CREATE
+        /// intent), an existing .claude/project.json at the path returns a clean error.
+        /// Set allowReuseExisting=true to preserve the legacy sync-existing-by-ID behavior.
         /// </summary>
-        public CreateProjectResult CreateProject(string name, string description, string createdBy, string path = null)
+        public CreateProjectResult CreateProject(
+            string name,
+            string description,
+            string createdBy,
+            string path = null,
+            string teamLead = null,
+            string defaultTerminal = null,
+            string projectType = null,
+            string currentVersion = null,
+            bool allowReuseExisting = false)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
                 return new CreateProjectResult { Success = false, Error = "Project name is required" };
             }
 
-            // Check if a .claude/project.json already exists at the path and sync it
+            // Check if a .claude/project.json already exists at the path
             string existingProjectId = null;
             if (!string.IsNullOrEmpty(path) && ProjectService != null)
             {
                 try
                 {
-                    var fileProject = ProjectService.LoadProject(path);
-                    if (fileProject != null)
+                    var existing = ProjectService.LoadProject(path);
+                    if (existing != null)
                     {
-                        existingProjectId = fileProject.Id;
+                        if (!allowReuseExisting)
+                        {
+                            return new CreateProjectResult
+                            {
+                                Success = false,
+                                Error = $"A project already exists at path '{path}' (id: {existing.Id}). Use update_project to modify it.",
+                            };
+                        }
+                        existingProjectId = existing.Id;
                         LogInfo($"Found existing project at {path}, syncing to database (ID: {existingProjectId})");
                     }
                 }
@@ -4456,18 +4482,25 @@ namespace MultiTerminal.MCPServer.Services
 
             if (_projects.TryAdd(project.Id, project))
             {
-                // Persist to database
+                // Persist to database (5-column INSERT — rich columns get filled by the
+                // SaveRichProject UPSERT inside ProjectService.SaveProject below).
                 try { _projectDb.SaveProject(project); }
                 catch (Exception ex) { LogError($"Failed to save project to database: {ex.Message}"); }
 
-                // Create or update .claude/project.json file
+                // Create or update .claude/project.json file (and SaveRichProject UPSERT).
+                MultiTerminal.Models.Project fileProject = null;
                 if (!string.IsNullOrEmpty(path) && ProjectService != null)
                 {
                     try
                     {
-                        var fileProject = MultiTerminal.Models.Project.Create(name, path);
-                        fileProject.Id = project.Id; // Use same ID for sync
+                        fileProject = MultiTerminal.Models.Project.Create(name, path);
+                        fileProject.Id = project.Id; // Use the same 8-char ID across DB and JSON.
                         fileProject.Description = description ?? "";
+                        if (!string.IsNullOrEmpty(teamLead)) fileProject.TeamLead = teamLead;
+                        if (!string.IsNullOrEmpty(defaultTerminal)) fileProject.DefaultTerminal = defaultTerminal;
+                        if (!string.IsNullOrEmpty(projectType)) fileProject.ProjectType = projectType;
+                        if (!string.IsNullOrEmpty(currentVersion)) fileProject.CurrentVersion = currentVersion;
+                        if (!string.IsNullOrEmpty(createdBy)) fileProject.CreatedBy = createdBy;
                         ProjectService.SaveProject(fileProject);
                         LogInfo($"Created/updated project file at {path}/.claude/project.json");
                     }
@@ -4486,7 +4519,12 @@ namespace MultiTerminal.MCPServer.Services
                     RelatedId = project.Id
                 });
 
-                return new CreateProjectResult { Success = true, ProjectId = project.Id };
+                return new CreateProjectResult
+                {
+                    Success = true,
+                    ProjectId = project.Id,
+                    CreatedFileProject = fileProject,
+                };
             }
 
             return new CreateProjectResult { Success = false, Error = "Failed to create project" };

@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using System.IO;
 using Microsoft.AspNetCore.Mvc;
+using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Controllers
@@ -14,11 +16,13 @@ namespace MultiTerminal.API.Controllers
     {
         private readonly ProjectContextService _contextService;
         private readonly ProjectDatabase _projectDb;
+        private readonly MessageBroker _broker;
 
-        public ProjectContextController(ProjectContextService contextService, ProjectDatabase projectDb)
+        public ProjectContextController(ProjectContextService contextService, ProjectDatabase projectDb, MessageBroker broker)
         {
             _contextService = contextService;
             _projectDb = projectDb;
+            _broker = broker;
         }
 
         #region Projects
@@ -31,6 +35,53 @@ namespace MultiTerminal.API.Controllers
         {
             var projects = _projectDb.GetAllRichProjects();
             return Ok(new { count = projects.Count, projects });
+        }
+
+        /// <summary>
+        /// POST /api/projects — Create a new project.
+        /// Body: { name (required), path (required), description, teamLead, defaultTerminal,
+        ///         projectType, currentVersion, createdBy }
+        /// Returns: { projectId, name, path } on success, 400 on duplicate path / missing required.
+        /// Same shared creation path as the UI "New Project" dialog (MessageBroker.CreateProject).
+        /// </summary>
+        [HttpPost]
+        public IActionResult CreateProject([FromBody] CreateProjectRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Name))
+                return BadRequest(new { error = "Project name is required" });
+            if (string.IsNullOrWhiteSpace(request.Path))
+                return BadRequest(new { error = "Project path is required" });
+
+            // Create folder if it doesn't already exist — matches the UI button behavior
+            // (Directory.CreateDirectory is a no-op for existing folders).
+            // CA3003: path comes from an authenticated local API caller's project registration request.
+            #pragma warning disable CA3003
+            try { Directory.CreateDirectory(request.Path); }
+            #pragma warning restore CA3003
+            catch (System.Exception ex)
+            {
+                return BadRequest(new { error = $"Failed to create project folder: {ex.Message}" });
+            }
+
+            var result = _broker.CreateProject(
+                name: request.Name,
+                description: request.Description,
+                createdBy: string.IsNullOrEmpty(request.CreatedBy) ? "api" : request.CreatedBy,
+                path: request.Path,
+                teamLead: request.TeamLead,
+                defaultTerminal: request.DefaultTerminal,
+                projectType: request.ProjectType,
+                currentVersion: request.CurrentVersion);
+
+            if (!result.Success)
+                return BadRequest(new { error = result.Error ?? "Failed to create project" });
+
+            return Ok(new
+            {
+                projectId = result.ProjectId,
+                name = request.Name,
+                path = request.Path,
+            });
         }
 
         /// <summary>
@@ -301,6 +352,18 @@ namespace MultiTerminal.API.Controllers
         #endregion
 
         #region Request DTOs
+
+        public class CreateProjectRequest
+        {
+            public string Name { get; set; }
+            public string Path { get; set; }
+            public string Description { get; set; }
+            public string TeamLead { get; set; }
+            public string DefaultTerminal { get; set; }
+            public string ProjectType { get; set; }
+            public string CurrentVersion { get; set; }
+            public string CreatedBy { get; set; }
+        }
 
         public class UpdateProjectRequest
         {

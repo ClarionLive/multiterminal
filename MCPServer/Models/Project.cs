@@ -52,6 +52,14 @@ namespace MultiTerminal.MCPServer.Models
         public bool Success { get; set; }
         public string ProjectId { get; set; }
         public string Error { get; set; }
+
+        /// <summary>
+        /// The rich app-level Project (with all enhanced columns: TeamLead, DefaultTerminal,
+        /// ProjectType, etc.) populated when CreateProject succeeds. Used by callers that
+        /// need the full Project object for downstream work (e.g., MainForm terminal launch
+        /// reads DefaultTerminal/TeamLead from it). Null when Success=false.
+        /// </summary>
+        public MultiTerminal.Models.Project CreatedFileProject { get; set; }
     }
 
     /// <summary>
