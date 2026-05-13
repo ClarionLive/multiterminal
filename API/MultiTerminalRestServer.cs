@@ -243,7 +243,11 @@ namespace MultiTerminal.API
 
                         if (_broker.GetProject(dbProject.Id).Success == false)
                         {
-                            _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path);
+                            // This hook fires *after* ProjectService.RegisterProject wrote
+                            // .claude/project.json. The broker must reuse that ID rather
+                            // than reject the create as a duplicate — set allowReuseExisting.
+                            _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path,
+                                allowReuseExisting: true);
                             System.Diagnostics.Debug.WriteLine($"[ProjectSync] Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
                         }
                     }

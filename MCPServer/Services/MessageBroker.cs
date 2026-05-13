@@ -159,35 +159,6 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Raised when the Git tab's diff popup "Open Code Review" button is clicked.
-        /// MainForm subscribes and activates the Tasks panel + tells it to open the
-        /// task-bound Code Review overlay for the given task. Payload carries both
-        /// the task id and the originating file path so the overlay can pre-select
-        /// the file the user was looking at (otherwise it defaults to the first
-        /// linked file, which is rarely the one they clicked from).
-        /// </summary>
-        public event EventHandler<OpenTasksCodeReviewEventArgs> OpenTasksCodeReviewRequested;
-
-        /// <summary>
-        /// Forward an "open Code Review for this task" intent to whoever owns the
-        /// Tasks panel (MainForm). Called from TerminalDocument when the diff popup
-        /// in the HUD Git tab fires its escalation button. <paramref name="filePath"/>
-        /// is the absolute path of the file shown in the popup; the overlay matches
-        /// against the task's linked-file list and selects that tab on open.
-        /// </summary>
-        public void RequestOpenTasksCodeReview(string taskId, string filePath = null)
-        {
-            if (!string.IsNullOrEmpty(taskId))
-            {
-                OpenTasksCodeReviewRequested?.Invoke(this, new OpenTasksCodeReviewEventArgs
-                {
-                    TaskId = taskId,
-                    FilePath = filePath,
-                });
-            }
-        }
-
-        /// <summary>
         /// Raised when a pipeline agent report is saved for a task.
         /// Payload contains taskId and reportId so the UI can refresh badges.
         /// </summary>
@@ -6349,17 +6320,6 @@ namespace MultiTerminal.MCPServer.Services
         public string TaskId { get; set; }
         public string TaskTitle { get; set; }
         public string ClaimedBy { get; set; }
-    }
-
-    /// <summary>
-    /// Event args for the Git tab diff-popup "Open Code Review" escalation. Carries
-    /// the task id and the absolute file path of the file the popup was showing so
-    /// the overlay can pre-select that file's tab instead of defaulting to file 0.
-    /// </summary>
-    public class OpenTasksCodeReviewEventArgs : EventArgs
-    {
-        public string TaskId { get; set; }
-        public string FilePath { get; set; }
     }
 
     /// <summary>

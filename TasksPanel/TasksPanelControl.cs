@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.ChatPanel;
+using MultiTerminal.Dialogs;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
@@ -26,6 +27,7 @@ namespace MultiTerminal.TasksPanel
         private bool _initializePending;
         private bool _isShuttingDown;
         private MessageBroker _broker;
+        private CodeReviewService _codeReviewService;
         private ActivityService _activityService;
         private SettingsService _settings;
         private DebugLogService _debugLogService;
@@ -139,6 +141,7 @@ namespace MultiTerminal.TasksPanel
         public async void Initialize(MessageBroker broker, ActivityService activityService = null, SettingsService settings = null)
         {
             _broker = broker;
+            _codeReviewService = broker != null ? new CodeReviewService(broker) : null;
             _activityService = activityService;
             _settings = settings;
 
@@ -371,6 +374,18 @@ namespace MultiTerminal.TasksPanel
                                 reviewNotesJson = reviewNotesEl.GetRawText();
                             }
                             HandleCodeReviewVerdict(crTaskId, crVerdict, reviewNotesJson);
+                        }
+                        break;
+
+                    case "open_code_review_popup":
+                        // Kanban-card Code Review icon → open the standalone popup
+                        // via the manager. Single-instance per taskId; focuses if
+                        // already open. Independent of Tasks panel state.
+                        if (root.TryGetProperty("taskId", out var crpTaskIdEl))
+                        {
+                            var crpTaskId = crpTaskIdEl.GetString();
+                            var crpFilePath = root.TryGetProperty("filePath", out var crpFpEl) ? crpFpEl.GetString() : null;
+                            OpenCodeReviewPopup(crpTaskId, crpFilePath);
                         }
                         break;
 
@@ -945,20 +960,48 @@ namespace MultiTerminal.TasksPanel
         }
 
         /// <summary>
-        /// Tell the WebView2 to open the Code Review overlay for a task. The HTML
-        /// already implements <c>openCodeReview(taskId)</c> for in-panel button clicks
-        /// (the &lt;&gt; review icon on a task card); this just triggers the same path
-        /// from outside the panel via a JSON message. When <paramref name="filePath"/>
-        /// is non-empty, the JS handler picks the matching linked-file tab on open
-        /// (used by the Git tab's diff popup so the overlay lands on the file the
-        /// user was already looking at, not file 0).
+        /// Open (or focus) the standalone Code Review popup for a task. Routes
+        /// through <see cref="CodeReviewPopupManager"/> — single-instance per
+        /// taskId, independent of the Tasks panel being open. Replaces the
+        /// previous in-panel overlay path; the panel kanban-card icon, the
+        /// HUD Git right-click escalation, and external callers
+        /// (TasksPanelDocument.OpenCodeReview) all share this entry point.
         /// </summary>
         public void OpenCodeReview(string taskId, string filePath = null)
         {
-            if (!_isInitialized || string.IsNullOrEmpty(taskId)) return;
-            string payload = JsonSerializer.Serialize(new { type = "open_code_review_external", taskId, filePath });
-            PostMessage(payload);
+            if (string.IsNullOrEmpty(taskId)) return;
+
+            string taskTitle = string.Empty;
+            try
+            {
+                var task = _broker?.GetTask(taskId);
+                if (task != null) taskTitle = task.Title ?? string.Empty;
+            }
+            catch
+            {
+                // Lookup failure is non-fatal — popup title falls back to taskId.
+            }
+
+            try
+            {
+                CodeReviewPopupManager.OpenOrFocus(
+                    taskId,
+                    taskTitle,
+                    filePath,
+                    _isDarkTheme,
+                    _broker,
+                    _codeReviewService,
+                    FindForm());
+            }
+            catch (Exception ex)
+            {
+                DebugLogError($"OpenCodeReview popup failed: {ex.Message}");
+            }
         }
+
+        // Internal entry point for the open_code_review_popup web message —
+        // identical behavior to the public OpenCodeReview.
+        private void OpenCodeReviewPopup(string taskId, string filePath) => OpenCodeReview(taskId, filePath);
 
         private void PostWebMessage(string message)
         {
@@ -1003,100 +1046,36 @@ namespace MultiTerminal.TasksPanel
             base.Dispose(disposing);
         }
 
+        // Thin delegate to CodeReviewService — the full sanitize / snapshot /
+        // transition logic was extracted to a shared service (task d29512ef
+        // item [2]) so CodeReviewPopupForm can call the same code path in-proc.
+        // The in-panel JS handler at line ~361 still posts code_review_verdict
+        // messages until item [5] removes the in-panel overlay entirely.
         private void HandleCodeReviewVerdict(string taskId, string verdict, string reviewNotesJson = null)
         {
-            if (_broker == null) return;
+            if (_codeReviewService == null) return;
 
-            // Get the task to find checklist items in testing status
-            var task = _broker.GetTask(taskId);
-            if (task == null || string.IsNullOrEmpty(task.ChecklistJson)) return;
+            var result = _codeReviewService.HandleVerdict(taskId, verdict, reviewNotesJson);
+            if (result == null || result.Ok) return;
 
-            try
+            if (result.RequiresOperatorAttention && !string.IsNullOrEmpty(result.Error))
             {
-                // If submitting notes (fail with inline comments), persist them on the task
-                if (verdict == "fail" && !string.IsNullOrEmpty(reviewNotesJson))
+                try
                 {
-                    task.ReviewNotes = reviewNotesJson;
-                    _broker.SaveTask(task);
+                    MessageBox.Show(
+                        result.Error,
+                        "Code Review — Pass Failed",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
                 }
-                else if (verdict == "pass")
+                catch (Exception mbEx)
                 {
-                    // Clear any previous review notes on pass
-                    task.ReviewNotes = null;
-                    _broker.SaveTask(task);
-                }
-
-                using var doc = JsonDocument.Parse(task.ChecklistJson);
-                var items = doc.RootElement;
-                var targetStatus = verdict == "pass" ? "done" : "coding";
-
-                // Build transition notes — include formatted review notes summary for agents
-                string notes;
-                if (verdict == "pass")
-                {
-                    notes = "Human code review passed";
-                }
-                else if (!string.IsNullOrEmpty(reviewNotesJson))
-                {
-                    notes = FormatReviewNotesForAgent(reviewNotesJson);
-                }
-                else
-                {
-                    notes = "Human code review failed — needs fixes";
-                }
-
-                for (int i = 0; i < items.GetArrayLength(); i++)
-                {
-                    var item = items[i];
-                    if (item.TryGetProperty("status", out var statusEl) &&
-                        string.Equals(statusEl.GetString(), "testing", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _broker.TransitionChecklistItem(taskId, i, targetStatus, notes, "CodeReview");
-                    }
+                    DebugLogError($"failed to surface verdict-result dialog: {mbEx.Message}");
                 }
             }
-            catch (Exception ex)
+            else if (!string.IsNullOrEmpty(result.Error))
             {
-                System.Diagnostics.Debug.WriteLine($"[TasksPanel] Code review verdict error: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Format review notes JSON into agent-readable text for checklist transition notes.
-        /// Produces: [SEVERITY] file:line — "comment"
-        /// </summary>
-        private static string FormatReviewNotesForAgent(string reviewNotesJson)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(reviewNotesJson);
-                var notes = doc.RootElement;
-                if (notes.GetArrayLength() == 0) return "Human code review failed — needs fixes";
-
-                var lines = new System.Text.StringBuilder();
-                lines.AppendLine("Human code review — inline notes:");
-                foreach (var note in notes.EnumerateArray())
-                {
-                    var severity = note.TryGetProperty("severity", out var sev) ? sev.GetString() : "SUGGESTION";
-                    var file = note.TryGetProperty("file", out var f) ? f.GetString() : "unknown";
-                    var line = "?";
-                    if (note.TryGetProperty("line", out var l))
-                    {
-                        line = l.ValueKind == System.Text.Json.JsonValueKind.Number
-                            ? l.GetInt32().ToString()
-                            : l.GetString() ?? "?";
-                    }
-                    var comment = note.TryGetProperty("comment", out var c) ? c.GetString() : "";
-                    // Use short path (last 2 segments)
-                    var parts = file.Split(new[] { '/', '\\' });
-                    var shortPath = parts.Length >= 2 ? parts[parts.Length - 2] + "/" + parts[parts.Length - 1] : file;
-                    lines.AppendLine($"[{severity}] {shortPath}:{line} — \"{comment}\"");
-                }
-                return lines.ToString().TrimEnd();
-            }
-            catch
-            {
-                return "Human code review failed — inline notes attached (see task.ReviewNotes)";
+                DebugLogError($"Code review verdict error: {result.Error}");
             }
         }
     }

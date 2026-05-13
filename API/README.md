@@ -387,18 +387,6 @@ POST /api/tasks/{taskId}/files/unlink
 
 ---
 
-## Task Code Review API
-
-**Route:** `/api/tasks/{taskId}/code-review`
-
-### Get Code Review Diffs
-```
-GET /api/tasks/{taskId}/code-review
-```
-Returns git diff output for all linked files in a task.
-
----
-
 ## Task Attachments API
 
 **Route:** `/api/tasks/{taskId}/attachments`

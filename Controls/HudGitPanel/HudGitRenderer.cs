@@ -52,12 +52,13 @@ namespace MultiTerminal.Controls
         public event EventHandler<double> ZoomChanged;
 
         /// <summary>
-        /// Raised when the user picks "Open in pop-up diff editor" from the
-        /// file-row context menu in the Git tab. The string argument is the
+        /// Raised when the user picks "Open Code Review" from the file-row
+        /// context menu in the Git tab. The string argument is the
         /// repo-relative path (forward-slashes, as LibGit2Sharp emits) for
         /// which the inline diff was already loadable. The host
-        /// (<see cref="Docking.TerminalDocument"/>) routes this to the
-        /// existing standalone <c>ShowDiffPopup</c> with persisted bounds.
+        /// (<see cref="Docking.TerminalDocument"/>) routes this directly to
+        /// <see cref="Dialogs.CodeReviewPopupManager.OpenOrFocus"/> when the
+        /// file is linked to an active task.
         /// </summary>
         public event EventHandler<string> OpenDiffPopupRequested;
 
@@ -208,10 +209,11 @@ namespace MultiTerminal.Controls
                         break;
 
                     case "open_diff_popup":
-                        // Right-click → "Open in pop-up diff editor" from the
-                        // file-row context menu (smoke-1 polish [15] fix #7).
-                        // Forwards the repo-relative path; the host resolves
-                        // the GitRepoService and shows the standalone popup.
+                        // Right-click → "Open Code Review" from the file-row
+                        // context menu. Forwards the repo-relative path; the
+                        // host resolves the task linkage and opens the
+                        // standalone Code Review popup via
+                        // CodeReviewPopupManager.OpenOrFocus.
                         if (doc.RootElement.TryGetProperty("path", out var popupPathProp))
                         {
                             string popupPath = popupPathProp.GetString();

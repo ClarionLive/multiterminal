@@ -445,7 +445,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("{taskId}/files")]
         public IActionResult LinkFile(string taskId, [FromBody] LinkFileRequest request)
         {
-            var result = _broker.LinkFile(taskId, request.FilePath, request.Description, request.LineStart, request.LineEnd, request.AddedBy);
+            var result = _broker.LinkFile(taskId, request.FilePath, request.Description, request.LineStart, request.LineEnd, request.AddedBy, request.ChecklistItemIndex);
             if (!result.Success)
                 return BadRequest(new { error = result.Error });
 
@@ -476,109 +476,6 @@ namespace MultiTerminal.API.Controllers
                 return BadRequest(new { error = result.Error });
 
             return Ok(new { success = true, files = result.Files });
-        }
-
-        // =============================================
-        // Code Review Endpoints
-        // =============================================
-
-        /// <summary>
-        /// Get code review diff data for all linked files in a task.
-        /// Returns file list with git diff output for each.
-        /// </summary>
-        [HttpGet("{taskId}/code-review")]
-        public IActionResult GetCodeReview(string taskId)
-        {
-            var filesResult = _broker.GetTaskFiles(taskId);
-            if (!filesResult.Success)
-                return BadRequest(new { error = filesResult.Error });
-
-            var files = new System.Collections.Generic.List<object>();
-            foreach (var fileLink in filesResult.Files)
-            {
-                var diff = GetGitDiffForFile(fileLink.FilePath);
-                files.Add(new
-                {
-                    filePath = fileLink.FilePath,
-                    description = fileLink.Description,
-                    lineStart = fileLink.LineStart,
-                    lineEnd = fileLink.LineEnd,
-                    addedBy = fileLink.AddedBy,
-                    hasDiff = !string.IsNullOrEmpty(diff),
-                    diff = diff ?? ""
-                });
-            }
-
-            return Ok(new { taskId, fileCount = files.Count, files });
-        }
-
-        private string GetGitDiffForFile(string filePath)
-        {
-            try
-            {
-                // Try git diff for uncommitted changes first, then HEAD~1 diff
-                var repoRoot = FindGitRoot(filePath);
-                if (repoRoot == null) return null;
-
-                // Validate file is within repo root (prevent path traversal)
-                var canonicalPath = System.IO.Path.GetFullPath(filePath);
-                var canonicalRoot = System.IO.Path.GetFullPath(repoRoot);
-                if (!canonicalPath.StartsWith(canonicalRoot, System.StringComparison.OrdinalIgnoreCase))
-                    return null;
-
-                // Get relative path from repo root
-                var relativePath = System.IO.Path.GetRelativePath(repoRoot, filePath).Replace('\\', '/');
-
-                // Try unstaged + staged changes first
-                var diff = RunGitDiff(repoRoot, relativePath, "");
-                if (string.IsNullOrWhiteSpace(diff))
-                {
-                    // Try diff against last commit
-                    diff = RunGitDiff(repoRoot, relativePath, "HEAD~1");
-                }
-                return diff;
-            }
-            catch (System.Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[CodeReview] Git diff failed for {filePath}: {ex.Message}");
-                return null;
-            }
-        }
-
-        private string FindGitRoot(string filePath)
-        {
-            var dir = System.IO.Path.GetDirectoryName(filePath);
-            while (!string.IsNullOrEmpty(dir))
-            {
-                if (System.IO.Directory.Exists(System.IO.Path.Combine(dir, ".git")))
-                    return dir;
-                dir = System.IO.Path.GetDirectoryName(dir);
-            }
-            return null;
-        }
-
-        private string RunGitDiff(string repoRoot, string relativePath, string baseRef)
-        {
-            var args = string.IsNullOrEmpty(baseRef)
-                ? $"diff -- \"{relativePath}\""
-                : $"diff {baseRef} -- \"{relativePath}\"";
-
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "git",
-                Arguments = args,
-                WorkingDirectory = repoRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = false,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc == null) return null;
-            var output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
-            return output;
         }
 
         // =============================================
@@ -821,6 +718,9 @@ namespace MultiTerminal.API.Controllers
         public int? LineStart { get; set; }
         public int? LineEnd { get; set; }
         public string AddedBy { get; set; }
+        // Optional: 0-based checklist item index to scope the link to a single
+        // item. NULL (default) means task-scoped — applies to all items.
+        public int? ChecklistItemIndex { get; set; }
     }
 
     public class UnlinkFileRequest

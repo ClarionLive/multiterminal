@@ -543,11 +543,6 @@ namespace MultiTerminal
                 // Browser tab support - route tab requests to correct terminal
                 _mcpServer.Broker.BrowserTabRequested += OnBrowserTabRequested;
 
-                // Git tab diff popup → "Open Code Review" escalation: when the
-                // popup's button is clicked, activate the Tasks panel and tell it
-                // to open the task-bound Code Review overlay.
-                _mcpServer.Broker.OpenTasksCodeReviewRequested += OnOpenTasksCodeReviewRequested;
-
                 // Wire up spawn callback for programmatic terminal spawning
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 17: Checking SpawnService");
                 if (_mcpServer.SpawnService == null)
@@ -2123,6 +2118,8 @@ namespace MultiTerminal
             // Update all open lifecycle board windows
             TaskLifecycleBoardForm.ApplyThemeToAll(_currentTheme.IsDark);
 
+            // Update all open Code Review popups
+            Dialogs.CodeReviewPopupManager.ApplyThemeToAll(_currentTheme.IsDark);
         }
 
         private void ToggleTheme()
@@ -3614,6 +3611,12 @@ namespace MultiTerminal
             // timer thread should not fire mid-shutdown.
             try { _worktreeJanitorTimer?.Dispose(); _worktreeJanitorTimer = null; }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Janitor timer dispose: {ex.Message}"); }
+
+            // Close any live Code Review popups so their bounds/zoom get flushed
+            // to SettingsService. The CloseAll call is idempotent \u2014 safe even if
+            // a popup has already been closed manually.
+            try { Dialogs.CodeReviewPopupManager.CloseAll(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Code Review popup CloseAll: {ex.Message}"); }
 
             // Save session context for all active terminals before closing
             if (!_sessionSaveCompleted)
@@ -5214,55 +5217,6 @@ namespace MultiTerminal
                 _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
                 _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
-        }
-
-        /// <summary>
-        /// Handles the Git tab diff popup's "Open Code Review" escalation. Activates
-        /// the Tasks panel (creating it if needed, bringing it forward if hidden) and
-        /// asks it to open the task-bound Code Review overlay for the given task,
-        /// pre-selected on the file the popup was showing. Marshals to the UI
-        /// thread; broker events can fire from any thread.
-        /// </summary>
-        private void OnOpenTasksCodeReviewRequested(object sender, OpenTasksCodeReviewEventArgs e)
-        {
-            if (e == null || string.IsNullOrEmpty(e.TaskId)) return;
-            if (InvokeRequired)
-            {
-                try { BeginInvoke(new Action(() => OnOpenTasksCodeReviewRequested(sender, e))); }
-                catch { }
-                return;
-            }
-
-            // Bring the Tasks panel forward (recreate if disposed, show if hidden,
-            // bring to front otherwise). Mirrors the toggle path but never hides.
-            if (_tasksPanel == null || _tasksPanel.IsDisposed)
-            {
-                _tasksPanel = new TasksPanelDocument();
-                _tasksPanel.SetDebugLogService(_debugLogService);
-                if (_mcpServer?.Broker != null)
-                {
-                    _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
-                    _tasksPanel.InjectRequested += OnChatInjectRequested;
-                }
-                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
-            }
-            else if (!_tasksPanel.Visible)
-            {
-                _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
-                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-            }
-            else
-            {
-                _tasksPanel.Activate();
-            }
-
-            // Tell the panel to open the Code Review overlay for this task. The
-            // panel's WebView2 must be ready before the message can route — this
-            // is normally true once Show() has run. If we hit a race (rare, from
-            // freshly-created panel), the JS handler in tasks-panel.html will be
-            // queued because PostWebMessageAsJson buffers until the page is loaded.
-            _tasksPanel.OpenCodeReview(e.TaskId, e.FilePath);
         }
 
         private void ToggleInboxPanel()

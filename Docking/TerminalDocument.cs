@@ -50,6 +50,7 @@ namespace MultiTerminal.Docking
 #pragma warning restore CA2213
         private System.Windows.Forms.Timer _agentPanelSanityTimer;
         private MessageBroker _messageBroker;
+        private MultiTerminal.Services.CodeReviewService _codeReviewService;
         private DebugLogService _debugLogService;
         private static int _instanceCount = 0;
         private readonly string _docId = Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -1213,17 +1214,16 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Routes the Git tab's "Open in pop-up diff editor" right-click menu to a
-        /// Code-Review-styled popup (line numbers, hunk navigator, dark Code Review
-        /// theme) — read-only for casual exploration. When the file is linked to an
-        /// active task, the popup includes an "Open Code Review" button that escalates
-        /// into the task-bound Code Review overlay in the Tasks panel.
+        /// Routes the Git tab's "Open Code Review" right-click menu directly to
+        /// <see cref="Dialogs.CodeReviewPopupManager.OpenOrFocus"/>. The clicked
+        /// file's repo-relative path is passed as <c>filePath</c> so the popup
+        /// preselects it. If the file has no task linkage, surfaces a
+        /// <see cref="MessageBox"/> suggesting <c>link_task_file</c> rather than
+        /// opening an unrooted popup (single-instance keying is by taskId).
         ///
-        /// <para>Design rationale: the Git tab popup is exploratory ("what's in this
-        /// file?") while the Code Review overlay is the formal sign-off gate (comments,
-        /// pass/fail verdict tied to a task). They serve different purposes and don't
-        /// share one heavyweight UI; the "Open Code Review" button is the single
-        /// discoverable bridge between them when a task linkage exists.</para>
+        /// <para>The popup loads files + diffs + the latest code-reviewer report
+        /// via <see cref="MultiTerminal.Services.CodeReviewService"/> (in-proc).
+        /// We no longer pre-fetch the diff here.</para>
         /// </summary>
         private async void OnHudGitOpenDiffPopupRequested(object sender, string repoRelativePath)
         {
@@ -1233,46 +1233,38 @@ namespace MultiTerminal.Docking
                 return;
             }
             if (string.IsNullOrEmpty(repoRelativePath)) return;
+            if (_messageBroker == null) return;
 
             string workDir = GetWorkingDirectory();
             if (string.IsNullOrEmpty(workDir) || !Directory.Exists(workDir)) return;
 
-            var manager = _messageBroker?.GitRepos;
+            var manager = _messageBroker.GitRepos;
             if (manager == null) return;
 
             // Capture broker-owned services into locals before the background pass —
-            // same race-mitigation pattern as HudGitRenderer.RefreshAsync (item [11]
-            // debugger finding). The auto-property on MessageBroker has no volatile or
-            // lock; freezing the reference here ensures we use one stable service for
-            // the duration of this call.
-            var attributionSvc = _messageBroker?.GitAttribution;
+            // same race-mitigation pattern as HudGitRenderer.RefreshAsync. The
+            // auto-property on MessageBroker has no volatile or lock; freezing the
+            // reference here ensures we use one stable service for the duration of
+            // this call.
+            var attributionSvc = _messageBroker.GitAttribution;
 
             try
             {
-                var diffResult = await System.Threading.Tasks.Task.Run(() =>
+                string repoRoot = await System.Threading.Tasks.Task.Run(() =>
                 {
                     var svc = manager.GetOrCreate(workDir);
-                    if (svc == null) return (diff: "", fullPath: "", repoRoot: "");
-                    string diff = svc.GetFileDiff(repoRelativePath) ?? "";
-                    string repoRoot = svc.RepoRoot ?? "";
-                    string fullPath = string.IsNullOrEmpty(repoRoot)
-                        ? repoRelativePath
-                        : Path.Combine(repoRoot, repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
-                    return (diff, fullPath, repoRoot);
+                    return svc?.RepoRoot ?? string.Empty;
                 });
 
-                // File→task linkage lookup (Phase 2 attribution). Empty result is the
-                // common case (most working-tree files aren't linked to any active
-                // task); the popup just hides the "Open Code Review" button.
                 string taskId = null;
                 string taskTitle = null;
-                if (attributionSvc != null && !string.IsNullOrEmpty(diffResult.repoRoot))
+                if (attributionSvc != null && !string.IsNullOrEmpty(repoRoot))
                 {
                     try
                     {
                         var attrs = await System.Threading.Tasks.Task.Run(() =>
                             attributionSvc.GetAttributionForFiles(
-                                diffResult.repoRoot,
+                                repoRoot,
                                 new[] { repoRelativePath }));
                         if (attrs != null && attrs.Count > 0)
                         {
@@ -1282,19 +1274,61 @@ namespace MultiTerminal.Docking
                     }
                     catch
                     {
-                        // Degrade silently — popup just renders without the task button.
+                        // Degrade silently — caller decides what to do without a taskId.
                     }
                 }
 
-                string displayName = Path.GetFileName(repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
-                string html = DiffRenderer.RenderCodeReviewStylePopup(
-                    displayName,
-                    diffResult.fullPath,
-                    string.IsNullOrEmpty(diffResult.diff) ? "(no changes found)" : diffResult.diff,
-                    taskId,
-                    taskTitle);
+                if (string.IsNullOrEmpty(taskId))
+                {
+                    MessageBox.Show(
+                        $"'{repoRelativePath}' isn't linked to an active task.\n\n" +
+                        "Link the file to a task first (use the link_task_file MCP tool " +
+                        "or the kanban file-link UI), then right-click → Open Code Review again.",
+                        "No Task Linked",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
 
-                ShowDiffPopup(displayName, html, OnDiffPopupWebMessage);
+                // Fallback: if attribution didn't return a title but we have the
+                // taskId, ask the broker. Cheap in-memory lookup.
+                if (string.IsNullOrEmpty(taskTitle))
+                {
+                    try { taskTitle = _messageBroker.GetTask(taskId)?.Title; }
+                    catch { /* leave blank — popup falls back to taskId in title bar */ }
+                }
+
+                // F-R2-6: task file_links store absolute paths; the JS
+                // findFileIndex matches strictly. Resolve the repo-relative
+                // path to absolute here so the popup preselects the correct
+                // file instead of silently falling back to file 0.
+                string absoluteFilePath = repoRelativePath;
+                if (!string.IsNullOrEmpty(repoRoot))
+                {
+                    try
+                    {
+                        absoluteFilePath = Path.Combine(
+                            repoRoot,
+                            repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                    }
+                    catch (Exception pathEx)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[TerminalDocument] absoluteFilePath resolve failed: {pathEx.Message}");
+                        // Fall through with repoRelativePath — JS will console.warn on no-match.
+                    }
+                }
+
+                var crService = _codeReviewService ??= new MultiTerminal.Services.CodeReviewService(_messageBroker);
+                bool isDark = _currentTheme?.IsDark ?? true;
+                Dialogs.CodeReviewPopupManager.OpenOrFocus(
+                    taskId,
+                    taskTitle,
+                    absoluteFilePath,
+                    isDark,
+                    _messageBroker,
+                    crService,
+                    FindForm());
             }
             catch (Exception ex)
             {
@@ -1304,43 +1338,12 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Webmessage handler for the diff popup. Currently routes a single message:
-        /// <c>{type:'open_code_review', taskId:'...', filePath:'...'}</c> from the
-        /// popup's "Open Code Review" button. Forwards through MessageBroker so
-        /// MainForm can activate the Tasks panel and trigger the task-bound Code
-        /// Review overlay pre-selected on the originating file.
+        /// Opens a standalone read-only popup window showing diff HTML content.
+        /// Used by the HUD activity-feed "Show Diff" flow (<see cref="ShowDiff"/>);
+        /// the Code Review popup goes through
+        /// <see cref="Dialogs.CodeReviewPopupManager.OpenOrFocus"/> instead.
         /// </summary>
-        private void OnDiffPopupWebMessage(JsonElement message)
-        {
-            if (_isDisposing) return;
-            try
-            {
-                if (!message.TryGetProperty("type", out var typeProp)) return;
-                string type = typeProp.GetString();
-                if (type != "open_code_review") return;
-                if (!message.TryGetProperty("taskId", out var taskIdProp)) return;
-                string taskId = taskIdProp.GetString();
-                if (string.IsNullOrEmpty(taskId)) return;
-                string filePath = message.TryGetProperty("filePath", out var filePathProp)
-                    ? filePathProp.GetString()
-                    : null;
-                _messageBroker?.RequestOpenTasksCodeReview(taskId, filePath);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[TerminalDocument] OnDiffPopupWebMessage failed: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Opens a standalone popup window showing diff HTML content. When
-        /// <paramref name="onWebMessage"/> is supplied, the popup's WebView2
-        /// forwards JSON messages from JavaScript (e.g. the new Code-Review-styled
-        /// popup's "Open Code Review" button) to the caller. Pass <c>null</c> for
-        /// the legacy read-only popups (dashboard activity-feed flow).
-        /// </summary>
-        private async void ShowDiffPopup(string fileName, string html, Action<JsonElement> onWebMessage = null)
+        private async void ShowDiffPopup(string fileName, string html)
         {
             LoadDiffPopupSettings();
 
@@ -1364,8 +1367,6 @@ namespace MultiTerminal.Docking
             var webView = new WebView2 { Dock = DockStyle.Fill };
             form.Controls.Add(webView);
 
-            EventHandler<Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs> webMsgHandler = null;
-
             try
             {
                 var environment = await WebView2EnvironmentCache.GetEnvironmentAsync();
@@ -1376,26 +1377,6 @@ namespace MultiTerminal.Docking
 
                 if (Math.Abs(_diffPopupZoom - 1.0) > 0.01)
                     webView.ZoomFactor = _diffPopupZoom;
-
-                if (onWebMessage != null)
-                {
-                    webMsgHandler = (s, args) =>
-                    {
-                        try
-                        {
-                            string json = args.WebMessageAsJson;
-                            if (string.IsNullOrEmpty(json)) return;
-                            using var doc = JsonDocument.Parse(json);
-                            onWebMessage(doc.RootElement.Clone());
-                        }
-                        catch (Exception ex)
-                        {
-                            System.Diagnostics.Debug.WriteLine(
-                                $"[TerminalDocument] Diff popup WebMessage parse failed: {ex.Message}");
-                        }
-                    };
-                    webView.CoreWebView2.WebMessageReceived += webMsgHandler;
-                }
 
                 webView.CoreWebView2.NavigateToString(html);
             }
@@ -1409,11 +1390,7 @@ namespace MultiTerminal.Docking
                     : form.RestoreBounds;
 
                 if (webView.CoreWebView2 != null)
-                {
                     _diffPopupZoom = webView.ZoomFactor;
-                    if (webMsgHandler != null)
-                        webView.CoreWebView2.WebMessageReceived -= webMsgHandler;
-                }
 
                 SaveDiffPopupSettings();
                 webView.Dispose();
