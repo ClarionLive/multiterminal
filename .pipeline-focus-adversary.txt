@@ -1,0 +1,43 @@
+VERIFIER HANDOFF:
+The verifier has already run and PASSED in Run 4. Build clean 0/0.
+---
+Run 3 left 3 HIGH findings + 2 MEDIUMs. Run 4 fixes:
+1. ResolveCommonGitDirAsync + per-entry common-gitdir membership filter in WorktreeListService (HIGH/Security)
+2. TOCTOU revalidation before GetDirtyCountAsync (MEDIUM)
+3. Deferred restore + _allowlistGeneration token + allowlist clear in SetProject (HIGH/Security + HIGH/Adversary)
+4. GitRepoLayout.UnsupportedLink for non-default layouts (MEDIUM/Adversary)
+5. GitRepoWatcher.Start() revalidation (MEDIUM/Security)
+
+Peer reports running in parallel.
+---
+
+Build clean. You are the cross-model adversary on Run 4. Pressure-test the assumptions of THIS pass's fixes — not the prior runs.
+
+PROJECT ROOT: H:\DevLaptop\ClarionPowerShell\MultiTerminal-worktrees\72254499
+
+Specific Run 4 surfaces worth challenging:
+
+- ResolveCommonGitDirAsync trusts `git rev-parse --git-common-dir` output. What if git config or env (GIT_DIR, core.worktree, safe.directory, --git-dir) can be manipulated by a hostile repo to make the output point at the SAME canonical path as the source repo's common-dir, fooling the membership check?
+- Deferred restore order: SetProject sets _projectPath = projectPath (the bound one). ApplyProject runs against that. Meanwhile _pendingRestoredRepo waits. What if the bound projectPath itself is poisoned via the caller chain (Docking/TerminalDocument.cs passes whatever was registered)? The deferred restore defends against poisoned settings — not poisoned-input-to-SetProject.
+- Generation token defends against stale continuation overwriting allowlist. What about stale switch_repo web messages that arrived in WebView2's message queue before SetProject? They'll be processed AFTER SetProject — IsAllowedWorktree fires against the new (empty or fresh) allowlist. If the empty allowlist rejects → silent swallow → user sees nothing. If the fresh allowlist contains the path → cross-project switch is authorized. Is this concerning?
+- UnsupportedLink → empty_linked: a user with a legitimate `git init --separate-git-dir` setup gets the empty-state with a "submodule" message. Worse UX than necessary, but documented in code.
+- The post-fetch reversion in UpdateWorktreeAllowlist STILL fires for the SwitchToRepo case where a worktree got pruned externally. ApplyProject is called, which re-enters RefreshWorktreeListAsync → could this loop if pruning is fast?
+
+Protocol:
+
+1. ORIENT. Did Run 4 close the Run 3 findings? Did it introduce new ones?
+2. FIND THE ASSUMPTIONS in the Run 4 code specifically.
+3. PROBE THE BOUNDARIES NOBODY NAMED IN RUN 4.
+4. REQUIREMENTS AMBIGUITY: are we shipping the actual feature or just hardening forever?
+
+Output:
+
+### Verdict: approve / needs-attention / block
+
+### Assumptions pressure-tested
+
+### Findings (severity + location + assumption + failure mode + recommendation)
+
+### Requirements ambiguity
+
+### What the other gates covered well

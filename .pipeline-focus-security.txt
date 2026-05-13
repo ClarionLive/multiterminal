@@ -1,0 +1,46 @@
+VERIFIER HANDOFF:
+The verifier has already run and PASSED. Here is its report:
+---
+## Verification Report (Run 4) — PASS
+
+Build clean 0/0. All 5 Run 4 fix claims verified present.
+
+Run 3 left 3 HIGH security/adversary findings + 2 MEDIUMs. Run 4 fixes:
+
+1. WorktreeListService.ResolveCommonGitDirAsync(workingDir) — runs `git rev-parse --git-common-dir`, canonicalizes output, returns empty on failure. Per-entry filter loop in GetWorktreesForRepoAsync drops candidates whose common-dir differs from the source's. (HIGH/Security closed)
+
+2. WorktreeListService TOCTOU revalidation — re-checks IsSafeWorktreePath right before each GetDirtyCountAsync. Failed candidate gets DirtyCount=-1 without git invocation. (MEDIUM/Security closed)
+
+3. HudGitRenderer deferred restore + generation token:
+   - _allowlistGeneration (int) bumped in SetProject. RefreshWorktreeListAsync captures at start; drops if it moved while await ran.
+   - _pendingRestoredRepo (string) holds the persisted-selection value. SetProject NEVER binds _projectPath to it (always = _originalProjectPath).
+   - After UpdateWorktreeAllowlist, pending is applied via SwitchToRepo iff member; else clears the stale persisted key.
+   - _worktreeAllowlist cleared in SetProject — defeats cross-project switch via stale allowlist. (HIGH/Security + HIGH/Adversary closed)
+
+4. GitRepoManager.GitRepoLayout.UnsupportedLink — distinct enum value for non-default gitlink layouts (separate-git-dir etc). Currently routes to empty_linked alongside Submodule; documented as v1 unsupported. (MEDIUM/Adversary addressed)
+
+5. GitRepoWatcher.Start() TOCTOU revalidation — inside existing lock, re-runs CanonicalizeAndValidateDir on _adminDir + _commonGitDir; OrdinalIgnoreCase comparison against stored values; throws InvalidOperationException on mismatch with before/after paths. _started stays false on abort. (MEDIUM/Security closed)
+
+### Verdict
+PASS — all Run 3 blockers addressed
+---
+
+Build is clean. Focus on security, not build/completeness.
+
+PROJECT ROOT: H:\DevLaptop\ClarionPowerShell\MultiTerminal-worktrees\72254499
+
+This is the 4th adversarial pass. Run 1 found a wrong-branch fiasco (not security). Run 2 found 3 HIGHs (path validation). Run 3 found 3 NEW HIGHs (deeper trust boundaries — persisted selection, common-gitdir membership, allowlist persistence). Run 4 closes all Run 3 findings.
+
+Pressure-test the Run 4 fixes specifically:
+- ResolveCommonGitDirAsync uses `git rev-parse --git-common-dir`. Is the path it returns trustworthy? Could a hostile repo manipulate this output via config (e.g. `core.worktree`, `--git-dir`, `safe.directory`)?
+- The generation token defends against a stale RefreshWorktreeListAsync continuation, but what about a stale SwitchToRepo call that arrived before SetProject and is still in the WebView2 message queue?
+- Deferred restore: between SetProject and the first RefreshWorktreeListAsync completion, the panel renders against _originalProjectPath. But what if _originalProjectPath itself is poisoned? (Caller-trust assumption.)
+- TOCTOU revalidation in the dirty-count loop catches the moment-before-git-invocation case. What about between IsSafeWorktreePath in the filter pass and the common-gitdir check?
+
+Severity scale:
+- critical -> exploitable vulnerability with data loss / RCE / auth bypass. MUST fix before testing.
+- high -> significant weakness, exploitation plausible. MUST fix before testing.
+- medium -> concern requiring specific conditions to exploit. Fix recommended.
+- low -> defense-in-depth note. Non-blocking.
+
+Find findings that remain after the Run 4 hardening. If the remaining concerns are LOW-only or non-existent, verdict should be approve.
