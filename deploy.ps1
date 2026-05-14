@@ -75,12 +75,11 @@ if (Test-Path $stampPath) {
         Write-Host "  Source:   $($stamp.sourceDir)"
         Write-Host ""
 
+        # NOTE: Release-config guard was dropped — agent build_project defaults to Debug
+        # and this is a run-what-you-build local setup, so the guard caused friction
+        # without value. Use `-Build` to explicitly Release-rebuild before deploy.
         if ($stamp.configuration -ne 'Release') {
-            Write-Host "WARNING: Staged build is $($stamp.configuration), not Release." -ForegroundColor Yellow
-            if (-not $Force) {
-                Write-Host "Re-run with -Force to deploy a non-Release build, or rebuild Release." -ForegroundColor Yellow
-                exit 1
-            }
+            Write-Host "Note: deploying $($stamp.configuration) build (use -Build to Release-rebuild first)." -ForegroundColor DarkGray
         }
 
         # Staleness guard: warn if staged is >24h old, require -Force to proceed

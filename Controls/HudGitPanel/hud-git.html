@@ -40,81 +40,120 @@ html, body {
     overflow: hidden;
 }
 
-/* ------- Worktree tree pane -------
-   Left-side hierarchical pane: parent (IsMain=true) as root with
-   worktrees indented beneath. Hidden when entries.length ≤ 1 (a plain
-   checkout with no worktrees gets no extra chrome — content pane goes
-   full width). Width is user-resizable via .splitter and persisted in
-   localStorage. */
-.tree-pane {
-    display: none;
-    flex: 0 0 auto;
-    width: var(--tree-width, 220px);
-    min-width: 180px;
-    background: var(--bg-elevated);
-    border-right: 1px solid var(--border);
-    overflow-x: hidden;
-    overflow-y: auto;
-    padding: 4px 0;
+/* ------- Unified project-overview tree -------
+   Full-width single tree: repo root → `branches` + `folders` → worktrees
+   → working changes + recent commits → task groups → files. Replaces the
+   201266ff left-pane + right-tabbed-pane split. Renderer wires the DOM
+   from the `git_state_tree` payload (item 1, Frank). Expand state per
+   node is persisted in localStorage under `hudGit.tree.expanded.{projectId}`. */
+.tree {
+    padding: 4px 0 8px 0;
     font-size: 11px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    height: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
 }
-.tree-pane.shown { display: block; }
-.tree-pane .tree-header {
-    padding: 4px 12px 6px;
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--fg-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    user-select: none;
-}
-.tree-node {
+/* A tree-row is the clickable label line of a node. The chevron + label
+   live inside; children render in the sibling .tree-children container. */
+.tree-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 12px;
+    padding: 3px 10px 3px 4px;
     cursor: pointer;
     color: var(--fg);
-    line-height: 1.3;
+    line-height: 1.4;
     user-select: none;
-    border: none;
     background: none;
+    border: none;
     width: 100%;
     text-align: left;
     font-family: inherit;
     font-size: inherit;
 }
-.tree-node:hover { background: var(--border); }
-.tree-node.current {
+.tree-row:hover { background: var(--bg-elevated); }
+.tree-row.selected {
     background: var(--select-bg);
     color: var(--accent);
     font-weight: 600;
-    cursor: default;
 }
-.tree-node:focus-visible { outline: 1px dotted var(--accent); outline-offset: -2px; }
-.tree-node.child { padding-left: 24px; }
-.tree-node-dot {
-    width: 9px;
-    height: 9px;
+.tree-row:focus-visible { outline: 1px dotted var(--accent); outline-offset: -1px; }
+
+/* Chevron — clickable; double-click on the .tree-row label also toggles. */
+.tree-chevron {
+    width: 12px;
+    flex: 0 0 auto;
+    color: var(--fg-muted);
+    font-size: 9px;
+    text-align: center;
+    cursor: pointer;
+}
+.tree-chevron.leaf { visibility: hidden; }
+
+/* Depth-based indentation via data-depth attribute. Each level adds 14px
+   of padding to the row (chevron stays aligned within the depth slot). */
+.tree-row[data-depth="0"] { padding-left: 4px; }
+.tree-row[data-depth="1"] { padding-left: 18px; }
+.tree-row[data-depth="2"] { padding-left: 32px; }
+.tree-row[data-depth="3"] { padding-left: 46px; }
+.tree-row[data-depth="4"] { padding-left: 60px; }
+.tree-row[data-depth="5"] { padding-left: 74px; }
+.tree-row[data-depth="6"] { padding-left: 88px; }
+
+/* Section / category nodes (branches, folders, working changes, recent commits). */
+.tree-row.section {
+    color: var(--fg-muted);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.tree-row.section .tree-count {
+    color: var(--fg-dim);
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+}
+/* Short plain-English hint after a section label. Used on BRANCHES /
+   Working changes / Recent commits headers so a git-naive reader
+   immediately knows what they're looking at. */
+.tree-row.section .tree-tagline {
+    color: var(--fg-dim);
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    font-style: italic;
+    margin-left: 6px;
+}
+
+/* Worktree row — dot + branch + dirty + linked-task title + parent badge. */
+.tree-row .wt-dot {
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     border: 1.5px solid var(--fg-muted);
     flex: 0 0 auto;
     box-sizing: border-box;
 }
-.tree-node.current .tree-node-dot {
+.tree-row.selected .wt-dot,
+.tree-row .wt-dot.filled {
     background: var(--accent);
     border-color: var(--accent);
 }
-.tree-node-branch {
+.tree-row .wt-branch {
     font-weight: 600;
     flex: 0 0 auto;
-    /* Bidi defense — branch names come from user-controlled storage. */
     direction: ltr;
     unicode-bidi: isolate;
 }
-.tree-node-dirty { color: var(--fg-muted); flex: 0 0 auto; }
-.tree-node.current .tree-node-dirty { color: var(--accent); }
-.tree-node-task {
+.tree-row .wt-dirty {
+    color: var(--fg-muted);
+    flex: 0 0 auto;
+}
+.tree-row.selected .wt-dirty { color: var(--accent); }
+.tree-row .wt-task {
     color: var(--fg-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -124,13 +163,68 @@ html, body {
     direction: ltr;
     unicode-bidi: isolate;
 }
-.tree-node.current .tree-node-task { color: var(--accent); }
-.tree-node-badge {
+.tree-row.selected .wt-task { color: var(--accent); }
+.tree-row .wt-badge {
     color: var(--fg-dim);
     font-size: 10px;
-    font-weight: normal;
+    font-weight: 400;
     flex: 0 0 auto;
 }
+
+/* Branch row (under `branches` section). */
+.tree-row .br-name {
+    font-weight: 600;
+    flex: 0 0 auto;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+.tree-row .br-tip-sha {
+    color: var(--fg-dim);
+    font-family: ui-monospace, Consolas, "Courier New", monospace;
+    font-size: 10px;
+    flex: 0 0 auto;
+}
+.tree-row .br-tip-subject {
+    color: var(--fg-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 0;
+    direction: ltr;
+    unicode-bidi: isolate;
+}
+.tree-row .br-wt-hint {
+    color: var(--fg-dim);
+    font-size: 10px;
+    flex: 0 0 auto;
+}
+
+/* Task-group row (within working changes — links a file group to its owning task). */
+.tree-row.task-group {
+    color: var(--fg);
+}
+.tree-row .tg-check {
+    color: var(--green, var(--accent));
+    flex: 0 0 auto;
+}
+.tree-row .tg-title {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.tree-row .tg-agent,
+.tree-row .tg-count {
+    color: var(--fg-muted);
+    font-size: 10px;
+    flex: 0 0 auto;
+}
+
+/* Collapsible children container. */
+.tree-children { /* nothing structural; rows handle their own indent via data-depth */ }
+.tree-children.collapsed { display: none; }
 
 /* ------- Header strip (item [7]) ------- */
 .header {
@@ -173,37 +267,16 @@ html, body {
 #empty h3 { color: var(--fg); margin: 0 0 8px 0; font-size: 13px; font-weight: 600; }
 #empty p { margin: 0 auto; max-width: 420px; line-height: 1.55; }
 
-/* ------- Body split — tree pane | splitter | content ------- */
-#body { display: none; flex: 1; min-height: 0; }
-.body-split { display: flex; height: 100%; min-height: 0; }
-.body-content {
-    /* Flex column so the tab strip pins at the top and only the active
-       panel scrolls (overflow-y is on .git-tab-panels, not here).
-       overflow-x: hidden keeps file-row chip overflow from spilling out. */
+/* ------- Body — unified tree consumes full panel width.
+   201266ff's left-pane + right-pane split + splitter + drag handlers
+   were removed when the tree took over. */
+#body {
+    display: none;
     flex: 1;
-    min-width: 320px;
-    display: flex;
-    flex-direction: column;
-    overflow-x: hidden;
-    overflow-y: hidden;
+    min-height: 0;
+    overflow: hidden;
     background: var(--bg);
 }
-
-/* Draggable splitter between tree pane and content. Hidden when the
-   tree pane is hidden (single-entry plain checkout) so the content
-   pane gets a clean edge. */
-.splitter {
-    display: none;
-    flex: 0 0 4px;
-    cursor: col-resize;
-    background: var(--border);
-    position: relative;
-    user-select: none;
-}
-.splitter.shown { display: block; }
-.splitter:hover,
-.splitter.dragging { background: var(--accent); }
-body.dragging-splitter { cursor: col-resize; user-select: none; }
 
 /* ------- Section headers (left column) ------- */
 .section-header {
@@ -225,81 +298,10 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     font-size: 11px;
 }
 
-/* ------- Tab strip (left column) — replaces the stacked .section-header
-   layout so users can switch between Working Changes / Recent Commits /
-   Branches without scrolling past the previous section. ------- */
-.git-tabs {
-    display: flex;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
-    flex: 0 0 auto;
-}
-.git-tab {
-    flex: 1;
-    padding: 8px 10px;
-    text-align: center;
-    cursor: pointer;
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--fg-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    border-right: 1px solid var(--border);
-    border-bottom: 2px solid transparent;
-    user-select: none;
-    /* Truncate long labels gracefully when the splitter is dragged narrow. */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    /* Anchor for the .contam-active::after badge so it sits in the corner
-       outside the text flow — otherwise the ::after participates in the
-       same inline flow as the label and gets eaten by text-overflow:ellipsis
-       at narrow splitter widths (cross-model adversary HIGH, run 2). */
-    position: relative;
-}
-.git-tab:last-child { border-right: none; }
-.git-tab:hover { color: var(--fg); background: var(--bg-elevated); }
-.git-tab.active {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
-    background: var(--bg-elevated);
-}
-.git-tab .tab-count {
-    color: var(--fg-dim);
-    font-weight: 400;
-    margin-left: 5px;
-}
-.git-tab.active .tab-count { color: var(--accent); }
-.git-tab:focus-visible { outline: 1px dotted var(--accent); outline-offset: -2px; }
-/* Cross-tab contamination signal — when >1 active tasks span the working
-   tree, the contamination banner inside the Working Changes panel is the
-   only red iconography. With tabs gating visibility, a user parked on the
-   Recent Commits or Branches tab would never see it. This badge on the
-   Working Changes tab label fires whenever the banner does. (Adversary
-   MEDIUM, run 1.)
-   Badge is absolute-positioned in the top-right corner of the tab so it
-   sits outside the text flow — otherwise the surrounding ellipsis truncation
-   at narrow splitter widths would clip the glyph (adversary HIGH, run 2). */
-.git-tab.contam-active::after {
-    content: '\26A0'; /* ⚠ */
-    color: var(--red);
-    font-weight: 700;
-    position: absolute;
-    top: 2px;
-    right: 4px;
-    line-height: 1;
-    font-size: 11px;
-    pointer-events: none;
-}
-
-.git-tab-panels {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    min-height: 0;
-}
-[data-tab-panel] { display: none; }
-[data-tab-panel].active { display: block; }
+/* Tab strip / panels removed alongside the body-split when the unified
+   tree took over. Contamination signal now rides on the worktree row
+   in the tree (still surfaced; see .tree-row variants) instead of on a
+   tab label. */
 
 /* ------- File rows (working changes) ------- */
 .file-list { padding: 0; margin: 0; }
@@ -746,34 +748,13 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
     <p id="empty-message"></p>
 </div>
 
-<!-- Body — tree pane | splitter | content -->
+<!-- Body — single unified tree (root → branches + folders → worktrees → working changes + recent commits).
+     Replaces the 201266ff left-tree + right-tabbed-pane split. Renderer (items 3-5) populates
+     this from the `git_state_tree` payload Frank ships in item 1. Tree DOM uses stable node-ids
+     for localStorage expand-state persistence (hudGit.tree.expanded.{projectId}). -->
 <div id="body">
-    <div class="body-split">
-        <aside class="tree-pane" id="worktree-tree" aria-label="Worktree tree"></aside>
-        <div class="splitter" id="splitter" title="Drag to resize"></div>
-        <div class="body-content">
-            <div class="git-tabs" role="tablist" aria-label="Git sections">
-                <div class="git-tab active" id="working-changes-tab" data-tab="working-changes" role="tab" aria-selected="true" aria-controls="working-changes-section" tabindex="0">Working Changes<span class="tab-count" id="changes-count">0</span></div>
-                <div class="git-tab" id="commits-tab" data-tab="commits" role="tab" aria-selected="false" aria-controls="commits-section" tabindex="0">Recent Commits<span class="tab-count" id="commits-count">0</span></div>
-                <div class="git-tab" id="branches-tab" data-tab="branches" role="tab" aria-selected="false" aria-controls="branches-section" tabindex="0">Branches<span class="tab-count" id="branches-count">0</span></div>
-            </div>
-            <div class="git-tab-panels">
-                <div id="working-changes-section" class="active" data-tab-panel="working-changes" role="tabpanel" aria-labelledby="working-changes-tab">
-                    <div id="contamination-banner" class="contam-banner" style="display: none;"></div>
-                    <div id="file-list" class="file-list"></div>
-                    <div id="working-changes-empty" class="section-empty" style="display: none;">No uncommitted changes</div>
-                </div>
-                <div id="commits-section" data-tab-panel="commits" role="tabpanel" aria-labelledby="commits-tab">
-                    <div id="commits-list" class="commits-list"></div>
-                    <div id="commits-empty" class="section-empty" style="display: none;">No commits yet</div>
-                </div>
-                <div id="branches-section" data-tab-panel="branches" role="tabpanel" aria-labelledby="branches-tab">
-                    <div id="branches-list" class="branches-list"></div>
-                    <div id="branches-empty" class="section-empty" style="display: none;">No branches</div>
-                </div>
-            </div>
-        </div>
-    </div>
+    <div id="tree" class="tree" role="tree" aria-label="Project overview"></div>
+    <div id="contamination-banner" class="contam-banner" style="display: none;"></div>
 </div>
 
 </div>
@@ -805,7 +786,13 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                                    // disable the next legitimate switch reset
                                    // (cross-model adversary MEDIUM, run 2).
     let contextMenuPath = null;    // path the file-row context menu was raised on
+    // SPLITTER_KEY ('mt.git.treePaneWidthPx') retired alongside the
+    // body-split + splitter DOM. One-shot cleanup of the stale entry
+    // happens in initTreeKeysCleanup() called once at script init below;
+    // legacy splitter code paths reference it via the throwaway constant
+    // so they no-op gracefully until the dead-code sweep in a follow-up.
     const SPLITTER_KEY = 'mt.git.treePaneWidthPx';
+    try { localStorage.removeItem('mt.git.treePaneWidthPx'); } catch (e) { /* non-fatal */ }
 
     // --- Theme ---
     function applyTheme(isDark) {
@@ -983,6 +970,734 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
         const sep = trimmedRoot.indexOf('\\') >= 0 ? '\\' : '/';
         const normRel = (relPath || '').replace(/\//g, sep);
         return trimmedRoot + sep + normRel;
+    }
+
+    // ------------------------------------------------------------------
+    // Unified-tree renderer state.
+    //   lastTreeState — last `git_state_tree` payload, retained so a
+    //     re-render triggered by an expand toggle can rebuild from the
+    //     same data without re-asking the host.
+    //   treeExpandState — map of nodeId → boolean (true = expanded).
+    //     Populated from localStorage on each render; mutations go
+    //     through setExpanded() which persists.
+    //   treeExpandKey — current localStorage key (`hudGit.tree.expanded.{projectKey}`).
+    //
+    // Node-id contract (used as keys in treeExpandState):
+    //   'root', 'branches'
+    //   'branch:<name>', 'branch:<name>:working', 'branch:<name>:commits'
+    //   'branch:<name>:group:<taskId>'
+    //
+    // Branch-name keys over worktree-path keys: a branch's identity
+    // outlives a worktree being added/removed (the same `task/xxx`
+    // branch keeps its expand state even if its working folder gets
+    // pruned and re-created). Legacy `wt:<path>...` keys from the
+    // prior FOLDERS-section shape are swept by gcOrphanExpandKeys on
+    // each render so the map doesn't carry dead entries forever.
+    // ------------------------------------------------------------------
+    const EXPAND_KEY_PREFIX = 'hudGit.tree.expanded.';
+    let lastTreeState = null;
+    let treeExpandState = {};
+    let treeExpandKey = '';
+
+    function loadTreeExpandState(projectKey) {
+        treeExpandKey = EXPAND_KEY_PREFIX + (projectKey || '_default');
+        try {
+            const raw = localStorage.getItem(treeExpandKey);
+            treeExpandState = raw ? (JSON.parse(raw) || {}) : {};
+            if (typeof treeExpandState !== 'object' || treeExpandState === null) {
+                treeExpandState = {};
+            }
+        } catch (e) {
+            treeExpandState = {};
+        }
+    }
+
+    function saveTreeExpandState() {
+        if (!treeExpandKey) return;
+        try {
+            localStorage.setItem(treeExpandKey, JSON.stringify(treeExpandState));
+        } catch (e) {
+            // Quota exceeded — non-fatal; tree still works for this session.
+        }
+    }
+
+    // Returns the effective expand state for a node: user setting if
+    // present, else the locked-design default for that node type.
+    function isExpanded(nodeId, defaultExpanded) {
+        if (Object.prototype.hasOwnProperty.call(treeExpandState, nodeId)) {
+            return treeExpandState[nodeId] !== false;
+        }
+        return !!defaultExpanded;
+    }
+
+    function setExpanded(nodeId, value) {
+        if (!nodeId) return;
+        treeExpandState[nodeId] = !!value;
+        saveTreeExpandState();
+    }
+
+    // ------------------------------------------------------------------
+    // Tree-node factory.
+    //
+    // A node is a wrap containing two children: a row (the clickable
+    // label line) and an optional children container that holds the
+    // subtree. Chevron click + double-click on the row label both
+    // toggle expansion; single-click on the row body fires onSelect.
+    //
+    // Returns {wrap, row, children, setSelected}. Caller appends content
+    // children to `node.row` (after the chevron) and child rows to
+    // `node.children`.
+    // ------------------------------------------------------------------
+    function makeTreeNode(opts) {
+        opts = opts || {};
+        const nodeId = opts.nodeId || '';
+        const depth = opts.depth || 0;
+        const leaf = !!opts.leaf;
+        const defaultExpanded = !!opts.defaultExpanded;
+        const onSelect = typeof opts.onSelect === 'function' ? opts.onSelect : null;
+        const classes = Array.isArray(opts.classes) ? opts.classes : [];
+
+        const wrap = document.createElement('div');
+        wrap.className = 'tree-node-wrap';
+        if (nodeId) wrap.dataset.nodeId = nodeId;
+
+        const row = document.createElement('div');
+        row.className = 'tree-row';
+        row.setAttribute('role', 'treeitem');
+        row.setAttribute('data-depth', String(depth));
+        row.setAttribute('tabindex', '0');
+        classes.forEach(c => { if (c) row.classList.add(c); });
+
+        const chevron = document.createElement('span');
+        chevron.className = 'tree-chevron';
+        if (leaf) {
+            chevron.classList.add('leaf');
+            chevron.textContent = '';
+        } else {
+            chevron.textContent = isExpanded(nodeId, defaultExpanded) ? '▼' : '▶';
+            chevron.setAttribute('aria-hidden', 'true');
+        }
+        row.appendChild(chevron);
+        wrap.appendChild(row);
+
+        let children = null;
+        if (!leaf) {
+            children = document.createElement('div');
+            children.className = 'tree-children';
+            if (!isExpanded(nodeId, defaultExpanded)) {
+                children.classList.add('collapsed');
+            }
+            wrap.appendChild(children);
+
+            const toggle = () => {
+                const wasCollapsed = children.classList.contains('collapsed');
+                children.classList.toggle('collapsed');
+                chevron.textContent = wasCollapsed ? '▼' : '▶';
+                if (nodeId) setExpanded(nodeId, wasCollapsed);
+            };
+            chevron.addEventListener('click', e => {
+                e.stopPropagation();
+                toggle();
+            });
+            row.addEventListener('dblclick', e => {
+                e.preventDefault();
+                toggle();
+            });
+        }
+
+        if (onSelect) {
+            row.addEventListener('click', e => {
+                if (e.target === chevron) return; // chevron handles itself
+                onSelect(row);
+            });
+            row.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelect(row);
+                }
+            });
+        }
+
+        return { wrap, row, children };
+    }
+
+    // ------------------------------------------------------------------
+    // renderUnifiedTree — main entry. Builds the full tree DOM from a
+    // `git_state_tree` payload.
+    //
+    // Tree shape (revised 2026-05-13): single BRANCHES section. Each
+    // checked-out branch is expandable and contains its worktree's
+    // working changes + recent commits inline. Orphan branches (no
+    // worktree) are leaves with just tip SHA + subject. The prior
+    // FOLDERS section was dropped — it duplicated checked-out branches.
+    // ------------------------------------------------------------------
+    function renderUnifiedTree(state) {
+        const tree = $('tree');
+        if (!tree) return;
+        lastTreeState = state || {};
+
+        // Panel visibility — mirror showStandard's body/header/empty toggles
+        // so the panel actually surfaces when the first git_state_tree arrives.
+        $('empty').style.display = 'none';
+        $('header').style.display = 'flex';
+        $('body').style.display = 'flex';
+
+        const repoRoot = lastTreeState.repoRoot || '';
+        lastRepoRoot = repoRoot; // existing module-level cache used by file-row tooltip composition.
+
+        // Per-project expand-state key: sanitize the repo root so the key
+        // is filesystem-derivation-stable but localStorage-safe (alnum only).
+        const projectKey = repoRoot.replace(/[^A-Za-z0-9]/g, '_');
+        loadTreeExpandState(projectKey);
+
+        tree.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+
+        const repoName = lastTreeState.repoName || repoRoot.split(/[\\/]/).pop() || 'project';
+        const branches = Array.isArray(lastTreeState.branches) ? lastTreeState.branches : [];
+        const folders = Array.isArray(lastTreeState.folders) ? lastTreeState.folders : [];
+        const selectedPath = lastTreeState.selectedWorktreePath || '';
+
+        // ROOT — project node (depth 0). Always expanded.
+        const rootNode = makeTreeNode({
+            nodeId: 'root',
+            depth: 0,
+            defaultExpanded: true,
+            classes: ['section'],
+        });
+        const rootLabel = document.createElement('span');
+        rootLabel.textContent = repoName;
+        rootNode.row.appendChild(rootLabel);
+        fragment.appendChild(rootNode.wrap);
+
+        // BRANCHES — the only section now. Expanded by default since it's
+        // the primary view (worktrees roll up under their owning branch).
+        const branchesNode = makeTreeNode({
+            nodeId: 'branches',
+            depth: 1,
+            defaultExpanded: true,
+            classes: ['section'],
+        });
+        const branchesLabel = document.createElement('span');
+        branchesLabel.textContent = 'BRANCHES';
+        branchesNode.row.appendChild(branchesLabel);
+        const branchesCount = document.createElement('span');
+        branchesCount.className = 'tree-count';
+        branchesCount.textContent = ' (' + branches.length + ')';
+        branchesNode.row.appendChild(branchesCount);
+        const branchesTagline = document.createElement('span');
+        branchesTagline.className = 'tree-tagline';
+        branchesTagline.textContent = '— lines of work; each one can have its own folder';
+        branchesNode.row.appendChild(branchesTagline);
+        renderBranchesSection(branchesNode.children, branches, folders, selectedPath);
+        rootNode.children.appendChild(branchesNode.wrap);
+
+        tree.appendChild(fragment);
+
+        // GC orphan expand-state entries. Live set = branch names from
+        // the current payload; drop any `branch:<name>...` entries whose
+        // branch is no longer present. Also sweep legacy `wt:<path>...`
+        // keys from the prior tree shape so the map doesn't accumulate
+        // dead entries forever.
+        gcOrphanExpandKeys(branches);
+    }
+
+    function gcOrphanExpandKeys(branches) {
+        if (!treeExpandKey) return;
+        const liveBranches = new Set();
+        for (const b of branches) {
+            if (b && b.name) liveBranches.add(String(b.name));
+        }
+        let dropped = 0;
+        for (const key of Object.keys(treeExpandState)) {
+            // Legacy `wt:<path>...` keys from the prior FOLDERS-section
+            // shape — always sweep; the new shape never writes them.
+            if (key.startsWith('wt:')) {
+                delete treeExpandState[key];
+                dropped++;
+                continue;
+            }
+            if (!key.startsWith('branch:')) continue;
+            // Key forms: branch:<name>, branch:<name>:working,
+            // branch:<name>:commits, branch:<name>:group:<taskId>.
+            // Branch names contain `/` (e.g. `task/4363577a`) but never
+            // `:`, so we can split on the `:working`/`:commits`/`:group:`
+            // markers safely.
+            const afterPrefix = key.slice(7); // 'branch:'.length
+            let name = afterPrefix;
+            for (const suffix of [':working', ':commits', ':group:']) {
+                const i = afterPrefix.lastIndexOf(suffix);
+                if (i > 0) { name = afterPrefix.slice(0, i); break; }
+            }
+            if (!liveBranches.has(name)) {
+                delete treeExpandState[key];
+                dropped++;
+            }
+        }
+        if (dropped > 0) saveTreeExpandState();
+    }
+
+    // ------------------------------------------------------------------
+    // Branches section — one row per branch. The unified organizing unit:
+    //
+    //   • A checked-out branch (worktreePath != null) is expandable and
+    //     contains its worktree's working changes + recent commits inline.
+    //     Clicking the row switches the HUD to that worktree (switch_repo).
+    //   • An orphan branch (no worktree) is a leaf with just tip SHA +
+    //     subject. Clicking selects but does not switch (branch actions —
+    //     create-worktree-from-branch, delete — are out of scope).
+    //
+    // Ordering: parent/main branch first, then other checked-out branches
+    // in source order, then orphan branches in source order.
+    //
+    // The `(main)` badge lives on the parent branch row — the branch
+    // whose worktree is the IsMain worktree (typically `master`/`main`).
+    // ------------------------------------------------------------------
+    function renderBranchesSection(container, branches, folders, selectedPath) {
+        if (!container) return;
+        container.innerHTML = '';
+        if (!branches.length) {
+            const empty = document.createElement('div');
+            empty.className = 'tree-row';
+            empty.setAttribute('data-depth', '2');
+            const span = document.createElement('span');
+            span.style.color = 'var(--fg-muted)';
+            span.style.fontStyle = 'italic';
+            span.textContent = '(no branches)';
+            empty.appendChild(span);
+            container.appendChild(empty);
+            return;
+        }
+
+        // Build a path → folder lookup (lowercased) so each checked-out
+        // branch can find its worktree's working-changes / commits payload.
+        const folderByPath = new Map();
+        let mainFolderPath = '';
+        for (const f of (folders || [])) {
+            if (!f || !f.path) continue;
+            const lower = String(f.path).toLowerCase();
+            folderByPath.set(lower, f);
+            if (f.isMain) mainFolderPath = lower;
+        }
+
+        // Sort: parent first, other checked-out next, orphans last. Within
+        // each tier, preserve the payload's source order (HudGitRenderer
+        // sorts branches by last-commit-time newest-first by default).
+        const parentBranches = [];
+        const checkedOutBranches = [];
+        const orphanBranches = [];
+        for (const b of branches) {
+            if (!b || !b.name) continue;
+            const wtLower = b.worktreePath ? String(b.worktreePath).toLowerCase() : '';
+            if (wtLower && wtLower === mainFolderPath) {
+                parentBranches.push(b);
+            } else if (b.checkedOut || b.worktreePath) {
+                checkedOutBranches.push(b);
+            } else {
+                orphanBranches.push(b);
+            }
+        }
+        const ordered = parentBranches.concat(checkedOutBranches, orphanBranches);
+
+        const selectedLower = (selectedPath || '').toLowerCase();
+
+        for (const b of ordered) {
+            const name = String(b.name);
+            const wtPath = b.worktreePath ? String(b.worktreePath) : '';
+            const hasWorktree = !!wtPath;
+            const folder = hasWorktree ? folderByPath.get(wtPath.toLowerCase()) : null;
+            const isSelected = hasWorktree && wtPath.toLowerCase() === selectedLower;
+            const isParent = hasWorktree && wtPath.toLowerCase() === mainFolderPath;
+
+            const node = makeTreeNode({
+                nodeId: 'branch:' + name,
+                depth: 2,
+                // Orphan branches render as leaves (no expand chevron, no
+                // children container). Checked-out branches expand by
+                // default only if their worktree is the currently-selected
+                // one — user toggle is persisted and overrides on next
+                // render.
+                leaf: !hasWorktree,
+                defaultExpanded: isSelected,
+                onSelect: () => {
+                    if (hasWorktree && !isSelected) {
+                        send({ type: 'switch_repo', path: wtPath });
+                    }
+                },
+            });
+
+            if (isSelected) {
+                node.row.classList.add('selected');
+                node.row.setAttribute('aria-current', 'true');
+            }
+
+            const dot = document.createElement('span');
+            dot.className = 'wt-dot' + (hasWorktree ? ' filled' : '');
+            node.row.appendChild(dot);
+
+            const brName = document.createElement('span');
+            brName.className = 'br-name';
+            brName.textContent = name;
+            node.row.appendChild(brName);
+
+            if (b.tipSha) {
+                const sha = document.createElement('span');
+                sha.className = 'br-tip-sha';
+                sha.textContent = String(b.tipSha);
+                node.row.appendChild(sha);
+            }
+            if (b.tipSubject) {
+                const subj = document.createElement('span');
+                subj.className = 'br-tip-subject';
+                subj.textContent = String(b.tipSubject);
+                node.row.appendChild(subj);
+            }
+
+            const wtHint = document.createElement('span');
+            wtHint.className = 'br-wt-hint';
+            wtHint.textContent = hasWorktree ? '· open in working folder' : '· no working folder';
+            node.row.appendChild(wtHint);
+
+            if (isParent) {
+                const badge = document.createElement('span');
+                badge.className = 'wt-badge';
+                badge.textContent = '(main)';
+                node.row.appendChild(badge);
+            }
+
+            // Surface dirty count + linked task title from the matched
+            // folder (these used to live on the FOLDERS section row;
+            // now they ride along the branch row). Only render when we
+            // have a folder match — orphan branches skip.
+            if (folder) {
+                const dirtyText = (typeof folder.dirtyCount === 'number' && folder.dirtyCount >= 0)
+                    ? String(folder.dirtyCount)
+                    : '';
+                if (dirtyText) {
+                    const dirty = document.createElement('span');
+                    dirty.className = 'wt-dirty';
+                    dirty.textContent = '· ' + dirtyText;
+                    node.row.appendChild(dirty);
+                }
+                if (folder.linkedTaskTitle) {
+                    const task = document.createElement('span');
+                    task.className = 'wt-task';
+                    task.textContent = '· ' + String(folder.linkedTaskTitle);
+                    node.row.appendChild(task);
+                }
+            }
+
+            node.row.title = name
+                + (wtPath ? '\n' + wtPath : '')
+                + (folder && folder.linkedTaskTitle ? '\n' + String(folder.linkedTaskTitle) : '');
+
+            if (hasWorktree && folder) {
+                renderWorktreeSubtree(node.children, folder, /*depth*/ 3, /*idPrefix*/ 'branch:' + name);
+            }
+
+            container.appendChild(node.wrap);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Per-worktree subtree — wired under each expandable BRANCH row by
+    // renderBranchesSection. Two siblings:
+    //
+    //   • Working changes  — expanded by default. Children are task
+    //     groups + an `Unlinked changes` group at the end. Groups with
+    //     ≤5 files default expanded, >5 default collapsed.
+    //
+    //   • Recent commits   — collapsed by default. Flat commit rows.
+    //
+    // `idPrefix` is the parent branch's nodeId prefix (e.g.
+    // `branch:task/4363577a`); children compose their own ids on top
+    // (`:working`, `:commits`, `:group:<taskId>`) so expand-state
+    // persists against the branch identity rather than the filesystem
+    // path of the worktree.
+    // ------------------------------------------------------------------
+    function renderWorktreeSubtree(container, folder, depth, idPrefix) {
+        if (!container) return;
+        const path = folder.path || '';
+        const wc = folder.workingChanges || {};
+        const groupedByTask = Array.isArray(wc.groupedByTask) ? wc.groupedByTask : [];
+        const unlinked = Array.isArray(wc.unlinked) ? wc.unlinked : [];
+        const workingTreeFlat = Array.isArray(wc.workingTree) ? wc.workingTree : [];
+        const recentCommits = Array.isArray(folder.recentCommits) ? folder.recentCommits : [];
+
+        // --- working changes ---
+        const wcNode = makeTreeNode({
+            nodeId: idPrefix + ':working',
+            depth: depth,
+            defaultExpanded: true,
+            classes: ['section'],
+        });
+        const wcLabel = document.createElement('span');
+        wcLabel.textContent = 'Working changes';
+        wcNode.row.appendChild(wcLabel);
+        const wcCount = document.createElement('span');
+        wcCount.className = 'tree-count';
+        wcCount.textContent = ' (' + workingTreeFlat.length + ')';
+        wcNode.row.appendChild(wcCount);
+        const wcTagline = document.createElement('span');
+        wcTagline.className = 'tree-tagline';
+        wcTagline.textContent = "— files you've edited but not yet committed";
+        wcNode.row.appendChild(wcTagline);
+
+        if (workingTreeFlat.length === 0) {
+            const emptyRow = document.createElement('div');
+            emptyRow.className = 'tree-row';
+            emptyRow.setAttribute('data-depth', String(depth + 1));
+            const span = document.createElement('span');
+            span.style.color = 'var(--fg-muted)';
+            span.style.fontStyle = 'italic';
+            span.textContent = '(clean)';
+            emptyRow.appendChild(span);
+            wcNode.children.appendChild(emptyRow);
+        } else if (groupedByTask.length === 0 && unlinked.length === 0) {
+            // Worktree-mode OFF — groupedByTask + unlinked are empty arrays.
+            // Fall back to flat file listing under the working-changes node
+            // (no task-group nesting) so the user still sees the files.
+            for (const file of workingTreeFlat) {
+                wcNode.children.appendChild(buildFileRow(file, depth + 1, path));
+            }
+        } else {
+            // Render task groups in payload order (HudGitRenderer sorts
+            // active before shipped, then by title) plus an Unlinked changes
+            // group at the end when present.
+            for (const group of groupedByTask) {
+                wcNode.children.appendChild(buildTaskGroupNode(group, depth + 1, path, idPrefix));
+            }
+            if (unlinked.length > 0) {
+                wcNode.children.appendChild(buildUnlinkedGroupNode(unlinked, depth + 1, path, idPrefix));
+            }
+        }
+
+        container.appendChild(wcNode.wrap);
+
+        // --- recent commits ---
+        const rcNode = makeTreeNode({
+            nodeId: idPrefix + ':commits',
+            depth: depth,
+            defaultExpanded: false,
+            classes: ['section'],
+        });
+        const rcLabel = document.createElement('span');
+        rcLabel.textContent = 'Recent commits';
+        rcNode.row.appendChild(rcLabel);
+        const rcCount = document.createElement('span');
+        rcCount.className = 'tree-count';
+        rcCount.textContent = ' (' + recentCommits.length + ')';
+        rcNode.row.appendChild(rcCount);
+        const rcTagline = document.createElement('span');
+        rcTagline.className = 'tree-tagline';
+        rcTagline.textContent = '— recent saved snapshots on this branch';
+        rcNode.row.appendChild(rcTagline);
+
+        if (recentCommits.length === 0) {
+            const emptyRow = document.createElement('div');
+            emptyRow.className = 'tree-row';
+            emptyRow.setAttribute('data-depth', String(depth + 1));
+            const span = document.createElement('span');
+            span.style.color = 'var(--fg-muted)';
+            span.style.fontStyle = 'italic';
+            span.textContent = '(no commits)';
+            emptyRow.appendChild(span);
+            rcNode.children.appendChild(emptyRow);
+        } else {
+            for (const c of recentCommits) {
+                rcNode.children.appendChild(buildCommitRow(c, depth + 1));
+            }
+        }
+
+        container.appendChild(rcNode.wrap);
+    }
+
+    // Task-group node. Header row carries: ✓ for shipped/done task, title,
+    // agent, file count. Children are file rows. Default expand state is
+    // file-count-driven: ≤5 files expanded (inline scan), >5 collapsed
+    // (drill required) — overridable by user toggle (persisted).
+    function buildTaskGroupNode(group, depth, worktreePath, idPrefix) {
+        const taskId = group && group.taskId ? String(group.taskId) : '';
+        const files = Array.isArray(group.files) ? group.files : [];
+        const isShipped = group.linkageState === 'shipped';
+        const defaultExpanded = files.length <= 5;
+        // idPrefix is the parent branch's nodeId (e.g.
+        // `branch:task/4363577a`). Compose `:group:<taskId>` so
+        // expand-state binds to the branch, not the worktree path.
+        const nodeId = idPrefix + ':group:' + taskId;
+
+        const node = makeTreeNode({
+            nodeId: nodeId,
+            depth: depth,
+            defaultExpanded: defaultExpanded,
+            classes: ['task-group'],
+        });
+
+        if (isShipped) {
+            const check = document.createElement('span');
+            check.className = 'tg-check';
+            check.textContent = '✓';
+            node.row.appendChild(check);
+        }
+
+        const title = document.createElement('span');
+        title.className = 'tg-title';
+        title.textContent = (group.taskTitle && String(group.taskTitle)) || '(untitled task)';
+        node.row.appendChild(title);
+
+        if (group.agent) {
+            const agent = document.createElement('span');
+            agent.className = 'tg-agent';
+            agent.textContent = '· ' + String(group.agent);
+            node.row.appendChild(agent);
+        }
+
+        const count = document.createElement('span');
+        count.className = 'tg-count';
+        count.textContent = '· ' + files.length;
+        node.row.appendChild(count);
+
+        // Tooltip surfaces the short task id for cross-reference with the kanban board.
+        const idShort = group.taskIdShort || (taskId.slice(0, 8));
+        node.row.title = (group.taskTitle || '') + (idShort ? '\n[' + idShort + ']' : '');
+
+        for (const file of files) {
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath));
+        }
+
+        return node.wrap;
+    }
+
+    // Unlinked changes group — files with no task linkage. Always rendered
+    // at the bottom when present, with `drill-if->5` rule applied per
+    // locked design (matches the per-task-group default).
+    function buildUnlinkedGroupNode(unlinked, depth, worktreePath, idPrefix) {
+        const defaultExpanded = unlinked.length <= 5;
+        const nodeId = idPrefix + ':group:_unlinked';
+
+        const node = makeTreeNode({
+            nodeId: nodeId,
+            depth: depth,
+            defaultExpanded: defaultExpanded,
+            classes: ['task-group'],
+        });
+
+        const title = document.createElement('span');
+        title.className = 'tg-title';
+        title.textContent = 'Unlinked changes';
+        node.row.appendChild(title);
+
+        const count = document.createElement('span');
+        count.className = 'tg-count';
+        count.textContent = '· ' + unlinked.length;
+        node.row.appendChild(count);
+
+        for (const file of unlinked) {
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath));
+        }
+
+        return node.wrap;
+    }
+
+    // File row — leaf in the tree. Status marker (M/A/D/U/R/T/C glyph) +
+    // path + line stats. Click handler + right-click → Open Code Review
+    // are wired in item 5 from the existing handlers.
+    function buildFileRow(file, depth, worktreePath) {
+        const row = document.createElement('div');
+        row.className = 'tree-row';
+        row.setAttribute('role', 'treeitem');
+        row.setAttribute('data-depth', String(depth));
+        row.setAttribute('tabindex', '0');
+        row.dataset.path = (file && file.path) || '';
+        row.dataset.worktreePath = worktreePath || '';
+
+        // Chevron slot kept for visual alignment with other rows even
+        // though file rows are leaves.
+        const chevron = document.createElement('span');
+        chevron.className = 'tree-chevron leaf';
+        row.appendChild(chevron);
+
+        const marker = document.createElement('span');
+        const glyph = (file && file.statusGlyph) || '?';
+        const kindRaw = (file && file.statusKindRaw) || 'UNK';
+        marker.className = 'file-marker ' + kindRaw;
+        marker.textContent = glyph;
+        row.appendChild(marker);
+
+        const pathSpan = document.createElement('span');
+        pathSpan.className = 'file-path';
+        pathSpan.textContent = (file && file.path) || '';
+        row.appendChild(pathSpan);
+
+        const added = (file && file.linesAdded) | 0;
+        const deleted = (file && file.linesDeleted) | 0;
+        if (added || deleted) {
+            const stats = document.createElement('span');
+            stats.className = 'file-stats';
+            if (added) {
+                const a = document.createElement('span');
+                a.className = 'added';
+                a.textContent = '+' + added;
+                stats.appendChild(a);
+            }
+            if (added && deleted) stats.appendChild(document.createTextNode(' '));
+            if (deleted) {
+                const d = document.createElement('span');
+                d.className = 'deleted';
+                d.textContent = '-' + deleted;
+                stats.appendChild(d);
+            }
+            row.appendChild(stats);
+        }
+
+        row.title = composeAbsolutePath(lastRepoRoot, (file && file.path) || '') || (file && file.path) || '';
+
+        // Right-click → Open Code Review. Reuses the existing context-menu
+        // DOM (#file-context-menu) and #ctx-open-diff-popup click handler
+        // → fires {type: 'open_diff_popup', path} → the C# host
+        // (TerminalDocument.OnHudGitOpenDiffPopupRequested) opens the
+        // Code Review popup.
+        row.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            const p = (file && file.path) || '';
+            if (p) showFileContextMenu(e.clientX, e.clientY, p);
+        });
+
+        return row;
+    }
+
+    // Commit row — leaf in the recent-commits subtree.
+    function buildCommitRow(commit, depth) {
+        const row = document.createElement('div');
+        row.className = 'tree-row';
+        row.setAttribute('role', 'treeitem');
+        row.setAttribute('data-depth', String(depth));
+        row.setAttribute('tabindex', '0');
+        row.dataset.sha = (commit && commit.fullSha) || (commit && commit.shortSha) || '';
+
+        const chevron = document.createElement('span');
+        chevron.className = 'tree-chevron leaf';
+        row.appendChild(chevron);
+
+        const sha = document.createElement('span');
+        sha.className = 'br-tip-sha';
+        sha.textContent = (commit && commit.shortSha) || '';
+        row.appendChild(sha);
+
+        const subj = document.createElement('span');
+        subj.className = 'br-tip-subject';
+        subj.textContent = (commit && commit.subject) || '';
+        row.appendChild(subj);
+
+        if (commit && commit.authorName) {
+            const author = document.createElement('span');
+            author.className = 'tg-agent';
+            author.textContent = '· ' + String(commit.authorName);
+            row.appendChild(author);
+        }
+
+        row.title = ((commit && commit.shortSha) || '') + '\n' + ((commit && commit.subject) || '');
+        return row;
     }
 
     function renderWorkingTree(files) {
@@ -1222,7 +1937,7 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             return (a.path || '').localeCompare(b.path || '');
         });
         for (const f of sortedFiles) {
-            details.appendChild(buildFileRow(f, /*suppressTaskChip*/ true));
+            details.appendChild(buildLegacyFileRow(f, /*suppressTaskChip*/ true));
         }
         return details;
     }
@@ -1279,12 +1994,18 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
             return (a.path || '').localeCompare(b.path || '');
         });
         for (const f of sortedFiles) {
-            details.appendChild(buildFileRow(f, /*suppressTaskChip*/ false));
+            details.appendChild(buildLegacyFileRow(f, /*suppressTaskChip*/ false));
         }
         return details;
     }
 
-    function buildFileRow(f, suppressTaskChip) {
+    // Legacy file-row builder for the dead `git_state` / `wt-group` render
+    // path (showStandard → renderWorkingTreeGrouped → buildGroupDetails /
+    // buildUnlinkedDetails). Kept alongside the still-routed `git_state`
+    // switch case until that branch is excised. Distinct from the
+    // tree-mode `buildFileRow` (data-depth driven) — the old name was
+    // hoisting over the new one and stripping depth from every file row.
+    function buildLegacyFileRow(f, suppressTaskChip) {
         const row = document.createElement('div');
         row.className = 'file-row';
         row.dataset.path = f.path;
@@ -1710,7 +2431,17 @@ body.dragging-splitter { cursor: col-resize; user-select: none; }
                 applyTheme(m.isDark !== false);
                 break;
             case 'git_state':
+                // Legacy selected-only payload — kept while item 1 (Frank)
+                // lands the unified `git_state_tree` message. Once that goes
+                // green, this case + showStandard / renderWorkingTree /
+                // renderRecentCommits / renderBranches / renderWorktreeTree
+                // become dead code and are removed in item 5 cleanup.
                 showStandard(m);
+                break;
+            case 'git_state_tree':
+                // Unified tree payload from item 1. Renderer implemented in
+                // items 3-5 (Alice). Stub for now so the wiring is visible.
+                renderUnifiedTree(m);
                 break;
             case 'diff_loaded':
                 renderDiff(m.path, m.lines || [], m.selectionKey);
