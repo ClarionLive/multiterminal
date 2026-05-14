@@ -269,20 +269,93 @@ namespace MultiTerminal.API.Controllers
 
         /// <summary>
         /// Set a task as active, auto-pausing other active tasks for the same assignee.
+        /// Response is enriched with <c>branchCandidates</c> — active worktrees of the
+        /// task's project paired with each branch's outcome (if any) — so the
+        /// kanban-task skill can surface fit-on-existing-branch options. Suggestion-only.
+        /// Empty when worktree mode is disabled or the task has no resolvable project.
         /// </summary>
         [HttpPost("{taskId}/activate")]
-        public IActionResult SetTaskActive(string taskId, [FromBody] SetActiveRequest request)
+        public async Task<IActionResult> SetTaskActive(string taskId, [FromBody] SetActiveRequest request)
         {
             var result = _broker.SetTaskActive(taskId, request.UpdatedBy);
             if (!result.Success)
                 return BadRequest(new { error = result.Error });
 
+            var branchCandidates = await BuildBranchCandidatesAsync(taskId).ConfigureAwait(false);
+
             return Ok(new
             {
                 success = true,
                 pausedTaskIds = result.PausedTaskIds,
-                pausedTaskTitles = result.PausedTaskTitles
+                pausedTaskTitles = result.PausedTaskTitles,
+                branchCandidates
             });
+        }
+
+        /// <summary>
+        /// Builds the fit-suggestion candidate list for the task's project: active
+        /// worktrees joined with branch outcomes. Returns an empty list (never null)
+        /// when worktree mode is disabled, the task is unknown, the project has no
+        /// path, or the project's branch metadata service is unavailable. Failures
+        /// inside the underlying calls (e.g. git not on PATH) bubble up an empty
+        /// list rather than a 5xx — this is an enrichment, not a load-bearing field.
+        /// </summary>
+        private async Task<List<object>> BuildBranchCandidatesAsync(string taskId)
+        {
+            var empty = new List<object>();
+            if (!MultiTerminal.Services.WorktreeConfig.IsEnabled) return empty;
+
+            var task = _broker.GetTask(taskId);
+            if (task == null || string.IsNullOrEmpty(task.ProjectId)) return empty;
+
+            var projectPath = _broker.TryGetProjectPathForTask(taskId);
+            if (string.IsNullOrEmpty(projectPath)) return empty;
+
+            var worktreeSvc = _broker.WorktreeList;
+            var metadataSvc = _broker.BranchMetadata;
+            if (worktreeSvc == null || metadataSvc == null) return empty;
+
+            try
+            {
+                var worktrees = await worktreeSvc.GetWorktreesForRepoAsync(projectPath).ConfigureAwait(false);
+                if (worktrees == null || worktrees.Count == 0) return empty;
+
+                var outcomes = metadataSvc.GetOutcomes(task.ProjectId);
+                var outcomeByBranch = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var o in outcomes)
+                {
+                    if (!string.IsNullOrEmpty(o?.BranchName))
+                        outcomeByBranch[o.BranchName] = o.Outcome;
+                }
+
+                var candidates = new List<object>(worktrees.Count);
+                foreach (var w in worktrees)
+                {
+                    if (w == null) continue;
+                    outcomeByBranch.TryGetValue(w.Branch ?? string.Empty, out var outcome);
+                    // Pipeline Run 3 (Codex security HIGH): drop worktreePath
+                    // (filesystem layout disclosure) and dirtyCount (project state)
+                    // from this enrichment. The kanban-task skill's fit-suggestion
+                    // surface needs only branch + outcome + linkedTaskTitle to
+                    // present "fit on existing branch X" choices. Filesystem
+                    // paths and per-worktree dirty counts are not required at
+                    // the suggestion-decision boundary and were widening the
+                    // unauthed-disclosure surface flagged on this endpoint.
+                    candidates.Add(new
+                    {
+                        branch = w.Branch,
+                        outcome,
+                        linkedTaskTitle = w.LinkedTaskTitle,
+                    });
+                }
+                return candidates;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[TasksController.BuildBranchCandidatesAsync] {ex.GetType().Name}: {ex.Message}");
+                return empty;
+            }
         }
 
         /// <summary>

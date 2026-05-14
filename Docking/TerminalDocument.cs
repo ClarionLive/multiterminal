@@ -990,7 +990,11 @@ namespace MultiTerminal.Docking
             _hudDispatchedFolder = workingDirectory;
             _hudNotes?.SetProject(workingDirectory);
             _hudKnowledge?.SetProject(projectId);
-            _hudGit?.SetProject(workingDirectory);
+            // Pass projectId explicitly — workingDirectory may be a worktree
+            // subfolder that isn't in the project registry, and the path-only
+            // overload would silently leave _projectId null (breaks per-(project,
+            // branch) outcome read/write). Debugger Run-1 finding.
+            _hudGit?.SetProject(projectId, workingDirectory);
             _hudSessions?.SetProject(workingDirectory);
             // Switch HUD to dashboard tab by default when starting a terminal
             _hudTabContainer?.SwitchToTabById("__dashboard__");
@@ -2441,7 +2445,8 @@ namespace MultiTerminal.Docking
                             _hudDashboard?.SetProject(resolvedProjectId, folderForUi, resolvedProjectName);
                             _hudNotes?.SetProject(folderForUi);
                             _hudKnowledge?.SetProject(resolvedProjectId);
-                            _hudGit?.SetProject(folderForUi);
+                            // Pass resolvedProjectId — see comment in StartTerminal call site for rationale.
+                            _hudGit?.SetProject(resolvedProjectId, folderForUi);
                             _hudSessions?.SetProject(folderForUi);
                             _hudDispatchedFolder = folderForUi;
                             UpdateStatusBar();

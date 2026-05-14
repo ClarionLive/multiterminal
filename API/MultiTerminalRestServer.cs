@@ -150,6 +150,23 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(sp =>
                     new MultiTerminal.Services.OwnerProfileService(
                         sp.GetRequiredService<TaskDatabase>().Connection));
+                // Pipeline Run 5 finding (Codex security HIGH): the DI factory
+                // previously constructed a SECOND BranchMetadataService instance
+                // separate from the one MainForm wires onto broker.BranchMetadata
+                // for the HUD path. Two instances → two private _lock objects →
+                // HUD writes and REST writes don't serialize against the same
+                // lock. Unify by returning the broker's instance so all callers
+                // (REST controllers via DI + HUD via broker) share one lock.
+                // The broker.BranchMetadata is wired by MainForm during startup
+                // before the REST server begins accepting connections, so the
+                // null-check throw is defensive against future ordering drift.
+                builder.Services.AddSingleton<MultiTerminal.Services.BranchMetadataService>(sp =>
+                {
+                    var broker = sp.GetRequiredService<MultiTerminal.MCPServer.Services.MessageBroker>();
+                    return broker.BranchMetadata
+                        ?? throw new InvalidOperationException(
+                            "BranchMetadataService not yet wired on MessageBroker — MainForm wire-up must precede REST controller resolution.");
+                });
 
                 // Add controllers for REST API (DebugController gets DebugLogService from MessageBroker directly)
                 builder.Services.AddControllers()

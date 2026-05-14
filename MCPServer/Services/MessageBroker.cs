@@ -296,6 +296,25 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<BrowserTabEventArgs> BrowserTabRequested;
 
         /// <summary>
+        /// Raised after a branch's outcome is saved via BranchMetadataService.SetOutcome.
+        /// HudGitRenderer subscribes to refresh the tree when its active project matches.
+        /// </summary>
+        public event EventHandler<BranchOutcomeUpdatedEventArgs> BranchOutcomeUpdated;
+
+        /// <summary>
+        /// Fires BranchOutcomeUpdated. Called by BranchMetadataService after a successful
+        /// upsert so subscribers (HudGitRenderer) can refresh.
+        /// </summary>
+        public void FireBranchOutcomeUpdated(string projectId, string branchName)
+        {
+            BranchOutcomeUpdated?.Invoke(this, new BranchOutcomeUpdatedEventArgs
+            {
+                ProjectId = projectId,
+                BranchName = branchName
+            });
+        }
+
+        /// <summary>
         /// Knowledge database for institutional memory — knowledge entries and code digests.
         /// Set via DI after broker is created (shares multiterminal.db via TaskDatabase).
         /// </summary>
@@ -375,6 +394,14 @@ namespace MultiTerminal.MCPServer.Services
         /// Set via DI after broker is created.
         /// </summary>
         public MultiTerminal.Services.GitAttributionService GitAttribution { get; set; }
+
+        /// <summary>
+        /// Per-(project, branch) outcome metadata for the HUD Git tree.
+        /// Set via MainForm wire-up (mirrors <see cref="GitAttribution"/> pattern;
+        /// REST controllers receive their own DI-resolved instance — both share
+        /// the SQLite connection and fire events through this same broker).
+        /// </summary>
+        public MultiTerminal.Services.BranchMetadataService BranchMetadata { get; set; }
 
         /// <summary>
         /// Project service for managing .claude/project.json files.
@@ -6427,6 +6454,12 @@ namespace MultiTerminal.MCPServer.Services
         public string UserId { get; set; }
         public InboxMessage Message { get; set; }
         public int UnreadCount { get; set; }
+    }
+
+    public class BranchOutcomeUpdatedEventArgs : EventArgs
+    {
+        public string ProjectId { get; set; }
+        public string BranchName { get; set; }
     }
 
     /// <summary>

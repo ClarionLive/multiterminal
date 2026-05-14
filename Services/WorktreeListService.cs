@@ -87,8 +87,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public async Task<List<WorktreeEntry>> GetWorktreesForRepoAsync(string workingDir)
         {
+            // CA3003: workingDir originates from broker._projects (trusted, populated by
+            // ProjectService) or from HudGitRenderer's SetProject(path) call. REST callers
+            // never supply this path directly — they pass a task id which the broker resolves
+            // through its internal _tasks → _projects dictionaries. Taint analysis can't see
+            // through those lookups, so suppress at the sink.
+#pragma warning disable CA3003
             if (string.IsNullOrEmpty(workingDir) || !Directory.Exists(workingDir))
                 return new List<WorktreeEntry>();
+#pragma warning restore CA3003
 
             var (exitCode, stdout, _) = await RunGitAsync(
                 workingDir, "worktree", "list", "--porcelain").ConfigureAwait(false);
@@ -303,7 +310,10 @@ namespace MultiTerminal.Services
         private async Task<string> ResolveCommonGitDirAsync(string workingDir)
         {
             if (string.IsNullOrEmpty(workingDir)) return string.Empty;
+            // CA3003: see suppression rationale on GetWorktreesForRepoAsync above.
+#pragma warning disable CA3003
             if (!Directory.Exists(workingDir)) return string.Empty;
+#pragma warning restore CA3003
 
             var (exitCode, stdout, _) = await RunGitAsync(
                 workingDir, "rev-parse", "--git-common-dir").ConfigureAwait(false);

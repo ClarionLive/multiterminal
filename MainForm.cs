@@ -427,6 +427,9 @@ namespace MultiTerminal
                 // Wire up GitAttributionService — Phase 2 overlays for the HUD Git tab (agent / task / pipeline-status chips + contamination banner)
                 _mcpServer.Broker.GitAttribution = new Services.GitAttributionService(_mcpServer.Broker.TaskDb);
 
+                // Wire up BranchMetadataService — per-branch outcome strings for the HUD Git tree (HudGitRenderer reads via broker; REST controllers get their own DI instance)
+                _mcpServer.Broker.BranchMetadata = new Services.BranchMetadataService(_mcpServer.Broker.TaskDb.Connection, _mcpServer.Broker);
+
                 // Note: Session memory crash recovery moved to after _mcpServer.StartAsync()
                 // so that ProjectService is available (it's wired during server startup)
 

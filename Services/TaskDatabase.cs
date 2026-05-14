@@ -108,6 +108,7 @@ namespace MultiTerminal.Services
             MigrateAddKnowledgeAttentionDecay();
             MigrateAddSessionLifecycleStatus();
             MigrateAddTaskWorktrees();
+            MigrateAddBranchMetadata();
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -1815,6 +1816,52 @@ namespace MultiTerminal.Services
                     CreatedAt = DateTime.Parse(reader.GetString(3)),
                     Status = reader.GetString(4)
                 });
+            }
+            return results;
+        }
+
+        /// <summary>
+        /// Tasks whose recorded worktree branch matches <paramref name="branchName"/>,
+        /// scoped to <paramref name="projectId"/>. Returns (id, title) pairs ordered by
+        /// most-recent worktree first. Used by the HUD Git tree to surface a branch's
+        /// task cluster in the inspector + by BranchMetadataController.GetDraftContext
+        /// to source agent prompt content. Empty list when nothing is linked OR when
+        /// either argument is empty.
+        ///
+        /// <para>Project scoping is mandatory (security): branch names like 'main' or
+        /// 'master' are reused across projects, so a branch-name-only lookup would
+        /// leak task content from unrelated projects through draft-context. Pipeline
+        /// Run 2 finding from both Codex security-auditor + cross-model adversary.</para>
+        /// </summary>
+        public List<(string Id, string Title)> GetTasksLinkedToBranch(string projectId, string branchName)
+        {
+            var results = new List<(string, string)>();
+            if (string.IsNullOrWhiteSpace(projectId)) return results;
+            if (string.IsNullOrWhiteSpace(branchName)) return results;
+
+            // Pipeline Run 5 finding (Codex adversary MEDIUM): take the shared
+            // _dbLock that other TaskDatabase methods use. Without it, the new
+            // helper races against concurrent TaskDatabase operations (called
+            // from HudGitRenderer.RefreshAsync background pass + REST controllers)
+            // on the same SQLiteConnection. Matches the pattern at lines 1435,
+            // 1505, 1619, 1689.
+            const string sql = @"
+                SELECT t.id, t.title
+                FROM tasks t
+                JOIN task_worktrees w ON t.id = w.task_id
+                WHERE w.branch_name = @branchName AND t.project_id = @projectId
+                ORDER BY w.created_at DESC
+            ";
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@projectId", projectId);
+                cmd.Parameters.AddWithValue("@branchName", branchName);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add((reader.GetString(0), reader.IsDBNull(1) ? "" : reader.GetString(1)));
+                }
             }
             return results;
         }
@@ -4985,6 +5032,28 @@ namespace MultiTerminal.Services
                 using var cmd = new SQLiteCommand(sql, _connection);
                 cmd.ExecuteNonQuery();
             }
+        }
+
+        private void MigrateAddBranchMetadata()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='branch_metadata'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS branch_metadata (
+                    project_id TEXT NOT NULL,
+                    branch_name TEXT NOT NULL,
+                    outcome TEXT,
+                    drafted_by TEXT,
+                    updated_at DATETIME DEFAULT (datetime('now')),
+                    PRIMARY KEY (project_id, branch_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_branch_metadata_project ON branch_metadata(project_id);
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
         }
 
         private void MigrateAddOwnerProfile()

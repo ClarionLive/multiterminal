@@ -42,6 +42,12 @@ namespace MultiTerminal.Controls
         private MessageBroker _broker;
         private string _projectPath;
 
+        // Project ID resolved from _originalProjectPath via ProjectService at
+        // SetProject() time. Used by OnBranchOutcomeUpdated to filter event
+        // fires to this panel's active project. Null if the path is not in
+        // the registry (events are ignored in that case — safe fallback).
+        private string _projectId;
+
         /// <summary>
         /// The project root the panel was originally bound to via
         /// <see cref="SetProject"/>. Used as the stable identity for the
@@ -127,15 +133,91 @@ namespace MultiTerminal.Controls
             };
         }
 
-        public void Initialize(MessageBroker broker) { _broker = broker; }
+        public void Initialize(MessageBroker broker)
+        {
+            _broker = broker;
+            if (_broker != null)
+            {
+                _broker.BranchOutcomeUpdated += OnBranchOutcomeUpdated;
+            }
+        }
+
+        private void OnBranchOutcomeUpdated(object sender, BranchOutcomeUpdatedEventArgs args)
+        {
+            if (IsDisposed) return;
+            if (args == null) return;
+            if (string.IsNullOrEmpty(_projectId)) return;
+            if (!string.Equals(_projectId, args.ProjectId, StringComparison.Ordinal)) return;
+
+            try
+            {
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action(() => { _ = RefreshAsync(); }));
+                }
+                else
+                {
+                    _ = RefreshAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.OnBranchOutcomeUpdated] {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private void ResolveProjectIdFromPath(string projectPath)
+        {
+            _projectId = null;
+            if (string.IsNullOrEmpty(projectPath)) return;
+
+            var svc = _broker?.ProjectService;
+            if (svc == null) return;
+
+            try
+            {
+                foreach (var entry in svc.GetAllRegisteredProjects())
+                {
+                    if (entry == null) continue;
+                    if (string.Equals(entry.Path, projectPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _projectId = entry.Id;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.ResolveProjectIdFromPath] {ex.GetType().Name}: {ex.Message}");
+            }
+        }
 
         /// <summary>
-        /// Bind this panel to a project root. Detects git layout, subscribes to
-        /// <see cref="GitRepoService.RepoStateChanged"/> for live refresh on
-        /// Standard repos, or posts the appropriate empty-state message for
-        /// Worktree / Submodule / NotARepo paths.
+        /// Legacy single-arg overload. Resolves the project id by path against
+        /// <see cref="ProjectService.GetAllRegisteredProjects"/>. Use the
+        /// two-arg overload from callers that already know the project id —
+        /// the path-only resolver fails for worktree subdirectories (which
+        /// aren't registered as projects in their own right) and silently
+        /// disables the per-(project, branch) features (outcome edits, fit
+        /// suggestions) for terminals opened in a worktree subfolder.
         /// </summary>
         public void SetProject(string projectPath)
+        {
+            SetProject(null, projectPath);
+        }
+
+        /// <summary>
+        /// Bind this panel to a project root with an explicit project id.
+        /// Preferred overload: callers that already resolved the project id
+        /// (e.g. <c>TerminalDocument</c>) should pass it through so the path
+        /// vs registry mismatch on worktree subdirectories doesn't strand
+        /// <see cref="_projectId"/> as null. When <paramref name="projectId"/>
+        /// is null/empty, falls back to <see cref="ResolveProjectIdFromPath"/>
+        /// for backwards compatibility.
+        /// </summary>
+        public void SetProject(string projectId, string projectPath)
         {
             // The "project" identity changes only when SetProject moves us to a
             // genuinely different root. Switcher-driven moves go through
@@ -164,6 +246,18 @@ namespace MultiTerminal.Controls
             // one render cycle before the post-fetch revert fires.
             _pendingRestoredRepo = TryRestoreSelectedRepo(projectPath);
             _projectPath = projectPath;
+
+            if (!string.IsNullOrEmpty(projectId))
+            {
+                // Caller-provided project id wins. Skips the registry lookup
+                // entirely — required for worktree subdirectories whose paths
+                // aren't registered as projects.
+                _projectId = projectId;
+            }
+            else
+            {
+                ResolveProjectIdFromPath(projectPath);
+            }
 
             if (_isInitialized) ApplyProject();
         }
@@ -472,9 +566,84 @@ namespace MultiTerminal.Controls
                             if (!string.IsNullOrEmpty(switchPath)) SwitchToRepo(switchPath);
                         }
                         break;
+
+                    case "set_branch_outcome":
+                        // Posted from the inspector's outcome-edit input (item 8 of
+                        // task 6a56f56c). Routes the user's edit through the
+                        // BranchMetadataService — which fires BranchOutcomeUpdated,
+                        // and OnBranchOutcomeUpdated re-fires RefreshAsync, which
+                        // ships the new outcome on the next git_state_tree, which
+                        // re-renders both the row label and the Details tab.
+                        HandleSetBranchOutcome(doc.RootElement);
+                        break;
                 }
             }
             catch { }
+        }
+
+        private void HandleSetBranchOutcome(JsonElement root)
+        {
+            string branchName = null;
+            if (root.TryGetProperty("branchName", out var nameEl))
+                branchName = nameEl.GetString();
+
+            // Echo a failure to the WebView so the editor's "Saving…" stuck
+            // state can be cleared and the user gets feedback. Three failure
+            // shapes get an explicit reason; the catch below sends a generic
+            // 'exception' shape with the exception message.
+            void NotifyFailed(string reason)
+            {
+                try
+                {
+                    PostJson(new
+                    {
+                        type = "set_branch_outcome_failed",
+                        branchName = branchName ?? string.Empty,
+                        reason = reason ?? "unknown",
+                    });
+                }
+                catch { /* non-fatal — UI has its own timeout fallback */ }
+            }
+
+            if (string.IsNullOrEmpty(_projectId))
+            {
+                NotifyFailed("project not registered (per-project outcomes unavailable from this terminal)");
+                return;
+            }
+            if (_broker?.BranchMetadata == null)
+            {
+                NotifyFailed("outcome service unavailable");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(branchName))
+            {
+                NotifyFailed("missing branchName");
+                return;
+            }
+
+            string outcome = null;
+            if (root.TryGetProperty("outcome", out var outcomeEl))
+            {
+                outcome = outcomeEl.ValueKind == JsonValueKind.String ? outcomeEl.GetString() : null;
+            }
+
+            try
+            {
+                // Empty/whitespace outcome is treated as "clear" — the service
+                // upserts NULL when null is passed; we trim and pass null
+                // explicitly so DB sees a single canonical "no outcome" value.
+                string normalized = string.IsNullOrWhiteSpace(outcome) ? null : outcome.Trim();
+                _broker.BranchMetadata.SetOutcome(_projectId, branchName, normalized, "user");
+                // Success path: BranchOutcomeUpdated fires from the service,
+                // OnBranchOutcomeUpdated kicks RefreshAsync, the new state pass
+                // re-renders the Details tab — UI re-enters read-only display
+                // automatically. No explicit success echo needed.
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleSetBranchOutcome] Failed for branch='{branchName}': {ex.Message}");
+                NotifyFailed(ex.Message ?? ex.GetType().Name);
+            }
         }
 
         private void HandleOpenLifecycle(JsonElement root)
@@ -589,7 +758,7 @@ namespace MultiTerminal.Controls
                 // ran between the IsDisposed check above and the BeginInvoke call.
                 // Benign (UnsubscribeCurrent in Dispose ensures this is the last
                 // event we'll see) but log so a real issue isn't lost.
-                System.Diagnostics.Debug.WriteLine(
+                System.Diagnostics.Trace.WriteLine(
                     $"[HudGitRenderer.OnRepoStateChanged] {ex.GetType().Name}: {ex.Message}");
             }
         }
@@ -703,6 +872,14 @@ namespace MultiTerminal.Controls
                 var attributionSvcCaptured = attributionSvc;
                 string selectedWorktreePath = _projectPath;
 
+                // Broker-owned services for per-branch enrichment. Captured into
+                // locals BEFORE Task.Run for the same reason as attributionSvc:
+                // the broker properties are auto-properties without volatile
+                // and could race with a broker swap mid-pass.
+                var branchMetaCaptured = _broker?.BranchMetadata;
+                var taskDbCaptured = _broker?.TaskDb;
+                string projectIdSnap = _projectId;
+
                 var payload = await Task.Run(() =>
                 {
                     // Branches enumerate from the main service handle — every
@@ -724,12 +901,77 @@ namespace MultiTerminal.Controls
                         branchToWorktree[wt.Branch] = wt.Path;
                     }
 
+                    // Pre-fetch outcomes for this project in a single query so
+                    // the per-branch loop below is O(1) lookup instead of O(N)
+                    // round-trips. Empty map when project is unregistered or
+                    // service unavailable — outcome falls back to null per branch.
+                    var outcomesByBranch = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+                    if (branchMetaCaptured != null && !string.IsNullOrEmpty(projectIdSnap))
+                    {
+                        try
+                        {
+                            var outcomes = branchMetaCaptured.GetOutcomes(projectIdSnap);
+                            if (outcomes != null)
+                            {
+                                foreach (var o in outcomes)
+                                {
+                                    if (o == null || string.IsNullOrEmpty(o.BranchName)) continue;
+                                    if (!string.IsNullOrEmpty(o.Outcome))
+                                        outcomesByBranch[o.BranchName] = o.Outcome;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.RefreshAsync] outcome pre-fetch: {ex.Message}");
+                        }
+                    }
+
                     var branches = branchInfos
                         .Select(b =>
                         {
                             string wtPath = null;
                             if (!string.IsNullOrEmpty(b.Name) && !b.IsRemote)
                                 branchToWorktree.TryGetValue(b.Name, out wtPath);
+
+                            // Outcome lookup (project-scoped, pre-fetched).
+                            string outcome = null;
+                            if (!string.IsNullOrEmpty(b.Name))
+                                outcomesByBranch.TryGetValue(b.Name, out outcome);
+
+                            // Linked tasks: tasks whose task_worktrees row
+                            // points at this branch. Skipped for remotes
+                            // (refs/remotes/* never own a worktree). Per-branch
+                            // query is acceptable: branch counts are small
+                            // (typically <30) and the join hits the indexed
+                            // task_id PK on tasks.
+                            object[] linkedTasks = Array.Empty<object>();
+                            // GetTasksLinkedToBranch is now project-scoped (Run 2 security
+                            // fix). When _projectId is null (worktree subfolder + legacy
+                            // SetProject(path) path), the helper returns empty rather than
+                            // leaking cross-project tasks.
+                            if (taskDbCaptured != null
+                                && !string.IsNullOrEmpty(projectIdSnap)
+                                && !string.IsNullOrEmpty(b.Name)
+                                && !b.IsRemote)
+                            {
+                                try
+                                {
+                                    var tasks = taskDbCaptured.GetTasksLinkedToBranch(projectIdSnap, b.Name);
+                                    if (tasks != null && tasks.Count > 0)
+                                    {
+                                        var arr = new object[tasks.Count];
+                                        for (int i = 0; i < tasks.Count; i++)
+                                            arr[i] = new { id = tasks[i].Id ?? "", title = tasks[i].Title ?? "" };
+                                        linkedTasks = arr;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.RefreshAsync] linkedTasks lookup for branch='{b.Name}': {ex.Message}");
+                                }
+                            }
+
                             return new
                             {
                                 name = b.Name ?? "",
@@ -738,6 +980,8 @@ namespace MultiTerminal.Controls
                                 worktreePath = wtPath,
                                 checkedOut = !string.IsNullOrEmpty(wtPath),
                                 isRemote = b.IsRemote,
+                                outcome,
+                                linkedTasks,
                                 when = b.LastCommitTime.HasValue
                                     ? b.LastCommitTime.Value.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)
                                     : null,
@@ -1116,6 +1360,14 @@ namespace MultiTerminal.Controls
             if (disposing)
             {
                 UnsubscribeCurrent();
+                // UnsubscribeCurrent only releases _currentService.RepoStateChanged.
+                // The broker-owned BranchOutcomeUpdated event was wired in Initialize
+                // and must be released here too — otherwise the broker holds a strong
+                // reference to this disposed renderer for its (app-long) lifetime.
+                if (_broker != null)
+                {
+                    try { _broker.BranchOutcomeUpdated -= OnBranchOutcomeUpdated; } catch { /* non-fatal */ }
+                }
                 if (_webView != null)
                 {
                     if (_webView.CoreWebView2 != null)

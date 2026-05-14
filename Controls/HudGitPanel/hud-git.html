@@ -185,7 +185,7 @@ html, body {
     flex: 0 0 auto;
 }
 .tree-row .br-tip-subject {
-    color: var(--fg-muted);
+    color: var(--fg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -193,6 +193,10 @@ html, body {
     min-width: 0;
     direction: ltr;
     unicode-bidi: isolate;
+}
+.tree-row .br-tip-subject.muted {
+    color: var(--fg-dim);
+    font-style: italic;
 }
 .tree-row .br-wt-hint {
     color: var(--fg-dim);
@@ -267,16 +271,281 @@ html, body {
 #empty h3 { color: var(--fg); margin: 0 0 8px 0; font-size: 13px; font-weight: 600; }
 #empty p { margin: 0 auto; max-width: 420px; line-height: 1.55; }
 
-/* ------- Body — unified tree consumes full panel width.
+/* ------- Body — unified tree on top, inspector panel below.
    201266ff's left-pane + right-pane split + splitter + drag handlers
-   were removed when the tree took over. */
+   were removed when the tree took over. The inspector (item 6a56f56c)
+   is a sibling under #body that drops below the tree, separated by a
+   horizontal splitter. flex-direction: column drives the vertical
+   stack; #tree gets flex: 1 to fill remaining space. */
 #body {
     display: none;
     flex: 1;
+    flex-direction: column;
     min-height: 0;
     overflow: hidden;
     background: var(--bg);
 }
+
+/* ------- Inspector panel (Details + Help tabs) — appears below the
+   tree, separated by a horizontal splitter. Item 3 lays the bones;
+   item 4 wires drag-to-resize + collapsed-state persistence; items
+   5-6 fill the tab bodies. Theme tokens reused from the tree.
+
+   Layout: #inspector is a flex column (tabs row + body). Sits with a
+   default fixed height (220px); item 4 promotes that to localStorage-
+   driven inline style. When collapsed (item 4), #inspector hides and
+   #inspector-handle (a thin re-expand strip) takes its place. */
+#inspector-splitter {
+    flex: 0 0 4px;
+    background: var(--border);
+    cursor: ns-resize;
+    transition: background 0.1s;
+}
+#inspector-splitter:hover, #inspector-splitter.dragging {
+    background: var(--accent);
+}
+#inspector {
+    flex: 0 0 220px;
+    display: flex;
+    flex-direction: column;
+    min-height: 80px;
+    max-height: 60%;
+    overflow: hidden;
+    background: var(--bg);
+    border-top: 0; /* splitter element provides the visual divider */
+}
+#inspector.collapsed {
+    display: none !important;
+}
+#inspector-tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 6px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+}
+.inspector-tab {
+    background: none;
+    border: none;
+    color: var(--fg-muted);
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    border-radius: 3px;
+}
+.inspector-tab:hover { background: var(--border); color: var(--fg); }
+.inspector-tab.active {
+    background: var(--bg);
+    color: var(--accent);
+    font-weight: 600;
+}
+#inspector-collapse-btn {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 2px 8px;
+    font-size: 14px;
+    line-height: 1;
+    border-radius: 3px;
+}
+#inspector-collapse-btn:hover { background: var(--border); color: var(--fg); }
+#inspector-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 10px 14px;
+    min-height: 0;
+}
+.inspector-tab-pane { display: none; }
+.inspector-tab-pane.active { display: block; }
+.inspector-empty {
+    color: var(--fg-muted);
+    font-style: italic;
+    line-height: 1.5;
+    padding: 4px 0;
+}
+
+/* Inspector Details tab content (item 5) — context-sensitive renders for
+   branch / file / commit selection. Heading + label/value rows + a task
+   list. Help tab uses simpler one-block paragraph styling. */
+.detail-heading {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg);
+    margin: 0 0 8px 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    word-break: break-all;
+}
+.detail-heading.detail-branch { color: var(--accent); }
+.detail-heading.detail-file {
+    font-family: 'Cascadia Code', monospace;
+    font-weight: 500;
+    font-size: 11px;
+}
+.detail-heading.detail-commit { font-family: 'Cascadia Code', monospace; }
+.detail-subheading {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 12px 0 4px 0;
+}
+.detail-field {
+    display: flex;
+    gap: 10px;
+    padding: 2px 0;
+    font-size: 11px;
+    line-height: 1.45;
+}
+.detail-label {
+    flex: 0 0 96px;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    padding-top: 2px;
+}
+.detail-value {
+    flex: 1;
+    color: var(--fg);
+    word-break: break-word;
+    min-width: 0;
+}
+.detail-value.mono {
+    font-family: 'Cascadia Code', monospace;
+    font-size: 10.5px;
+}
+.detail-value.muted { color: var(--fg-muted); font-style: italic; }
+.detail-tasklist { margin-top: 2px; }
+.detail-task {
+    display: flex;
+    gap: 10px;
+    padding: 3px 0;
+    font-size: 11px;
+    border-top: 1px solid transparent;
+}
+.detail-task + .detail-task { border-top-color: var(--border); }
+.detail-task-id {
+    flex: 0 0 64px;
+    font-family: 'Cascadia Code', monospace;
+    color: var(--fg-muted);
+    font-size: 10px;
+    padding-top: 1px;
+}
+.detail-task-title {
+    flex: 1;
+    color: var(--fg);
+    word-break: break-word;
+    min-width: 0;
+}
+
+/* Outcome edit affordance (item 8) — pencil button next to the outcome
+   value swaps the read-only span out for an editable textarea + Save/
+   Cancel actions. Inline; no modal. */
+.detail-edit-btn {
+    background: none;
+    border: none;
+    color: var(--fg-dim);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 4px;
+    line-height: 1;
+    margin-left: 6px;
+    flex: 0 0 auto;
+}
+.detail-edit-btn:hover { color: var(--accent); }
+.detail-outcome-edit {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+.detail-outcome-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.4;
+    resize: vertical;
+    min-height: 56px;
+}
+.detail-outcome-input:focus { border-color: var(--accent); outline: none; }
+.detail-edit-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+}
+.detail-edit-actions button {
+    background: var(--bg-elevated);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+}
+.detail-edit-actions button:hover { background: var(--border); }
+.detail-edit-actions button.primary {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+}
+.detail-edit-actions button.primary:hover {
+    filter: brightness(1.1);
+}
+
+/* Help tab content (item 6) — teaching paragraphs + a subtle tip
+   block for non-obvious follow-ups. Plain prose styling. */
+.help-text {
+    color: var(--fg);
+    line-height: 1.55;
+    font-size: 11.5px;
+    margin: 0 0 10px 0;
+}
+.help-text strong { color: var(--accent); font-weight: 600; }
+.help-tip {
+    color: var(--fg-muted);
+    line-height: 1.5;
+    font-size: 11px;
+    padding: 8px 10px;
+    border-left: 2px solid var(--border);
+    background: var(--bg-elevated);
+    margin: 8px 0 0 0;
+}
+.help-tip strong { color: var(--fg); font-weight: 600; }
+
+/* Re-expand handle — a thin strip with chevron + label, shown only
+   when the inspector is collapsed. Click anywhere on it to restore
+   the inspector at its previous height (item 4 wires this). */
+#inspector-handle {
+    display: none;
+    flex: 0 0 22px;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: var(--bg-elevated);
+    border-top: 1px solid var(--border);
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: 11px;
+    user-select: none;
+}
+#inspector-handle:hover { background: var(--border); color: var(--fg); }
+#inspector-handle.shown { display: flex; }
 
 /* ------- Section headers (left column) ------- */
 .section-header {
@@ -748,13 +1017,33 @@ html, body {
     <p id="empty-message"></p>
 </div>
 
-<!-- Body — single unified tree (root → branches + folders → worktrees → working changes + recent commits).
-     Replaces the 201266ff left-tree + right-tabbed-pane split. Renderer (items 3-5) populates
-     this from the `git_state_tree` payload Frank ships in item 1. Tree DOM uses stable node-ids
-     for localStorage expand-state persistence (hudGit.tree.expanded.{projectId}). -->
+<!-- Body — single unified tree on top + bottom inspector panel (Details/Help).
+     Layout is flex column: #tree fills, splitter, then inspector at the bottom.
+     Inspector DOM scaffolded in item 3 of task 6a56f56c; behaviors wired in items 4-6. -->
 <div id="body">
     <div id="tree" class="tree" role="tree" aria-label="Project overview"></div>
     <div id="contamination-banner" class="contam-banner" style="display: none;"></div>
+    <!-- Horizontal splitter (visually inert in item 3; item 4 wires drag-to-resize). -->
+    <div id="inspector-splitter" title="Drag to resize details panel"></div>
+    <!-- Inspector panel: Details + Help tabs. Item 3 = scaffold + tab-switching only;
+         items 5-6 fill the bodies; item 4 wires resize + collapse persistence. -->
+    <div id="inspector" role="region" aria-label="Selection details">
+        <div id="inspector-tabs" role="tablist">
+            <button class="inspector-tab active" data-tab="details" role="tab" aria-selected="true">Details</button>
+            <button class="inspector-tab" data-tab="help" role="tab" aria-selected="false">Help</button>
+            <button id="inspector-collapse-btn" title="Hide details panel" aria-label="Hide details panel">▾</button>
+        </div>
+        <div id="inspector-body">
+            <div class="inspector-tab-pane active" data-tab="details" role="tabpanel">
+                <div class="inspector-empty">Click a branch, file, or commit in the tree to see details here.</div>
+            </div>
+            <div class="inspector-tab-pane" data-tab="help" role="tabpanel">
+                <div class="inspector-empty">Click something in the tree to learn what it is and what you can do with it.</div>
+            </div>
+        </div>
+    </div>
+    <!-- Re-expand handle: shown only when #inspector is collapsed (item 4 wires this). -->
+    <div id="inspector-handle" title="Show details panel" role="button" aria-label="Show details panel">▴ Details</div>
 </div>
 
 </div>
@@ -772,6 +1061,12 @@ html, body {
     let diffMode = 'side-by-side'; // 'side-by-side' | 'unified'
     let selectedPath = null;       // currently selected working-tree file
     let selectedSha = null;        // currently selected commit SHA
+    let selectedBranchName = null; // currently selected branch (for inspector Details — item 5)
+    // Tracks an in-flight outcome save so a server-side silent failure or
+    // network stall doesn't strand the editor on "Saving…" forever
+    // (debugger Run-1 finding). Cleared on success-refresh, failure echo,
+    // or timeout. Shape: { branchName, saveBtn, cancelBtn, ta, errorBox, timeoutId }
+    let pendingOutcomeSave = null;
     let lastWorkingTree = [];
     let lastRecentCommits = [];
     let lastBranches = [];
@@ -1200,6 +1495,29 @@ html, body {
         // keys from the prior tree shape so the map doesn't accumulate
         // dead entries forever.
         gcOrphanExpandKeys(branches);
+
+        // Re-render the inspector Details + Help (items 5/6 of task 6a56f56c) —
+        // branches' outcomes and linkedTasks may have changed in this state
+        // pass; if the user has a selection, refresh its detail view.
+        //
+        // Pipeline Run 2 finding (debugger HIGH + adversary HIGH): Details
+        // rebuild does pane.innerHTML='' which destroys an open outcome
+        // editor textarea and the user's typed text. OnRepoStateChanged
+        // fires git_state_tree on every file change, so any concurrent
+        // file activity during an edit erases the work. Skip the Details
+        // rebuild while an outcome edit is in flight — Help still re-renders
+        // (no editable surface there). The pendingOutcomeSave success-path
+        // logic in the message handler also gates on the saved value matching
+        // before clearing, so the editor only goes away when the save
+        // actually lands or the user cancels/times out.
+        try {
+            const editorOpen = (typeof pendingOutcomeSave !== 'undefined' && pendingOutcomeSave)
+                || !!document.querySelector('.detail-outcome-input');
+            if (!editorOpen) {
+                if (typeof renderInspectorDetails === 'function') renderInspectorDetails();
+            }
+            if (typeof renderInspectorHelp === 'function') renderInspectorHelp();
+        } catch (e) { /* non-fatal */ }
     }
 
     function gcOrphanExpandKeys(branches) {
@@ -1320,6 +1638,9 @@ html, body {
                 leaf: !hasWorktree,
                 defaultExpanded: isSelected,
                 onSelect: () => {
+                    // Always update the inspector's Details + Help tabs (item 5/6 of 6a56f56c).
+                    onSelectBranch(name);
+                    // Checked-out branches additionally trigger a worktree switch.
                     if (hasWorktree && !isSelected) {
                         send({ type: 'switch_repo', path: wtPath });
                     }
@@ -1346,17 +1667,29 @@ html, body {
                 sha.textContent = String(b.tipSha);
                 node.row.appendChild(sha);
             }
-            if (b.tipSubject) {
-                const subj = document.createElement('span');
-                subj.className = 'br-tip-subject';
-                subj.textContent = String(b.tipSubject);
-                node.row.appendChild(subj);
-            }
 
-            const wtHint = document.createElement('span');
-            wtHint.className = 'br-wt-hint';
-            wtHint.textContent = hasWorktree ? '· open in working folder' : '· no working folder';
-            node.row.appendChild(wtHint);
+            // Row label: outcome if set, else a fallback that signals what's
+            // available behind the row (linked-task count for branches with
+            // tasks, "orphan" for the rest). The full subject + worktree-hint
+            // + dirty count + linked-task title that used to ride here have
+            // moved into the inspector Details tab (item 5/6/8 of 6a56f56c).
+            const outcomeText = (b.outcome && String(b.outcome).trim()) ? String(b.outcome).trim() : '';
+            const linkedTaskCount = Array.isArray(b.linkedTasks) ? b.linkedTasks.length : 0;
+            const labelEl = document.createElement('span');
+            if (outcomeText) {
+                labelEl.className = 'br-tip-subject';
+                labelEl.textContent = outcomeText;
+            } else if (linkedTaskCount > 0) {
+                labelEl.className = 'br-tip-subject muted';
+                labelEl.textContent = '(no outcome — ' + linkedTaskCount + (linkedTaskCount === 1 ? ' task)' : ' tasks)');
+            } else if (hasWorktree) {
+                labelEl.className = 'br-tip-subject muted';
+                labelEl.textContent = '(no outcome)';
+            } else {
+                labelEl.className = 'br-tip-subject muted';
+                labelEl.textContent = '(orphan)';
+            }
+            node.row.appendChild(labelEl);
 
             if (isParent) {
                 const badge = document.createElement('span');
@@ -1365,31 +1698,15 @@ html, body {
                 node.row.appendChild(badge);
             }
 
-            // Surface dirty count + linked task title from the matched
-            // folder (these used to live on the FOLDERS section row;
-            // now they ride along the branch row). Only render when we
-            // have a folder match — orphan branches skip.
-            if (folder) {
-                const dirtyText = (typeof folder.dirtyCount === 'number' && folder.dirtyCount >= 0)
-                    ? String(folder.dirtyCount)
-                    : '';
-                if (dirtyText) {
-                    const dirty = document.createElement('span');
-                    dirty.className = 'wt-dirty';
-                    dirty.textContent = '· ' + dirtyText;
-                    node.row.appendChild(dirty);
-                }
-                if (folder.linkedTaskTitle) {
-                    const task = document.createElement('span');
-                    task.className = 'wt-task';
-                    task.textContent = '· ' + String(folder.linkedTaskTitle);
-                    node.row.appendChild(task);
-                }
-            }
-
-            node.row.title = name
-                + (wtPath ? '\n' + wtPath : '')
-                + (folder && folder.linkedTaskTitle ? '\n' + String(folder.linkedTaskTitle) : '');
+            // Tooltip carries the trimmed metadata so a hover still surfaces
+            // worktree path + tip subject + linked task without the row
+            // having to render them. Inspector Details remains the primary
+            // surface for the full picture.
+            const tooltipParts = [name];
+            if (b.tipSubject) tooltipParts.push(String(b.tipSubject));
+            if (wtPath) tooltipParts.push(wtPath);
+            if (folder && folder.linkedTaskTitle) tooltipParts.push(String(folder.linkedTaskTitle));
+            node.row.title = tooltipParts.join('\n');
 
             if (hasWorktree && folder) {
                 renderWorktreeSubtree(node.children, folder, /*depth*/ 3, /*idPrefix*/ 'branch:' + name);
@@ -1652,6 +1969,14 @@ html, body {
 
         row.title = composeAbsolutePath(lastRepoRoot, (file && file.path) || '') || (file && file.path) || '';
 
+        // Left-click → select file (drives inspector Details + Help tabs).
+        // The unified-tree row builders previously only handled contextmenu;
+        // wiring up click was the missing piece making selection a no-op.
+        row.addEventListener('click', () => {
+            const p = (file && file.path) || '';
+            if (p) onSelectFile(p);
+        });
+
         // Right-click → Open Code Review. Reuses the existing context-menu
         // DOM (#file-context-menu) and #ctx-open-diff-popup click handler
         // → fires {type: 'open_diff_popup', path} → the C# host
@@ -1697,6 +2022,19 @@ html, body {
         }
 
         row.title = ((commit && commit.shortSha) || '') + '\n' + ((commit && commit.subject) || '');
+
+        // Left-click → select commit (drives inspector Details + Help tabs).
+        // displayName mirrors the legacy renderRecentCommits signature so
+        // any downstream consumer of {type:'select_commit'} payloads gets
+        // the same shape.
+        row.addEventListener('click', () => {
+            const sha = (commit && (commit.fullSha || commit.shortSha)) || '';
+            if (!sha) return;
+            const subj = (commit && commit.subject) || '';
+            const display = ((commit && commit.shortSha) || sha) + (subj ? ' — ' + subj : '');
+            onSelectCommit(sha, display);
+        });
+
         return row;
     }
 
@@ -2106,18 +2444,27 @@ html, body {
     }
 
     function onSelectFile(path) {
-        if (selectedPath === path && selectedSha === null) return;
+        if (selectedPath === path && selectedSha === null && selectedBranchName === null) return;
         selectedPath = path;
         selectedSha = null;
-        // Update row highlight on file list and clear commit list highlight.
+        selectedBranchName = null;
+        // Legacy file-list / commits-list elements were dropped when the unified
+        // tree took over (task 4363577a); guards keep these no-ops harmless if
+        // the elements ever come back.
         const fl = $('file-list');
-        for (const row of fl.children) {
-            row.classList.toggle('selected', row.dataset.path === path);
+        if (fl) {
+            for (const row of fl.children) {
+                row.classList.toggle('selected', row.dataset.path === path);
+            }
         }
         const cl = $('commits-list');
-        for (const row of cl.children) {
-            row.classList.remove('selected');
+        if (cl) {
+            for (const row of cl.children) {
+                row.classList.remove('selected');
+            }
         }
+        renderInspectorDetails();
+        renderInspectorHelp();
         send({ type: 'select_file', path });
     }
 
@@ -2183,19 +2530,36 @@ html, body {
 
     function onSelectCommit(sha, displayName) {
         if (!sha) return;
-        if (selectedSha === sha && selectedPath === null) return;
+        if (selectedSha === sha && selectedPath === null && selectedBranchName === null) return;
         selectedSha = sha;
         selectedPath = null;
-        // Update row highlight on commit list and clear file list highlight.
+        selectedBranchName = null;
+        // Legacy DOM walks — null-guarded for the same reason as onSelectFile.
         const cl = $('commits-list');
-        for (const row of cl.children) {
-            row.classList.toggle('selected', row.dataset.sha === sha);
+        if (cl) {
+            for (const row of cl.children) {
+                row.classList.toggle('selected', row.dataset.sha === sha);
+            }
         }
         const fl = $('file-list');
-        for (const row of fl.children) {
-            row.classList.remove('selected');
+        if (fl) {
+            for (const row of fl.children) {
+                row.classList.remove('selected');
+            }
         }
+        renderInspectorDetails();
+        renderInspectorHelp();
         send({ type: 'select_commit', sha, displayName });
+    }
+
+    function onSelectBranch(name) {
+        if (!name) return;
+        if (selectedBranchName === name && selectedPath === null && selectedSha === null) return;
+        selectedBranchName = name;
+        selectedPath = null;
+        selectedSha = null;
+        renderInspectorDetails();
+        renderInspectorHelp();
     }
 
     // --- Branches (item [10]) ---
@@ -2439,9 +2803,49 @@ html, body {
                 showStandard(m);
                 break;
             case 'git_state_tree':
-                // Unified tree payload from item 1. Renderer implemented in
-                // items 3-5 (Alice). Stub for now so the wiring is visible.
                 renderUnifiedTree(m);
+                // Pipeline Run 2 finding (debugger MEDIUM + adversary HIGH):
+                // ONLY clear pendingOutcomeSave when this state pass actually
+                // contains the value we tried to save. An unrelated refresh
+                // (OnRepoStateChanged from a sibling file change, another
+                // panel's BranchOutcomeUpdated, manual refresh) would otherwise
+                // cancel the timeout and let a silent save failure look like a
+                // success. Compare the trimmed textarea value against the
+                // outcome shipped on the saved branch in the new payload.
+                if (pendingOutcomeSave && pendingOutcomeSave.branchName) {
+                    try {
+                        const b = (typeof findBranchByName === 'function')
+                            ? findBranchByName(pendingOutcomeSave.branchName)
+                            : null;
+                        const expected = (pendingOutcomeSave.ta && pendingOutcomeSave.ta.value || '').trim();
+                        const actual = (b && typeof b.outcome === 'string') ? String(b.outcome).trim() : '';
+                        // Empty save = clear (server stores NULL → payload outcome === null).
+                        // Match on null-or-empty AND non-empty equality.
+                        const matched = (expected.length === 0 && (b == null || !b.outcome))
+                            || (expected.length > 0 && expected === actual);
+                        if (matched) {
+                            if (pendingOutcomeSave.timeoutId != null) clearTimeout(pendingOutcomeSave.timeoutId);
+                            pendingOutcomeSave = null;
+                            // The Details rebuild is gated above on editorOpen — manually
+                            // re-render now that the save landed and the editor should go.
+                            if (typeof renderInspectorDetails === 'function') renderInspectorDetails();
+                        }
+                        // If not matched: leave pendingOutcomeSave intact. The 6s timeout
+                        // (or an explicit set_branch_outcome_failed echo) will recover.
+                    } catch (e) { /* non-fatal — let timeout handle it */ }
+                }
+                break;
+            case 'set_branch_outcome_failed':
+                // C# echo when SetOutcome was dropped (project unregistered,
+                // service unavailable, missing branchName, or exception). Echo
+                // matches the originating branchName so we don't restore the
+                // wrong editor if the user has since switched selection.
+                if (pendingOutcomeSave
+                    && pendingOutcomeSave.branchName === (m.branchName || '')
+                    && typeof pendingOutcomeSave.restoreEditableWithError === 'function') {
+                    pendingOutcomeSave.restoreEditableWithError(
+                        'Save failed: ' + (m.reason || 'unknown error') + '. Try again.');
+                }
                 break;
             case 'diff_loaded':
                 renderDiff(m.path, m.lines || [], m.selectionKey);
@@ -2708,6 +3112,623 @@ html, body {
     });
     window.addEventListener('blur', hideFileContextMenu);
     window.addEventListener('scroll', hideFileContextMenu, true);
+
+    // --- Inspector panel: tab switching (item 3 of task 6a56f56c).
+    // Drag-to-resize, collapse/expand, and tab-body content are wired in
+    // items 4-6. This block only handles which tab is visually active.
+    function initInspectorTabs() {
+        const tabs = document.querySelectorAll('.inspector-tab');
+        if (!tabs || !tabs.length) return;
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const target = tab.getAttribute('data-tab');
+                if (!target) return;
+                document.querySelectorAll('.inspector-tab').forEach(t => {
+                    const active = t.getAttribute('data-tab') === target;
+                    t.classList.toggle('active', active);
+                    t.setAttribute('aria-selected', active ? 'true' : 'false');
+                });
+                document.querySelectorAll('.inspector-tab-pane').forEach(p => {
+                    p.classList.toggle('active', p.getAttribute('data-tab') === target);
+                });
+            });
+        });
+    }
+    initInspectorTabs();
+
+    // --- Inspector splitter + collapse persistence (item 4 of task 6a56f56c).
+    // Drag-to-resize, click-to-collapse, click-handle-to-restore. Height +
+    // collapsed state persist in localStorage (NOT scoped by project — the
+    // inspector is a viewport-level preference, not per-project state).
+    // Constraints: MIN_HEIGHT matches CSS min-height (80px); MAX_HEIGHT is
+    // 60% of #body's current pixel height (matches CSS max-height: 60%) so
+    // the tree always retains at least 40% of the viewport.
+    const INSPECTOR_HEIGHT_KEY = 'hudGit.inspector.heightPx';
+    const INSPECTOR_COLLAPSED_KEY = 'hudGit.inspector.collapsed';
+    const INSPECTOR_DEFAULT_HEIGHT = 220;
+    const INSPECTOR_MIN_HEIGHT = 80;
+
+    function readInspectorHeight() {
+        try {
+            const v = localStorage.getItem(INSPECTOR_HEIGHT_KEY);
+            if (v == null) return INSPECTOR_DEFAULT_HEIGHT;
+            const n = parseInt(v, 10);
+            return Number.isFinite(n) && n >= INSPECTOR_MIN_HEIGHT ? n : INSPECTOR_DEFAULT_HEIGHT;
+        } catch (e) { return INSPECTOR_DEFAULT_HEIGHT; }
+    }
+    function writeInspectorHeight(px) {
+        try { localStorage.setItem(INSPECTOR_HEIGHT_KEY, String(Math.round(px))); } catch (e) { /* non-fatal */ }
+    }
+    function readInspectorCollapsed() {
+        try { return localStorage.getItem(INSPECTOR_COLLAPSED_KEY) === 'true'; } catch (e) { return false; }
+    }
+    function writeInspectorCollapsed(collapsed) {
+        try { localStorage.setItem(INSPECTOR_COLLAPSED_KEY, collapsed ? 'true' : 'false'); } catch (e) { /* non-fatal */ }
+    }
+
+    function applyInspectorCollapsedState(collapsed) {
+        const inspector = $('inspector');
+        const splitter = $('inspector-splitter');
+        const handle = $('inspector-handle');
+        const btn = $('inspector-collapse-btn');
+        if (!inspector || !splitter || !handle) return;
+        if (collapsed) {
+            inspector.classList.add('collapsed');
+            splitter.style.display = 'none';
+            handle.classList.add('shown');
+            if (btn) { btn.textContent = '▾'; btn.title = 'Hide details panel'; }
+        } else {
+            inspector.classList.remove('collapsed');
+            splitter.style.display = '';
+            handle.classList.remove('shown');
+            if (btn) { btn.textContent = '▾'; btn.title = 'Hide details panel'; }
+        }
+    }
+
+    function initInspectorSplitter() {
+        const inspector = $('inspector');
+        const splitter = $('inspector-splitter');
+        const collapseBtn = $('inspector-collapse-btn');
+        const handle = $('inspector-handle');
+        if (!inspector || !splitter || !collapseBtn || !handle) return;
+
+        // Restore persisted height first (always set inline so subsequent
+        // collapse/restore round-trips have a value to fall back to), then
+        // apply collapsed state — collapse hides #inspector via CSS, but the
+        // height is preserved in the inline style for the next un-collapse.
+        inspector.style.height = readInspectorHeight() + 'px';
+        // Override CSS flex-basis so the inline height wins.
+        inspector.style.flexBasis = inspector.style.height;
+        applyInspectorCollapsedState(readInspectorCollapsed());
+
+        // Drag-to-resize. We compute the new height as (body bottom - mouse Y)
+        // because the inspector is anchored to the bottom of #body. Clamped
+        // to [MIN_HEIGHT, 60% of body height] to mirror the CSS max-height.
+        let dragging = false;
+        splitter.addEventListener('mousedown', e => {
+            // Don't start a drag if the inspector is collapsed (splitter is
+            // hidden anyway, but defensive).
+            if (inspector.classList.contains('collapsed')) return;
+            dragging = true;
+            splitter.classList.add('dragging');
+            document.body.style.cursor = 'ns-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', e => {
+            if (!dragging) return;
+            const body = $('body');
+            if (!body) return;
+            const rect = body.getBoundingClientRect();
+            const maxByContent = Math.floor(rect.height * 0.6);
+            let newHeight = Math.round(rect.bottom - e.clientY);
+            if (newHeight < INSPECTOR_MIN_HEIGHT) newHeight = INSPECTOR_MIN_HEIGHT;
+            if (newHeight > maxByContent) newHeight = maxByContent;
+            inspector.style.height = newHeight + 'px';
+            inspector.style.flexBasis = newHeight + 'px';
+        });
+        document.addEventListener('mouseup', () => {
+            if (!dragging) return;
+            dragging = false;
+            splitter.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            // Persist on release (not on every mousemove — too chatty).
+            const px = parseInt(inspector.style.height, 10);
+            if (Number.isFinite(px)) writeInspectorHeight(px);
+        });
+
+        // Collapse / restore.
+        collapseBtn.addEventListener('click', () => {
+            applyInspectorCollapsedState(true);
+            writeInspectorCollapsed(true);
+        });
+        handle.addEventListener('click', () => {
+            applyInspectorCollapsedState(false);
+            writeInspectorCollapsed(false);
+        });
+    }
+    initInspectorSplitter();
+
+    // --- Inspector Details tab content (item 5 of task 6a56f56c).
+    // Dispatches on selection state (selectedBranchName | selectedPath | selectedSha)
+    // and re-resolves the underlying object from lastTreeState so renders stay
+    // consistent with whatever the most recent git_state_tree carried. The
+    // outcome edit pencil (item 8) and Help-tab content (item 6) are wired
+    // by their respective items.
+    function findBranchByName(name) {
+        if (!name || !lastTreeState || !Array.isArray(lastTreeState.branches)) return null;
+        for (const b of lastTreeState.branches) {
+            if (b && b.name === name) return b;
+        }
+        return null;
+    }
+    function findFolderForBranch(branch) {
+        if (!branch || !branch.worktreePath || !lastTreeState || !Array.isArray(lastTreeState.folders)) return null;
+        const lower = String(branch.worktreePath).toLowerCase();
+        for (const f of lastTreeState.folders) {
+            if (f && f.path && String(f.path).toLowerCase() === lower) return f;
+        }
+        return null;
+    }
+    function findFileInFolders(path) {
+        if (!path || !lastTreeState || !Array.isArray(lastTreeState.folders)) return null;
+        for (const f of lastTreeState.folders) {
+            if (!f || !f.workingChanges) continue;
+            const flat = Array.isArray(f.workingChanges.workingTree) ? f.workingChanges.workingTree : [];
+            for (const file of flat) {
+                if (file && file.path === path) return { file: file, folder: f };
+            }
+        }
+        return null;
+    }
+    function findCommitBySha(sha) {
+        if (!sha || !lastTreeState || !Array.isArray(lastTreeState.folders)) return null;
+        for (const f of lastTreeState.folders) {
+            if (!f || !Array.isArray(f.recentCommits)) continue;
+            for (const c of f.recentCommits) {
+                if (c && (c.fullSha === sha || c.shortSha === sha)) return { commit: c, folder: f };
+            }
+        }
+        return null;
+    }
+    function kindLabel(k) {
+        switch (String(k || '').toUpperCase()) {
+            case 'M': return 'Modified';
+            case 'A': return 'Added';
+            case 'D': return 'Deleted';
+            case 'R': return 'Renamed';
+            case 'T': return 'Type changed';
+            case 'C': return 'Copied';
+            case 'U': return 'Untracked';
+            default: return k || 'Unknown';
+        }
+    }
+    function joinPath(folderPath, relPath) {
+        if (!folderPath) return relPath || '';
+        if (!relPath) return folderPath;
+        const sep = folderPath.indexOf('\\') >= 0 ? '\\' : '/';
+        const stripped = String(folderPath).replace(/[\\/]+$/, '');
+        const rel = String(relPath).replace(/^[\\/]+/, '').replace(/[\\/]/g, sep);
+        return stripped + sep + rel;
+    }
+    function detailHeading(text, kind) {
+        const h = document.createElement('div');
+        h.className = 'detail-heading' + (kind ? ' detail-' + kind : '');
+        h.textContent = text;
+        return h;
+    }
+    function detailSubheading(text) {
+        const s = document.createElement('div');
+        s.className = 'detail-subheading';
+        s.textContent = text;
+        return s;
+    }
+    function detailField(label, value, classes) {
+        const row = document.createElement('div');
+        row.className = 'detail-field';
+        const l = document.createElement('span');
+        l.className = 'detail-label';
+        l.textContent = label;
+        row.appendChild(l);
+        const v = document.createElement('span');
+        v.className = 'detail-value' + (classes ? ' ' + classes : '');
+        v.textContent = value == null ? '' : String(value);
+        row.appendChild(v);
+        return row;
+    }
+    function detailEmpty(text) {
+        const e = document.createElement('div');
+        e.className = 'inspector-empty';
+        e.textContent = text;
+        return e;
+    }
+
+    function renderInspectorDetails() {
+        const pane = document.querySelector('.inspector-tab-pane[data-tab="details"]');
+        if (!pane) return;
+        pane.innerHTML = '';
+        if (selectedBranchName) {
+            renderInspectorBranchDetails(pane, findBranchByName(selectedBranchName));
+        } else if (selectedPath) {
+            renderInspectorFileDetails(pane, findFileInFolders(selectedPath));
+        } else if (selectedSha) {
+            renderInspectorCommitDetails(pane, findCommitBySha(selectedSha));
+        } else {
+            pane.appendChild(detailEmpty('Click a branch, file, or commit in the tree to see details here.'));
+        }
+    }
+
+    // --- Outcome row + inline edit (item 8 of task 6a56f56c).
+    function buildOutcomeRow(b) {
+        const row = document.createElement('div');
+        row.className = 'detail-field';
+        const label = document.createElement('span');
+        label.className = 'detail-label';
+        label.textContent = 'Outcome';
+        row.appendChild(label);
+
+        const valueWrap = document.createElement('span');
+        valueWrap.className = 'detail-value';
+        valueWrap.style.display = 'flex';
+        valueWrap.style.alignItems = 'flex-start';
+        valueWrap.style.gap = '4px';
+
+        const hasOutcome = !!(b.outcome && String(b.outcome).trim());
+        const text = document.createElement('span');
+        text.style.flex = '1';
+        text.style.minWidth = '0';
+        text.style.wordBreak = 'break-word';
+        if (hasOutcome) {
+            text.textContent = String(b.outcome);
+        } else {
+            text.textContent = '(no outcome set — ask any agent to draft one or click ✎ to type your own)';
+            text.style.color = 'var(--fg-muted)';
+            text.style.fontStyle = 'italic';
+        }
+        valueWrap.appendChild(text);
+
+        const pencil = document.createElement('button');
+        pencil.className = 'detail-edit-btn';
+        pencil.title = 'Edit outcome';
+        pencil.setAttribute('aria-label', 'Edit outcome');
+        pencil.textContent = '✎';
+        pencil.addEventListener('click', () => {
+            swapToOutcomeEditor(row, b.name || '', hasOutcome ? String(b.outcome) : '');
+        });
+        valueWrap.appendChild(pencil);
+
+        row.appendChild(valueWrap);
+        return row;
+    }
+
+    function swapToOutcomeEditor(row, branchName, currentValue) {
+        // Replace the row's value column with a textarea + Save/Cancel.
+        // Keep the label intact; replace only the second child.
+        if (!row || row.childNodes.length < 2) return;
+        const label = row.firstChild;
+        row.innerHTML = '';
+        row.appendChild(label);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'detail-outcome-edit';
+
+        // Inline error box (hidden by default) for save failures —
+        // "Save timed out" / "project not registered" / etc. Stays visible
+        // until the user edits the textarea or clicks Cancel.
+        const errorBox = document.createElement('div');
+        errorBox.style.display = 'none';
+        errorBox.style.color = 'var(--red, #f38ba8)';
+        errorBox.style.fontSize = '10.5px';
+        errorBox.style.padding = '4px 0';
+        wrap.appendChild(errorBox);
+
+        const ta = document.createElement('textarea');
+        ta.className = 'detail-outcome-input';
+        ta.value = currentValue || '';
+        ta.placeholder = 'A one-sentence user-facing capability this branch delivers (e.g. "Allow easy access to a Code Review editor for code changes")';
+        wrap.appendChild(ta);
+
+        const actions = document.createElement('div');
+        actions.className = 'detail-edit-actions';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.title = 'Discard changes (Esc)';
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'primary';
+        saveBtn.textContent = 'Save';
+        saveBtn.title = 'Save outcome (Ctrl+Enter)';
+        actions.appendChild(cancelBtn);
+        actions.appendChild(saveBtn);
+        wrap.appendChild(actions);
+
+        row.appendChild(wrap);
+
+        // Auto-focus + place cursor at end so the user can start typing immediately.
+        try {
+            ta.focus();
+            ta.setSelectionRange(ta.value.length, ta.value.length);
+        } catch (e) { /* non-fatal */ }
+
+        // Hide error box on the first edit so stale messages don't linger.
+        ta.addEventListener('input', () => { errorBox.style.display = 'none'; });
+
+        function clearPending() {
+            if (pendingOutcomeSave && pendingOutcomeSave.timeoutId != null) {
+                clearTimeout(pendingOutcomeSave.timeoutId);
+            }
+            pendingOutcomeSave = null;
+        }
+        function restoreEditableWithError(message) {
+            clearPending();
+            saveBtn.disabled = false;
+            cancelBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            errorBox.textContent = message || 'Save failed.';
+            errorBox.style.display = 'block';
+        }
+        function commitSave() {
+            const newVal = ta.value;
+            // Clear any prior pending save before starting a new one.
+            clearPending();
+            // Empty / whitespace clears the outcome (server stores NULL).
+            send({ type: 'set_branch_outcome', branchName: branchName, outcome: newVal });
+            // Disable buttons during the round-trip. On success, BranchOutcomeUpdated
+            // → RefreshAsync → git_state_tree → renderInspectorDetails rebuilds the
+            // row entirely (and clears pendingOutcomeSave). On failure, C# echoes
+            // set_branch_outcome_failed and we re-enable here. As a defence against
+            // any silent failure path that misses both, a timeout fires after 6s.
+            saveBtn.disabled = true;
+            cancelBtn.disabled = true;
+            saveBtn.textContent = 'Saving…';
+            errorBox.style.display = 'none';
+            const timeoutId = setTimeout(() => {
+                restoreEditableWithError('Save timed out — try again, or check the project is registered.');
+            }, 6000);
+            pendingOutcomeSave = {
+                branchName: branchName,
+                saveBtn: saveBtn,
+                cancelBtn: cancelBtn,
+                ta: ta,
+                errorBox: errorBox,
+                timeoutId: timeoutId,
+                restoreEditableWithError: restoreEditableWithError,
+            };
+        }
+        function discardEdit() {
+            clearPending();
+            // Re-render Details from current state — no save.
+            renderInspectorDetails();
+        }
+        saveBtn.addEventListener('click', commitSave);
+        cancelBtn.addEventListener('click', discardEdit);
+        ta.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                discardEdit();
+            } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                commitSave();
+            }
+        });
+    }
+
+    function renderInspectorBranchDetails(pane, b) {
+        if (!b) {
+            pane.appendChild(detailEmpty('Branch not found in current state.'));
+            return;
+        }
+        pane.appendChild(detailHeading(b.name || '', 'branch'));
+
+        // Outcome — read-only display + inline edit affordance (item 8 of
+        // task 6a56f56c). Click the pencil to swap to a textarea + Save/
+        // Cancel; Save posts set_branch_outcome to C# which writes via
+        // BranchMetadataService and fires BranchOutcomeUpdated → tree
+        // refreshes → outcome reappears in row + Details on next state pass.
+        pane.appendChild(buildOutcomeRow(b));
+
+        const status = b.checkedOut
+            ? 'Checked out (open in working folder)'
+            : 'Orphan (no working folder)';
+        pane.appendChild(detailField('Status', status));
+
+        if (b.worktreePath) {
+            pane.appendChild(detailField('Worktree', b.worktreePath, 'mono'));
+        }
+        if (b.tipSha) {
+            const tipText = String(b.tipSha) + (b.tipSubject ? ' · ' + String(b.tipSubject) : '');
+            pane.appendChild(detailField('Tip', tipText));
+        }
+        if (b.when) {
+            pane.appendChild(detailField('Last commit', formatRelativeTime(b.when)));
+        }
+
+        const tasks = Array.isArray(b.linkedTasks) ? b.linkedTasks : [];
+        pane.appendChild(detailSubheading('Linked tasks (' + tasks.length + ')'));
+        if (tasks.length === 0) {
+            pane.appendChild(detailEmpty('No tasks recorded for this branch.'));
+        } else {
+            const list = document.createElement('div');
+            list.className = 'detail-tasklist';
+            for (const t of tasks) {
+                const row = document.createElement('div');
+                row.className = 'detail-task';
+                const id = document.createElement('span');
+                id.className = 'detail-task-id';
+                const tid = String(t.id || '');
+                id.textContent = tid.length >= 8 ? tid.substring(0, 8) : tid;
+                const title = document.createElement('span');
+                title.className = 'detail-task-title';
+                title.textContent = String(t.title || '');
+                row.appendChild(id);
+                row.appendChild(title);
+                list.appendChild(row);
+            }
+            pane.appendChild(list);
+        }
+    }
+
+    function renderInspectorFileDetails(pane, ctx) {
+        if (!ctx) {
+            pane.appendChild(detailEmpty('File not found in current state.'));
+            return;
+        }
+        const file = ctx.file;
+        const folder = ctx.folder;
+        pane.appendChild(detailHeading(String(file.path || ''), 'file'));
+        pane.appendChild(detailField('Change type', kindLabel(file.kind || 'M')));
+        if (folder && folder.path) {
+            pane.appendChild(detailField('Worktree', String(folder.path), 'mono'));
+            const fullPath = joinPath(folder.path, file.path);
+            if (fullPath) pane.appendChild(detailField('Full path', fullPath, 'mono'));
+        }
+        if (typeof file.linesAdded === 'number' || typeof file.linesDeleted === 'number') {
+            const added = typeof file.linesAdded === 'number' ? file.linesAdded : 0;
+            const deleted = typeof file.linesDeleted === 'number' ? file.linesDeleted : 0;
+            pane.appendChild(detailField('Lines', '+' + added + ' / -' + deleted));
+        }
+        if (file.taskTitle) {
+            const taskRow = document.createElement('div');
+            taskRow.className = 'detail-field';
+            const label = document.createElement('span');
+            label.className = 'detail-label';
+            label.textContent = 'Linked task';
+            taskRow.appendChild(label);
+            const value = document.createElement('span');
+            value.className = 'detail-value';
+            const tidShort = file.taskId ? String(file.taskId).substring(0, 8) : '';
+            value.textContent = String(file.taskTitle) + (tidShort ? ' (' + tidShort + ')' : '');
+            taskRow.appendChild(value);
+            pane.appendChild(taskRow);
+        }
+        if (file.agent) pane.appendChild(detailField('Agent', String(file.agent)));
+        if (file.linkageState && file.linkageState !== 'none') {
+            pane.appendChild(detailField('Linkage', String(file.linkageState)));
+        }
+        if (file.pipelineStatus) {
+            pane.appendChild(detailField('Pipeline', String(file.pipelineStatus)));
+        }
+    }
+
+    function renderInspectorCommitDetails(pane, ctx) {
+        if (!ctx) {
+            pane.appendChild(detailEmpty('Commit not found in current state.'));
+            return;
+        }
+        const commit = ctx.commit;
+        const folder = ctx.folder;
+        pane.appendChild(detailHeading(String(commit.shortSha || ''), 'commit'));
+        if (commit.subject) pane.appendChild(detailField('Subject', String(commit.subject)));
+        if (commit.fullSha) pane.appendChild(detailField('Full SHA', String(commit.fullSha), 'mono'));
+        if (commit.authorName) pane.appendChild(detailField('Author', String(commit.authorName)));
+        if (Array.isArray(commit.coAuthors) && commit.coAuthors.length > 0) {
+            pane.appendChild(detailField('Co-authors', commit.coAuthors.join(', ')));
+        }
+        if (commit.when) {
+            pane.appendChild(detailField('When', formatRelativeTime(commit.when)));
+        }
+        if (folder && folder.path) {
+            pane.appendChild(detailField('On worktree', String(folder.path), 'mono'));
+        }
+    }
+
+    // --- Inspector Help tab content (item 6 of task 6a56f56c).
+    // Context-sensitive plain-English explanations. Different copy per node
+    // type — written to teach a git-naive user what they're looking at and
+    // what they can do with it, not to recapitulate field labels.
+    function helpPara(htmlSafeText) {
+        const p = document.createElement('p');
+        p.className = 'help-text';
+        p.innerHTML = htmlSafeText;
+        return p;
+    }
+    function helpTip(htmlSafeText) {
+        const t = document.createElement('div');
+        t.className = 'help-tip';
+        t.innerHTML = htmlSafeText;
+        return t;
+    }
+
+    function renderInspectorHelp() {
+        const pane = document.querySelector('.inspector-tab-pane[data-tab="help"]');
+        if (!pane) return;
+        pane.innerHTML = '';
+        if (selectedBranchName) {
+            const b = findBranchByName(selectedBranchName);
+            renderInspectorBranchHelp(pane, b);
+        } else if (selectedPath) {
+            renderInspectorFileHelp(pane);
+        } else if (selectedSha) {
+            renderInspectorCommitHelp(pane);
+        } else {
+            pane.appendChild(helpPara(
+                'This is the unified branch tree for your project. Each row is either a ' +
+                '<strong>branch</strong> (a line of work) or a checked-out branch\'s ' +
+                '<strong>working folder</strong> where you can edit files. Click anything ' +
+                'in the tree to learn what it is and what you can do with it.'));
+            pane.appendChild(helpTip(
+                '<strong>Filled vs empty dot:</strong> a filled dot next to a branch means ' +
+                'it has a working folder you can edit in. An empty dot means the branch ' +
+                'exists in git but isn\'t checked out anywhere right now.'));
+        }
+    }
+
+    function renderInspectorBranchHelp(pane, b) {
+        if (!b) {
+            pane.appendChild(helpPara('A branch in this project. (Details for the selected branch aren\'t in the current view.)'));
+            return;
+        }
+        const isCheckedOut = !!b.checkedOut;
+        if (isCheckedOut) {
+            pane.appendChild(helpPara(
+                'This is a <strong>branch</strong> — a separate line of work in your project. ' +
+                'Because it\'s checked out (filled dot), it has a <strong>working folder</strong> ' +
+                'where you can edit files without affecting other branches. Expand it in the ' +
+                'tree to see the files you\'ve changed and recent commits on it.'));
+            pane.appendChild(helpTip(
+                '<strong>About the outcome line:</strong> the outcome at the top of the Details ' +
+                'tab is the <em>user-facing capability</em> this branch delivers — separate from ' +
+                'the developer task titles inside it. Ask any agent to draft one, or click the ' +
+                '<strong>✎ pencil</strong> next to the outcome value to type your own.'));
+        } else {
+            pane.appendChild(helpPara(
+                'This is a <strong>branch with no working folder</strong> (empty dot). It exists ' +
+                'in git history but isn\'t checked out anywhere right now — so you can see its ' +
+                'tip commit and any recorded outcome, but you can\'t edit files on it without ' +
+                'creating a working folder for it first.'));
+            pane.appendChild(helpTip(
+                '<strong>Where orphans come from:</strong> these are usually branches from completed ' +
+                'tasks whose working folders have been cleaned up. The outcome (in the Details tab) ' +
+                'tells you what capability the branch was supposed to deliver.'));
+        }
+    }
+
+    function renderInspectorFileHelp(pane) {
+        pane.appendChild(helpPara(
+            'This is a <strong>file you\'ve edited</strong> but not yet committed. The change ' +
+            'type tells you the kind of change: <strong>Modified</strong> (existing file changed), ' +
+            '<strong>Added</strong> (new file), <strong>Deleted</strong> (removed), or ' +
+            '<strong>Untracked</strong> (new file git doesn\'t know about yet).'));
+        pane.appendChild(helpTip(
+            '<strong>What you can do:</strong> right-click the row in the tree to open the file ' +
+            'in the Code Review editor and see the diff. When you\'re ready to save the change ' +
+            'permanently, commit it from your terminal — git records it on whichever branch this ' +
+            'working folder is checked out to.'));
+    }
+
+    function renderInspectorCommitHelp(pane) {
+        pane.appendChild(helpPara(
+            'This is a <strong>commit</strong> — a saved snapshot of the project at a point in ' +
+            'time on this branch. The <strong>short SHA</strong> is a 7-character ID; the ' +
+            '<strong>full SHA</strong> is the unambiguous one git uses internally. The ' +
+            '<strong>author</strong> made the commit; <strong>co-authors</strong> are extra ' +
+            'contributors recorded in the commit message (often used to attribute AI-assisted work).'));
+        pane.appendChild(helpTip(
+            '<strong>What you can do:</strong> click the commit in the tree to load its diff ' +
+            '(existing behavior). The commit lives on the worktree shown above — to share it ' +
+            'with another branch, you\'d <code>git merge</code> or <code>git cherry-pick</code> ' +
+            'from your terminal.'));
+    }
 
     send({ type: 'ready' });
 })();
