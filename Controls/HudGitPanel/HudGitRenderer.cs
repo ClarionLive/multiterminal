@@ -418,7 +418,6 @@ namespace MultiTerminal.Controls
 
                     case "refresh":
                         _ = RefreshAsync();
-                        _ = RefreshWorktreeListAsync();
                         break;
 
                     case "fetch":
@@ -554,98 +553,6 @@ namespace MultiTerminal.Controls
             }
             _currentService.RepoStateChanged += OnRepoStateChanged;
             _ = RefreshAsync();
-            _ = RefreshWorktreeListAsync();
-        }
-
-        /// <summary>
-        /// Loads the parent + linked-worktree list for the currently-bound
-        /// repository and pushes it to the webview as a separate
-        /// <c>worktrees</c> message — the switcher UI (rendered above the
-        /// header) consumes this independently of the main refresh payload so
-        /// the two surfaces can update on different cadences.
-        ///
-        /// <para>Silently no-ops when the broker hasn't wired a
-        /// <see cref="MultiTerminal.Services.WorktreeListService"/> yet (early
-        /// startup) or when the list comes back empty — the switcher just
-        /// stays hidden in that case.</para>
-        /// </summary>
-        private async System.Threading.Tasks.Task RefreshWorktreeListAsync()
-        {
-            try
-            {
-                var service = _broker?.WorktreeList;
-                if (service == null) return;
-                var projectPath = _projectPath;
-                if (string.IsNullOrEmpty(projectPath)) return;
-
-                // Capture the generation at start. SetProject increments the
-                // counter; if it moves while we're awaiting git, our result
-                // belongs to a stale project and must not touch the new
-                // project's allowlist (otherwise a switcher click could be
-                // authorised against the wrong repo's set).
-                int generationAtStart = _allowlistGeneration;
-
-                // No ConfigureAwait(false) here — the continuation must resume
-                // on the captured WinForms SynchronizationContext so the
-                // subsequent Send → PostWebMessageAsJson call lands on the UI
-                // thread. WebView2 COM proxies are STA-bound; calling them
-                // from a thread-pool continuation throws RPC_E_WRONG_THREAD,
-                // and PostRaw's catch swallows it, leaving the switcher
-                // silently un-rendered. Matches RefreshAsync / LoadDiffAsync /
-                // LoadCommitDiffAsync which deliberately omit ConfigureAwait
-                // for the same reason.
-                var entries = await service.GetWorktreesForRepoAsync(projectPath);
-
-                // Drop stale results: project switched, OR generation token
-                // moved (a SetProject call superseded us even if the path is
-                // somehow identical — covers the project-bounces-A→B→A edge).
-                if (!string.Equals(projectPath, _projectPath, StringComparison.OrdinalIgnoreCase)) return;
-                if (generationAtStart != _allowlistGeneration) return;
-
-                // Cache the validated set so SwitchToRepo can reject paths
-                // the user didn't actually see in the switcher (defends
-                // against compromised webview message rebinding the panel to
-                // an unrelated repo).
-                UpdateWorktreeAllowlist(entries);
-
-                // Deferred restore: SetProject parked the persisted-selection
-                // value in _pendingRestoredRepo without binding _projectPath
-                // to it. Now that we have an authenticated worktree set, apply
-                // the restore only if the saved value is a member; otherwise
-                // clear the now-invalid setting and stay on the original.
-                if (!string.IsNullOrEmpty(_pendingRestoredRepo))
-                {
-                    string pending = _pendingRestoredRepo;
-                    _pendingRestoredRepo = null;
-                    if (IsAllowedWorktree(pending)
-                        && !string.Equals(pending, _projectPath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        // SwitchToRepo will rebind _projectPath, persist, and
-                        // re-fire ApplyProject + a fresh RefreshWorktreeListAsync.
-                        SwitchToRepo(pending);
-                        return;
-                    }
-                    if (!IsAllowedWorktree(pending))
-                    {
-                        // Saved selection no longer valid (worktree pruned,
-                        // settings poisoned, or project moved on disk). Clear
-                        // the stale key so we don't keep trying every session.
-                        PersistSelectedRepo(_originalProjectPath, _originalProjectPath);
-                    }
-                }
-
-                Send(new
-                {
-                    type = "worktrees",
-                    currentPath = projectPath,
-                    entries = entries,
-                });
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.RefreshWorktreeListAsync] {ex.Message}");
-            }
         }
 
         private void UnsubscribeCurrent()
@@ -662,17 +569,18 @@ namespace MultiTerminal.Controls
             if (IsDisposed) return;
             try
             {
-                // Both the main panel state and the switcher chips can drift when
-                // the working tree mutates — kick both refreshes so sibling
-                // worktrees' dirty counts and our own current chip stay accurate.
+                // RefreshAsync now ships the unified git_state_tree payload —
+                // single fire keeps the tree's per-worktree dirty counts, the
+                // selected-worktree subtree, and the branches-with-worktree-join
+                // section consistent (no two-message tearing between the prior
+                // git_state + worktrees pair).
                 if (InvokeRequired)
                 {
-                    BeginInvoke(new Action(() => { _ = RefreshAsync(); _ = RefreshWorktreeListAsync(); }));
+                    BeginInvoke(new Action(() => { _ = RefreshAsync(); }));
                 }
                 else
                 {
                     _ = RefreshAsync();
-                    _ = RefreshWorktreeListAsync();
                 }
             }
             catch (Exception ex)
@@ -690,6 +598,21 @@ namespace MultiTerminal.Controls
         // State refresh
         // -------------------------------------------------------------------------
 
+        /// <summary>
+        /// Unified-payload refresh — fetches the worktree list, computes
+        /// per-worktree working-changes + recent-commits via a transient
+        /// <see cref="GitRepoService"/> per worktree, builds the
+        /// branch→worktree join from the worktree entries, and ships one
+        /// <c>git_state_tree</c> message. Replaces the prior
+        /// <c>git_state</c> + <c>worktrees</c> pair.
+        ///
+        /// <para>Allowlist + deferred-restore work (formerly in the dropped
+        /// <c>RefreshWorktreeListAsync</c>) lives here too — the
+        /// authoritative worktree-set fetch happens at the top of this method
+        /// and feeds both the security allowlist and the payload assembly.
+        /// Single fetch keeps the two consumers in lock-step (no race window
+        /// where the allowlist trails the payload by one fire).</para>
+        /// </summary>
         private async Task RefreshAsync()
         {
             var svc = _currentService;
@@ -701,215 +624,378 @@ namespace MultiTerminal.Controls
             // (auto-property has no volatile or lock). Locals freeze the
             // reference for the duration of this background pass.
             var attributionSvc = _broker?.GitAttribution;
+            var worktreeSvc = _broker?.WorktreeList;
             string repoRoot = svc.RepoRoot;
+
+            string projectPath = _projectPath;
+            if (string.IsNullOrEmpty(projectPath)) return;
+
+            // Capture the generation at start. SetProject increments the
+            // counter; if it moves while we're awaiting git, our result
+            // belongs to a stale project and must not touch the new
+            // project's allowlist (otherwise a switcher click could be
+            // authorised against the wrong repo's set).
+            int generationAtStart = _allowlistGeneration;
 
             try
             {
-                var snapshot = await Task.Run(() =>
+                // No ConfigureAwait(false) here — the continuation must resume
+                // on the captured WinForms SynchronizationContext so the
+                // subsequent allowlist update + SwitchToRepo + Send all land
+                // on the UI thread. WebView2 COM proxies are STA-bound;
+                // calling them from a thread-pool continuation throws
+                // RPC_E_WRONG_THREAD. Matches LoadDiffAsync / LoadCommitDiffAsync
+                // which deliberately omit ConfigureAwait for the same reason.
+                System.Collections.Generic.IReadOnlyList<MultiTerminal.Services.WorktreeEntry> worktrees;
+                if (worktreeSvc != null)
                 {
-                    string branch = svc.CurrentBranch ?? "";
-                    var status = svc.GetWorkingTreeStatus();
-                    int changes = status?.Count ?? 0;
-                    bool hasRemote = svc.HasRemote;
-                    int ahead = 0;
-                    int behind = 0;
-                    string lastFetch = null;
+                    var fetched = await worktreeSvc.GetWorktreesForRepoAsync(projectPath);
+                    worktrees = fetched ?? (System.Collections.Generic.IReadOnlyList<MultiTerminal.Services.WorktreeEntry>)Array.Empty<MultiTerminal.Services.WorktreeEntry>();
+                }
+                else
+                {
+                    worktrees = Array.Empty<MultiTerminal.Services.WorktreeEntry>();
+                }
 
-                    if (hasRemote)
+                // Drop stale results: project switched, OR generation token
+                // moved (a SetProject call superseded us even if the path is
+                // somehow identical — covers the project-bounces-A→B→A edge).
+                if (!string.Equals(projectPath, _projectPath, StringComparison.OrdinalIgnoreCase)) return;
+                if (generationAtStart != _allowlistGeneration) return;
+
+                // Cache the validated worktree set BEFORE shipping the payload
+                // so SwitchToRepo can reject paths the user didn't actually
+                // see in the rendered tree.
+                UpdateWorktreeAllowlist(worktrees);
+
+                // Deferred restore: SetProject parked the persisted-selection
+                // value in _pendingRestoredRepo without binding _projectPath
+                // to it. Now that we have an authenticated worktree set, apply
+                // the restore only if the saved value is a member; otherwise
+                // clear the now-invalid setting and stay on the original.
+                if (!string.IsNullOrEmpty(_pendingRestoredRepo))
+                {
+                    string pending = _pendingRestoredRepo;
+                    _pendingRestoredRepo = null;
+                    if (IsAllowedWorktree(pending)
+                        && !string.Equals(pending, _projectPath, StringComparison.OrdinalIgnoreCase))
                     {
-                        var ab = svc.GetAheadBehind();
-                        if (ab != null)
-                        {
-                            ahead = ab.Ahead;
-                            behind = ab.Behind;
-                        }
-                        var t = svc.GetLastFetchTime();
-                        if (t.HasValue) lastFetch = FormatRelativeTime(t.Value);
+                        // SwitchToRepo rebinds _projectPath, persists, and
+                        // re-fires ApplyProject which kicks a fresh RefreshAsync
+                        // against the restored repo. Bail out of this pass —
+                        // the data we just fetched is for the wrong worktree.
+                        SwitchToRepo(pending);
+                        return;
+                    }
+                    if (!IsAllowedWorktree(pending))
+                    {
+                        // Saved selection no longer valid (worktree pruned,
+                        // settings poisoned, or project moved on disk). Clear
+                        // the stale key so we don't keep trying every session.
+                        PersistSelectedRepo(_originalProjectPath, _originalProjectPath);
+                    }
+                }
+
+                // Snapshot for the background pass. _projectPath can mutate
+                // under us on the UI thread; the inner builder reads only
+                // the captured locals.
+                var worktreesSnapshot = worktrees;
+                var attributionSvcCaptured = attributionSvc;
+                string selectedWorktreePath = _projectPath;
+
+                var payload = await Task.Run(() =>
+                {
+                    // Branches enumerate from the main service handle — every
+                    // worktree of a repo shares the same branch namespace, so
+                    // one query is canonical.
+                    var branchInfos = svc.GetBranches()
+                        ?? (System.Collections.Generic.IReadOnlyList<GitBranchInfo>)Array.Empty<GitBranchInfo>();
+
+                    // branch-name → worktree-path join, built from the
+                    // worktree-list output. Sentinel branches ((detached),
+                    // (bare), (unknown)) are skipped — they correspond to
+                    // worktrees not pointing at a named branch, so there's
+                    // nothing to match against the branches[] array.
+                    var branchToWorktree = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (var wt in worktreesSnapshot)
+                    {
+                        if (wt == null || string.IsNullOrEmpty(wt.Branch) || string.IsNullOrEmpty(wt.Path)) continue;
+                        if (wt.Branch.Length > 0 && wt.Branch[0] == '(') continue;
+                        branchToWorktree[wt.Branch] = wt.Path;
                     }
 
-                    var statusList = status ?? (System.Collections.Generic.IReadOnlyList<GitFileStatus>)Array.Empty<GitFileStatus>();
-
-                    // Phase 2 overlays — fetch attribution for each uncommitted file
-                    // (agent + task + pipeline status). Falls back to empty fields on
-                    // any failure so the working-changes panel still renders.
-                    // attributionSvc captured into local before this Task.Run; stable.
-                    System.Collections.Generic.IReadOnlyList<GitFileAttribution> attributions = Array.Empty<GitFileAttribution>();
-                    var fileList = statusList.Select(f => f.Path ?? "").ToList();
-                    if (attributionSvc != null && statusList.Count > 0)
-                    {
-                        try
+                    var branches = branchInfos
+                        .Select(b =>
                         {
-                            attributions = attributionSvc.GetAttributionForFiles(repoRoot, fileList);
-                        }
-                        catch
-                        {
-                            attributions = Array.Empty<GitFileAttribution>();
-                        }
-                    }
-
-                    // Index attribution by file path. Ordinal (case-sensitive) per
-                    // debugger SERIOUS finding: case-only-different paths from
-                    // LibGit2Sharp's RetrieveStatus would collide under
-                    // OrdinalIgnoreCase and silently swap the chips. Paths
-                    // round-trip case-exact through GitFileAttribution.FilePath.
-                    var attrByPath = new System.Collections.Generic.Dictionary<string, GitFileAttribution>(StringComparer.Ordinal);
-                    foreach (var a in attributions)
-                    {
-                        if (!string.IsNullOrEmpty(a?.FilePath))
-                            attrByPath[a.FilePath] = a;
-                    }
-
-                    var workingTree = statusList
-                        .Select(f =>
-                        {
-                            attrByPath.TryGetValue(f.Path ?? "", out var a);
+                            string wtPath = null;
+                            if (!string.IsNullOrEmpty(b.Name) && !b.IsRemote)
+                                branchToWorktree.TryGetValue(b.Name, out wtPath);
                             return new
                             {
-                                path = f.Path ?? "",
-                                kind = f.Kind.ToString(),
-                                linesAdded = f.LinesAdded,
-                                linesDeleted = f.LinesDeleted,
-                                agent = a?.Agent ?? "",
-                                taskId = a?.TaskId ?? "",
-                                taskTitle = a?.TaskTitle ?? "",
-                                pipelineStatus = a?.PipelineStatus ?? "",
-                                // "active" | "shipped" | "none" — drives the
-                                // muted chip variant for files whose owning
-                                // task has shipped but the file isn't committed yet.
-                                linkageState = a?.LinkageState ?? "none",
+                                name = b.Name ?? "",
+                                tipSha = b.TipSha ?? "",
+                                tipSubject = b.TipSubject ?? "",
+                                worktreePath = wtPath,
+                                checkedOut = !string.IsNullOrEmpty(wtPath),
+                                isRemote = b.IsRemote,
+                                when = b.LastCommitTime.HasValue
+                                    ? b.LastCommitTime.Value.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)
+                                    : null,
                             };
                         })
                         .ToArray();
 
-                    // Phase 4 Track 1: server-side grouping projection. Files
-                    // with active or shipped linkage are grouped by taskId so
-                    // the panel can render <details> sections per task instead
-                    // of a flat list. Files with linkageState='none' go to the
-                    // unlinked array (rendered as a bottom group, hidden when
-                    // empty). Group is additive — workingTree flat array is
-                    // preserved for fallback / backward compat.
-                    //
-                    // a401e082: gated on WorktreeConfig.IsEnabled. In mode=OFF,
-                    // stale task_file_links rows from prior cycles surface as
-                    // linkageState='shipped' under done-task groups and
-                    // misattribute fresh trunk edits to old shipped tasks.
-                    // When the gate is OFF, the linkage filter below matches
-                    // nothing and groupedByTask collapses to an empty array;
-                    // hud-git.html:783-787 then routes to the flat-list path
-                    // (renderWorkingTree). The contamination heuristic in
-                    // GitAttributionService.GetCrossTaskActiveTaskIds is gated
-                    // independently with INVERTED polarity (active when
-                    // !IsEnabled), so the two gates straddle the same flag in
-                    // opposite directions — see GitAttributionService.cs:249.
-                    var groupedByTask = workingTree
-                        .Where(f => WorktreeConfig.IsEnabled
-                            && (f.linkageState == "active" || f.linkageState == "shipped"))
-                        .Where(f => !string.IsNullOrEmpty(f.taskId))
-                        .GroupBy(f => f.taskId)
-                        .Select(g =>
-                        {
-                            var first = g.First();
-                            return new
-                            {
-                                taskId = g.Key,
-                                taskIdShort = g.Key.Length >= 8 ? g.Key.Substring(0, 8) : g.Key,
-                                taskTitle = first.taskTitle,
-                                agent = first.agent,
-                                linkageState = first.linkageState,
-                                fileCount = g.Count(),
-                                files = g.ToArray(),
-                            };
-                        })
-                        .OrderByDescending(g => g.linkageState == "active") // active groups first, shipped after
-                        .ThenBy(g => g.taskTitle, StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-
-                    // a401e082: same gate as groupedByTask above. The unlinked
-                    // bucket is consumed only by renderWorkingTreeGrouped (when
-                    // groupedByTask is non-empty), so in mode=OFF it's never
-                    // read. Gating here keeps the two arrays in lock-step and
-                    // removes a contract-drift trap where future JS could read
-                    // s.unlinked directly without checking groupedByTask.length.
-                    var unlinked = workingTree
-                        .Where(f => WorktreeConfig.IsEnabled
-                            && f.linkageState == "none")
-                        .ToArray();
-
-                    // Cross-task contamination: distinct active task IDs across ALL
-                    // active claims (multi-claim aware). Uses a separate query
-                    // (GetCrossTaskActiveTaskIds) instead of the dedup'd attribution
-                    // set, since the per-file attribution above shows only one
-                    // primary task per file and would otherwise hide the very
-                    // multi-claim case the banner exists to flag (adversary HIGH).
-                    string[] contamTaskIds = Array.Empty<string>();
-                    if (attributionSvc != null && fileList.Count > 0)
+                    // Per-worktree state via transient GitRepoService. Each
+                    // worktree opens a fresh LibGit2Sharp Repository handle
+                    // for working-tree + recent-commits, then disposes —
+                    // bounded by the worktree-list count (and capped further
+                    // by WorktreeListService's 16-worktree dirty-count gate
+                    // for sanity).
+                    var folders = new System.Collections.Generic.List<object>(worktreesSnapshot.Count);
+                    foreach (var wt in worktreesSnapshot)
                     {
+                        if (wt == null || string.IsNullOrEmpty(wt.Path)) continue;
+
+                        object workingChanges;
+                        object[] recentCommits;
                         try
                         {
-                            contamTaskIds = attributionSvc
-                                .GetCrossTaskActiveTaskIds(repoRoot, fileList)
-                                .ToArray();
+                            using var perSvc = new GitRepoService(wt.Path);
+                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured);
+                            recentCommits = BuildRecentCommits(perSvc);
                         }
                         catch
                         {
-                            contamTaskIds = Array.Empty<string>();
+                            // Worktree path didn't open as a valid repo (pruned,
+                            // permission, transient I/O). Degrade to empty so
+                            // the rest of the tree still renders rather than
+                            // failing the whole refresh.
+                            workingChanges = EmptyWorkingChanges();
+                            recentCommits = Array.Empty<object>();
                         }
+
+                        folders.Add(new
+                        {
+                            path = wt.Path,
+                            branch = wt.Branch ?? "",
+                            isMain = wt.IsMain,
+                            dirtyCount = wt.DirtyCount,
+                            linkedTaskId = wt.LinkedTaskId,
+                            linkedTaskTitle = wt.LinkedTaskTitle,
+                            workingChanges,
+                            recentCommits,
+                        });
                     }
 
-                    var commits = svc.GetRecentCommits(30);
-                    var recentCommits = (commits ?? (System.Collections.Generic.IReadOnlyList<GitCommitInfo>)Array.Empty<GitCommitInfo>())
-                        .Select(c => new
+                    // Project name = parent worktree's folder name. The current
+                    // worktree's folder can be a hash-y task id (e.g.
+                    // `MultiTerminal-worktrees\4363577a`); the parent worktree
+                    // path ends with the actual repo name (`MultiTerminal`),
+                    // which is what a git-naive user expects to see at the
+                    // tree root.
+                    string repoName = string.Empty;
+                    try
+                    {
+                        string sourcePath = null;
+                        foreach (var wt in worktreesSnapshot)
                         {
-                            shortSha = c.ShortSha ?? "",
-                            fullSha = c.FullSha ?? "",
-                            subject = c.Subject ?? "",
-                            authorName = c.AuthorName ?? "",
-                            coAuthors = c.CoAuthors ?? (System.Collections.Generic.IReadOnlyList<string>)Array.Empty<string>(),
-                            when = c.When != DateTimeOffset.MinValue
-                                ? c.When.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)
-                                : null,
-                        })
-                        .ToArray();
-
-                    var branchInfos = svc.GetBranches();
-                    var branches = (branchInfos ?? (System.Collections.Generic.IReadOnlyList<GitBranchInfo>)Array.Empty<GitBranchInfo>())
-                        .Select(b => new
-                        {
-                            name = b.Name ?? "",
-                            isRemote = b.IsRemote,
-                            isCurrent = b.IsCurrent,
-                            when = b.LastCommitTime.HasValue
-                                ? b.LastCommitTime.Value.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)
-                                : null,
-                        })
-                        .ToArray();
+                            if (wt != null && wt.IsMain && !string.IsNullOrEmpty(wt.Path))
+                            {
+                                sourcePath = wt.Path;
+                                break;
+                            }
+                        }
+                        if (string.IsNullOrEmpty(sourcePath)) sourcePath = repoRoot;
+                        string trimmed = sourcePath?.Replace('/', Path.DirectorySeparatorChar).TrimEnd(Path.DirectorySeparatorChar);
+                        if (!string.IsNullOrEmpty(trimmed)) repoName = Path.GetFileName(trimmed) ?? string.Empty;
+                    }
+                    catch
+                    {
+                        repoName = string.Empty;
+                    }
 
                     return new
                     {
-                        type = "git_state",
+                        type = "git_state_tree",
                         // repoRoot ships native-separator filesystem path so JS
                         // can compose absolute-path tooltips on file rows
-                        // (smoke-1 polish [15] fix #3). Already stable inside
-                        // this Task.Run via the captured local.
+                        // (smoke-1 polish [15] fix #3). Stable via captured local.
                         repoRoot,
-                        branch,
-                        changes,
-                        hasRemote,
-                        ahead,
-                        behind,
-                        lastFetch,
-                        workingTree,
-                        groupedByTask,
-                        unlinked,
-                        recentCommits,
+                        repoName,
+                        selectedWorktreePath,
                         branches,
-                        contamTaskIds,
+                        folders = folders.ToArray(),
                     };
                 });
-                Send(snapshot);
+                Send(payload);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.RefreshAsync] {ex.Message}");
+            }
         }
+
+        /// <summary>
+        /// Per-worktree working-changes projection — same shape the old
+        /// <c>git_state</c> payload carried at the top level (workingTree
+        /// flat list + groupedByTask + unlinked + contamTaskIds), now scoped
+        /// to a single worktree. Called inside the unified-payload
+        /// <see cref="RefreshAsync"/> pass for each worktree.
+        /// </summary>
+        private static object BuildWorkingChanges(
+            GitRepoService svc,
+            string svcRepoRoot,
+            GitAttributionService attributionSvc)
+        {
+            var status = svc.GetWorkingTreeStatus();
+            var statusList = status ?? (System.Collections.Generic.IReadOnlyList<GitFileStatus>)Array.Empty<GitFileStatus>();
+
+            // Phase 2 overlays — fetch attribution for each uncommitted file
+            // (agent + task + pipeline status). Falls back to empty fields on
+            // any failure so the working-changes panel still renders.
+            System.Collections.Generic.IReadOnlyList<GitFileAttribution> attributions = Array.Empty<GitFileAttribution>();
+            var fileList = statusList.Select(f => f.Path ?? "").ToList();
+            if (attributionSvc != null && statusList.Count > 0)
+            {
+                try
+                {
+                    attributions = attributionSvc.GetAttributionForFiles(svcRepoRoot, fileList);
+                }
+                catch
+                {
+                    attributions = Array.Empty<GitFileAttribution>();
+                }
+            }
+
+            // Index attribution by file path. Ordinal (case-sensitive) per
+            // debugger SERIOUS finding: case-only-different paths from
+            // LibGit2Sharp's RetrieveStatus would collide under
+            // OrdinalIgnoreCase and silently swap the chips. Paths
+            // round-trip case-exact through GitFileAttribution.FilePath.
+            var attrByPath = new System.Collections.Generic.Dictionary<string, GitFileAttribution>(StringComparer.Ordinal);
+            foreach (var a in attributions)
+            {
+                if (!string.IsNullOrEmpty(a?.FilePath))
+                    attrByPath[a.FilePath] = a;
+            }
+
+            var workingTree = statusList
+                .Select(f =>
+                {
+                    attrByPath.TryGetValue(f.Path ?? "", out var a);
+                    return new
+                    {
+                        path = f.Path ?? "",
+                        kind = f.Kind.ToString(),
+                        linesAdded = f.LinesAdded,
+                        linesDeleted = f.LinesDeleted,
+                        agent = a?.Agent ?? "",
+                        taskId = a?.TaskId ?? "",
+                        taskTitle = a?.TaskTitle ?? "",
+                        pipelineStatus = a?.PipelineStatus ?? "",
+                        // "active" | "shipped" | "none" — drives the
+                        // muted chip variant for files whose owning
+                        // task has shipped but the file isn't committed yet.
+                        linkageState = a?.LinkageState ?? "none",
+                    };
+                })
+                .ToArray();
+
+            // a401e082: gated on WorktreeConfig.IsEnabled. In mode=OFF,
+            // stale task_file_links rows from prior cycles surface as
+            // linkageState='shipped' under done-task groups and
+            // misattribute fresh trunk edits to old shipped tasks.
+            // When the gate is OFF, the linkage filter below matches
+            // nothing and groupedByTask collapses to an empty array.
+            var groupedByTask = workingTree
+                .Where(f => WorktreeConfig.IsEnabled
+                    && (f.linkageState == "active" || f.linkageState == "shipped"))
+                .Where(f => !string.IsNullOrEmpty(f.taskId))
+                .GroupBy(f => f.taskId)
+                .Select(g =>
+                {
+                    var first = g.First();
+                    return new
+                    {
+                        taskId = g.Key,
+                        taskIdShort = g.Key.Length >= 8 ? g.Key.Substring(0, 8) : g.Key,
+                        taskTitle = first.taskTitle,
+                        agent = first.agent,
+                        linkageState = first.linkageState,
+                        fileCount = g.Count(),
+                        files = g.ToArray(),
+                    };
+                })
+                .OrderByDescending(g => g.linkageState == "active")
+                .ThenBy(g => g.taskTitle, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var unlinked = workingTree
+                .Where(f => WorktreeConfig.IsEnabled && f.linkageState == "none")
+                .ToArray();
+
+            // Cross-task contamination: distinct active task IDs across ALL
+            // active claims (multi-claim aware). Separate query from the
+            // dedup'd attribution set so the multi-claim case the banner
+            // exists to flag isn't hidden (adversary HIGH).
+            string[] contamTaskIds = Array.Empty<string>();
+            if (attributionSvc != null && fileList.Count > 0)
+            {
+                try
+                {
+                    contamTaskIds = attributionSvc
+                        .GetCrossTaskActiveTaskIds(svcRepoRoot, fileList)
+                        .ToArray();
+                }
+                catch
+                {
+                    contamTaskIds = Array.Empty<string>();
+                }
+            }
+
+            return new
+            {
+                workingTree,
+                groupedByTask,
+                unlinked,
+                contamTaskIds,
+            };
+        }
+
+        /// <summary>
+        /// Per-worktree recent-commits projection. 30 commits, newest-first,
+        /// matches the prior top-level <c>recentCommits</c> shape.
+        /// </summary>
+        private static object[] BuildRecentCommits(GitRepoService svc)
+        {
+            var commits = svc.GetRecentCommits(30);
+            return (commits ?? (System.Collections.Generic.IReadOnlyList<GitCommitInfo>)Array.Empty<GitCommitInfo>())
+                .Select(c => (object)new
+                {
+                    shortSha = c.ShortSha ?? "",
+                    fullSha = c.FullSha ?? "",
+                    subject = c.Subject ?? "",
+                    authorName = c.AuthorName ?? "",
+                    coAuthors = c.CoAuthors ?? (System.Collections.Generic.IReadOnlyList<string>)Array.Empty<string>(),
+                    when = c.When != DateTimeOffset.MinValue
+                        ? c.When.ToString("yyyy-MM-ddTHH:mm:sszzz", System.Globalization.CultureInfo.InvariantCulture)
+                        : null,
+                })
+                .ToArray();
+        }
+
+        /// <summary>
+        /// Empty-but-shaped working-changes object for the degraded path
+        /// (transient <see cref="GitRepoService"/> ctor threw). JS consumes
+        /// the same field names regardless of state.
+        /// </summary>
+        private static object EmptyWorkingChanges() => new
+        {
+            workingTree = Array.Empty<object>(),
+            groupedByTask = Array.Empty<object>(),
+            unlinked = Array.Empty<object>(),
+            contamTaskIds = Array.Empty<string>(),
+        };
 
         /// <summary>
         /// Loads a commit's diff vs its first parent and ships the parsed

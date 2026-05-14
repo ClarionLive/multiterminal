@@ -58,6 +58,11 @@ namespace MultiTerminal.Services
 
     /// <summary>
     /// Single branch entry for the branches panel.
+    /// <c>TipSha</c> is the short 7-char prefix of the branch tip's full SHA;
+    /// <c>TipSubject</c> is the sanitized first line of the tip commit message
+    /// (same pipeline as <see cref="GitCommitInfo.Subject"/>). Both can be
+    /// <c>null</c> when the branch has no tip resolvable on this repo handle
+    /// (rare — pruned remote, broken ref).
     /// </summary>
     public sealed class GitBranchInfo
     {
@@ -65,6 +70,8 @@ namespace MultiTerminal.Services
         public bool IsRemote { get; set; }
         public bool IsCurrent { get; set; }
         public DateTimeOffset? LastCommitTime { get; set; }
+        public string TipSha { get; set; }
+        public string TipSubject { get; set; }
     }
 
     /// <summary>
@@ -412,12 +419,18 @@ namespace MultiTerminal.Services
                 var current = _repo.Head;
                 var currentCanonical = current?.CanonicalName;
 
-                return _repo.Branches.Select(b => new GitBranchInfo
+                return _repo.Branches.Select(b =>
                 {
-                    Name = b.FriendlyName,
-                    IsRemote = b.IsRemote,
-                    IsCurrent = currentCanonical != null && b.CanonicalName == currentCanonical,
-                    LastCommitTime = b.Tip?.Author?.When,
+                    var tipSha = b.Tip?.Sha;
+                    return new GitBranchInfo
+                    {
+                        Name = b.FriendlyName,
+                        IsRemote = b.IsRemote,
+                        IsCurrent = currentCanonical != null && b.CanonicalName == currentCanonical,
+                        LastCommitTime = b.Tip?.Author?.When,
+                        TipSha = !string.IsNullOrEmpty(tipSha) && tipSha.Length >= 7 ? tipSha.Substring(0, 7) : tipSha,
+                        TipSubject = SanitizeUserText(b.Tip?.MessageShort, MaxUserTextLength),
+                    };
                 }).ToList();
             }
         }
