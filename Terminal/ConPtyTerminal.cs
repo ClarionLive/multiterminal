@@ -390,13 +390,30 @@ namespace MultiTerminal.Terminal
             string promptFunc = "function prompt { $Host.UI.RawUI.WindowTitle = $PWD.Path; return \\\"PS $($PWD.Path)> \\\" }";
 
             // If autoRunCommand is specified, append it after the prompt function setup
-            // IMPORTANT: Add cd command before autoRunCommand so Claude Code runs from correct directory
+            // IMPORTANT: Add cd command before autoRunCommand so Claude Code runs from correct directory.
+            //
+            // AC7 launch-root strategy (task c6ed236c): when the spawn was scoped
+            // to a task with a materialized worktree, the caller passes the repo
+            // root as workingDirectory AND a non-empty taskWorktreePath. We emit
+            // TWO cds — the first lands in repoRoot (matches the process's
+            // WorkingDirectory; Claude Code reads this as its permission scope),
+            // the second narrows to the task worktree. Worktrees now live as
+            // descendants of repoRoot (Item 1), so the second cd stays in scope
+            // AND future cd's to sibling worktrees work too. When no worktree is
+            // in play, the second cd is omitted.
             string autoRun = "";
             if (!string.IsNullOrEmpty(autoRunCommand))
             {
-                // Escape single quotes in workingDirectory to prevent PowerShell injection via path names
+                // Escape single quotes in workingDirectory to prevent PowerShell injection via path names.
                 string safeWorkDir = (workingDirectory ?? "").Replace("'", "''");
-                autoRun = $"; cd '{safeWorkDir}'; {autoRunCommand}";
+                autoRun = $"; cd '{safeWorkDir}'";
+                if (!string.IsNullOrEmpty(taskWorktreePath))
+                {
+                    string safeTaskWorktree = taskWorktreePath.Replace("'", "''");
+                    autoRun += $"; cd '{safeTaskWorktree}'";
+                    System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] AC7: in-shell cd narrows to worktree '{taskWorktreePath}'");
+                }
+                autoRun += $"; {autoRunCommand}";
             }
             else
             {

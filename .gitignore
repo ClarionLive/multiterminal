@@ -47,6 +47,9 @@ Thumbs.db
 # Git-stint worktrees
 .stint/
 
+# Per-task worktrees (materialized by WorktreeManager on set_task_active)
+/worktrees/
+
 # Transient agent/runtime state (regeneratable, not team-wide)
 .claude/scheduled_tasks.lock
 .claude/tmp/

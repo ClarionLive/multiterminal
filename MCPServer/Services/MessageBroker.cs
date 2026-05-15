@@ -302,6 +302,16 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<BranchOutcomeUpdatedEventArgs> BranchOutcomeUpdated;
 
         /// <summary>
+        /// Fires after <see cref="SetTaskActive"/> swaps the agent's active task.
+        /// Carries the agent name, the previous task's worktree (null when there
+        /// was no prior active task), and the new task's worktree (null when no
+        /// worktree was materialized). Subscribed by MainForm to push a
+        /// task_active_changed event over the agent's Claude Code Channel (AC2);
+        /// the agent-side hook acts on it.
+        /// </summary>
+        public event EventHandler<TaskActiveChangedEventArgs> TaskActiveChanged;
+
+        /// <summary>
         /// Fires BranchOutcomeUpdated. Called by BranchMetadataService after a successful
         /// upsert so subscribers (HudGitRenderer) can refresh.
         /// </summary>
@@ -372,6 +382,67 @@ namespace MultiTerminal.MCPServer.Services
         /// <c>MainForm</c> via a <see cref="System.Threading.Timer"/>.
         /// </summary>
         public MultiTerminal.Services.WorktreeJanitorService WorktreeJanitor => _janitor;
+
+        /// <summary>
+        /// Shared resolver used by every named-agent spawn site. Returns the
+        /// active task's materialized worktree path for <paramref name="terminalName"/>,
+        /// or <c>null</c> when the agent has no active task, the task has no
+        /// active worktree, the worktree path doesn't exist on disk, or any
+        /// internal lookup throws. Callers must fall through to their default
+        /// single-tree cwd on null.
+        ///
+        /// <para>The rule "always resolve before deciding workingDirectory at a
+        /// spawn site" lives here so it can't be silently violated by a new
+        /// caller. Lookup is in-memory + DB-cached; safe to call from spawn
+        /// paths without measurable overhead.</para>
+        /// </summary>
+        public string ResolveTaskWorktreePath(string terminalName)
+        {
+            if (string.IsNullOrEmpty(terminalName)) return null;
+            try
+            {
+                var activeTask = GetMyActiveTask(terminalName);
+                if (activeTask == null) return null;
+                string candidate = _worktrees?.GetWorktreePathForTask(activeTask.Id);
+                if (string.IsNullOrEmpty(candidate) || !System.IO.Directory.Exists(candidate))
+                    return null;
+                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' -> task '{activeTask.Id}' -> '{candidate}'");
+                return candidate;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' threw: {ex.Message} — falling through to main checkout");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Companion to <see cref="ResolveTaskWorktreePath"/> used by the AC7
+        /// launch-root strategy. Returns the project root (main checkout) for
+        /// the agent's active task, or <c>null</c> when the agent has no active
+        /// task, the task has no project, or the project has no registered path.
+        ///
+        /// <para>Spawn sites set <c>ProcessStartInfo.WorkingDirectory = repoRoot</c>
+        /// so Claude Code's launch-time permission scope AND its harness cwd-pin
+        /// cover the entire repo (worktrees live inside as descendants). An
+        /// in-shell <c>cd '{worktreePath}'</c> then narrows to the active
+        /// worktree before <c>claude</c> starts.</para>
+        /// </summary>
+        public string ResolveTaskRepoRoot(string terminalName)
+        {
+            if (string.IsNullOrEmpty(terminalName)) return null;
+            try
+            {
+                var activeTask = GetMyActiveTask(terminalName);
+                if (activeTask == null) return null;
+                return TryGetProjectPathForTask(activeTask.Id);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[ResolveTaskRepoRoot] '{terminalName}' threw: {ex.Message} — falling through");
+                return null;
+            }
+        }
 
         /// <summary>
         /// Resolve a task id to its project's filesystem path, going through
@@ -3717,6 +3788,13 @@ namespace MultiTerminal.MCPServer.Services
             var pausedIds = new List<string>();
             var pausedTitles = new List<string>();
 
+            // Capture the previously-active task's id + worktree (for the
+            // TaskActiveChanged event fired below). One assignee can have at
+            // most one active task, so the first match in the loop wins; if
+            // none, both stay null and AC4's "no-active-task baseline" applies.
+            string oldTaskId = null;
+            string oldWorktreePath = null;
+
             // Auto-pause other active tasks for this assignee
             foreach (var kvp in _tasks)
             {
@@ -3726,6 +3804,12 @@ namespace MultiTerminal.MCPServer.Services
                     other.SubStatus == "active" &&
                     string.Equals(other.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
                 {
+                    if (oldTaskId == null)
+                    {
+                        oldTaskId = other.Id;
+                        oldWorktreePath = _worktrees?.GetWorktreePathForTask(other.Id);
+                    }
+
                     other.SubStatus = "paused";
                     other.PausedAt = DateTime.UtcNow;
                     pausedIds.Add(other.Id);
@@ -3858,6 +3942,28 @@ namespace MultiTerminal.MCPServer.Services
                     : $"Set '{task.Title}' active.",
                 RelatedId = taskId
             });
+
+            // AC2: notify subscribers (MainForm pushes the event over the
+            // agent's Claude Code Channel so the agent-side auto-cd hook can
+            // react). Resolve newWorktreePath fresh from the worktree manager
+            // so we reflect whatever the create attempt above produced (null
+            // when worktree mode is off, project unresolvable, or git failed).
+            string newWorktreePath = _worktrees?.GetWorktreePathForTask(taskId);
+            try
+            {
+                TaskActiveChanged?.Invoke(this, new TaskActiveChangedEventArgs
+                {
+                    AgentName = assignee,
+                    OldTaskId = oldTaskId,
+                    OldWorktreePath = oldWorktreePath,
+                    NewTaskId = taskId,
+                    NewWorktreePath = newWorktreePath,
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] TaskActiveChanged subscribers threw: {ex.Message}");
+            }
 
             return new SetTaskActiveResult
             {
@@ -6493,6 +6599,31 @@ namespace MultiTerminal.MCPServer.Services
         public string ReportId { get; set; }
         public string AgentName { get; set; }
         public string Verdict { get; set; }
+    }
+
+    /// <summary>
+    /// Event args for <see cref="MessageBroker.TaskActiveChanged"/>. Fired after
+    /// <see cref="MessageBroker.SetTaskActive"/> has paused the previous active
+    /// task (if any) and materialized the new task's worktree. Subscribers (today:
+    /// MainForm) push a corresponding system message into the agent's Claude Code
+    /// Channel so the auto-cd hook can react.
+    ///
+    /// <para><see cref="OldWorktreePath"/> is null when the agent had no prior
+    /// active task; <see cref="NewWorktreePath"/> is null when the new task
+    /// didn't materialize a worktree (worktree mode off, project unregistered,
+    /// or git failure — all non-fatal).</para>
+    /// </summary>
+    public class TaskActiveChangedEventArgs : EventArgs
+    {
+        public string AgentName { get; set; }
+
+        public string OldTaskId { get; set; }
+
+        public string OldWorktreePath { get; set; }
+
+        public string NewTaskId { get; set; }
+
+        public string NewWorktreePath { get; set; }
     }
 
     /// <summary>

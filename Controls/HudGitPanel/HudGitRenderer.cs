@@ -1031,9 +1031,9 @@ namespace MultiTerminal.Controls
                         });
                     }
 
-                    // Project name = parent worktree's folder name. The current
+                    // Project name = main checkout's folder name. The current
                     // worktree's folder can be a hash-y task id (e.g.
-                    // `MultiTerminal-worktrees\4363577a`); the parent worktree
+                    // `MultiTerminal\worktrees\4363577a`); the main worktree
                     // path ends with the actual repo name (`MultiTerminal`),
                     // which is what a git-naive user expects to see at the
                     // tree root.

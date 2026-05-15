@@ -16,9 +16,13 @@ namespace MultiTerminal.Services
     /// same manager can serve multiple projects in one MT instance.</para>
     ///
     /// <para>Path conventions: a worktree for task <c>abcd1234</c> lives at
-    /// <c>{repoParent}/{repoName}-worktrees/abcd1234/</c> on branch
-    /// <c>task/abcd1234</c>, forked from the current HEAD of <c>repoRoot</c>
-    /// at create time.</para>
+    /// <c>{repoRoot}/worktrees/abcd1234/</c> on branch <c>task/abcd1234</c>,
+    /// forked from the current HEAD of <c>repoRoot</c> at create time. The
+    /// <c>worktrees/</c> dir is a child of the repo root (gitignored) so that
+    /// (a) every worktree is a descendant of the main checkout — important
+    /// for Claude Code's permission scope + harness cwd pinning — and
+    /// (b) all per-task scratch space is contained inside the project
+    /// folder rather than floating in the parent dir.</para>
     /// </summary>
     public class WorktreeManager
     {
@@ -71,12 +75,8 @@ namespace MultiTerminal.Services
 
             string taskIdShort = taskId.Length >= 8 ? taskId.Substring(0, 8) : taskId;
             string trimmed = repoRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string repoName = Path.GetFileName(trimmed);
-            string repoParent = Path.GetDirectoryName(trimmed);
-            if (string.IsNullOrEmpty(repoParent))
-                throw new InvalidOperationException($"Cannot determine parent directory of {repoRoot}");
 
-            string worktreesParent = Path.Combine(repoParent, $"{repoName}-worktrees");
+            string worktreesParent = Path.Combine(trimmed, "worktrees");
             string worktreePath = Path.Combine(worktreesParent, taskIdShort);
             string branchName = $"task/{taskIdShort}";
 

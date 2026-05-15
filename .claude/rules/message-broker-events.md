@@ -17,7 +17,8 @@ Subscribe in MainForm or panels for UI updates:
 - `OfficeAgentSpawned`, `OfficeAgentDeparted`
 - `AgentPanelCloseRequested`, `ReportSaved`
 - `NotificationReceived`, `SessionLineageUpdated`
-- `BrowserTabRequested`
+- `BrowserTabRequested`, `BranchOutcomeUpdated`
+- `TaskActiveChanged` — fires after `SetTaskActive` swaps the assignee's active task. Args carry `AgentName`, `OldTaskId`+`OldWorktreePath` (nullable when no prior active task), `NewTaskId`+`NewWorktreePath` (nullable when no worktree materialized). Subscribed by MainForm which pushes a `{type:"task_active_changed",...}` JSON envelope over the agent's Claude Code Channel for the auto-cd hook (task c6ed236c).
 
 # Project System Architecture (Phase 4 -- SQLite-only)
 

@@ -1760,6 +1760,20 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Updates the <c>worktree_path</c> of an existing record. Used by the
+        /// layout-migration startup service (task c6ed236c) after a successful
+        /// <c>git worktree move</c>. No-op if no row exists for <paramref name="taskId"/>.
+        /// </summary>
+        public void UpdateWorktreePath(string taskId, string newWorktreePath)
+        {
+            const string sql = "UPDATE task_worktrees SET worktree_path = @path WHERE task_id = @taskId";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@path", newWorktreePath);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
         /// List all worktree records currently in <c>status='active'</c>, ordered
         /// most-recent first. Used by panel aggregation and lifecycle reconciliation.
         /// </summary>
