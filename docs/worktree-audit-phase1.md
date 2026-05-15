@@ -132,16 +132,22 @@ This is an architectural fact, not a defect. The MT desktop app is a singleton: 
 
 ## 4. Branch and path conventions for the spike
 
+> **Updated 2026-05-14 (task c6ed236c):** worktree layout moved from a **sibling**
+> of the repo root (`{repoParent}/MultiTerminal-worktrees/`) to a **child** of it
+> (`{repoRoot}/worktrees/`). The table below now reflects the current convention.
+> Smoke-test transcripts further down in this doc still reference the old
+> sibling layout — preserved as historical record of what Phase 1 actually ran.
+
 | Item | Convention |
 |------|-----------|
-| Worktrees parent dir | `{repoParent}/MultiTerminal-worktrees/` (sibling to main checkout, NOT nested) |
+| Worktrees parent dir | `{repoRoot}/worktrees/` (child of main checkout; gitignored) |
 | Worktree path format | `{worktreesParent}/{taskIdShort}/` where `taskIdShort` is the 8-char prefix |
 | Branch name format | `task/{taskIdShort}` |
 | Branch base | `main` HEAD at the time of `git worktree add` |
 | Worktree lifecycle | Create on `set_task_active`; remove on `update_task_status='done'` |
 | Feature flag | `MULTITERMINAL_WORKTREE_MODE` env var (`off` | `on`); default `off` during spike |
 
-For this repo specifically: `H:/DevLaptop/ClarionPowerShell/MultiTerminal-worktrees/{taskIdShort}/`.
+For this repo specifically: `H:/DevLaptop/ClarionPowerShell/MultiTerminal/worktrees/{taskIdShort}/`.
 
 ---
 

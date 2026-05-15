@@ -71,6 +71,12 @@ namespace MultiTerminal
             // Ensure plan database is seeded with initial data
             PlanSeeder.EnsureSeeded();
 
+            // One-shot migration: relocate any pre-2026-05-14 worktrees from
+            // the old sibling layout to the new child-of-repo layout. Idempotent
+            // and self-recovering — failures (e.g. locked directories) are
+            // retried on the next startup. See WorktreeLayoutMigrationService.
+            WorktreeLayoutMigrationService.RunIfNeeded();
+
             // Show splash screen immediately
             // CA2000: SplashScreen lifetime spans async init; disposed in TryShowMainForm after gates close.
 #pragma warning disable CA2000

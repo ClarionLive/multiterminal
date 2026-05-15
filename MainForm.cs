@@ -550,6 +550,12 @@ namespace MultiTerminal
                 // Browser tab support - route tab requests to correct terminal
                 _mcpServer.Broker.BrowserTabRequested += OnBrowserTabRequested;
 
+                // AC2: when the broker swaps an agent's active task, push a
+                // task_active_changed event over the agent's channel so the
+                // auto-cd hook can react. Subscriber lives in MainForm because
+                // the broker is HTTP-free.
+                _mcpServer.Broker.TaskActiveChanged += OnBrokerTaskActiveChanged;
+
                 // Wire up spawn callback for programmatic terminal spawning
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 17: Checking SpawnService");
                 if (_mcpServer.SpawnService == null)
@@ -1210,11 +1216,28 @@ namespace MultiTerminal
                         "Deploy");
                 }
 
+                // Phase 1 worktree isolation: route the headless AgentProcess
+                // spawn through the same resolver every other spawn site uses.
+                // When this identity owns an active task with a materialized
+                // worktree, override cwd AND inject MULTITERMINAL_TASK_WORKTREE
+                // so MCP tools that read the env var see the right path.
+                string taskWorktreePath = ResolveTaskWorktreePath(agentName);
+                Dictionary<string, string> spawnEnv = null;
+                if (taskWorktreePath != null)
+                {
+                    workingDir = taskWorktreePath;
+                    spawnEnv = new Dictionary<string, string>
+                    {
+                        [WorktreeConfig.TaskWorktreeEnvVar] = taskWorktreePath,
+                    };
+                }
+
                 var agent = new AgentProcess();
                 await agent.SpawnAsync(
                     prompt: initialPrompt,
                     workingDir: workingDir,
-                    mcpConfigPath: mcpConfigPath);
+                    mcpConfigPath: mcpConfigPath,
+                    environmentVars: spawnEnv);
 
                 // Register with MessageBroker so other terminals can message this agent
                 string agentDocId = $"agent-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
@@ -1372,6 +1395,60 @@ namespace MultiTerminal
         {
             Timeout = TimeSpan.FromSeconds(5)
         };
+
+        /// <summary>
+        /// Subscriber for MessageBroker.TaskActiveChanged (AC2). Looks up the
+        /// agent's registered terminal, encodes the event as a JSON message,
+        /// and posts it to the agent's Claude Code Channel via DeliverViaChannel.
+        /// The agent-side auto-cd hook parses the JSON envelope and acts on it.
+        ///
+        /// <para>Fire-and-forget intentionally: the broker fires the event
+        /// synchronously from SetTaskActive and we don't want to block the
+        /// caller on an HTTP round-trip. Failures are logged but never
+        /// surfaced — a missed event just means the agent won't auto-cd
+        /// (manual cd remains an option).</para>
+        /// </summary>
+        private void OnBrokerTaskActiveChanged(object sender, MCPServer.Services.TaskActiveChangedEventArgs e)
+        {
+            if (e == null || string.IsNullOrEmpty(e.AgentName)) return;
+
+            try
+            {
+                var terminal = _mcpServer?.Broker?.GetTerminal(e.AgentName);
+                if (terminal == null || terminal.ChannelPort == null)
+                {
+                    _debugLogService.Trace("MainForm",
+                        $"TaskActiveChanged for '{e.AgentName}' but agent has no live channel port — skipping push (agent will pick up the new task on next spawn).");
+                    return;
+                }
+
+                var payload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    type = "task_active_changed",
+                    agentName = e.AgentName,
+                    oldTaskId = e.OldTaskId,
+                    oldWorktree = e.OldWorktreePath,
+                    newTaskId = e.NewTaskId,
+                    newWorktree = e.NewWorktreePath,
+                });
+
+                int port = terminal.ChannelPort.Value;
+                _ = Task.Run(async () =>
+                {
+                    bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal").ConfigureAwait(false);
+                    if (!ok)
+                    {
+                        _debugLogService.Warning("MainForm",
+                            $"task_active_changed push failed for '{e.AgentName}' on channel port {port}.");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _debugLogService.Warning("MainForm",
+                    $"OnBrokerTaskActiveChanged threw for '{e?.AgentName}': {ex.Message}");
+            }
+        }
 
         /// <summary>
         /// Delivers a message to a terminal's Claude Code Channel via HTTP POST.
@@ -2144,30 +2221,33 @@ namespace MultiTerminal
             "Quinn", "Ruby", "Sam", "Tara", "Uma", "Vera", "Wade", "Xena", "Yuri", "Zara"
         };
 
-        // Phase 1 worktree isolation: shared resolver. Every spawn site that
-        // knows the terminal's identity name must call this so the active task's
-        // worktree (if any) is injected as MULTITERMINAL_TASK_WORKTREE and used
-        // as the shell's cwd. Returns null when there's no usable worktree —
-        // callers fall through to the original single-tree behavior.
+        // Thin wrapper around the canonical resolver on MessageBroker. Kept
+        // for ergonomics at MainForm spawn sites that already had this name —
+        // the broker version is the single source of truth and is also reachable
+        // from non-UI spawn paths (REST controllers, headless AgentProcess flow,
+        // future callers). See <see cref="MessageBroker.ResolveTaskWorktreePath"/>.
         private string ResolveTaskWorktreePath(string terminalName)
         {
-            if (string.IsNullOrEmpty(terminalName) || _mcpServer?.Broker == null)
-                return null;
-            try
-            {
-                var activeTask = _mcpServer.Broker.GetMyActiveTask(terminalName);
-                if (activeTask == null) return null;
-                string candidate = _mcpServer.Broker.Worktrees?.GetWorktreePathForTask(activeTask.Id);
-                if (string.IsNullOrEmpty(candidate) || !System.IO.Directory.Exists(candidate))
-                    return null;
-                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' -> task '{activeTask.Id}' -> '{candidate}'");
-                return candidate;
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' threw: {ex.Message} — falling through to main checkout");
-                return null;
-            }
+            return _mcpServer?.Broker?.ResolveTaskWorktreePath(terminalName);
+        }
+
+        // AC7 launch-root helper. When an agent owns an active task with a
+        // materialized worktree, the spawn dir becomes the project's repo root
+        // (so Claude Code's permission scope + harness cwd-pin cover the entire
+        // repo and any sibling worktrees are reachable). The in-shell cd inside
+        // ConPtyTerminal then narrows to taskWorktreePath. Returns:
+        //   - (fallbackDir, null) when the agent has no active task / no worktree
+        //   - (repoRoot, worktreePath) when both resolve cleanly
+        //   - (worktreePath, worktreePath) when worktree exists but repoRoot
+        //     can't be resolved — preserves pre-AC7 behavior on that edge.
+        private string ResolveSpawnDir(string terminalName, string fallbackDir, out string taskWorktreePath)
+        {
+            taskWorktreePath = ResolveTaskWorktreePath(terminalName);
+            if (taskWorktreePath == null) return fallbackDir;
+            string repoRoot = _mcpServer?.Broker?.ResolveTaskRepoRoot(terminalName);
+            if (!string.IsNullOrEmpty(repoRoot) && System.IO.Directory.Exists(repoRoot))
+                return repoRoot;
+            return taskWorktreePath;
         }
 
         public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false)
@@ -2312,12 +2392,13 @@ namespace MultiTerminal
                 // Start the terminal with specified or default directory and optional auto-run command
                 string dir = workingDirectory ?? _settings?.GetLastDirectory();
 
-                // Phase 1 worktree isolation: when this terminal is bound to an identity
-                // that owns an active task with a materialized worktree, redirect cwd to
-                // the worktree and inject MULTITERMINAL_TASK_WORKTREE so the spawned
-                // agent operates inside its own isolated checkout.
-                string taskWorktreePath = ResolveTaskWorktreePath(terminalName);
-                if (taskWorktreePath != null) dir = taskWorktreePath;
+                // AC7 launch-root strategy (task c6ed236c): when this terminal is bound to
+                // an identity that owns an active task with a materialized worktree, spawn
+                // at the project repo root so Claude Code's permission scope + harness
+                // cwd-pin cover the entire repo (worktrees live inside as descendants).
+                // ConPtyTerminal's in-shell cd then narrows to taskWorktreePath before
+                // claude starts. Falls through to `dir` when no worktree is in play.
+                dir = ResolveSpawnDir(terminalName, dir, out string taskWorktreePath);
 
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Starting terminal...");
                 System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
@@ -2491,10 +2572,9 @@ namespace MultiTerminal
                     catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
                 }
 
-                // Phase 1 worktree isolation: redirect cwd to the active-task worktree
-                // when this identity owns one. Falls through to launchDir otherwise.
-                string taskWorktreePath = ResolveTaskWorktreePath(terminalName);
-                if (taskWorktreePath != null) launchDir = taskWorktreePath;
+                // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
+                // cd narrows to the worktree. Falls through to launchDir on no worktree.
+                launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath);
 
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
                 System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
@@ -2591,10 +2671,9 @@ namespace MultiTerminal
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
                 }
 
-                // Phase 1 worktree isolation: redirect cwd to the active-task worktree
-                // when this identity owns one. Falls through to workingDir otherwise.
-                string taskWorktreePath = ResolveTaskWorktreePath(terminalName);
-                if (taskWorktreePath != null) workingDir = taskWorktreePath;
+                // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
+                // cd narrows to the worktree. Falls through to workingDir on no worktree.
+                workingDir = ResolveSpawnDir(terminalName, workingDir, out string taskWorktreePath);
 
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath);
 
@@ -2744,10 +2823,9 @@ namespace MultiTerminal
                     catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
                 }
 
-                // Phase 1 worktree isolation: redirect cwd to the active-task worktree
-                // when this identity owns one. Falls through to launchDir otherwise.
-                string taskWorktreePath2 = ResolveTaskWorktreePath(terminalName);
-                if (taskWorktreePath2 != null) launchDir = taskWorktreePath2;
+                // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
+                // cd narrows to the worktree. Falls through to launchDir on no worktree.
+                launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath2);
 
                 // Start terminal in project folder
                 System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
@@ -3585,34 +3663,12 @@ namespace MultiTerminal
             // Register with the new identity name
             string terminalName = PreRegisterTerminalWithName(doc.DocId, identityName);
 
-            // Phase 1 worktree isolation: same logic as AddNewTerminal — when this
-            // identity owns an active task with a materialized worktree, redirect
-            // cwd to the worktree and inject MULTITERMINAL_TASK_WORKTREE so the
-            // re-launched agent operates inside its own isolated checkout. Without
-            // this, "Launch as..." preserves the prior terminal's cwd and the env
-            // var stays empty — bypassing the wiring fix from AddNewTerminal.
-            string taskWorktreePath = null;
-            if (!string.IsNullOrEmpty(terminalName) && _mcpServer?.Broker != null)
-            {
-                try
-                {
-                    var activeTask = _mcpServer.Broker.GetMyActiveTask(terminalName);
-                    if (activeTask != null)
-                    {
-                        string candidate = _mcpServer.Broker.Worktrees?.GetWorktreePathForTask(activeTask.Id);
-                        if (!string.IsNullOrEmpty(candidate) && System.IO.Directory.Exists(candidate))
-                        {
-                            taskWorktreePath = candidate;
-                            workingDirectory = candidate;
-                            System.Diagnostics.Trace.WriteLine($"[OnLaunchAsIdentityRequested] Active task '{activeTask.Id}' for '{terminalName}' has worktree -> overriding dir to '{candidate}'");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Trace.WriteLine($"[OnLaunchAsIdentityRequested] Worktree lookup failed for '{terminalName}': {ex.Message} — falling through to original cwd");
-                }
-            }
+            // AC7 launch-root strategy (task c6ed236c): same logic as AddNewTerminal —
+            // when this identity owns an active task with a materialized worktree, spawn
+            // at the project repo root and let the in-shell cd narrow to the worktree.
+            // Without this, "Launch as..." preserves the prior terminal's cwd and the
+            // env var stays empty — bypassing the wiring fix from AddNewTerminal.
+            workingDirectory = ResolveSpawnDir(terminalName, workingDirectory, out string taskWorktreePath);
 
             // Just launch claude - let the user choose to resume or start fresh
             // Using plain "claude" lets Claude prompt about resuming recent sessions
