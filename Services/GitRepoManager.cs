@@ -74,20 +74,20 @@ namespace MultiTerminal.Services
         public GitRepoLayout DetectLayout(string projectRoot)
         {
             if (_disposed || string.IsNullOrEmpty(projectRoot)) return GitRepoLayout.NotARepo;
-            string canonical = CanonicalizeProjectRoot(projectRoot);
-            if (canonical == null) return GitRepoLayout.NotARepo;
+            string repoRoot = ResolveRepoRoot(projectRoot);
+            if (repoRoot == null) return GitRepoLayout.NotARepo;
 
-            string gitPath = Path.Combine(canonical, ".git");
+            string gitPath = Path.Combine(repoRoot, ".git");
             if (Directory.Exists(gitPath)) return GitRepoLayout.Standard;
             if (File.Exists(gitPath))
             {
                 var classification = ClassifyGitlink(gitPath);
                 lock (_lock)
                 {
-                    if (_loggedLinkedDirs.Add(canonical))
+                    if (_loggedLinkedDirs.Add(repoRoot))
                     {
                         Debug.WriteLine(
-                            $"[GitRepoManager] Detected linked .git for '{canonical}' (classified as {classification}).");
+                            $"[GitRepoManager] Detected linked .git for '{repoRoot}' (classified as {classification}).");
                     }
                 }
                 return classification;
@@ -176,7 +176,7 @@ namespace MultiTerminal.Services
         public GitRepoService GetOrCreate(string projectRoot)
         {
             if (_disposed || string.IsNullOrEmpty(projectRoot)) return null;
-            string key = CanonicalizeProjectRoot(projectRoot);
+            string key = ResolveRepoRoot(projectRoot);
             if (key == null) return null;
 
             lock (_lock)
@@ -210,7 +210,7 @@ namespace MultiTerminal.Services
         public GitRepoService TryGet(string projectRoot)
         {
             if (_disposed || string.IsNullOrEmpty(projectRoot)) return null;
-            string key = CanonicalizeProjectRoot(projectRoot);
+            string key = ResolveRepoRoot(projectRoot);
             if (key == null) return null;
 
             lock (_lock)
@@ -231,26 +231,74 @@ namespace MultiTerminal.Services
         /// <summary>
         /// Disposes the cached service for a given project root and removes it
         /// from the cache. Use when a project is being unloaded.
+        ///
+        /// <para>Eviction tries <see cref="ResolveRepoRoot"/> first (the same key
+        /// derivation as <see cref="GetOrCreate"/>) and, if that returns null
+        /// because the <c>.git</c> has disappeared, falls back to scanning
+        /// <see cref="_byPath"/> for an entry whose key is the canonicalised
+        /// input or an ancestor of it. The fallback preserves the documented
+        /// invalidation use cases (project rename, <c>git init</c> rerun, repo
+        /// move) — exactly the cases where the caller invalidates because the
+        /// filesystem state has changed.</para>
         /// </summary>
         public void Release(string projectRoot)
         {
             if (string.IsNullOrEmpty(projectRoot)) return;
-            string key = CanonicalizeProjectRoot(projectRoot);
-            if (key == null) return;
+            string resolvedKey = ResolveRepoRoot(projectRoot);
+            string canonical = resolvedKey == null ? CanonicalizeProjectRoot(projectRoot) : null;
 
             GitRepoService toDispose = null;
             lock (_lock)
             {
-                if (_byPath.TryGetValue(key, out var svc))
+                string keyToRemove = null;
+                if (resolvedKey != null && _byPath.ContainsKey(resolvedKey))
+                {
+                    keyToRemove = resolvedKey;
+                }
+                else if (canonical != null)
+                {
+                    // Pick the LONGEST matching ancestor — when nested repos are
+                    // cached (e.g. both `C:\outer` and `C:\outer\inner`), the
+                    // most specific root is the one the caller actually meant
+                    // to invalidate. First-match-wins would pick whichever the
+                    // dictionary enumerated first, which is not guaranteed and
+                    // could dispose an unrelated live service while leaving
+                    // the intended stale entry stranded.
+                    foreach (var k in _byPath.Keys)
+                    {
+                        if (IsSameOrAncestor(k, canonical) &&
+                            (keyToRemove == null || k.Length > keyToRemove.Length))
+                        {
+                            keyToRemove = k;
+                        }
+                    }
+                }
+
+                if (keyToRemove != null && _byPath.TryGetValue(keyToRemove, out var svc))
                 {
                     toDispose = svc;
-                    _byPath.Remove(key);
+                    _byPath.Remove(keyToRemove);
                 }
             }
             if (toDispose != null)
             {
                 try { toDispose.Dispose(); } catch { }
             }
+        }
+
+        /// <summary>
+        /// Returns true if <paramref name="descendant"/> is the same path as
+        /// <paramref name="ancestor"/> or sits underneath it. Both inputs are
+        /// expected to be canonical (trailing separators trimmed, full paths)
+        /// — see <see cref="CanonicalizeProjectRoot"/>. Case-insensitive to
+        /// match the rest of the cache-key comparisons on this class.
+        /// </summary>
+        private static bool IsSameOrAncestor(string ancestor, string descendant)
+        {
+            if (string.IsNullOrEmpty(ancestor) || string.IsNullOrEmpty(descendant)) return false;
+            if (string.Equals(ancestor, descendant, StringComparison.OrdinalIgnoreCase)) return true;
+            string prefix = ancestor + Path.DirectorySeparatorChar;
+            return descendant.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
         }
 
         public void Dispose()
@@ -268,6 +316,64 @@ namespace MultiTerminal.Services
             {
                 try { svc.Dispose(); } catch { }
             }
+        }
+
+        /// <summary>
+        /// Resolves a caller-supplied project path to the enclosing repository
+        /// root by walking the parent chain until an ancestor containing a
+        /// <c>.git</c> (directory or gitlink file) is found. Returns the canonical
+        /// repository-root path, or <c>null</c> if no <c>.git</c> is found before
+        /// the drive root.
+        ///
+        /// <para>This is what lets the HUD Git tab, dashboard, and per-terminal
+        /// git status work when the project path is a subdir of a repo — e.g.
+        /// a worktree subdir whose <c>.git</c> gitlink sits at the worktree root
+        /// rather than at the subdir level. Without walk-up, those callers
+        /// would classify the path as <see cref="GitRepoLayout.NotARepo"/> and
+        /// render the empty-state.</para>
+        ///
+        /// <para>Routing all cache-key derivation through this method also
+        /// consolidates two subdirs of the same repo onto a single cached
+        /// <see cref="GitRepoService"/> entry instead of opening two Repository
+        /// handles for the same underlying git directory.</para>
+        ///
+        /// <para>The walk is bounded (<c>MaxDepth</c>) to avoid pathological
+        /// loops on unusual filesystems. 64 levels is comfortably past any
+        /// realistic project depth.</para>
+        /// </summary>
+        private static string ResolveRepoRoot(string projectRoot)
+        {
+            string canonical = CanonicalizeProjectRoot(projectRoot);
+            if (canonical == null) return null;
+
+            const int MaxDepth = 64;
+            string cursor = canonical;
+            for (int i = 0; i < MaxDepth && !string.IsNullOrEmpty(cursor); i++)
+            {
+                string gitPath = Path.Combine(cursor, ".git");
+                try
+                {
+                    if (Directory.Exists(gitPath) || File.Exists(gitPath))
+                        return cursor;
+                }
+                catch
+                {
+                    // I/O issue probing this level — keep walking; a parent
+                    // may still be readable.
+                }
+
+                try
+                {
+                    cursor = Directory.GetParent(cursor)?.FullName;
+                }
+                catch
+                {
+                    // Unreadable parent (permissions, malformed path) — stop
+                    // here rather than spin.
+                    return null;
+                }
+            }
+            return null;
         }
 
         /// <summary>
