@@ -661,7 +661,45 @@ namespace MultiTerminal.TaskLifecycleBoard
             if (!root.TryGetProperty("projectId", out var projectEl))
                 return;
 
-            _broker?.UpdateTaskProject(_taskId, projectEl.GetString());
+            // ValueKind guard: a malformed message that sends projectId as a
+            // non-string (Number/Array/Object) would throw
+            // InvalidOperationException out of GetString() and be silently
+            // swallowed by the outer message-pump catch. Reject the shape
+            // early with an error toast so the failure is visible. Mirrors
+            // the guard in TasksPanelControl.edit_task added in Run 2.
+            if (projectEl.ValueKind != JsonValueKind.String
+                && projectEl.ValueKind != JsonValueKind.Null)
+            {
+                var shapePayload = JsonSerializer.Serialize(new
+                {
+                    type = "error",
+                    message = $"Cannot update project: 'projectId' must be a string or null (got {projectEl.ValueKind}).",
+                    authoritativeProjectId = _task?.ProjectId
+                });
+                PostMessage(shapePayload);
+                return;
+            }
+
+            var result = _broker?.UpdateTaskProject(_taskId, projectEl.GetString());
+            if (result?.Success == false)
+            {
+                // Surface the failure (e.g., ambiguous short id) AND include
+                // the authoritative ProjectId so the WebView can roll back
+                // its optimistic local mutation. Without authoritativeProjectId
+                // the dropdown/header would continue rendering the rejected
+                // value until a later refresh — a real state-divergence bug.
+                //
+                // _task.ProjectId is the post-Run-4-revert value: either the
+                // original (when SaveTask threw) or the unchanged stored value
+                // (when the broker fast-failed pre-mutation on ambiguous id).
+                var payload = JsonSerializer.Serialize(new
+                {
+                    type = "error",
+                    message = result.Error ?? "Failed to update project",
+                    authoritativeProjectId = _task?.ProjectId
+                });
+                PostMessage(payload);
+            }
         }
 
         private void HandleHelpersUpdate(JsonElement root)

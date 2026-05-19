@@ -236,6 +236,19 @@ namespace MultiTerminal.TasksPanel
             return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
         }
 
+        /// <summary>
+        /// Centralized {"type":"error","message":...} payload emit. Multiple
+        /// caller-side gaps (create_task failure, edit_task validation gates,
+        /// edit_task late race-coverage) post the same shape with the same
+        /// EscapeJson dialect; channeling through one helper keeps the wire
+        /// format consistent and avoids 7+ near-identical inline shapes.
+        /// </summary>
+        private void PostErrorMessage(string message)
+        {
+            var escaped = EscapeJson(message ?? "Operation failed");
+            PostMessage($"{{\"type\":\"error\",\"message\":\"{escaped}\"}}");
+        }
+
         private void OnWebViewInitialized(object sender, CoreWebView2InitializationCompletedEventArgs e)
         {
             DebugLog($"OnWebViewInitialized: success={e.IsSuccess}");
@@ -449,6 +462,14 @@ namespace MultiTerminal.TasksPanel
                                     }
                                 }
                             }
+                            else
+                            {
+                                // Surface CreateTask failure (e.g., ambiguous projectId)
+                                // and skip the checklist/assignee/helpers follow-ups —
+                                // those would target a non-existent task and produce
+                                // additional silent failures.
+                                PostErrorMessage(result?.Error ?? "Failed to create task");
+                            }
                         }
                         break;
 
@@ -506,25 +527,141 @@ namespace MultiTerminal.TasksPanel
                             var testResults = root.TryGetProperty("testResults", out var testEl)
                                 ? testEl.GetString() : null;
 
+                            // Pre-validate ALL fields BEFORE any state mutation.
+                            // The edit is treated as one user-level operation —
+                            // any invalid input must abort the whole edit so the
+                            // user doesn't see (e.g.) the title rename land
+                            // while a bad priority is silently rejected. The
+                            // existing per-field broker methods each validate
+                            // and return Success=false on bad input but only
+                            // AFTER prior fields already persisted; we close
+                            // that gap here by validating up-front.
+                            //
+                            // ValueKind guard for projectId: a malformed message
+                            // sending projectId as a non-string (Number/Array/
+                            // Object) would throw InvalidOperationException out
+                            // of GetString() and be silently swallowed by the
+                            // outer try/catch. Reject the shape early.
+                            bool hasProjectId = root.TryGetProperty("projectId", out var editProjectIdEl);
+                            string editProjectIdRaw = null;
+                            if (hasProjectId)
+                            {
+                                if (editProjectIdEl.ValueKind != JsonValueKind.String
+                                    && editProjectIdEl.ValueKind != JsonValueKind.Null)
+                                {
+                                    PostErrorMessage($"Cannot save task: 'projectId' must be a string or null (got {editProjectIdEl.ValueKind}).");
+                                    break;
+                                }
+                                editProjectIdRaw = editProjectIdEl.GetString();
+                            }
+
+                            // Title cannot be empty (UpdateTask would reject it
+                            // anyway, but only after we'd have no way to know
+                            // what else might have already partially applied —
+                            // here it's still pre-mutation, so safe to bail).
+                            var editTitleStr = editTitleEl.GetString();
+                            if (string.IsNullOrWhiteSpace(editTitleStr))
+                            {
+                                PostErrorMessage("Cannot save task: title cannot be empty.");
+                                break;
+                            }
+
+                            // Priority must be one of the documented values.
+                            string editPriorityStr = null;
+                            bool hasPriority = root.TryGetProperty("priority", out var editPriorityEl);
+                            if (hasPriority)
+                            {
+                                editPriorityStr = editPriorityEl.GetString();
+                                if (editPriorityStr != "urgent" && editPriorityStr != "normal" && editPriorityStr != "low")
+                                {
+                                    PostErrorMessage($"Cannot save task: invalid priority '{editPriorityStr}' (expected urgent | normal | low).");
+                                    break;
+                                }
+                            }
+
+                            // Status must be one of the documented values.
+                            string editStatusStr = null;
+                            bool hasStatus = root.TryGetProperty("status", out var editStatusEl);
+                            if (hasStatus)
+                            {
+                                editStatusStr = editStatusEl.GetString();
+                                if (editStatusStr != "todo" && editStatusStr != "in_progress" && editStatusStr != "done" && editStatusStr != "suggestion")
+                                {
+                                    PostErrorMessage($"Cannot save task: invalid status '{editStatusStr}' (expected todo | in_progress | done | suggestion).");
+                                    break;
+                                }
+                            }
+
+                            // Project ambiguity dry-run. Capture the canonical
+                            // id so we pass exactly what we validated to
+                            // UpdateTaskProject, rather than re-resolving the
+                            // raw string at apply time. Without this thread,
+                            // a registry mutation in the microseconds between
+                            // dry-run and apply could resolve the same input
+                            // differently — pedantic check/use split, but
+                            // free to close.
+                            string editProjectIdToApply = editProjectIdRaw;
+                            if (hasProjectId && _broker != null)
+                            {
+                                string canonicalProjectId = _broker.TryNormalizeProjectId(editProjectIdRaw, out bool projectAmbiguous);
+                                if (projectAmbiguous)
+                                {
+                                    PostErrorMessage($"Project id '{editProjectIdRaw}' is ambiguous (matches multiple registered projects, or is a short prefix of one); edit not applied. Pass the full id.");
+                                    break;
+                                }
+                                // canonicalProjectId may be null when the input
+                                // was empty/whitespace (caller intent: clear
+                                // binding) — pass null through to preserve
+                                // that semantic. For a registered key or
+                                // unique-prefix expansion, pass the canonical.
+                                // For an unknown raw, canonical equals trimmed
+                                // raw — pass-through is identical to the
+                                // pre-fix behaviour.
+                                editProjectIdToApply = canonicalProjectId;
+                            }
+
+                            // All fields validated. Apply via the existing
+                            // per-field broker methods. Cross-SaveTask atomicity
+                            // for runtime persistence exceptions is NOT
+                            // guaranteed here — the per-field methods each call
+                            // SaveTask and a mid-sequence DB failure can still
+                            // half-apply. Closing that requires either a
+                            // transaction-aware EditTask broker method or
+                            // SQLite transactions across the per-field calls;
+                            // both are out of scope for this task and tracked
+                            // as follow-up. The pre-validation above closes
+                            // the dominant failure mode (invalid input).
+
                             // Update title, description, and documentation fields
-                            _broker?.UpdateTask(taskId, editTitleEl.GetString(), editDescription, editedBy, plan, implementation, testResults);
+                            _broker?.UpdateTask(taskId, editTitleStr, editDescription, editedBy, plan, implementation, testResults);
 
                             // Update priority if provided
-                            if (root.TryGetProperty("priority", out var editPriorityEl))
+                            if (hasPriority)
                             {
-                                _broker?.UpdateTaskPriority(taskId, editPriorityEl.GetString());
+                                _broker?.UpdateTaskPriority(taskId, editPriorityStr);
                             }
 
                             // Update project if provided
-                            if (root.TryGetProperty("projectId", out var editProjectIdEl))
+                            if (hasProjectId)
                             {
-                                _broker?.UpdateTaskProject(taskId, editProjectIdEl.GetString());
+                                var projResult = _broker?.UpdateTaskProject(taskId, editProjectIdToApply);
+                                if (projResult?.Success == false)
+                                {
+                                    // Race: project registry shifted between
+                                    // pre-validate and apply, OR persistence
+                                    // failed (Run 4 fix returns Success=false
+                                    // and reverts the in-memory mutation in
+                                    // that case). Surface the late failure
+                                    // so the user knows the project change
+                                    // didn't apply.
+                                    PostErrorMessage(projResult.Error ?? "Failed to update project");
+                                }
                             }
 
                             // Update status if provided
-                            if (root.TryGetProperty("status", out var editStatusEl))
+                            if (hasStatus)
                             {
-                                _broker?.UpdateTaskStatus(taskId, editStatusEl.GetString());
+                                _broker?.UpdateTaskStatus(taskId, editStatusStr);
                             }
 
                             // Update assignee if provided

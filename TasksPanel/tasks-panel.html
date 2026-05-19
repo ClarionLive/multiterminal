@@ -1072,6 +1072,10 @@
             transform: translateY(0);
         }
 
+        .toast.error {
+            background-color: #d32f2f;
+        }
+
         /* Modal styles */
         /* Inline Add Task Form */
         .inline-add-form {
@@ -1400,6 +1404,9 @@
                     break;
                 case 'task_claimed':
                     showToast(`${data.claimedBy} claimed: ${data.taskTitle}`);
+                    break;
+                case 'error':
+                    showToast(data.message || 'Operation failed', true);
                     break;
                 case 'projects':
                     updateProjects(data.projects);
@@ -2577,13 +2584,14 @@
             showToast(terminalName ? `Task assigned to ${terminalName}` : 'Task unassigned');
         }
 
-        function showToast(message) {
+        function showToast(message, isError = false) {
             const toast = document.getElementById('toast');
             toast.textContent = message;
+            toast.classList.toggle('error', !!isError);
             toast.classList.add('show');
             setTimeout(() => {
                 toast.classList.remove('show');
-            }, 3000);
+            }, isError ? 5000 : 3000);
         }
 
         // Close assign dropdown when clicking outside

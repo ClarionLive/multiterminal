@@ -2291,6 +2291,17 @@ body.light .helper-chip {
             if (cardModalOpenIndex !== null) {
                 renderCardModalImages(cardModalOpenIndex);
             }
+        } else if (data.type === "error") {
+            showErrorToast(data.message);
+            // Roll back optimistic local state when the host sends back an
+            // authoritative value. Today only the project-update path uses
+            // this — the popover save mutates currentTask.projectId before
+            // the host confirms; without rollback the UI would keep showing
+            // the rejected project until a later refresh.
+            if (Object.prototype.hasOwnProperty.call(data, "authoritativeProjectId") && currentTask) {
+                currentTask.projectId = data.authoritativeProjectId || null;
+                renderAll();
+            }
         }
     }
 
@@ -2854,6 +2865,22 @@ body.light .helper-chip {
             toast.classList.remove("visible");
             invalidDropToastTimer = null;
         }, 2000);
+    }
+
+    // Generic error toast — reuses the existing styled element. Errors usually
+    // need more reading time than the invalid-drop hint, so the default
+    // duration is longer.
+    function showErrorToast(message, durationMs) {
+        var toast = document.getElementById("invalidDropToast");
+        if (!toast) return;
+        toast.textContent = message || "Operation failed";
+        toast.classList.add("visible");
+
+        if (invalidDropToastTimer) clearTimeout(invalidDropToastTimer);
+        invalidDropToastTimer = setTimeout(function () {
+            toast.classList.remove("visible");
+            invalidDropToastTimer = null;
+        }, typeof durationMs === "number" ? durationMs : 5000);
     }
 
     function transitionRequiresNotes(fromStatus, toStatus) {
