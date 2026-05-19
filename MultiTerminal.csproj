@@ -31,6 +31,14 @@
     <Compile Remove="AgentProcessTest\**" />
     <Content Remove="AgentProcessTest\**" />
     <None Remove="AgentProcessTest\**" />
+    <!-- Sibling git worktrees live under worktrees/ — exclude to avoid CS0111 duplicates -->
+    <Compile Remove="worktrees\**" />
+    <Content Remove="worktrees\**" />
+    <None Remove="worktrees\**" />
+    <EmbeddedResource Remove="worktrees\**" />
+    <Page Remove="worktrees\**" />
+    <ApplicationDefinition Remove="worktrees\**" />
+    <Resource Remove="worktrees\**" />
   </ItemGroup>
 
   <ItemGroup>
