@@ -1803,6 +1803,60 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Every <c>worktree_path</c> ever recorded — both <c>active</c> and
+        /// <c>pruned</c>. Used by the janitor's orphan empty-dir sweep (Pass 3)
+        /// to derive the set of parent directories where worktrees have lived,
+        /// then enumerate sibling dirs and rmdir empty orphans. Returns raw
+        /// paths only (no metadata) since callers just need the set.
+        /// </summary>
+        public List<string> ListAllWorktreePaths()
+        {
+            const string sql = "SELECT worktree_path FROM task_worktrees WHERE worktree_path IS NOT NULL AND worktree_path <> ''";
+            var results = new List<string>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(reader.GetString(0));
+            }
+            return results;
+        }
+
+        /// <summary>
+        /// Worktree records that are <c>status='active'</c> but whose owning
+        /// task is <c>done</c>. Used by the janitor's deferred-prune retry
+        /// pass — when the broker's pre-prune broadcast times out and the
+        /// prune is deferred, the worktree is left active; the janitor finds
+        /// these rows on a later sweep and retries the prune once agents
+        /// have likely released their cwd. Task db4b18c6 cycle-3.
+        /// </summary>
+        public List<MCPServer.Models.TaskWorktree> ListActiveWorktreesForDoneTasks()
+        {
+            const string sql = @"
+                SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status
+                FROM task_worktrees w
+                JOIN tasks t ON t.id = w.task_id
+                WHERE w.status = 'active' AND t.status = 'done'
+                ORDER BY w.created_at DESC
+            ";
+            var results = new List<MCPServer.Models.TaskWorktree>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new MCPServer.Models.TaskWorktree
+                {
+                    TaskId = reader.GetString(0),
+                    WorktreePath = reader.GetString(1),
+                    BranchName = reader.GetString(2),
+                    CreatedAt = DateTime.Parse(reader.GetString(3)),
+                    Status = reader.GetString(4)
+                });
+            }
+            return results;
+        }
+
+        /// <summary>
         /// List worktree records that are <c>pruned</c> but whose owning task is
         /// <c>done</c>. These are the rows the Phase 4 janitor inspects: if the
         /// task branch (<c>task/{taskIdShort}</c>) still exists in git, the merge

@@ -312,6 +312,109 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<TaskActiveChangedEventArgs> TaskActiveChanged;
 
         /// <summary>
+        /// Fires shortly before <see cref="WorktreeManager.PruneForTaskAsync"/>
+        /// is invoked in the task-done flow. Carries the worktree path that's
+        /// about to be removed, the owning repo root, and the task assignee.
+        /// Subscribed by MainForm to broadcast a <c>worktree_pruning</c> event
+        /// to every live terminal's Claude Code Channel so any agent with cwd
+        /// inside the worktree can <c>cd</c> out before git tries the rmdir
+        /// (task db4b18c6). Broadcast is best-effort — janitor Pass 3 is the
+        /// durable backstop for missed evictions.
+        /// </summary>
+        public event EventHandler<WorktreePruningEventArgs> WorktreePruning;
+
+        /// <summary>
+        /// Janitor-callable retry for a prune that was deferred at task-done
+        /// time. Cycle-4 contract:
+        /// <list type="bullet">
+        ///   <item>Re-validates that the task is still <c>done</c> before
+        ///   pruning — closes the security HIGH data-loss path where a task
+        ///   reopened between the janitor's snapshot query and this callback
+        ///   could still get its live worktree removed.</item>
+        ///   <item>Only unmarks the path on a clean outcome (prune succeeded
+        ///   OR the prune is no longer wanted because the task was reopened).
+        ///   If the prune itself fails, the path stays marked so spawns
+        ///   continue to be refused; the next janitor sweep retries.</item>
+        /// </list>
+        /// </summary>
+        public async Task<bool> TryDeferredPruneRetryAsync(string taskId)
+        {
+            if (string.IsNullOrEmpty(taskId)) return false;
+            string markedPath = null;
+            bool clearMarkOnExit = false;
+            try
+            {
+                var record = _taskDb.GetWorktreeForTask(taskId);
+                if (record == null || !string.Equals(record.Status, "active", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                // Cycle-4 security HIGH fix: re-check task status. The janitor
+                // snapshot can be stale by the time this callback runs; if the
+                // task has been reopened (moved out of done) we must NOT prune
+                // the live worktree.
+                var task = _taskDb.GetTask(taskId);
+                if (task == null || !string.Equals(task.Status, "done", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Task no longer wants pruning. Clear any stale defer-mark
+                    // so spawns can resume in the worktree.
+                    WorktreePruneCoordinator.UnmarkPruning(record.WorktreePath);
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Deferred prune for task {taskId} cancelled — task no longer 'done'. Released defer-mark.");
+                    return false;
+                }
+
+                string projectPath = TryGetProjectPathForTask(taskId);
+                if (string.IsNullOrEmpty(projectPath)) return false;
+
+                markedPath = record.WorktreePath;
+                WorktreePruneCoordinator.MarkPruning(markedPath); // idempotent; broker already marked at defer time
+                bool removed = await _worktrees.PruneForTaskAsync(taskId, projectPath).ConfigureAwait(false);
+                clearMarkOnExit = removed; // only unmark on success
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] TryDeferredPruneRetryAsync({taskId}) threw: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (clearMarkOnExit && !string.IsNullOrEmpty(markedPath))
+                {
+                    WorktreePruneCoordinator.UnmarkPruning(markedPath);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Internal helper that invokes <see cref="WorktreePruning"/> with
+        /// exception isolation. Returns the event args so callers can inspect
+        /// <see cref="WorktreePruningEventArgs.AllDelivered"/> for the
+        /// defer-on-timeout decision (cycle-3 adversary HIGH fix).
+        /// </summary>
+        private WorktreePruningEventArgs FireWorktreePruning(string taskId, string worktreePath, string repoRoot, string agentName)
+        {
+            var args = new WorktreePruningEventArgs
+            {
+                TaskId = taskId,
+                WorktreePath = worktreePath,
+                RepoRoot = repoRoot,
+                AgentName = agentName,
+            };
+            try
+            {
+                WorktreePruning?.Invoke(this, args);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] WorktreePruning subscribers threw: {ex.Message}");
+            }
+            return args;
+        }
+
+        /// <summary>
         /// Fires BranchOutcomeUpdated. Called by BranchMetadataService after a successful
         /// upsert so subscribers (HudGitRenderer) can refresh.
         /// </summary>
@@ -1117,6 +1220,21 @@ namespace MultiTerminal.MCPServer.Services
 
             System.Diagnostics.Debug.WriteLine($"[MessageBroker] DisconnectTerminalByName: {name} (terminal found: {terminal != null})");
             return true;
+        }
+
+        /// <summary>
+        /// Every <c>IsConnected</c> terminal, unfiltered by profile online
+        /// status or temporary-agent rules. Used by the
+        /// <see cref="WorktreePruning"/> broadcast subscriber so subagents
+        /// (names like "Agent Alice") — exactly the shells most likely to
+        /// hold cwd inside a worktree — also receive the eviction signal.
+        /// <see cref="GetTerminals"/>'s filtering is appropriate for UI
+        /// listings but wrong for broadcast audiences (task db4b18c6 cycle
+        /// 2, debugger HIGH finding).
+        /// </summary>
+        public List<TerminalInfo> GetAllConnectedTerminals()
+        {
+            return _terminals.Values.Where(t => t.IsConnected).ToList();
         }
 
         /// <summary>
@@ -3122,23 +3240,91 @@ namespace MultiTerminal.MCPServer.Services
                 bool prunedOK = false;
                 if (shouldPrune)
                 {
-                    try
+                    // Pre-prune broadcast (task db4b18c6): tell every live
+                    // terminal which worktree path is about to be removed so
+                    // any agent with cwd inside it can cd out before git tries
+                    // the rmdir. Without this, the agent's open handle keeps
+                    // the dir alive as an empty orphan on Windows.
+                    //
+                    // Cycle-2 fixes:
+                    //   - Subscriber awaits its HTTP deliveries with a bounded
+                    //     timeout (see MainForm.OnBrokerWorktreePruning), so
+                    //     this call now synchronously blocks until the agents
+                    //     have been *notified* (not just enqueued). The bare
+                    //     Thread.Sleep(500) "gut budget" is gone.
+                    //   - WorktreePruneCoordinator marks the path as pruning
+                    //     so a concurrent SpawnTerminal can refuse to launch
+                    //     into a soon-to-be-deleted worktree (closes the
+                    //     TOCTOU window adversary flagged).
+                    string worktreePathToPrune = _worktrees?.GetWorktreePathForTask(taskId);
+                    bool marked = false;
+                    bool deferred = false;
+                    if (!string.IsNullOrEmpty(worktreePathToPrune))
                     {
-                        _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
-                        prunedOK = true;
+                        WorktreePruneCoordinator.MarkPruning(worktreePathToPrune);
+                        marked = true;
+                        var fireArgs = FireWorktreePruning(taskId, worktreePathToPrune, doneProj.Path, task.Assignee);
+
+                        // Cycle-3 adversary HIGH fix: if the broadcast didn't
+                        // complete in time, DEFER prune — leave the worktree
+                        // active so the janitor's deferred-prune pass retries
+                        // once agents have likely moved on. Pruning while
+                        // agents still hold cwd reduces to the partial-prune
+                        // fallback + empty shell, which Pass 3 has to clean
+                        // up anyway. Skipping it removes that window.
+                        deferred = !fireArgs.AllDelivered;
                     }
-                    catch (Exception ex)
+
+                    if (deferred)
                     {
                         System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                            $"[MessageBroker] Prune deferred for task {taskId} (broadcast timeout); janitor will retry.");
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
                             Type = "worktree",
-                            Action = "prune_failed",
-                            Content = $"Worktree prune failed for '{task.Title}'. Auto-merge skipped — see debug log for details.",
+                            Action = "prune_deferred",
+                            Content = $"Prune deferred for '{task.Title}' — broadcast did not complete in time; janitor will retry.",
                             RelatedId = taskId
                         });
+                        // No prune attempt → don't auto-merge this pass either;
+                        // janitor's retry will get there once the prune lands.
+                    }
+                    else
+                    {
+                        try
+                        {
+                            _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                            prunedOK = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                            RecordActivity(new ActivityEvent
+                            {
+                                Terminal = task.Assignee ?? "System",
+                                Type = "worktree",
+                                Action = "prune_failed",
+                                Content = $"Worktree prune failed for '{task.Title}'. Auto-merge skipped — see debug log for details.",
+                                RelatedId = taskId
+                            });
+                        }
+                    }
+
+                    // Cycle-4 debugger MED fix: when deferred=true the worktree
+                    // is still active on disk + git — but we've decided to
+                    // prune it later via the janitor. Keep the path marked so
+                    // SpawnTerminal continues to refuse it during the defer
+                    // window. The janitor's TryDeferredPruneRetryAsync handles
+                    // unmark-on-success (or task-reopened cancellation).
+                    // For the non-deferred path: a failed prune leaves the
+                    // worktree in a known-valid state (no destructive partial
+                    // state outside the partial-prune fallback which already
+                    // marks the DB pruned), so unmarking is safe.
+                    if (marked && !deferred)
+                    {
+                        WorktreePruneCoordinator.UnmarkPruning(worktreePathToPrune);
                     }
                 }
 
@@ -6624,6 +6810,37 @@ namespace MultiTerminal.MCPServer.Services
         public string NewTaskId { get; set; }
 
         public string NewWorktreePath { get; set; }
+    }
+
+    /// <summary>
+    /// Event args for <see cref="MessageBroker.WorktreePruning"/>. Fired just
+    /// before <see cref="WorktreeManager.PruneForTaskAsync"/> in the task-done
+    /// flow so agents with cwd inside the worktree can evict before git tries
+    /// the rmdir. <see cref="AgentName"/> is the task assignee (may be null
+    /// for unowned tasks); subscribers broadcast to ALL live terminals
+    /// regardless, because subagents/helpers may also hold cwd in the
+    /// worktree even though they aren't the assignee.
+    /// </summary>
+    public class WorktreePruningEventArgs : EventArgs
+    {
+        public string TaskId { get; set; }
+
+        public string WorktreePath { get; set; }
+
+        public string RepoRoot { get; set; }
+
+        public string AgentName { get; set; }
+
+        /// <summary>
+        /// Subscriber-writable. Default <c>true</c>. The MainForm subscriber
+        /// sets this to <c>false</c> when the channel-delivery 1.5s timeout
+        /// wins the race against <c>Task.WhenAll(deliveries)</c> — i.e. at
+        /// least one terminal didn't acknowledge the broadcast in time.
+        /// Broker reads this after firing and DEFERS the prune (leaves the
+        /// worktree active) so the janitor can retry once agents have likely
+        /// moved on. Cycle-3 adversary HIGH fix.
+        /// </summary>
+        public bool AllDelivered { get; set; } = true;
     }
 
     /// <summary>
