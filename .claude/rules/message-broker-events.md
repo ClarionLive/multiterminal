@@ -19,6 +19,7 @@ Subscribe in MainForm or panels for UI updates:
 - `NotificationReceived`, `SessionLineageUpdated`
 - `BrowserTabRequested`, `BranchOutcomeUpdated`
 - `TaskActiveChanged` — fires after `SetTaskActive` swaps the assignee's active task. Args carry `AgentName`, `OldTaskId`+`OldWorktreePath` (nullable when no prior active task), `NewTaskId`+`NewWorktreePath` (nullable when no worktree materialized). Subscribed by MainForm which pushes a `{type:"task_active_changed",...}` JSON envelope over the agent's Claude Code Channel for the auto-cd hook (task c6ed236c).
+- `WorktreePruning` — fires synchronously just before `WorktreeManager.PruneForTaskAsync` in the task-done flow. Args carry `TaskId`, `WorktreePath`, `RepoRoot`, `AgentName` (assignee, possibly null). Subscribed by MainForm which broadcasts a `{type:"worktree_pruning",...}` JSON envelope to EVERY connected terminal (via `GetAllConnectedTerminals`, not `GetTerminals` — subagents are not filtered out) so any agent with cwd inside the worktree can `cd` out before the rmdir attempt. The subscriber synchronously awaits deliveries with a 1.5s cap; that's the only sync point between broadcast and prune (task db4b18c6).
 
 # Project System Architecture (Phase 4 -- SQLite-only)
 

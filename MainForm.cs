@@ -214,7 +214,8 @@ namespace MultiTerminal
                                         });
                                     }
                                     catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[Janitor] activity log failed: {ex.Message}"); }
-                                }).GetAwaiter().GetResult();
+                                },
+                                tryDeferredPruneRetry: id => broker.TryDeferredPruneRetryAsync(id)).GetAwaiter().GetResult();
                         }
                         catch (Exception ex)
                         {
@@ -555,6 +556,12 @@ namespace MultiTerminal
                 // auto-cd hook can react. Subscriber lives in MainForm because
                 // the broker is HTTP-free.
                 _mcpServer.Broker.TaskActiveChanged += OnBrokerTaskActiveChanged;
+
+                // Task db4b18c6: broadcast worktree_pruning to every live
+                // terminal before the broker runs PruneForTaskAsync, so any
+                // agent (assignee or helper/subagent) with cwd inside the
+                // worktree can cd out before Windows holds an open handle.
+                _mcpServer.Broker.WorktreePruning += OnBrokerWorktreePruning;
 
                 // Wire up spawn callback for programmatic terminal spawning
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 17: Checking SpawnService");
@@ -1447,6 +1454,108 @@ namespace MultiTerminal
             {
                 _debugLogService.Warning("MainForm",
                     $"OnBrokerTaskActiveChanged threw for '{e?.AgentName}': {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Subscriber for MessageBroker.WorktreePruning (task db4b18c6).
+        /// Broadcasts a <c>{type:"worktree_pruning",...}</c> envelope to every
+        /// connected terminal's Claude Code Channel so any agent with cwd
+        /// inside the worktree can <c>cd</c> to the repo root before the
+        /// broker invokes <c>git worktree remove</c>.
+        ///
+        /// <para>Cycle-2 fixes:</para>
+        /// <list type="bullet">
+        ///   <item><b>Audience (debugger HIGH):</b> uses
+        ///   <see cref="MessageBroker.GetAllConnectedTerminals"/> instead of
+        ///   <see cref="MessageBroker.GetTerminals"/>. The latter filters out
+        ///   <c>"Agent *"</c> subagents — exactly the shells most likely to
+        ///   hold cwd inside the worktree.</item>
+        ///   <item><b>Observability (adversary HIGH):</b> the handler now
+        ///   synchronously awaits delivery completion (or a 1.5s timeout)
+        ///   before returning, replacing the broker's removed bare
+        ///   Thread.Sleep(500). The broker calls subscribers synchronously
+        ///   from <c>FireWorktreePruning</c>, so blocking here is the natural
+        ///   synchronization point — agents are notified before prune fires.</item>
+        /// </list>
+        ///
+        /// <para>The block is still best-effort: a delivered HTTP POST does
+        /// not prove the agent reacted before prune. Pass 3 catches that
+        /// residual gap.</para>
+        /// </summary>
+        private void OnBrokerWorktreePruning(object sender, MCPServer.Services.WorktreePruningEventArgs e)
+        {
+            if (e == null || string.IsNullOrEmpty(e.WorktreePath)) return;
+
+            try
+            {
+                var terminals = _mcpServer?.Broker?.GetAllConnectedTerminals();
+                if (terminals == null || terminals.Count == 0) return;
+
+                var payload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    type = "worktree_pruning",
+                    taskId = e.TaskId,
+                    worktreePath = e.WorktreePath,
+                    repoRoot = e.RepoRoot,
+                    agentName = e.AgentName,
+                });
+
+                // Cycle-4 adversary MED fix: track per-delivery success, not
+                // just completion. A 500/refused channel server completes the
+                // task with ok==false; without this, Task.WhenAll wins and
+                // AllDelivered stays true even though no agent acknowledged.
+                int failureCount = 0;
+                var deliveries = new List<Task>();
+                foreach (var t in terminals)
+                {
+                    if (t?.ChannelPort == null) continue;
+                    int port = t.ChannelPort.Value;
+                    string termName = t.Name;
+                    deliveries.Add(Task.Run(async () =>
+                    {
+                        bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal").ConfigureAwait(false);
+                        if (!ok)
+                        {
+                            System.Threading.Interlocked.Increment(ref failureCount);
+                            _debugLogService.Warning("MainForm",
+                                $"worktree_pruning push failed for '{termName}' on channel port {port}.");
+                        }
+                    }));
+                }
+
+                if (deliveries.Count == 0) return;
+
+                // Block subscriber until deliveries land OR 1.5s elapses,
+                // whichever first. Broker fires the event synchronously, so
+                // returning here means the agents have been notified before
+                // the broker proceeds to PruneForTaskAsync. The 1.5s cap
+                // bounds the broker stall on a sick channel server.
+                //
+                // Cycle-3 adversary HIGH fix: track which task won the race.
+                // If Task.Delay wins, at least one delivery didn't complete in
+                // time — signal that to the broker via args.AllDelivered=false
+                // so it can DEFER prune to the janitor instead of plowing
+                // ahead with a likely-doomed rmdir.
+                //
+                // Cycle-4 adversary MED fix: defer also if any delivery
+                // returned false (failure was fast but real — no acknowledgement).
+                var allDeliveries = Task.WhenAll(deliveries);
+                var timeout = Task.Delay(1500);
+                var winner = Task.WhenAny(allDeliveries, timeout).GetAwaiter().GetResult();
+                bool timedOut = winner == timeout;
+                bool anyFailed = System.Threading.Interlocked.CompareExchange(ref failureCount, 0, 0) > 0;
+                if (timedOut || anyFailed)
+                {
+                    e.AllDelivered = false;
+                    _debugLogService.Warning("MainForm",
+                        $"worktree_pruning broadcast for '{e.WorktreePath}' incomplete (timedOut={timedOut}, failedDeliveries={failureCount}) — signaling defer to broker.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService.Warning("MainForm",
+                    $"OnBrokerWorktreePruning threw for worktree '{e?.WorktreePath}': {ex.Message}");
             }
         }
 
