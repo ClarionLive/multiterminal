@@ -1,0 +1,64 @@
+VERIFIER HANDOFF:
+The verifier has already run and PASSED. Here is its report:
+---
+## Verification Report
+
+### Build Status: PASS
+- 0 Warnings, 0 Errors
+- Output: MultiTerminal.dll at bin/Debug/net8.0-windows/win-x64/
+
+### Item 1: Output-side `(no content)` detector — PASS
+- Fields/constants at lines 611-617: EmptyPromptPlaceholder, EmptyDetectorBufferMax, EmptyDetectorArmDelayMs, _emptyDetectorArmed, _emptyPlaceholderVisible, _sessionStartInjectedAfterEmpty, _emptyDetectorBuffer
+- DoStart resets new state at lines 227-230
+- OnTerminalDataReceived at lines 863-889: rolling buffer, edge-detection, one-shot inject via TypeInput("/session-start", "cr", 20), falling-edge resets dedup flag
+- ArmEmptyPlaceholderDetectorAfterDelay() at lines 742-755: async 5s delay, dispose-safe
+- Invoked from ClaudeCodeDetected path at line 855
+
+### Item 2: Input-side LF acceptance — PASS
+- Line 657: `if (b == 0x0D || b == 0x0A)` in BufferInputForSlashDetection
+
+### Overall Verdict: PASS
+2 of 2 items verified, 0 issues found. Build green at 0/0. Ready for testing.
+---
+Build is clean. Focus on security, not build/completeness issues the verifier already checked.
+
+CONTEXT FOR THE DIFF:
+Task bf5bcfd5 — restore /clear → /session-start re-injection in Claude Code terminals.
+
+File modified: H:\DevLaptop\ClarionPowerShell\MultiTerminal\worktrees\bf5bcfd5\Controls\TerminalControl.cs
+
+What changed:
+1. New output-side detector that watches a rolling 500-char window of terminal output for the literal string "(no content)". Edge-triggered: rising edge (placeholder appears) fires TypeInput("/session-start", "cr", 20) via xterm.js character typing. One-shot dedup flag clears on falling edge.
+2. Input-side /clear detection in BufferInputForSlashDetection now accepts 0x0A (LF) as well as 0x0D (CR) as the Enter trigger that flushes the input buffer and matches "/clear".
+
+The detector is armed 5 seconds after ClaudeCodeDetected fires (giving the initial new-terminal "initializing..." injection time to land).
+
+Pressure-test this diff for security defects. Focus areas:
+
+- Injection: SQL, command, path, XSS, deserialization
+- Auth / authz: missing checks, privilege escalation, session/token handling
+- Concurrency: TOCTOU, shared mutable state, async ordering assumptions
+- Input validation: boundary checks, size limits, untrusted data handling
+- Secrets: hardcoded keys, logged sensitive data, credentials in URLs
+- Error handling: info leaks via exceptions, open-vs-closed default behavior
+- Trust boundaries: third-party data trust, inter-service assumption mismatches
+
+Challenge the design, not just the code:
+- Is enforcement in the right place?
+- What caller assumptions might not hold under attacker input?
+- What breaks if input is hostile rather than cooperating?
+
+Severity scale:
+- critical → exploitable vulnerability with data loss / RCE / auth bypass. MUST fix before testing.
+- high → significant weakness, exploitation plausible. MUST fix before testing.
+- medium → concern requiring specific conditions to exploit. Fix recommended.
+- low → defense-in-depth note. Non-blocking.
+
+Each finding: severity tag, file:line or "design-level", OWASP category (A01–A10) if applicable, description, attack vector, specific recommendation.
+
+Verdict mapping:
+- approve = no critical/high findings.
+- needs-attention = medium/low findings only (informally: PASS_WITH_WARNINGS).
+- block = at least one critical or high finding.
+
+Keep findings grounded in the diff — do not speculate about unchanged code.
