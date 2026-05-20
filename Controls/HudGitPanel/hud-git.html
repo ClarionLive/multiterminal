@@ -609,6 +609,10 @@ html, body {
 .file-marker.T { background: rgba(250, 179, 135, 0.18); color: var(--yellow); }
 .file-marker.C { background: rgba(243, 139, 168, 0.32); color: var(--red); }
 .file-marker.UNK { background: rgba(112, 112, 136, 0.10); color: var(--fg-dim); }
+/* Spacer that occupies the same horizontal slot as .file-marker so folder
+   nodes (e.g. untracked-dir roots) align their label with the file paths
+   above/below them, which sit one marker-width to the right of the chevron. */
+.file-marker-spacer { width: 16px; flex: 0 0 16px; }
 .file-path {
     flex: 1;
     min-width: 0;
@@ -1739,6 +1743,13 @@ html, body {
         const groupedByTask = Array.isArray(wc.groupedByTask) ? wc.groupedByTask : [];
         const unlinked = Array.isArray(wc.unlinked) ? wc.unlinked : [];
         const workingTreeFlat = Array.isArray(wc.workingTree) ? wc.workingTree : [];
+        const untrackedDirRoots = Array.isArray(wc.untrackedDirRoots) ? wc.untrackedDirRoots : [];
+        // Porcelain entry count = what `git status --porcelain | wc -l` reports.
+        // Drives the visible (N) header so the tree count matches the badge.
+        // Fallback to recursed count if the server didn't send it (degraded path).
+        const porcelainCount = (typeof wc.porcelainEntryCount === 'number')
+            ? wc.porcelainEntryCount
+            : workingTreeFlat.length;
         const recentCommits = Array.isArray(folder.recentCommits) ? folder.recentCommits : [];
 
         // --- working changes ---
@@ -1753,7 +1764,7 @@ html, body {
         wcNode.row.appendChild(wcLabel);
         const wcCount = document.createElement('span');
         wcCount.className = 'tree-count';
-        wcCount.textContent = ' (' + workingTreeFlat.length + ')';
+        wcCount.textContent = ' (' + porcelainCount + ')';
         wcNode.row.appendChild(wcCount);
         const wcTagline = document.createElement('span');
         wcTagline.className = 'tree-tagline';
@@ -1785,7 +1796,7 @@ html, body {
                 wcNode.children.appendChild(buildTaskGroupNode(group, depth + 1, path, idPrefix));
             }
             if (unlinked.length > 0) {
-                wcNode.children.appendChild(buildUnlinkedGroupNode(unlinked, depth + 1, path, idPrefix));
+                wcNode.children.appendChild(buildUnlinkedGroupNode(unlinked, depth + 1, path, idPrefix, untrackedDirRoots));
             }
         }
 
@@ -1885,11 +1896,53 @@ html, body {
         return node.wrap;
     }
 
+    // Partition an array of file rows by porcelain-style untracked-dir roots.
+    // Roots come from the server (GitRepoService.GetUntrackedDirRoots) with
+    // trailing slashes (e.g. `Clarion/`). Files whose path begins with a root
+    // are folded under that root; files not under any root stay top-level.
+    // Returns { topLevel: file[], dirGroups: [{rootPath, files}] }.
+    function partitionByUntrackedRoots(files, untrackedDirRoots) {
+        const roots = Array.isArray(untrackedDirRoots) ? untrackedDirRoots : [];
+        if (roots.length === 0) {
+            return { topLevel: files.slice(), dirGroups: [] };
+        }
+        // Longest-first so a nested root like `a/b/` wins over `a/` if both were
+        // somehow emitted. Defensive — libgit2 only emits the outermost root.
+        const sortedRoots = roots.slice().sort((a, b) => b.length - a.length);
+        const buckets = new Map();
+        for (const r of sortedRoots) buckets.set(r, []);
+        const topLevel = [];
+        for (const file of files) {
+            const path = (file && file.path) ? String(file.path) : '';
+            let matched = null;
+            for (const r of sortedRoots) {
+                if (path.startsWith(r)) { matched = r; break; }
+            }
+            if (matched) buckets.get(matched).push(file);
+            else topLevel.push(file);
+        }
+        const dirGroups = [];
+        // Preserve server-side root order for deterministic display.
+        for (const r of roots) {
+            const files = buckets.get(r);
+            if (files && files.length > 0) dirGroups.push({ rootPath: r, files: files });
+        }
+        return { topLevel, dirGroups };
+    }
+
     // Unlinked changes group — files with no task linkage. Always rendered
     // at the bottom when present, with `drill-if->5` rule applied per
     // locked design (matches the per-task-group default).
-    function buildUnlinkedGroupNode(unlinked, depth, worktreePath, idPrefix) {
-        const defaultExpanded = unlinked.length <= 5;
+    //
+    // Porcelain alignment (task 046f2dea Phase 2): with `untrackedDirRoots`
+    // from the server, fold inner files of each untracked-dir root into a
+    // single collapsible folder node. Top-level entry count then matches
+    // `git status --porcelain` and the HUD badge instead of expanding to
+    // every recursed file.
+    function buildUnlinkedGroupNode(unlinked, depth, worktreePath, idPrefix, untrackedDirRoots) {
+        const partition = partitionByUntrackedRoots(unlinked, untrackedDirRoots);
+        const porcelainEntries = partition.topLevel.length + partition.dirGroups.length;
+        const defaultExpanded = porcelainEntries <= 5;
         const nodeId = idPrefix + ':group:_unlinked';
 
         const node = makeTreeNode({
@@ -1906,10 +1959,63 @@ html, body {
 
         const count = document.createElement('span');
         count.className = 'tg-count';
-        count.textContent = '· ' + unlinked.length;
+        count.textContent = '· ' + porcelainEntries;
         node.row.appendChild(count);
 
-        for (const file of unlinked) {
+        for (const file of partition.topLevel) {
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath));
+        }
+        for (const group of partition.dirGroups) {
+            node.children.appendChild(buildUntrackedDirNode(group, depth + 1, worktreePath, idPrefix));
+        }
+
+        return node.wrap;
+    }
+
+    // Untracked-directory node — collapsible folder containing the recursed
+    // file list inside one of the `?? dirname/` porcelain entries. Collapsed
+    // by default since these are by definition the directories git itself
+    // would roll up at the top level.
+    function buildUntrackedDirNode(group, depth, worktreePath, idPrefix) {
+        const rootPath = String(group.rootPath || '');
+        // Strip trailing slash for the nodeId so it round-trips with other
+        // expand-state keys; display keeps the slash for "this is a folder".
+        const idSegment = rootPath.endsWith('/') ? rootPath.slice(0, -1) : rootPath;
+        const nodeId = idPrefix + ':untrackedDir:' + idSegment;
+
+        const node = makeTreeNode({
+            nodeId: nodeId,
+            depth: depth,
+            defaultExpanded: false,
+            classes: ['untracked-dir'],
+        });
+
+        // Glyph-column alignment with sibling file rows. File rows render
+        // [invisible-leaf-chev 12px] [gap] [marker 16px] [gap] [path]; the
+        // folder chevron must occupy the same 16px marker slot so '▼' lines
+        // up with '?' above. Inject a leading 12px invisible leaf-chev to
+        // match the file-row prefix, then widen the makeTreeNode chevron to
+        // 16px so it visually IS the marker (no separate spacer needed).
+        const leadPad = document.createElement('span');
+        leadPad.className = 'tree-chevron leaf';
+        node.row.insertBefore(leadPad, node.row.firstChild);
+        const chev = node.row.querySelector('.tree-chevron:not(.leaf)');
+        if (chev) {
+            chev.style.width = '16px';
+            chev.style.flex = '0 0 16px';
+        }
+
+        const title = document.createElement('span');
+        title.className = 'tg-title';
+        title.textContent = rootPath;
+        node.row.appendChild(title);
+
+        const count = document.createElement('span');
+        count.className = 'tg-count';
+        count.textContent = '· ' + group.files.length;
+        node.row.appendChild(count);
+
+        for (const file of group.files) {
             node.children.appendChild(buildFileRow(file, depth + 1, worktreePath));
         }
 

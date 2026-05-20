@@ -322,6 +322,47 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Top-level untracked-directory roots, porcelain-style. Returns forward-slash
+        /// relative paths with a trailing slash (e.g. <c>"Clarion/"</c>) matching the
+        /// <c>?? dirname/</c> entries emitted by <c>git status --porcelain</c> when
+        /// the directory contains untracked files but is not itself tracked.
+        ///
+        /// <para>The HUD Git tab uses this to fold the recursed flat file list back
+        /// into porcelain-aligned tree nodes: each root becomes a single collapsible
+        /// folder containing the inner files, so the visible top-level entry count
+        /// matches the badge's <see cref="GetWorkingTreeSummaryCount"/>.</para>
+        ///
+        /// <para>Detection rule: with <c>RecurseUntrackedDirs=false</c>, libgit2
+        /// emits one <c>NewInWorkdir</c> entry per untracked top-level item — both
+        /// loose files (no trailing slash) and dir roots (trailing slash). Filter
+        /// on the trailing slash to keep only the dir roots.</para>
+        /// </summary>
+        public IReadOnlyList<string> GetUntrackedDirRoots()
+        {
+            lock (_repoLock)
+            {
+                if (_disposed) return Array.Empty<string>();
+
+                var statusOptions = new StatusOptions
+                {
+                    IncludeUntracked = true,
+                    RecurseUntrackedDirs = false,
+                };
+                var status = _repo.RetrieveStatus(statusOptions);
+
+                var roots = new List<string>();
+                foreach (var entry in status)
+                {
+                    if (!entry.State.HasFlag(FileStatus.NewInWorkdir)) continue;
+                    var path = entry.FilePath;
+                    if (string.IsNullOrEmpty(path)) continue;
+                    if (path[path.Length - 1] == '/') roots.Add(path);
+                }
+                return roots;
+            }
+        }
+
+        /// <summary>
         /// Returns the unified diff text for a single file's uncommitted changes
         /// (staged + unstaged combined, against HEAD). Returns empty string for
         /// untracked files in v1 — the working changes panel synthesises an

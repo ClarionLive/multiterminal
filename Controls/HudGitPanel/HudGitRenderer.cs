@@ -1113,12 +1113,67 @@ namespace MultiTerminal.Controls
             var status = svc.GetWorkingTreeStatus();
             var statusList = status ?? (System.Collections.Generic.IReadOnlyList<GitFileStatus>)Array.Empty<GitFileStatus>();
 
+            // Porcelain-aligned tree rendering: untracked-dir roots come back as
+            // `Clarion/`, `DatePickerWebviewCOM/` etc — the same entries `git
+            // status --porcelain` collapses to single lines. The JS uses these
+            // to fold inner files of `statusList` (which is recursed) into
+            // collapsible folder nodes so the visible top-level entry count
+            // matches the badge's GetWorkingTreeSummaryCount. Defaults to empty
+            // on any libgit2 hiccup so the rest of the payload still renders.
+            string[] untrackedDirRoots;
+            try
+            {
+                untrackedDirRoots = svc.GetUntrackedDirRoots().ToArray();
+            }
+            catch
+            {
+                untrackedDirRoots = Array.Empty<string>();
+            }
+            int porcelainEntryCount;
+            try
+            {
+                porcelainEntryCount = svc.GetWorkingTreeSummaryCount();
+            }
+            catch
+            {
+                porcelainEntryCount = statusList.Count;
+            }
+
+            // Contract-breakage detector for the load-bearing trailing-slash
+            // filter in GetUntrackedDirRoots. The fix assumes LibGit2Sharp
+            // emits a `/` on the FilePath of every untracked-dir entry; if a
+            // future libgit2/LibGit2Sharp version stops doing that, the
+            // filter silently returns empty and the JS folds nothing — i.e.
+            // the original "list overcounts vs badge" bug returns with no
+            // outward signal. The signature of that broken state is
+            // "porcelain count is smaller than the recursed list count
+            // (some collapsing IS happening on the porcelain side) AND
+            // we got no roots back". One Trace line catches it on the
+            // first refresh after a library upgrade. Zero cost in the
+            // healthy state. Adversary HIGH, Run 5.
+            if (untrackedDirRoots.Length == 0 && porcelainEntryCount < statusList.Count)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    "[HudGitRenderer] GetUntrackedDirRoots returned empty but porcelain count "
+                    + $"({porcelainEntryCount}) < recursed count ({statusList.Count}) for repo '{svcRepoRoot}'. "
+                    + "LibGit2Sharp trailing-slash contract may have changed — porcelain-folded "
+                    + "tree rendering disabled. See task 046f2dea.");
+            }
+
             // Phase 2 overlays — fetch attribution for each uncommitted file
             // (agent + task + pipeline status). Falls back to empty fields on
             // any failure so the working-changes panel still renders.
+            //
+            // Mode=OFF skips the fetch entirely: task_file_links is unreliable
+            // when worktree mode is off (stale rows misattribute fresh trunk
+            // edits — see a401e082). Skipping at the source means every
+            // downstream consumer — workingTree projection, unlinked bucket,
+            // groupedByTask, the JS-side contamination banner — sees a
+            // uniform "no task linkage" contract instead of each consumer
+            // needing its own normalization (Codex adversary, task 046f2dea).
             System.Collections.Generic.IReadOnlyList<GitFileAttribution> attributions = Array.Empty<GitFileAttribution>();
             var fileList = statusList.Select(f => f.Path ?? "").ToList();
-            if (attributionSvc != null && statusList.Count > 0)
+            if (attributionSvc != null && statusList.Count > 0 && WorktreeConfig.IsEnabled)
             {
                 try
                 {
@@ -1193,16 +1248,26 @@ namespace MultiTerminal.Controls
                 .ThenBy(g => g.taskTitle, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
+            // In mode=OFF, every workingTree entry already has linkageState=="none"
+            // (attribution lookup was skipped upstream — see the guard above).
+            // The filter therefore matches every file, which is the desired
+            // behavior: a populated unlinked bucket so the WORKING CHANGES list
+            // doesn't render "(clean)" while the HUD badge correctly reports N>0.
             var unlinked = workingTree
-                .Where(f => WorktreeConfig.IsEnabled && f.linkageState == "none")
+                .Where(f => f.linkageState == "none")
                 .ToArray();
 
             // Cross-task contamination: distinct active task IDs across ALL
             // active claims (multi-claim aware). Separate query from the
             // dedup'd attribution set so the multi-claim case the banner
             // exists to flag isn't hidden (adversary HIGH).
+            //
+            // Gated on mode=ON for the same reason the attribution fetch
+            // above is gated: in mode=OFF task_file_links is unreliable, so
+            // a contamination warning derived from it would carry the same
+            // stale-attribution risk as the chip leak we just fixed.
             string[] contamTaskIds = Array.Empty<string>();
-            if (attributionSvc != null && fileList.Count > 0)
+            if (attributionSvc != null && fileList.Count > 0 && WorktreeConfig.IsEnabled)
             {
                 try
                 {
@@ -1222,6 +1287,8 @@ namespace MultiTerminal.Controls
                 groupedByTask,
                 unlinked,
                 contamTaskIds,
+                untrackedDirRoots,
+                porcelainEntryCount,
             };
         }
 
@@ -1258,6 +1325,8 @@ namespace MultiTerminal.Controls
             groupedByTask = Array.Empty<object>(),
             unlinked = Array.Empty<object>(),
             contamTaskIds = Array.Empty<string>(),
+            untrackedDirRoots = Array.Empty<string>(),
+            porcelainEntryCount = 0,
         };
 
         /// <summary>

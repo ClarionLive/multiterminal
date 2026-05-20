@@ -126,8 +126,19 @@ namespace MultiTerminal.Services
 
             if (Directory.Exists(gitPath))
             {
-                _adminDir = gitPath;
-                _commonGitDir = gitPath;
+                // Canonicalize at storage time: Start()'s TOCTOU revalidation
+                // pass calls Path.GetFullPath on the stored value and compares
+                // with OrdinalIgnoreCase string.Equals. If the caller passed a
+                // forward-slash path (e.g. wt.Path from `git worktree list
+                // --porcelain` on Windows: "H:/foo"), Path.Combine here yields
+                // mixed separators ("H:/foo\.git") while Start()'s
+                // canonicalization yields all-backslash ("H:\foo\.git"), the
+                // compare fails, and Start() throws — surfacing as an empty
+                // workingTree in HudGitRenderer's catch and "(clean)" in the
+                // Git tab while the badge correctly counts dirty files.
+                string canonical = Path.GetFullPath(gitPath);
+                _adminDir = canonical;
+                _commonGitDir = canonical;
                 return;
             }
 
