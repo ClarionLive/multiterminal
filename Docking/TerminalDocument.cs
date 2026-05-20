@@ -175,6 +175,13 @@ namespace MultiTerminal.Docking
         private System.Threading.Timer _statusLineTimer;
         private string _lastStatusLineContent;
         private string _lastSharedQuotaContent;
+
+        // Working-tree dirty poll — GitRepoWatcher only watches .git/, so plain
+        // working-tree edits (modify, no stage) never fire RepoStateChanged.
+        // This timer ticks on a slow cadence and refreshes the HUD's
+        // uncommitted-changes strip + Git tab so silent dirt never accumulates.
+        private System.Windows.Forms.Timer _workingTreeDirtyTimer;
+        private bool _workingTreeRefreshInFlight;
         // Last folder pushed to the HUD Dashboard — lets polling detect real cwd drift
         // and re-push so the HUD header tracks Claude Code's workspace instead of the
         // stale launch-dir that came from the global _settings.GetLastDirectory() fallback.
@@ -998,6 +1005,11 @@ namespace MultiTerminal.Docking
             _hudSessions?.SetProject(workingDirectory);
             // Switch HUD to dashboard tab by default when starting a terminal
             _hudTabContainer?.SwitchToTabById("__dashboard__");
+
+            // Kick off working-tree dirty polling now that we have a project
+            // context. This surfaces uncommitted edits (which don't touch .git/)
+            // in the HUD header strip + Git tab on a slow cadence.
+            StartWorkingTreeDirtyPolling();
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== COMPLETE =====");
         }
@@ -2463,6 +2475,100 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Starts the working-tree dirty poll. Ticks every 10s, refreshes the
+        /// HUD header strip + Git tab so working-tree edits that don't touch
+        /// <c>.git/</c> (and so don't fire <c>RepoStateChanged</c>) still
+        /// surface. Idempotent; also hooks <see cref="Form.Activated"/> for
+        /// an on-focus refresh and triggers an immediate refresh on start.
+        /// </summary>
+        public void StartWorkingTreeDirtyPolling()
+        {
+            if (_isDisposing) return;
+            if (_workingTreeDirtyTimer != null) return;
+
+            _workingTreeDirtyTimer = new System.Windows.Forms.Timer { Interval = 10000 };
+            _workingTreeDirtyTimer.Tick += (s, e) => RefreshWorkingTreeDirty();
+            _workingTreeDirtyTimer.Start();
+
+            // On-focus refresh — DockContent is a Form, so Activated fires when
+            // this docked pane becomes the active document in the dock panel.
+            this.Activated += OnDocActivatedForDirtyRefresh;
+
+            // Kick an immediate refresh so the strip reflects current state
+            // without waiting 10s for the first tick.
+            RefreshWorkingTreeDirty();
+        }
+
+        /// <summary>
+        /// Stops the working-tree dirty poll and unsubscribes the focus handler.
+        /// </summary>
+        public void StopWorkingTreeDirtyPolling()
+        {
+            if (_workingTreeDirtyTimer != null)
+            {
+                _workingTreeDirtyTimer.Stop();
+                _workingTreeDirtyTimer.Dispose();
+                _workingTreeDirtyTimer = null;
+            }
+            this.Activated -= OnDocActivatedForDirtyRefresh;
+        }
+
+        private void OnDocActivatedForDirtyRefresh(object sender, EventArgs e)
+        {
+            RefreshWorkingTreeDirty();
+        }
+
+        /// <summary>
+        /// Computes the working-tree dirty count + current branch on a
+        /// background thread and pushes the result to the HUD strip. Also
+        /// kicks the Git tab to refresh so its per-worktree dirty counts
+        /// stay live. Guarded by a single-flight flag so slow git operations
+        /// don't pile up on the thread pool.
+        /// </summary>
+        private void RefreshWorkingTreeDirty()
+        {
+            if (_isDisposing) return;
+            if (_workingTreeRefreshInFlight) return;
+
+            string folder = _hudDispatchedFolder;
+            var broker = _messageBroker;
+            if (string.IsNullOrEmpty(folder) || broker == null) return;
+
+            _workingTreeRefreshInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                int count = 0;
+                string branch = "";
+                try
+                {
+                    var svc = broker.GitRepos?.GetOrCreate(folder);
+                    if (svc != null)
+                    {
+                        var status = svc.GetWorkingTreeStatus();
+                        count = status?.Count ?? 0;
+                        branch = svc.CurrentBranch ?? "";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[TerminalDocument.RefreshWorkingTreeDirty] {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    _workingTreeRefreshInFlight = false;
+                }
+
+                try
+                {
+                    _hudTabContainer?.SetWorkingTreeDirty(count, branch);
+                    _hudGit?.RequestRefresh();
+                }
+                catch { }
+            });
+        }
+
+        /// <summary>
         /// Stops the status line polling timer.
         /// </summary>
         public void StopStatusLinePolling()
@@ -2612,6 +2718,7 @@ namespace MultiTerminal.Docking
                 }
 
                 StopStatusLinePolling();
+                StopWorkingTreeDirtyPolling();
 
                 _projectFileWatcher?.Dispose();
                 _projectFileWatcher = null;

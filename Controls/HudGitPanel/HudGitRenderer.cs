@@ -768,6 +768,25 @@ namespace MultiTerminal.Controls
         // -------------------------------------------------------------------------
 
         /// <summary>
+        /// External trigger for a full refresh — used by TerminalDocument's
+        /// working-tree dirty poll to catch edits that don't touch <c>.git/</c>
+        /// (which the <see cref="GitRepoWatcher"/> can't see). Fire-and-forget;
+        /// safe to call from any thread.
+        /// </summary>
+        public void RequestRefresh()
+        {
+            if (IsDisposed) return;
+            try
+            {
+                if (InvokeRequired)
+                    BeginInvoke(new Action(() => { _ = RefreshAsync(); }));
+                else
+                    _ = RefreshAsync();
+            }
+            catch { }
+        }
+
+        /// <summary>
         /// Unified-payload refresh — fetches the worktree list, computes
         /// per-worktree working-changes + recent-commits via a transient
         /// <see cref="GitRepoService"/> per worktree, builds the

@@ -18,13 +18,17 @@ namespace MultiTerminal.Controls
 #pragma warning disable CA2213
         private readonly Panel _tabStrip;
         private readonly Panel _contentArea;
+        private readonly Panel _dirtyStrip;
+        private readonly Label _dirtyLabel;
 #pragma warning restore CA2213
         private readonly TaskHudRenderer _taskHud;
         private readonly List<TabEntry> _tabs = new List<TabEntry>();
         private int _activeTabIndex;
         private bool _isDarkTheme = true;
+        private int _dirtyCount;
 
         private const int TabStripHeight = 28;
+        private const int DirtyStripHeight = 22;
         private const int TabPadding = 12;
         private const int CloseButtonWidth = 18;
 
@@ -77,9 +81,40 @@ namespace MultiTerminal.Controls
                 BackColor = Color.FromArgb(30, 30, 30)
             };
 
-            // Order matters: Fill must be added before Top for DockStyle layout
+            // Uncommitted-changes header strip — surfaces working-tree dirt that
+            // doesn't touch .git/ (so the existing RepoStateChanged watcher
+            // misses it). Hidden when count == 0, clickable when shown (deep
+            // links to the Git tab). Polled by TerminalDocument via
+            // SetWorkingTreeDirty().
+            _dirtyStrip = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = DirtyStripHeight,
+                BackColor = Color.FromArgb(80, 50, 30),
+                Visible = false,
+                Cursor = Cursors.Hand
+            };
+            _dirtyLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 0, 0, 0),
+                ForeColor = Color.FromArgb(255, 200, 140),
+                Font = new Font("Segoe UI", 9F, FontStyle.Regular),
+                Cursor = Cursors.Hand,
+                Text = string.Empty
+            };
+            _dirtyStrip.Controls.Add(_dirtyLabel);
+            _dirtyStrip.Click += OnDirtyStripClick;
+            _dirtyLabel.Click += OnDirtyStripClick;
+
+            // Docking order: Fill first, then Top-docked controls in the order
+            // they should appear from bottom-to-top. Tab strip sits just above
+            // content; dirty strip sits above the tab strip (added last =>
+            // closest to the top edge).
             Controls.Add(_contentArea);
             Controls.Add(_tabStrip);
+            Controls.Add(_dirtyStrip);
 
             ResumeLayout(false);
 
@@ -319,6 +354,43 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
+        /// Updates the persistent "uncommitted changes" strip at the top of the HUD.
+        /// Hidden when <paramref name="count"/> is 0; otherwise shows a clickable
+        /// warning ("N uncommitted file(s) on &lt;branch&gt;") that deep-links to the
+        /// Git tab. Safe to call from any thread.
+        /// </summary>
+        public void SetWorkingTreeDirty(int count, string branch)
+        {
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(() => SetWorkingTreeDirty(count, branch))); }
+                catch { }
+                return;
+            }
+
+            _dirtyCount = count;
+            if (count <= 0)
+            {
+                if (_dirtyStrip.Visible) _dirtyStrip.Visible = false;
+                return;
+            }
+
+            string branchPart = string.IsNullOrEmpty(branch) ? "" : " on " + branch;
+            string fileWord = count == 1 ? "file" : "files";
+            _dirtyLabel.Text = $"⚠ {count} uncommitted {fileWord}{branchPart} — click to view in Git tab";
+            if (!_dirtyStrip.Visible) _dirtyStrip.Visible = true;
+        }
+
+        private void OnDirtyStripClick(object sender, EventArgs e)
+        {
+            if (_dirtyCount <= 0) return;
+            // Deep-link to the Git tab. The tab is registered by TerminalDocument
+            // with the literal id "__git__" — silent no-op if not present.
+            try { SwitchToTabById("__git__"); }
+            catch { }
+        }
+
+        /// <summary>
         /// Applies theme to the container and all tabs.
         /// </summary>
         public void ApplyTheme(bool isDark)
@@ -326,6 +398,10 @@ namespace MultiTerminal.Controls
             _isDarkTheme = isDark;
             _tabStrip.BackColor = isDark ? Color.FromArgb(30, 30, 30) : Color.FromArgb(235, 235, 235);
             _contentArea.BackColor = isDark ? Color.FromArgb(30, 30, 30) : Color.FromArgb(245, 245, 245);
+            // Dirty strip stays warm-orange in both themes so it remains a
+            // loud, unmissable signal regardless of the surrounding palette.
+            _dirtyStrip.BackColor = isDark ? Color.FromArgb(80, 50, 30) : Color.FromArgb(255, 230, 200);
+            _dirtyLabel.ForeColor = isDark ? Color.FromArgb(255, 200, 140) : Color.FromArgb(120, 60, 0);
             _taskHud.ApplyTheme(isDark);
 
             foreach (var tab in _tabs)
