@@ -822,9 +822,9 @@ namespace MultiTerminal.Controls
                 catch { }
             }
 
-            // Auto-accept the dev channel warning dialog by sending "1".
-            // The dialog shows numbered options; "1" selects
-            // "I am using this for local development" without needing Enter.
+            // Auto-accept the dev channel warning dialog. The menu opens with '>' already
+            // pointing at option 1 ("I am using this for local development"), so we only
+            // need to send Enter to confirm.
             if (!_devChannelWarningHandled)
             {
                 try
@@ -840,7 +840,7 @@ namespace MultiTerminal.Controls
                         {
                             await System.Threading.Tasks.Task.Delay(500);
                             if (!_isDisposed)
-                                BeginInvoke(new Action(() => TypeInput("1", "none")));
+                                BeginInvoke(new Action(() => TypeInput("", "cr")));
                         });
                     }
                 }
