@@ -1,0 +1,99 @@
+VERIFIER HANDOFF:
+The verifier has already run and PASSED, and the prior gates (code-reviewer, security-auditor, debugger) are running in parallel with you. Here is the verifier's report:
+---
+## Verification Report
+
+### Build Status: PASS
+- 0 Warnings, 0 Errors
+- Output: MultiTerminal.dll at bin/Debug/net8.0-windows/win-x64/
+
+### Item 1: Output-side `(no content)` detector — PASS
+- Fields/constants at lines 611-617: EmptyPromptPlaceholder, EmptyDetectorBufferMax, EmptyDetectorArmDelayMs, _emptyDetectorArmed, _emptyPlaceholderVisible, _sessionStartInjectedAfterEmpty, _emptyDetectorBuffer
+- DoStart resets new state at lines 227-230
+- OnTerminalDataReceived at lines 863-889: rolling buffer, edge-detection, one-shot inject via TypeInput("/session-start", "cr", 20), falling-edge resets dedup flag
+- ArmEmptyPlaceholderDetectorAfterDelay() at lines 742-755: async 5s delay, dispose-safe
+- Invoked from ClaudeCodeDetected path at line 855
+
+### Item 2: Input-side LF acceptance — PASS
+- Line 657: `if (b == 0x0D || b == 0x0A)` in BufferInputForSlashDetection
+
+### Overall Verdict: PASS
+---
+peers running in parallel — reports not yet saved
+---
+
+CONTEXT FOR THE DIFF:
+Task bf5bcfd5 — restore /clear → /session-start re-injection in Claude Code terminals.
+
+Background: Claude Code's input pipe does not emit raw \r when the user presses Enter. The HEAD input-side /clear detector at Controls/TerminalControl.cs:642 only triggered on 0x0D, so it never fired. A prior session had rewritten the detector to watch for "(no content)" in output as the sole signal — that fired on every empty prompt re-render (no dedup) and was reverted.
+
+This diff:
+1. ADDS output-side `(no content)` detection back, but with a one-shot dedup flag and edge-triggered detection. Rising edge (placeholder appears in a rolling 500-char window) → TypeInput("/session-start", "cr", 20). Falling edge → reset dedup flag so the next /clear can re-fire.
+2. Adds a 5s arm delay after ClaudeCodeDetected so the detector doesn't false-fire during the initial new-terminal "initializing..." boot flow.
+3. Widens the input-side Enter detection at line 642 to accept 0x0A (LF) alongside 0x0D (CR) as belt-and-suspenders.
+
+Acceptance criteria from the task plan:
+- New-terminal boot must not double-fire (the existing MainForm injects "initializing..." within 1.5s of ClaudeCodeDetected; the detector arms 5s later).
+- /clear in an active session must re-fire /session-start exactly once per /clear.
+- Subsequent /clears must re-fire after the placeholder clears.
+- No regressions in CR-based input detection.
+
+File modified: Controls/TerminalControl.cs.
+
+You are the cross-model adversary. Your job is NOT to be a second code reviewer or a second security auditor — it is to surface the class of problems that arise when reviewers share a mental model:
+
+- underspecified requirements
+- load-bearing assumptions nobody stated
+- ambiguous contracts between the diff and its callers
+- hostile inputs nobody modelled
+- race windows nobody measured
+- silent-failure paths that return plausible-looking wrong answers
+
+Protocol:
+
+1. ORIENT. What did the diff promise? Confirm whether what was built is actually SUFFICIENT for the claimed scope.
+
+2. FIND THE ASSUMPTIONS. For every non-trivial change:
+   - Input shape / size / encoding silently required (e.g. is "(no content)" always rendered as that literal byte sequence in the terminal stream, or could it be split across chunks or interspersed with ANSI escapes?)
+   - Time / ordering assumptions (5s arm delay; is it sufficient under slow startup? could a /clear before arm leave the detector permanently armed without re-injecting?)
+   - Environment assumptions (Claude Code version, terminal encoding, ConPTY chunking)
+   - Caller assumptions (TypeInput's "cr" line-ending semantics; what if Claude Code changes its placeholder string?)
+
+3. PROBE THE BOUNDARIES NOBODY NAMED. For each assumption, ask: if it's false, what fails and how visibly? Flag any path where a violated assumption produces a plausible-looking wrong answer instead of a loud error.
+
+4. REQUIREMENTS AMBIGUITY. Read the acceptance criteria. Could the code pass every listed criterion while still not doing what the owner wanted?
+
+5. CROSS-CHECK WHAT THE OTHER GATES COVERED. Don't duplicate their findings.
+
+Output:
+
+### Verdict: approve / needs-attention / block
+
+### Assumptions pressure-tested
+- [assumption] — [what holds it up / what breaks if it's wrong]
+
+### Findings
+For each finding:
+- severity (critical / high / medium / low)
+- location (file:line or "design-level")
+- assumption being challenged
+- failure mode (concrete)
+- why prior gates missed it (brief)
+- recommendation (code-level or re-scope)
+
+### Requirements ambiguity
+Any acceptance criteria that could pass without the owner's intent being met. "None" is a valid answer.
+
+### What the other gates covered well
+One or two genuine wins. "Nothing notable" is a valid answer.
+
+Verdict mapping:
+- approve = diff is robust; assumptions are explicit or cheaply checked; any findings are low-severity design notes.
+- needs-attention = one or more medium+ findings worth a guard or a comment before wider rollout.
+- block = one or more critical/high findings the prior gates missed.
+
+Rules:
+- Be adversarial, not contrarian. If the diff is genuinely solid, say approve.
+- Name the class, not just the instance.
+- Don't re-litigate reviewer turf — naming / patterns / style belong to code-reviewer.
+- Be concrete about failure mode — "might break" is not a finding.

@@ -1,0 +1,20 @@
+VERIFIER HANDOFF (Run 3):
+PASS — build 0/0. Targeted fix for Run 2 debugger MEDIUM (edge-state latch).
+---
+Run 3 diff is MINIMAL — only the rising-edge suppression branches in OnTerminalDataReceived. Both `!armed` and `!outOfCooldown` now: log, clear buffer, reset visibility flag, return. Plus the previously-silent cooldown branch now has a LogTrace (fixes the LOW).
+
+NO CHANGES to:
+- Chrome anchoring approach
+- Cooldown duration (10s)
+- Arm delay (5s)
+- Any other detector state
+
+USER DECISION (DEFERRED — do not re-litigate):
+The user chose "ship + observe telemetry" for your Run 2 HIGH finding (chrome anchoring still output-only). Deployment telemetry via _lastClearInputAtUtc will inform whether to tighten further. Run 3 deliberately does NOT address that finding.
+
+Re-audit specifically for NEW issues introduced by the Run 3 targeted change. If you have nothing new to flag, approve.
+
+Verdict mapping:
+- approve = no NEW concerns from this specific diff
+- needs-attention = a NEW medium/low concern from this diff
+- block = a NEW critical/high concern from this diff
