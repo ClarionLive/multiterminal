@@ -290,6 +290,38 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Porcelain-style count of working-tree changes for the HUD header badge.
+        /// Matches <c>git status --porcelain | wc -l</c>: untracked directories
+        /// collapse to a single entry instead of recursing into their files. Cheap
+        /// — no diff/patch compute, just one status enumeration under the repo lock.
+        /// Distinct from <see cref="GetWorkingTreeStatus"/>, which recurses untracked
+        /// dirs so the Git tab can list every file.
+        /// </summary>
+        public int GetWorkingTreeSummaryCount()
+        {
+            lock (_repoLock)
+            {
+                if (_disposed) return 0;
+
+                var statusOptions = new StatusOptions
+                {
+                    IncludeUntracked = true,
+                    RecurseUntrackedDirs = false,
+                };
+                var status = _repo.RetrieveStatus(statusOptions);
+
+                int count = 0;
+                foreach (var entry in status)
+                {
+                    if (entry.State == FileStatus.Ignored) continue;
+                    if (entry.State == FileStatus.Unaltered) continue;
+                    count++;
+                }
+                return count;
+            }
+        }
+
+        /// <summary>
         /// Returns the unified diff text for a single file's uncommitted changes
         /// (staged + unstaged combined, against HEAD). Returns empty string for
         /// untracked files in v1 — the working changes panel synthesises an

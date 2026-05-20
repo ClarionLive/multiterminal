@@ -2544,8 +2544,7 @@ namespace MultiTerminal.Docking
                     var svc = broker.GitRepos?.GetOrCreate(folder);
                     if (svc != null)
                     {
-                        var status = svc.GetWorkingTreeStatus();
-                        count = status?.Count ?? 0;
+                        count = svc.GetWorkingTreeSummaryCount();
                         branch = svc.CurrentBranch ?? "";
                     }
                 }
