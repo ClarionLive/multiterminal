@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -75,13 +76,22 @@ namespace MultiTerminal.Services
                 if (filesResult == null || !filesResult.Success)
                     return null;
 
+                // Resolve the task's review base once per popup open (task 29ae1e99).
+                // Item 2 threads it through to GetGitDiffForFile so the diff form is
+                // `git diff <merge-base> <branch> -- <file>` for branch-tracked tasks.
+                // Item 4 surfaces ReviewBase.Error to the popup via reviewBaseError.
+                var firstFilePath = filesResult.Files.Count > 0 ? filesResult.Files[0].FilePath : null;
+                var firstRepoRoot = !string.IsNullOrEmpty(firstFilePath) ? FindGitRoot(firstFilePath) : null;
+                var reviewBase = ResolveTaskReviewBase(taskId, firstRepoRoot);
+                Debug.WriteLine($"[CodeReviewService] reviewBase for {taskId}: hasBranch={reviewBase.HasBranch}, baseRef={reviewBase.BaseRef ?? "<null>"}, branchTip={reviewBase.BranchTipRef ?? "<null>"}, error={reviewBase.Error ?? "<null>"}");
+
                 // Build the file-list payload. Pre-serialize so the popup form can
                 // stuff the raw JSON into its data message without a second
                 // round-trip through JsonSerializer.
                 var fileObjects = new List<object>();
                 foreach (var fileLink in filesResult.Files)
                 {
-                    string diff = GetGitDiffForFile(fileLink.FilePath);
+                    string diff = GetGitDiffForFile(fileLink.FilePath, reviewBase);
                     fileObjects.Add(new
                     {
                         filePath = fileLink.FilePath,
@@ -136,6 +146,9 @@ namespace MultiTerminal.Services
                 {
                     FilesJson = filesJson,
                     AgentReportJson = agentReportJson,
+                    // ReviewBase.Error is only populated when HasBranch=true and
+                    // resolution failed — no need to gate again here.
+                    ReviewBaseError = reviewBase.Error,
                 };
             }
             catch (Exception ex)
@@ -531,28 +544,336 @@ namespace MultiTerminal.Services
         }
 
         // =============================================
-        // Git diff helpers (extracted from TasksController)
+        // Review-base resolution (task 29ae1e99)
         // =============================================
+        // Replaces the working-tree/HEAD~1 diff strategy with a task-aware base
+        // ref derived from the task's branch. For tasks with a task_worktrees
+        // row, the review base is `git merge-base <trunk> <task-branch>` and
+        // the diff is `git diff <base> <branch> -- <file>` — which surfaces
+        // ALL commits on the task branch, not just the most recent one.
+        //
+        // Item 1 (this commit) adds the helpers + a single placeholder call in
+        // GetCodeReviewDataCore that resolves the base and logs it. Item 2
+        // rewires GetGitDiffForFile to actually use it; item 3 preserves the
+        // legacy HEAD/HEAD~1 fallback for tasks without a branch; item 4 wires
+        // ReviewBase.Error through to the popup.
 
-        private string GetGitDiffForFile(string filePath)
+        // Keyed by canonical repo root (Path.GetFullPath result). A single
+        // CodeReviewService instance may be reused across reviews from
+        // different projects within a session — using one string for the
+        // whole service would let project A's trunk choice ('master') poison
+        // project B's resolution if B's trunk is 'main'.
+        private readonly ConcurrentDictionary<string, string> _trunkRefCache =
+            new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Resolves the trunk ref for the given repo root. Probes "master"
+        /// first (MT's historical default), falls back to "main". Cache is
+        /// per-repo so multi-project sessions don't cross-contaminate; only
+        /// positive results are cached so a freshly-created trunk is picked
+        /// up on the next call without restarting the service.
+        /// </summary>
+        private string GetTrunkRef(string repoRoot)
+        {
+            if (string.IsNullOrEmpty(repoRoot)) return null;
+            string canonical;
+            try
+            {
+                canonical = Path.GetFullPath(repoRoot);
+            }
+            catch (Exception)
+            {
+                canonical = repoRoot;
+            }
+            if (_trunkRefCache.TryGetValue(canonical, out var cached)) return cached;
+
+            string trunk = null;
+            if (GitRefExists(canonical, "master")) trunk = "master";
+            else if (GitRefExists(canonical, "main")) trunk = "main";
+            // Only cache a positive result. Null means "neither found right
+            // now" — re-probe on the next call. Concurrent first-time probes
+            // against the same repoRoot may both run rev-parse (cheap waste);
+            // TryAdd's "first to publish wins" keeps the cache consistent.
+            if (trunk != null) _trunkRefCache.TryAdd(canonical, trunk);
+            return trunk;
+        }
+
+        /// <summary>
+        /// Resolves the review base for a task. Returns <see cref="ReviewBase.HasBranch"/>=false
+        /// for legacy tasks (no task_worktrees row, empty branch name, or status='pruned') —
+        /// callers fall back to the legacy HEAD/HEAD~1 diff strategy.
+        /// When HasBranch=true and Error is set, the branch exists but merge-base
+        /// couldn't be computed (orphan branch, missing branch, git failure) — callers
+        /// should surface the error rather than render misleading partial diffs.
+        /// </summary>
+        private ReviewBase ResolveTaskReviewBase(string taskId, string repoRoot)
+        {
+            if (_broker?.TaskDb == null || string.IsNullOrEmpty(taskId))
+                return new ReviewBase { HasBranch = false };
+
+            try
+            {
+                var record = _broker.TaskDb.GetWorktreeForTask(taskId);
+                if (record == null || string.IsNullOrEmpty(record.BranchName))
+                    return new ReviewBase { HasBranch = false };
+                if (string.Equals(record.Status, "pruned", StringComparison.OrdinalIgnoreCase))
+                    return new ReviewBase { HasBranch = false };
+
+                // Use the worktree path as the effective repo root for all git
+                // operations on this task. Tree paths inside the task branch's
+                // commits are relative to the worktree's own root, not the main
+                // checkout — running git from the worktree path makes pathspec
+                // matching natural and avoids the worktree-prefix mismatch that
+                // would otherwise return empty diffs. Falls back to the
+                // file-derived repoRoot only when the worktree directory is
+                // gone (e.g. externally removed while the row was still active).
+                var effectiveRoot = !string.IsNullOrEmpty(record.WorktreePath) && Directory.Exists(record.WorktreePath)
+                    ? record.WorktreePath
+                    : repoRoot;
+                if (string.IsNullOrEmpty(effectiveRoot))
+                    return new ReviewBase { HasBranch = true, Error = "Could not locate a working tree for this task." };
+
+                // Defense in depth: task_worktrees.branch_name is written by MT itself
+                // (via `git worktree add`) so under normal flow it's safe, but it's
+                // user/agent-controllable data flowing into a command-line argument.
+                // Reject anything that doesn't match Git's standard ref format.
+                if (!IsSafeGitRefName(record.BranchName))
+                    return new ReviewBase { HasBranch = true, WorktreePath = effectiveRoot, Error = $"Branch name '{record.BranchName}' contains characters not allowed in a git ref." };
+
+                var trunk = GetTrunkRef(effectiveRoot);
+                if (string.IsNullOrEmpty(trunk))
+                    return new ReviewBase { HasBranch = true, WorktreePath = effectiveRoot, Error = "Could not determine trunk ref (neither 'master' nor 'main' found in this repository)." };
+                if (!IsSafeGitRefName(trunk))
+                    return new ReviewBase { HasBranch = true, WorktreePath = effectiveRoot, Error = $"Trunk ref '{trunk}' contains characters not allowed in a git ref." };
+
+                if (!GitRefExists(effectiveRoot, record.BranchName))
+                    return new ReviewBase { HasBranch = true, WorktreePath = effectiveRoot, Error = $"Branch '{record.BranchName}' no longer exists in the repository." };
+
+                // Pin the branch tip to an immutable commit SHA up front. All
+                // subsequent diff/merge-base calls use this SHA instead of the
+                // mutable branch name, so a concurrent ref-update (rebase,
+                // force-push, branch repointing) can't make different files
+                // in the same popup render against different branch states.
+                var branchTipSha = ResolveCommitSha(effectiveRoot, record.BranchName);
+                if (string.IsNullOrEmpty(branchTipSha))
+                    return new ReviewBase { HasBranch = true, WorktreePath = effectiveRoot, Error = $"Could not resolve commit SHA for branch '{record.BranchName}'." };
+
+                var mergeBase = RunGitMergeBase(effectiveRoot, trunk, branchTipSha);
+                if (string.IsNullOrEmpty(mergeBase))
+                    return new ReviewBase { HasBranch = true, WorktreePath = effectiveRoot, Error = $"No common history between '{trunk}' and '{record.BranchName}'. Branch may be orphaned." };
+
+                return new ReviewBase
+                {
+                    HasBranch = true,
+                    BaseRef = mergeBase,
+                    BranchTipRef = record.BranchName,
+                    BranchTipSha = branchTipSha,
+                    WorktreePath = effectiveRoot,
+                };
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[CodeReviewService] ResolveTaskReviewBase failed for {taskId}: {ex.Message}");
+                return new ReviewBase { HasBranch = true, Error = $"Failed to resolve review base: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Resolves a ref to its immutable commit SHA via
+        /// <c>git rev-parse --verify &lt;ref&gt;^{commit}</c>. The <c>^{commit}</c>
+        /// peel guarantees we land on a commit (not a tag or tree object).
+        /// Returns null on any error. Caller MUST pre-validate <paramref name="refName"/>
+        /// via <see cref="IsSafeGitRefName"/>.
+        /// </summary>
+        private static string ResolveCommitSha(string repoRoot, string refName)
+        {
+            if (!IsSafeGitRefName(refName)) return null;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"-c core.pager=cat rev-parse --verify {refName}^{{commit}}",
+                    WorkingDirectory = repoRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = false,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+                var output = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit(5000);
+                if (proc.ExitCode != 0) return null;
+                return output.Trim();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Lightweight existence check for a git ref. Uses `git rev-parse --verify`.
+        /// Returns false on any error (process spawn failed, non-zero exit, exception).
+        /// Inherits F-R2-5 security flags: `-c core.pager=cat` guards against a
+        /// hostile pager helper if a future change adds one.
+        /// </summary>
+        private static bool GitRefExists(string repoRoot, string refName)
+        {
+            if (!IsSafeGitRefName(refName)) return false;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"-c core.pager=cat rev-parse --verify {refName}",
+                    WorkingDirectory = repoRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null) return false;
+                proc.StandardOutput.ReadToEnd();
+                proc.StandardError.ReadToEnd();
+                proc.WaitForExit(5000);
+                return proc.ExitCode == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Runs `git merge-base <refA> <refB>` and returns the trimmed SHA, or
+        /// null on any failure (non-zero exit = no common ancestor, or any error).
+        /// Both refs MUST be pre-validated by <see cref="IsSafeGitRefName"/> before
+        /// calling — this method does NOT re-validate.
+        /// </summary>
+        private static string RunGitMergeBase(string repoRoot, string refA, string refB)
         {
             try
             {
-                var repoRoot = FindGitRoot(filePath);
-                if (repoRoot == null) return null;
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"-c core.pager=cat merge-base {refA} {refB}",
+                    WorkingDirectory = repoRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+                var output = proc.StandardOutput.ReadToEnd();
+                proc.StandardError.ReadToEnd();
+                proc.WaitForExit(5000);
+                if (proc.ExitCode != 0) return null;
+                return output.Trim();
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
-                // Validate file is within repo root (prevent path traversal).
+        /// <summary>
+        /// Validates that <paramref name="refName"/> matches Git's standard ref
+        /// format and is safe to pass as a command-line argument. Rejects:
+        /// leading '-' (could be parsed as a flag), the sequences ".." and "@{",
+        /// and any character outside [A-Za-z0-9_/.-]. This is intentionally a
+        /// strict subset of what `git check-ref-format` accepts — sufficient for
+        /// MT's branch naming convention (e.g., "task/29ae1e99", "master", "main").
+        /// </summary>
+        private static bool IsSafeGitRefName(string refName)
+        {
+            if (string.IsNullOrEmpty(refName)) return false;
+            if (refName.Length > 256) return false;
+            if (refName[0] == '-') return false;
+            if (refName.Contains("..", StringComparison.Ordinal)) return false;
+            if (refName.Contains("@{", StringComparison.Ordinal)) return false;
+            foreach (var c in refName)
+            {
+                if (!(char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '/' || c == '.'))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Resolved review base for a task. <see cref="HasBranch"/>=false means
+        /// no branch is associated (legacy task, no worktree row, or pruned) —
+        /// caller falls back to the legacy HEAD/HEAD~1 diff strategy. When
+        /// HasBranch=true and Error is non-null, branch resolution failed and
+        /// the popup should surface the error instead of rendering diffs.
+        /// </summary>
+        private struct ReviewBase
+        {
+            public bool HasBranch;
+            public string BaseRef;       // merge-base SHA the diff is anchored at
+            public string BranchTipRef;  // branch name; informational (Debug.WriteLine and error strings)
+            public string BranchTipSha;  // pinned commit SHA — passed to `git diff` so concurrent ref mutations can't skew results
+            public string WorktreePath;  // cwd for git ops on the task branch; pathspecs are relative to this
+            public string Error;         // populated when HasBranch=true but resolution failed
+        }
+
+        // =============================================
+        // Git diff helpers (extracted from TasksController)
+        // =============================================
+
+        private string GetGitDiffForFile(string filePath, ReviewBase reviewBase)
+        {
+            try
+            {
+                // Choose the effective cwd for git. When the task has a live
+                // worktree, use it — tree paths inside the task branch's
+                // commits are relative to the worktree's own root, so running
+                // diff from there makes pathspecs match naturally. Otherwise
+                // (legacy task with no worktree row) walk up from the file to
+                // find the enclosing repo root.
+                string diffCwd = !string.IsNullOrEmpty(reviewBase.WorktreePath) && Directory.Exists(reviewBase.WorktreePath)
+                    ? reviewBase.WorktreePath
+                    : FindGitRoot(filePath);
+                if (diffCwd == null) return null;
+
+                // Validate file is within cwd (prevent path traversal).
                 var canonicalPath = Path.GetFullPath(filePath);
-                var canonicalRoot = Path.GetFullPath(repoRoot);
-                if (!canonicalPath.StartsWith(canonicalRoot, StringComparison.OrdinalIgnoreCase))
+                var canonicalCwd = Path.GetFullPath(diffCwd);
+                if (!canonicalPath.StartsWith(canonicalCwd, StringComparison.OrdinalIgnoreCase))
                     return null;
 
-                var relativePath = Path.GetRelativePath(repoRoot, filePath).Replace('\\', '/');
+                var relativePath = Path.GetRelativePath(diffCwd, filePath).Replace('\\', '/');
 
-                var diff = RunGitDiff(repoRoot, relativePath, "");
+                // Task-aware path: when the task has a branch and merge-base
+                // resolved cleanly, diff across the entire branch (base..tipSha)
+                // using pinned commit SHAs. Empty result here means the file is
+                // linked but unchanged on this branch — surface that as empty
+                // rather than falling through to legacy, which would show
+                // unrelated trunk commits.
+                if (reviewBase.HasBranch && string.IsNullOrEmpty(reviewBase.Error))
+                {
+                    return RunGitDiff(diffCwd, relativePath, reviewBase.BaseRef, reviewBase.BranchTipSha);
+                }
+
+                // Resolution failed: return empty diff and let the popup's
+                // reviewBaseError banner do the explaining. Falling back to
+                // legacy here would silently hide the resolution error.
+                if (reviewBase.HasBranch)
+                {
+                    return string.Empty;
+                }
+
+                // Legacy fallback: tasks with no task_worktrees row (or a
+                // pruned one) keep the working-tree → HEAD~1 dance. Preserves
+                // behavior for legacy tasks created before per-task worktrees.
+                var diff = RunGitDiff(diffCwd, relativePath, string.Empty);
                 if (string.IsNullOrWhiteSpace(diff))
                 {
-                    diff = RunGitDiff(repoRoot, relativePath, "HEAD~1");
+                    diff = RunGitDiff(diffCwd, relativePath, "HEAD~1");
                 }
                 return diff;
             }
@@ -568,28 +889,61 @@ namespace MultiTerminal.Services
             var dir = Path.GetDirectoryName(filePath);
             while (!string.IsNullOrEmpty(dir))
             {
-                if (Directory.Exists(Path.Combine(dir, ".git")))
+                // `.git` is a directory in a normal checkout, a small text "gitlink"
+                // file in a worktree (`git worktree add` creates one of these).
+                // Both forms indicate a working tree we can run git commands against;
+                // checking only Directory.Exists would skip past worktrees and land
+                // on the main checkout root, which makes branch-relative pathspecs
+                // miss because committed tree paths are worktree-relative, not
+                // main-checkout-relative.
+                var dotGit = Path.Combine(dir, ".git");
+                if (Directory.Exists(dotGit) || File.Exists(dotGit))
                     return dir;
                 dir = Path.GetDirectoryName(dir);
             }
             return null;
         }
 
+        // Per-file diff cap: branch-vs-trunk diffs can be arbitrarily large
+        // (hostile or merely oversized branches), and the popup JSON-serializes
+        // every diff body into a single payload. Bound the per-file size so
+        // one oversized file can't blow up memory or stall the WebView2.
+        private const int MaxDiffBytes = 512 * 1024;
+
         // Pipeline Run 1 fix (F-R2-5 / security-auditor HIGH, OWASP A05): plain
         // `git diff` inherits user/repo Git config, which means `diff.external`
         // and textconv drivers are honored during diff generation. In a hostile
         // or merely untrusted repository, opening the code-review popup could
         // execute attacker-chosen local programs as part of generating a diff.
-        // Hardening:
+        // Hardening (preserved across all invocation forms — legacy and range):
         //   --no-ext-diff  — refuse external diff helpers from diff.external
         //   --no-textconv  — refuse textconv filter drivers from gitattributes
         //   -c core.pager=cat — defense in depth (we don't pipe through a pager,
         //                       but if a future change does, ensure no pager helper)
-        private static string RunGitDiff(string repoRoot, string relativePath, string baseRef)
+        //
+        // Form-selection:
+        //   baseRef="" tipRef=null    →  git diff -- file                  (working tree vs HEAD)
+        //   baseRef="HEAD~1" tipRef=null → git diff HEAD~1 -- file         (legacy fallback)
+        //   baseRef=<sha> tipRef=<sha>   → git diff <baseSha> <tipSha> -- file (task-aware, both SHAs immutable)
+        //
+        // SECURITY: in the task-aware form callers MUST pass SHAs (from
+        // git merge-base / git rev-parse), not raw branch names. SHAs are safe
+        // by construction; branch names would re-introduce TOCTOU ref races
+        // where files in a single popup could end up diffed against different
+        // branch states if the ref moved mid-render.
+        private static string RunGitDiff(string repoRoot, string relativePath, string baseRef, string tipRef = null)
         {
-            var args = string.IsNullOrEmpty(baseRef)
+            string refArgs;
+            if (string.IsNullOrEmpty(baseRef))
+                refArgs = string.Empty;
+            else if (string.IsNullOrEmpty(tipRef))
+                refArgs = baseRef;
+            else
+                refArgs = $"{baseRef} {tipRef}";
+
+            var args = string.IsNullOrEmpty(refArgs)
                 ? $"-c core.pager=cat diff --no-ext-diff --no-textconv -- \"{relativePath}\""
-                : $"-c core.pager=cat diff --no-ext-diff --no-textconv {baseRef} -- \"{relativePath}\"";
+                : $"-c core.pager=cat diff --no-ext-diff --no-textconv {refArgs} -- \"{relativePath}\"";
 
             var psi = new ProcessStartInfo
             {
@@ -604,9 +958,35 @@ namespace MultiTerminal.Services
 
             using var proc = Process.Start(psi);
             if (proc == null) return null;
-            var output = proc.StandardOutput.ReadToEnd();
+
+            // Bounded read: cap at MaxDiffBytes so a massive branch-vs-trunk
+            // diff can't blow up memory or stall the JSON serializer feeding
+            // the WebView2 popup. Truncation is visible in the rendered diff.
+            var sb = new StringBuilder();
+            var buf = new char[8192];
+            var reader = proc.StandardOutput;
+            bool truncated = false;
+            int n;
+            while ((n = reader.Read(buf, 0, buf.Length)) > 0)
+            {
+                if (sb.Length + n > MaxDiffBytes)
+                {
+                    int remaining = Math.Max(0, MaxDiffBytes - sb.Length);
+                    if (remaining > 0) sb.Append(buf, 0, remaining);
+                    truncated = true;
+                    // Drain remaining stdout so git can exit cleanly; discard data.
+                    while (reader.Read(buf, 0, buf.Length) > 0) { }
+                    break;
+                }
+                sb.Append(buf, 0, n);
+            }
             proc.WaitForExit(5000);
-            return output;
+            if (truncated)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"... (diff truncated at {MaxDiffBytes / 1024} KB; open the file directly to see the full content)");
+            }
+            return sb.ToString();
         }
     }
 
@@ -618,6 +998,15 @@ namespace MultiTerminal.Services
 
         /// <summary>JSON-encoded string of the latest code-reviewer report content, or null.</summary>
         public string AgentReportJson { get; set; }
+
+        /// <summary>
+        /// Human-readable error from review-base resolution (task 29ae1e99 item 4).
+        /// Null when resolution succeeded or no branch is associated. When non-null,
+        /// the popup should surface a banner above the file list explaining the
+        /// problem (orphan branch, missing branch, invalid ref name) rather than
+        /// rendering misleading diffs.
+        /// </summary>
+        public string ReviewBaseError { get; set; }
     }
 
     /// <summary>Result envelope returned by <see cref="CodeReviewService.HandleVerdict"/>.</summary>

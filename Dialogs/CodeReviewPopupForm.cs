@@ -302,6 +302,7 @@ namespace MultiTerminal.Dialogs
         {
             string filesJson = null;
             string agentReportJson = null;
+            string reviewBaseError = null;
             try
             {
                 if (_crService != null)
@@ -311,6 +312,7 @@ namespace MultiTerminal.Dialogs
                     {
                         filesJson = data.FilesJson;
                         agentReportJson = data.AgentReportJson;
+                        reviewBaseError = data.ReviewBaseError;
                     }
                 }
             }
@@ -325,6 +327,8 @@ namespace MultiTerminal.Dialogs
             sb.Append(string.IsNullOrWhiteSpace(filesJson) ? "null" : filesJson);
             sb.Append(",\"agentReport\":");
             sb.Append(string.IsNullOrWhiteSpace(agentReportJson) ? "null" : agentReportJson);
+            sb.Append(",\"reviewBaseError\":");
+            sb.Append(string.IsNullOrEmpty(reviewBaseError) ? "null" : JsonSerializer.Serialize(reviewBaseError));
             sb.Append("}}");
             await PostRawJsonToWebViewAsync(sb.ToString());
         }

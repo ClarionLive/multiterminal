@@ -123,6 +123,11 @@
     .diff-line.hunk.highlighted { background: rgba(74, 144, 217, 0.15); }
     .cr-toggle-sidebar { background: none; border: 1px solid var(--border-color, #555); color: var(--text-color, #ddd); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
     .cr-toggle-sidebar:hover { background: rgba(255, 255, 255, 0.05); }
+    /* Review-base error banner (task 29ae1e99 item 4) — shown above the file list
+       when CodeReviewService couldn't resolve the task's branch merge-base. Uses
+       the same orange accent as cr-summary-card.mixed for visual consistency. */
+    .cr-review-base-error { background: rgba(255, 152, 0, 0.10); border-left: 3px solid #FF9800; color: var(--text-color, #ddd); padding: 8px 14px; margin: 8px 12px; border-radius: 3px; font-size: 12px; line-height: 1.4; }
+    .cr-review-base-error-label { font-weight: 700; color: #FF9800; margin-right: 6px; }
 </style>
 </head>
 <body>
@@ -270,8 +275,15 @@
     function showCodeReviewOverlay(taskId, data, targetFilePath) {
         const root = document.getElementById('cr-root');
         const files = data.files || [];
+        // Task 29ae1e99 item 4: render reviewBaseError above the file list when
+        // present. Shown in BOTH the empty-files case and the populated case —
+        // when the branch couldn't be resolved, an empty file list might be
+        // misleading without the banner explaining why.
+        const reviewBaseErrorHtml = data.reviewBaseError
+            ? `<div class="cr-review-base-error"><span class="cr-review-base-error-label">Review base unavailable:</span>${escapeHtml(data.reviewBaseError)}</div>`
+            : '';
         if (files.length === 0) {
-            root.innerHTML = '<div id="cr-empty">No linked files found for this task.<br>Agents should call <code style="margin:0 4px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;">link_task_file</code> to track changed files.</div>';
+            root.innerHTML = reviewBaseErrorHtml + '<div id="cr-empty">No linked files found for this task.<br>Agents should call <code style="margin:0 4px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;">link_task_file</code> to track changed files.</div>';
             return;
         }
 
@@ -307,6 +319,7 @@
 
         root.innerHTML = `
             <div class="cr-container">
+                ${reviewBaseErrorHtml}
                 <div class="cr-body">
                     <div class="cr-file-list">${fileListHtml}</div>
                     <div class="cr-diff-area" id="cr-diff-area">${diffHtml}</div>
