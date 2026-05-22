@@ -135,7 +135,12 @@
     function sendToHost(obj) {
         try {
             if (window.chrome && window.chrome.webview && window.chrome.webview.postMessage) {
-                window.chrome.webview.postMessage(JSON.stringify(obj));
+                // Pass the object directly. JSON.stringify here would make
+                // WebMessageAsJson on the host side return the message wrapped
+                // as a JSON string ("\"{...}\""), which parses to ValueKind=String
+                // and silently fails TryGetProperty("type", ...) — the same trap
+                // every other panel in this app avoids by posting raw objects.
+                window.chrome.webview.postMessage(obj);
             }
         } catch (e) { console.error('sendToHost failed:', e); }
     }
