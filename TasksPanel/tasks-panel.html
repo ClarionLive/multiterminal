@@ -384,6 +384,13 @@
         .task-title:hover {
             color: #4A90D9;
         }
+        .task-id {
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 11px;
+            color: #888;
+            margin-right: 6px;
+            user-select: all;
+        }
 
         .task-meta {
             display: flex;
@@ -1491,10 +1498,12 @@
                     const description = (task.description || '').toLowerCase();
                     const assignee = (task.assignee || '').toLowerCase();
                     const createdBy = (task.createdBy || '').toLowerCase();
+                    const taskId = (task.id || '').toLowerCase();
                     return title.includes(query) ||
                            description.includes(query) ||
                            assignee.includes(query) ||
-                           createdBy.includes(query);
+                           createdBy.includes(query) ||
+                           taskId.includes(query);
                 });
             }
 
@@ -1584,7 +1593,7 @@
                             ${statusIcon}
                             ${reviewIcon}
                         </div>
-                        <div class="task-title" onclick="event.stopPropagation(); openLifecycleBoard('${task.id}')" title="Open lifecycle board">${escapeHtml(task.title)}${priorityBadge}</div>
+                        <div class="task-title" onclick="event.stopPropagation(); openLifecycleBoard('${task.id}')" title="Open lifecycle board (id: ${escapeHtml(task.id || '')})"><span class="task-id">[${escapeHtml((task.id || '').substring(0, 8))}]</span>${escapeHtml(task.title)}${priorityBadge}</div>
                     </div>
                     ${task.Helpers && task.Helpers.length > 0 ? `
                         <div class="task-helpers">
