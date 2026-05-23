@@ -143,6 +143,17 @@ namespace MultiTerminal.MCPServer.Models
         public string ReviewNotes { get; set; }
 
         /// <summary>
+        /// When true, this task is a "quick task" — a lightweight, immutable attribution
+        /// anchor for trivial working-tree changes (typos, version bumps, changelog catchups)
+        /// that don't warrant a full kanban card with checklist or lifecycle. Created via
+        /// POST /api/tasks/quick at status='done'; the server rejects subsequent status,
+        /// plan, and checklist mutations (only title edits allowed). Hidden by default from
+        /// list_tasks unless includeQuickTasks=true (Git tab + Quick-Tasks audit view).
+        /// See task d42423e3.
+        /// </summary>
+        public bool IsQuickTask { get; set; }
+
+        /// <summary>
         /// When true, parent task status is auto-derived from checklist item positions:
         /// - All in Planning → "todo"
         /// - Any in Coding/Testing → "in_progress"

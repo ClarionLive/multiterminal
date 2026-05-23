@@ -89,6 +89,7 @@ namespace MultiTerminal.Services
             MigrateAddContinuationNotesToTasks();
             MigrateAddAutoStatusToTasks();
             MigrateAddReviewNotesToTasks();
+            MigrateAddIsQuickTaskToTasks();
             MigrateAddUserInbox();
             MigrateAddProjectIdsToProfiles();
             MigrateAddTaskAttachments();
@@ -1079,6 +1080,36 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Migration: Add is_quick_task column. Marks lightweight attribution-anchor
+        /// tasks (task d42423e3) that bypass the kanban lifecycle. Default 0 (false)
+        /// preserves all existing rows as regular tasks.
+        /// </summary>
+        private void MigrateAddIsQuickTaskToTasks()
+        {
+            bool hasIsQuickTask = false;
+            using (var pragmaCmd = new SQLiteCommand("PRAGMA table_info(tasks)", _connection))
+            using (var reader = pragmaCmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    var columnName = reader.GetString(1);
+                    if (columnName.Equals("is_quick_task", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasIsQuickTask = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasIsQuickTask)
+            {
+                const string sql = "ALTER TABLE tasks ADD COLUMN is_quick_task INTEGER DEFAULT 0";
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
         /// Load all tasks from the database, including helpers.
         /// </summary>
         public List<KanbanTask> LoadAllTasks()
@@ -1086,7 +1117,7 @@ namespace MultiTerminal.Services
             var tasks = new List<KanbanTask>();
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 ORDER BY created_at ASC
             ";
@@ -1111,7 +1142,7 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Helper method to read a KanbanTask from a data reader.
-        /// Expects columns: id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+        /// Expects columns: id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
         /// </summary>
         private static KanbanTask ReadTaskFromReader(SQLiteDataReader reader)
         {
@@ -1139,7 +1170,8 @@ namespace MultiTerminal.Services
                 ImplementationChecklistJson = reader.IsDBNull(20) ? "[]" : reader.GetString(20),
                 ContinuationNotes = reader.IsDBNull(21) ? null : reader.GetString(21),
                 AutoStatus = !reader.IsDBNull(22) && reader.GetInt32(22) != 0,
-                ReviewNotes = reader.IsDBNull(23) ? null : reader.GetString(23)
+                ReviewNotes = reader.IsDBNull(23) ? null : reader.GetString(23),
+                IsQuickTask = !reader.IsDBNull(24) && reader.GetInt32(24) != 0
             };
         }
 
@@ -1149,8 +1181,8 @@ namespace MultiTerminal.Services
         public void SaveTask(KanbanTask task)
         {
             const string sql = @"
-                INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes)
-                VALUES (@id, @title, @description, @status, @assignee, @createdBy, @createdAt, @updatedAt, @projectId, @subStatus, @pausedAt, @flaggedStaleAt, @staleLevel, @staleNotifiedAt, @staleResponse, @priority, @checklistJson, @plan, @implementationSummary, @testResults, @implementationChecklistJson, @continuationNotes, @autoStatus, @reviewNotes)
+                INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task)
+                VALUES (@id, @title, @description, @status, @assignee, @createdBy, @createdAt, @updatedAt, @projectId, @subStatus, @pausedAt, @flaggedStaleAt, @staleLevel, @staleNotifiedAt, @staleResponse, @priority, @checklistJson, @plan, @implementationSummary, @testResults, @implementationChecklistJson, @continuationNotes, @autoStatus, @reviewNotes, @isQuickTask)
                 ON CONFLICT(id) DO UPDATE SET
                     title = @title,
                     description = @description,
@@ -1172,6 +1204,7 @@ namespace MultiTerminal.Services
                     continuation_notes = @continuationNotes,
                     auto_status = @autoStatus,
                     review_notes = @reviewNotes,
+                    is_quick_task = @isQuickTask,
                     updated_at = @updatedAt
             ";
 
@@ -1200,6 +1233,7 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@continuationNotes", (object)task.ContinuationNotes ?? DBNull.Value);
             command.Parameters.AddWithValue("@autoStatus", task.AutoStatus ? 1 : 0);
             command.Parameters.AddWithValue("@reviewNotes", (object)task.ReviewNotes ?? DBNull.Value);
+            command.Parameters.AddWithValue("@isQuickTask", task.IsQuickTask ? 1 : 0);
 
             command.ExecuteNonQuery();
         }
@@ -2700,7 +2734,7 @@ namespace MultiTerminal.Services
         public KanbanTask GetTask(string taskId)
         {
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 WHERE id = @taskId
             ";
@@ -2724,7 +2758,7 @@ namespace MultiTerminal.Services
         public KanbanTask GetActiveTaskForAgent(string agentName)
         {
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 WHERE assignee = @agentName
                   AND status = 'in_progress'
@@ -2758,7 +2792,7 @@ namespace MultiTerminal.Services
             var sevenDaysAgo = DateTime.UtcNow.AddDays(-7);
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 WHERE sub_status = 'paused'
                   AND paused_at < @sevenDaysAgo
@@ -2788,7 +2822,7 @@ namespace MultiTerminal.Services
             var fourteenDaysAgo = DateTime.UtcNow.AddDays(-14);
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 WHERE sub_status = 'paused'
                   AND paused_at < @fourteenDaysAgo
@@ -2897,7 +2931,7 @@ namespace MultiTerminal.Services
 
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
-                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 WHERE sub_status = 'paused' AND paused_at IS NOT NULL AND paused_at <= @cutoffDate
                 ORDER BY paused_at ASC
@@ -2926,7 +2960,7 @@ namespace MultiTerminal.Services
 
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
-                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes
+                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
                 FROM tasks
                 WHERE assignee = @assignee AND stale_level > 0
                 ORDER BY stale_level DESC, paused_at ASC

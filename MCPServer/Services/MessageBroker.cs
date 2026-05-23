@@ -2767,6 +2767,115 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Create a quick-task — a lightweight, immutable attribution anchor for trivial
+        /// working-tree changes that don't warrant a full kanban card. Always status='done',
+        /// no checklist, no plan. After creation only the title can be edited (via
+        /// <see cref="UpdateQuickTaskTitle"/>); all other mutation methods reject the task.
+        /// Hidden by default from list_tasks (controller-level filter). See task d42423e3.
+        /// </summary>
+        public CreateTaskResult CreateQuickTask(string title, string createdBy, string projectId = null)
+        {
+            if (string.IsNullOrWhiteSpace(title))
+                return new CreateTaskResult { Success = false, Error = "Title required" };
+
+            string canonicalProjectId = null;
+            if (!string.IsNullOrWhiteSpace(projectId))
+            {
+                canonicalProjectId = NormalizeProjectId(projectId);
+                if (canonicalProjectId == null)
+                {
+                    return new CreateTaskResult
+                    {
+                        Success = false,
+                        Error = $"Project id '{projectId}' is ambiguous (matches multiple registered projects, or is a short prefix of one). Pass the full id."
+                    };
+                }
+            }
+
+            var task = new KanbanTask
+            {
+                Title = title,
+                Description = null,
+                CreatedBy = createdBy,
+                Status = "done",
+                Priority = "normal",
+                ProjectId = canonicalProjectId,
+                IsQuickTask = true,
+                ChecklistJson = "[]",
+                ImplementationChecklistJson = "[]"
+            };
+
+            if (_tasks.TryAdd(task.Id, task))
+            {
+                try
+                {
+                    _taskDb.SaveTask(task);
+                }
+                catch (Exception ex)
+                {
+                    _tasks.TryRemove(task.Id, out _);
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save quick task: {ex.Message}");
+                    return new CreateTaskResult
+                    {
+                        Success = false,
+                        Error = $"Failed to persist quick task: {ex.Message}"
+                    };
+                }
+
+                BroadcastTaskUpdate();
+
+                RecordActivity(new ActivityEvent
+                {
+                    Terminal = createdBy ?? "System",
+                    Type = "task",
+                    Action = "quick_created",
+                    Content = $"Quick task: {title}",
+                    RelatedId = task.Id
+                });
+
+                return new CreateTaskResult { Success = true, TaskId = task.Id };
+            }
+
+            return new CreateTaskResult { Success = false, Error = "Failed to create quick task" };
+        }
+
+        /// <summary>
+        /// Update the title of a quick-task. The only mutation allowed on quick-tasks
+        /// (per the immutability contract — see <see cref="CreateQuickTask"/>).
+        /// Returns Success=false if the task isn't a quick-task or doesn't exist.
+        /// </summary>
+        public UpdateTaskResult UpdateQuickTaskTitle(string taskId, string newTitle, string updatedBy)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+                return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            if (!task.IsQuickTask)
+                return new UpdateTaskResult { Success = false, Error = $"Task {taskId} is not a quick-task. Use UpdateTask for regular tasks." };
+
+            if (string.IsNullOrWhiteSpace(newTitle))
+                return new UpdateTaskResult { Success = false, Error = "Title cannot be empty" };
+
+            var previousTitle = task.Title;
+            task.Title = newTitle;
+
+            try { _taskDb.SaveTask(task); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update quick task title: {ex.Message}"); }
+
+            BroadcastTaskUpdate();
+
+            RecordActivity(new ActivityEvent
+            {
+                Terminal = updatedBy ?? task.Assignee ?? "System",
+                Type = "task",
+                Action = "edited",
+                Content = $"Renamed quick task: '{previousTitle}' → '{newTitle}'",
+                RelatedId = taskId
+            });
+
+            return new UpdateTaskResult { Success = true };
+        }
+
+        /// <summary>
         /// Claim a task by assigning it to a terminal.
         /// Priority-aware stack behavior based on task's priority field:
         /// - urgent: Pauses current active task (unless in critical section), makes this task active
@@ -3098,6 +3207,9 @@ namespace MultiTerminal.MCPServer.Services
             {
                 return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
             }
+
+            if (task.IsQuickTask)
+                return new UpdateTaskStatusResult { Success = false, Error = $"Cannot change status: task {taskId} is a quick-task (immutable; status is permanently 'done')." };
 
             var validStatuses = new[] { "todo", "in_progress", "done", "suggestion" };
             if (!validStatuses.Contains(status))
@@ -3517,6 +3629,9 @@ namespace MultiTerminal.MCPServer.Services
                 return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
+            if (task.IsQuickTask)
+                return new UpdateTaskResult { Success = false, Error = $"Cannot edit: task {taskId} is a quick-task (immutable except title). Use UpdateQuickTaskTitle for title changes." };
+
             if (string.IsNullOrWhiteSpace(title))
             {
                 return new UpdateTaskResult { Success = false, Error = "Title cannot be empty" };
@@ -3562,6 +3677,9 @@ namespace MultiTerminal.MCPServer.Services
             {
                 return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
+
+            if (task.IsQuickTask)
+                return new UpdateTaskResult { Success = false, Error = $"Cannot set checklist: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
 
             task.ChecklistJson = checklistJson ?? "[]";
 
@@ -3793,6 +3911,9 @@ namespace MultiTerminal.MCPServer.Services
                 return new UpdateChecklistItemResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
+            if (task.IsQuickTask)
+                return new UpdateChecklistItemResult { Success = false, Error = $"Cannot transition checklist: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
+
             var checklist = task.GetChecklist();
             if (itemIndex < 0 || itemIndex >= checklist.Count)
             {
@@ -4003,6 +4124,9 @@ namespace MultiTerminal.MCPServer.Services
                 return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
+            if (task.IsQuickTask)
+                return new UpdateTaskResult { Success = false, Error = $"Cannot set plan: task {taskId} is a quick-task (immutable; quick-tasks have no plan)." };
+
             task.Plan = plan;
 
             try { _taskDb.SaveTask(task); }
@@ -4031,6 +4155,9 @@ namespace MultiTerminal.MCPServer.Services
             {
                 return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
+
+            if (task.IsQuickTask)
+                return new UpdateTaskResult { Success = false, Error = $"Cannot set summary/test results: task {taskId} is a quick-task (immutable)." };
 
             if (implementationSummary != null) task.ImplementationSummary = implementationSummary;
             if (testResults != null) task.TestResults = testResults;

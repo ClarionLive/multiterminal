@@ -26,9 +26,14 @@ namespace MultiTerminal.API.Controllers
         /// List all tasks, optionally filtered by status
         /// </summary>
         [HttpGet]
-        public IActionResult ListTasks([FromQuery] string status = "all")
+        public IActionResult ListTasks([FromQuery] string status = "all", [FromQuery] bool includeQuickTasks = false)
         {
             var allTasks = _broker.GetTasks(projectId: null);
+
+            if (!includeQuickTasks)
+            {
+                allTasks = allTasks.Where(t => !t.IsQuickTask).ToList();
+            }
 
             if (status != "all")
             {
@@ -114,6 +119,70 @@ namespace MultiTerminal.API.Controllers
 
             var task = _taskDb.GetTask(result.TaskId);
             return Ok(new { taskId = result.TaskId, task });
+        }
+
+        /// <summary>
+        /// Create a quick-task — a lightweight immutable attribution anchor for trivial
+        /// working-tree changes. Atomically creates the quick-task AND links the supplied
+        /// file paths. If any file link fails, the newly-created quick-task is rolled back
+        /// (deleted) to avoid orphan quick-tasks with no attribution. See task d42423e3.
+        /// </summary>
+        [HttpPost("quick")]
+        public IActionResult CreateQuickTask([FromBody] CreateQuickTaskRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Title))
+                return BadRequest(new { error = "Title required" });
+
+            if (request.FilePaths == null || request.FilePaths.Count == 0)
+                return BadRequest(new { error = "At least one filePath is required (a quick-task must attribute to at least one file)" });
+
+            var createResult = _broker.CreateQuickTask(request.Title, request.CreatedBy, request.ProjectId);
+            if (!createResult.Success)
+                return BadRequest(new { error = createResult.Error });
+
+            var taskId = createResult.TaskId;
+            var linkedFiles = new List<string>();
+            string linkError = null;
+
+            foreach (var path in request.FilePaths)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+
+                var linkResult = _broker.LinkFile(
+                    taskId,
+                    path,
+                    description: request.Title,
+                    lineStart: null,
+                    lineEnd: null,
+                    addedBy: request.CreatedBy,
+                    checklistItemIndex: null);
+
+                if (!linkResult.Success)
+                {
+                    linkError = $"Failed to link file '{path}': {linkResult.Error}";
+                    break;
+                }
+                linkedFiles.Add(path);
+            }
+
+            if (linkError != null)
+            {
+                // Roll back the orphan quick-task. Best-effort — if delete fails we surface
+                // the original link error and a hint that the quick-task may need manual cleanup.
+                try { _broker.DeleteTask(taskId, request.CreatedBy); }
+                catch (Exception ex)
+                {
+                    return StatusCode(500, new
+                    {
+                        error = $"{linkError}. Rollback also failed: {ex.Message}. Orphan quick-task id={taskId} may need manual cleanup."
+                    });
+                }
+                return BadRequest(new { error = $"{linkError}. Quick-task rolled back." });
+            }
+
+            var task = _taskDb.GetTask(taskId);
+            return Ok(new { taskId, task, linkedFiles });
         }
 
         /// <summary>
@@ -703,6 +772,14 @@ namespace MultiTerminal.API.Controllers
         public string Status { get; set; }
         public string Priority { get; set; }
         public string ProjectId { get; set; }
+    }
+
+    public class CreateQuickTaskRequest
+    {
+        public string Title { get; set; }
+        public string CreatedBy { get; set; }
+        public string ProjectId { get; set; }
+        public List<string> FilePaths { get; set; }
     }
 
     public class UpdateStatusRequest
