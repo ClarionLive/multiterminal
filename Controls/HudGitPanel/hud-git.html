@@ -1725,8 +1725,9 @@ html, body {
     // renderBranchesSection. Two siblings:
     //
     //   • Working changes  — expanded by default. Children are task
-    //     groups + an `Unlinked changes` group at the end. Groups with
-    //     ≤5 files default expanded, >5 default collapsed.
+    //     groups + a `Needs a quick task` group at the end (renamed from
+    //     "Unlinked changes" in d42423e3 Phase 2a). Groups with ≤5
+    //     files default expanded, >5 default collapsed.
     //
     //   • Recent commits   — collapsed by default. Flat commit rows.
     //
@@ -1790,8 +1791,9 @@ html, body {
             }
         } else {
             // Render task groups in payload order (HudGitRenderer sorts
-            // active before shipped, then by title) plus an Unlinked changes
-            // group at the end when present.
+            // active before shipped, then by title) plus a Needs-a-quick-task
+            // group at the end when present (task d42423e3 Phase 2a renamed
+            // from "Unlinked changes"). Hidden entirely at length=0.
             for (const group of groupedByTask) {
                 wcNode.children.appendChild(buildTaskGroupNode(group, depth + 1, path, idPrefix));
             }
@@ -1930,9 +1932,12 @@ html, body {
         return { topLevel, dirGroups };
     }
 
-    // Unlinked changes group — files with no task linkage. Always rendered
-    // at the bottom when present, with `drill-if->5` rule applied per
-    // locked design (matches the per-task-group default).
+    // Needs-a-quick-task group — files with no task linkage. Phase 2a of
+    // task d42423e3 reframes this group as a forced-prompt zone: every
+    // file here needs an attribution anchor (a quick-task) before commit.
+    // Always rendered at the bottom when present, with `drill-if->5` rule
+    // applied per locked design (matches the per-task-group default).
+    // Hide-at-0 is enforced by the caller (`unlinked.length > 0` gate).
     //
     // Porcelain alignment (task 046f2dea Phase 2): with `untrackedDirRoots`
     // from the server, fold inner files of each untracked-dir root into a
@@ -1954,7 +1959,8 @@ html, body {
 
         const title = document.createElement('span');
         title.className = 'tg-title';
-        title.textContent = 'Unlinked changes';
+        title.textContent = 'Needs a quick task';
+        title.title = 'Files with no task attribution — each needs a quick-task to anchor commit history. Done tasks touched in the last 3 days appear in their own group above; older ones aren’t matched.';
         node.row.appendChild(title);
 
         const count = document.createElement('span');
@@ -2401,27 +2407,30 @@ html, body {
 
         const title = document.createElement('span');
         title.className = 'wt-group-title';
-        title.textContent = 'Unlinked changes';
-        title.title = 'Files with no active task linkage';
+        title.textContent = 'Needs a quick task';
+        title.title = 'Files with no task attribution — each needs a quick-task to anchor commit history.';
         summary.appendChild(title);
 
-        // Info icon documents the 3-day shipped-chip cliff: done tasks
-        // touched within the last 3 days surface as their own "shipped"
-        // group above, anything older falls into this Unlinked group with
-        // no signal explaining why. Tooltip uses "recently-touched" not
-        // "completed" because the SQL gate at TaskDatabase.cs:1513 filters
-        // on tasks.updated_at — and per the caveat at TaskDatabase.cs:1486-
-        // 1503, ANY edit to a done task (pipeline reports, review notes,
-        // summary edits) bumps updated_at. A real completed_at gate is
-        // tracked in ticket a28a3fe6. Native title= keeps it consistent
-        // with the chip tooltip pattern used throughout (no JS popover).
-        // cursor:help on the icon signals it's informational, not
-        // interactive (per task 521f0449).
+        // Info icon documents the 3-day shipped-chip cliff plus the new
+        // "every change must attribute to a task" framing (task d42423e3
+        // Phase 2a): done tasks touched within the last 3 days surface
+        // as their own "shipped" group above; anything older — plus any
+        // file never linked at all — falls into THIS group, which is now
+        // a forced-prompt zone awaiting a quick-task. Tooltip uses
+        // "recently-touched" not "completed" because the SQL gate at
+        // TaskDatabase.cs:1513 filters on tasks.updated_at — and per
+        // the caveat at TaskDatabase.cs:1486-1503, ANY edit to a done
+        // task (pipeline reports, review notes, summary edits) bumps
+        // updated_at. A real completed_at gate is tracked in ticket
+        // a28a3fe6. Native title= keeps it consistent with the chip
+        // tooltip pattern used throughout (no JS popover). cursor:help
+        // on the icon signals it's informational, not interactive
+        // (per task 521f0449).
         const infoIcon = document.createElement('span');
         infoIcon.className = 'wt-group-info-icon';
         infoIcon.textContent = 'ⓘ';
-        infoIcon.title = 'Files with no active task claim. Recently-touched done tasks (last 3 days of activity) appear in their own group above; older done tasks aren’t matched.';
-        infoIcon.setAttribute('aria-label', 'About unlinked changes');
+        infoIcon.title = 'Files with no task attribution — each needs a quick-task to anchor commit history. Done tasks touched in the last 3 days appear in their own group above; older ones aren’t matched.';
+        infoIcon.setAttribute('aria-label', 'About the needs-a-quick-task group');
         summary.appendChild(infoIcon);
 
         const count = document.createElement('span');
