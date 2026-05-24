@@ -90,6 +90,7 @@ namespace MultiTerminal.Services
             MigrateAddAutoStatusToTasks();
             MigrateAddReviewNotesToTasks();
             MigrateAddIsQuickTaskToTasks();
+            MigrateAddSortOrderToTasks();
             MigrateAddUserInbox();
             MigrateAddProjectIdsToProfiles();
             MigrateAddTaskAttachments();
@@ -1106,6 +1107,58 @@ namespace MultiTerminal.Services
                 const string sql = "ALTER TABLE tasks ADD COLUMN is_quick_task INTEGER DEFAULT 0";
                 using var cmd = new SQLiteCommand(sql, _connection);
                 cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// Adds the sort_order column to tasks and backfills existing rows so today's
+        /// creation-time order is preserved. Gap-based (1000-unit increments) so that
+        /// midpoint insertion on drag-rank rarely needs to renumber. Composite index
+        /// (status, sort_order) backs the kanban list query's ORDER BY.
+        /// </summary>
+        private void MigrateAddSortOrderToTasks()
+        {
+            bool hasSortOrder = false;
+            using (var pragmaCmd = new SQLiteCommand("PRAGMA table_info(tasks)", _connection))
+            using (var reader = pragmaCmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    var columnName = reader.GetString(1);
+                    if (columnName.Equals("sort_order", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasSortOrder = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasSortOrder)
+            {
+                using var alter = new SQLiteCommand("ALTER TABLE tasks ADD COLUMN sort_order REAL", _connection);
+                alter.ExecuteNonQuery();
+
+                // Backfill: assign 1000, 2000, 3000... per status bucket in created_at ASC
+                // order. ROW_NUMBER() requires SQLite 3.25+, which our SQLite assembly
+                // ships. Project_id is intentionally ignored for partitioning — relative
+                // order within (project, status) is identical to within (status) when the
+                // source order is created_at.
+                const string backfill = @"
+                    WITH ordered AS (
+                        SELECT id, ROW_NUMBER() OVER (PARTITION BY status ORDER BY created_at ASC) AS rn
+                        FROM tasks
+                    )
+                    UPDATE tasks
+                    SET sort_order = (SELECT rn * 1000.0 FROM ordered WHERE ordered.id = tasks.id)
+                    WHERE sort_order IS NULL
+                ";
+                using var backfillCmd = new SQLiteCommand(backfill, _connection);
+                backfillCmd.ExecuteNonQuery();
+
+                using var index = new SQLiteCommand(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_status_sort ON tasks(status, sort_order)",
+                    _connection);
+                index.ExecuteNonQuery();
             }
         }
 
