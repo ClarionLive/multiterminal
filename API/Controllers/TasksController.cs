@@ -199,6 +199,25 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Title-only rename. Narrow-surface companion to the WebView2 edit_task
+        /// path — used by the rename_task MCP tool so agents can rename a task
+        /// without going through the full edit_task message (which requires the
+        /// other fields to be re-sent).
+        /// </summary>
+        [HttpPatch("{taskId}/title")]
+        public IActionResult RenameTask(string taskId, [FromBody] RenameTaskRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.NewTitle))
+                return BadRequest(new { error = "newTitle is required and cannot be empty" });
+
+            var result = _broker.RenameTask(taskId, request.NewTitle, request.UpdatedBy);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
         /// Delete a task
         /// </summary>
         [HttpDelete("{taskId}")]
@@ -785,6 +804,12 @@ namespace MultiTerminal.API.Controllers
     public class UpdateStatusRequest
     {
         public string Status { get; set; }
+        public string UpdatedBy { get; set; }
+    }
+
+    public class RenameTaskRequest
+    {
+        public string NewTitle { get; set; }
         public string UpdatedBy { get; set; }
     }
 

@@ -3678,6 +3678,55 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Title-only rename for a task — the narrow-surface counterpart to
+        /// <see cref="UpdateTask"/>'s multi-field edit. Works for both regular
+        /// and quick-tasks (a quick-task's title is the one field its
+        /// immutability contract allows to change). Used by the rename_task
+        /// MCP tool / PATCH /api/tasks/{id}/title — neither needs the full
+        /// edit_task surface, so this path skips description/plan/priority/
+        /// project/status touches that <see cref="UpdateTask"/> would either
+        /// require or clobber.
+        /// </summary>
+        public UpdateTaskResult RenameTask(string taskId, string newTitle, string updatedBy)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+            {
+                return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
+            }
+
+            if (string.IsNullOrWhiteSpace(newTitle))
+            {
+                return new UpdateTaskResult { Success = false, Error = "Title cannot be empty" };
+            }
+
+            var previousTitle = task.Title;
+            if (previousTitle == newTitle)
+            {
+                return new UpdateTaskResult { Success = true };
+            }
+
+            task.Title = newTitle;
+
+            try { _taskDb.SaveTask(task); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to rename task: {ex.Message}"); }
+
+            BroadcastTaskUpdate();
+
+            RecordActivity(new ActivityEvent
+            {
+                Terminal = updatedBy ?? task.Assignee ?? "System",
+                Type = "task",
+                Action = "edited",
+                Content = task.IsQuickTask
+                    ? $"Renamed quick task: '{previousTitle}' → '{newTitle}'"
+                    : $"Renamed task: '{previousTitle}' → '{newTitle}'",
+                RelatedId = taskId
+            });
+
+            return new UpdateTaskResult { Success = true };
+        }
+
+        /// <summary>
         /// Update a task's checklist JSON.
         /// </summary>
         public UpdateTaskResult UpdateTaskChecklist(string taskId, string checklistJson)
