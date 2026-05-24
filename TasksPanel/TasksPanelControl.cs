@@ -353,7 +353,11 @@ namespace MultiTerminal.TasksPanel
                                 var dataObj = new DataObject(DataFormats.Text, payload);
                                 BeginInvoke(new Action(() =>
                                 {
-                                    _webView.DoDragDrop(dataObj, DragDropEffects.Move | DragDropEffects.Copy);
+                                    // Deferred until the cursor left the WebView (see tasks-panel.html
+                                    // handleDocumentDragLeave) so the modal OLE loop doesn't starve
+                                    // the in-page HTML5 drop pipeline that same-WebView reorder uses.
+                                    var oleEffect = _webView.DoDragDrop(dataObj, DragDropEffects.Move | DragDropEffects.Copy);
+                                    DebugLog($"DoDragDrop returned effect={oleEffect} for task={dragTaskId}");
                                     // OLE drag ended (user released mouse) — clear side-channel
                                     ClearPendingDragData();
                                 }));
