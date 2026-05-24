@@ -1066,7 +1066,8 @@ namespace MultiTerminal.TasksPanel
                     ContinuationNotes = t.ContinuationNotes,
                     SubStatus = t.SubStatus,
                     ImplementationChecklistJson = t.ImplementationChecklistJson ?? "[]",
-                    AutoStatus = t.AutoStatus
+                    AutoStatus = t.AutoStatus,
+                    sortOrder = t.SortOrder
                 }), JsonOptions.Unicode);
 
                 DebugLog($"SendTasksToWebView: JSON serialized, length={tasksJson.Length}");
