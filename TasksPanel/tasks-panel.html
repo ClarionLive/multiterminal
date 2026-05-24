@@ -1203,6 +1203,19 @@
             transform: scale(0.98);
         }
 
+        /* Ghost insertion line — shows where the dragged card will land within
+           the column. A single element is moved into the target column on
+           dragover and removed on dragleave/drop/dragend. */
+        .insertion-line {
+            height: 2px;
+            margin: 4px 0;
+            background: #4A90D9;
+            border-radius: 2px;
+            box-shadow: 0 0 4px rgba(74, 144, 217, 0.6);
+            pointer-events: none;
+            transition: opacity 0.08s ease-in;
+        }
+
         .column-tasks.drag-over {
             background-color: rgba(74, 144, 217, 0.1);
             border: 2px dashed #4A90D9;
@@ -1512,10 +1525,19 @@
                 filteredTasks = filteredTasks.filter(t => t.assignee === selectedTerminalName);
             }
 
-            const suggestions = filteredTasks.filter(t => t.status === 'suggestion');
-            const todo = filteredTasks.filter(t => t.status === 'todo');
-            const inProgress = filteredTasks.filter(t => t.status === 'in_progress');
-            const done = filteredTasks.filter(t => t.status === 'done');
+            // Sort by manual sort_order ascending; null sort_order rows sort
+            // last (matches LoadAllTasks NULLS LAST). Secondary sort by createdAt
+            // for deterministic order when sort_order ties.
+            const bySortOrder = (a, b) => {
+                const av = (a.sortOrder == null) ? Number.POSITIVE_INFINITY : a.sortOrder;
+                const bv = (b.sortOrder == null) ? Number.POSITIVE_INFINITY : b.sortOrder;
+                if (av !== bv) return av - bv;
+                return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+            };
+            const suggestions = filteredTasks.filter(t => t.status === 'suggestion').sort(bySortOrder);
+            const todo = filteredTasks.filter(t => t.status === 'todo').sort(bySortOrder);
+            const inProgress = filteredTasks.filter(t => t.status === 'in_progress').sort(bySortOrder);
+            const done = filteredTasks.filter(t => t.status === 'done').sort(bySortOrder);
 
             console.log('[TasksPanel JS] renderAllTasks columns:',
                 'suggestion=' + suggestions.length, 'todo=' + todo.length,
@@ -2393,47 +2415,138 @@
 
         // Drag and drop functionality
         let draggedTaskId = null;
+        // True once we've handed off to the host's OLE DoDragDrop bridge for
+        // this gesture. We MUST defer that handoff until the cursor leaves the
+        // WebView — DoDragDrop is a modal mouse-capture loop and starves the
+        // in-page HTML5 dragover/drop events same-WebView reorder relies on.
+        // See task 3007abb0 item 3 fix.
+        let _oleBridgeStarted = false;
+        let _pendingDragTitle = null;
 
         function handleDragStart(event) {
             const card = event.target.closest('.task-card');
             if (!card) return;
 
             draggedTaskId = card.dataset.taskId;
+            _oleBridgeStarted = false;
             card.classList.add('dragging');
             event.dataTransfer.effectAllowed = 'move';
             // Include task title for cross-control drag (kanban → terminal drop)
             const task = tasks.find(t => t.id === draggedTaskId);
+            _pendingDragTitle = task ? task.title : '';
             const dragPayload = JSON.stringify({
                 taskId: draggedTaskId,
-                title: task ? task.title : '',
+                title: _pendingDragTitle,
                 source: 'multiterminal-kanban'
             });
             event.dataTransfer.setData('text/plain', dragPayload);
+            console.log('[TasksPanel drag] dragstart taskId=' + draggedTaskId);
 
-            // Side-channel: notify C# host about drag data
-            // (WebView2 doesn't reliably pass dataTransfer to WinForms OLE drag-drop)
-            sendToHost({ type: 'task_drag_start', taskId: draggedTaskId, title: task ? task.title : '' });
+            // NOTE: previously this method posted `task_drag_start` to the host
+            // unconditionally, which made the host start a WinForms OLE
+            // DoDragDrop modal loop immediately. That loop captures the mouse
+            // and starves the HTML5 dragover/drop pipeline inside the WebView,
+            // so same-WebView reorder (item 3) and the pre-existing
+            // cross-column status drag both became no-ops. We now defer the
+            // OLE handoff to handleDocumentDragLeave: only post task_drag_start
+            // once the cursor actually leaves the WebView client area.
         }
+
+        // Fires when the cursor crosses the WebView document boundary during a
+        // drag. We start the OLE bridge here (once per gesture) so the drag can
+        // continue onto WinForms drop targets (e.g. a terminal tab). For drags
+        // that stay inside the WebView, this never fires and HTML5 handles the
+        // drop normally — that's the path the kanban reorder uses.
+        function handleDocumentDragLeave(event) {
+            // relatedTarget === null is the canonical signal that the cursor
+            // has left the document entirely (Edge/Chromium contract).
+            if (event.relatedTarget !== null) return;
+            if (_oleBridgeStarted) return;
+            if (!draggedTaskId) return;
+            _oleBridgeStarted = true;
+            console.log('[TasksPanel drag] cursor left WebView, handing off to OLE bridge taskId=' + draggedTaskId);
+            sendToHost({ type: 'task_drag_start', taskId: draggedTaskId, title: _pendingDragTitle || '' });
+        }
+        document.addEventListener('dragleave', handleDocumentDragLeave);
 
         function handleDragEnd(event) {
             const card = event.target.closest('.task-card');
             if (card) {
                 card.classList.remove('dragging');
             }
+            console.log('[TasksPanel drag] dragend taskId=' + draggedTaskId + ' oleBridgeStarted=' + _oleBridgeStarted);
             draggedTaskId = null;
+            _oleBridgeStarted = false;
+            _pendingDragTitle = null;
+            _dragOverTraced = false;
 
             // Remove drag-over from all columns
             document.querySelectorAll('.column-tasks').forEach(col => {
                 col.classList.remove('drag-over');
             });
 
+            // Drop or escape always clears the insertion indicator.
+            clearInsertionLine();
+
             // Clear the side-channel drag data
             sendToHost({ type: 'task_drag_end' });
         }
 
+        // Singleton ghost line element. Lazily created on first dragover so
+        // we don't pay the DOM cost when drag-rank is never used.
+        let _insertionLineEl = null;
+        function getInsertionLine() {
+            if (!_insertionLineEl) {
+                _insertionLineEl = document.createElement('div');
+                _insertionLineEl.className = 'insertion-line';
+            }
+            return _insertionLineEl;
+        }
+
+        function clearInsertionLine() {
+            if (_insertionLineEl && _insertionLineEl.parentNode) {
+                _insertionLineEl.parentNode.removeChild(_insertionLineEl);
+            }
+        }
+
+        // Move the singleton line into the target column at the index that
+        // matches the current cursor Y. We measure against the FILTERED card
+        // list (excluding the dragged card) so the visual feedback matches
+        // exactly where computeMidpointSortOrder will place the card on drop.
+        function positionInsertionLine(column, clientY, excludeTaskId) {
+            const cards = Array.from(column.querySelectorAll('.task-card'))
+                .filter(c => c.dataset.taskId !== excludeTaskId);
+            const line = getInsertionLine();
+
+            let insertIndex = cards.length;
+            for (let i = 0; i < cards.length; i++) {
+                const rect = cards[i].getBoundingClientRect();
+                const midpoint = rect.top + rect.height / 2;
+                if (clientY < midpoint) { insertIndex = i; break; }
+            }
+
+            if (insertIndex >= cards.length) {
+                column.appendChild(line);
+            } else {
+                column.insertBefore(line, cards[insertIndex]);
+            }
+        }
+
+        // Trace once per gesture so the console doesn't get flooded with
+        // dragover events (fires every few pixels). Useful for confirming the
+        // OLE-bridge starvation fix end-to-end.
+        let _dragOverTraced = false;
         function handleDragOver(event) {
             event.preventDefault();
             event.dataTransfer.dropEffect = 'move';
+            const column = event.target.closest('.column-tasks');
+            if (!_dragOverTraced) {
+                _dragOverTraced = true;
+                console.log('[TasksPanel drag] first dragover targetTag=' + event.target.tagName + ' inColumn=' + !!column + ' draggedTaskId=' + draggedTaskId);
+            }
+            if (column && draggedTaskId) {
+                positionInsertionLine(column, event.clientY, draggedTaskId);
+            }
         }
 
         function handleDragEnter(event) {
@@ -2447,31 +2560,83 @@
             const column = event.target.closest('.column-tasks');
             if (column && !column.contains(event.relatedTarget)) {
                 column.classList.remove('drag-over');
+                // Clear the line only when leaving the kanban grid entirely
+                // (not when moving between cards in the same column — the
+                // dragover handler will reposition it the next pixel).
+                if (!event.relatedTarget || !event.relatedTarget.closest('.column-tasks')) {
+                    clearInsertionLine();
+                }
             }
+        }
+
+        // Compute the insertion index for a drop event relative to the cards
+        // currently rendered in the target column. The dragged card itself is
+        // excluded so a same-column drop doesn't try to insert relative to its
+        // own pre-drop position. Returns 0..count (count = end of column).
+        function computeInsertionIndex(column, clientY, excludeTaskId) {
+            const cards = Array.from(column.querySelectorAll('.task-card'))
+                .filter(c => c.dataset.taskId !== excludeTaskId);
+            for (let i = 0; i < cards.length; i++) {
+                const rect = cards[i].getBoundingClientRect();
+                const midpoint = rect.top + rect.height / 2;
+                if (clientY < midpoint) return i;
+            }
+            return cards.length;
+        }
+
+        // Pure function: given the ordered sibling list of a status column
+        // (already excluding the dragged task) and a target insertion index,
+        // return the sort_order to write. Midpoint of prev/next neighbors when
+        // both exist; prev+1000 at the end; next-1000 at the front; 1000 if
+        // the column would otherwise be empty.
+        function computeMidpointSortOrder(siblings, insertIndex) {
+            const prev = insertIndex > 0 ? siblings[insertIndex - 1] : null;
+            const next = insertIndex < siblings.length ? siblings[insertIndex] : null;
+            const prevOrder = prev && prev.sortOrder != null ? prev.sortOrder : null;
+            const nextOrder = next && next.sortOrder != null ? next.sortOrder : null;
+            if (prevOrder != null && nextOrder != null) return (prevOrder + nextOrder) / 2;
+            if (prevOrder != null) return prevOrder + 1000;
+            if (nextOrder != null) return nextOrder - 1000;
+            return 1000;
         }
 
         function handleDrop(event) {
             event.preventDefault();
             const column = event.target.closest('.column-tasks');
+            console.log('[TasksPanel drag] drop column=' + !!column + ' draggedTaskId=' + draggedTaskId);
             if (!column || !draggedTaskId) return;
 
             column.classList.remove('drag-over');
+            clearInsertionLine();
 
-            // Get the target status from the column's parent
             const kanbanColumn = column.closest('.kanban-column');
             const newStatus = kanbanColumn ? kanbanColumn.dataset.column : null;
-
             if (!newStatus) return;
 
-            // Find the current task to check if status actually changed
             const task = tasks.find(t => t.id === draggedTaskId);
-            if (task && task.status !== newStatus) {
-                sendToHost({
-                    type: 'update_task',
-                    taskId: draggedTaskId,
-                    status: newStatus
+            if (!task) return;
+
+            // Build the sibling list (target column, sorted, excluding the
+            // dragged task) so the broker's gap-collapse guard sees the same
+            // view of the column the user does.
+            const siblings = tasks
+                .filter(t => t.status === newStatus && t.id !== draggedTaskId)
+                .sort((a, b) => {
+                    const av = (a.sortOrder == null) ? Number.POSITIVE_INFINITY : a.sortOrder;
+                    const bv = (b.sortOrder == null) ? Number.POSITIVE_INFINITY : b.sortOrder;
+                    return av - bv;
                 });
-            }
+
+            const insertIndex = computeInsertionIndex(column, event.clientY, draggedTaskId);
+            const newSortOrder = computeMidpointSortOrder(siblings, insertIndex);
+
+            sendToHost({
+                type: 'reorder_task',
+                taskId: draggedTaskId,
+                newStatus: newStatus,
+                newSortOrder: newSortOrder,
+                reorderedBy: 'UI'
+            });
         }
 
         // Set up drag event listeners on column containers

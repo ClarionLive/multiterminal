@@ -199,6 +199,50 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Title-only rename. Narrow-surface companion to the WebView2 edit_task
+        /// path — used by the rename_task MCP tool so agents can rename a task
+        /// without going through the full edit_task message (which requires the
+        /// other fields to be re-sent).
+        /// </summary>
+        [HttpPatch("{taskId}/title")]
+        public IActionResult RenameTask(string taskId, [FromBody] RenameTaskRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.NewTitle))
+                return BadRequest(new { error = "newTitle is required and cannot be empty" });
+
+            var result = _broker.RenameTask(taskId, request.NewTitle, request.UpdatedBy);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
+        /// Reorder a task within (or across) kanban columns. Atomic: if newStatus
+        /// differs from current status, the move-between-columns side-effects fire
+        /// before sort_order is written. Drag-rank UI sends both the target column
+        /// (newStatus) and the midpoint sort_order between drop-position neighbors.
+        /// </summary>
+        [HttpPatch("{taskId}/order")]
+        public IActionResult ReorderTask(string taskId, [FromBody] ReorderTaskRequest request)
+        {
+            if (request == null)
+                return BadRequest(new { error = "Request body is required and must include newStatus + newSortOrder." });
+
+            // Reject NaN / ±Infinity at the ingress (the broker also guards).
+            // Either poisons the sort_order column — SQL ordering against NaN
+            // is undefined and Infinity defeats the rebalance midpoint formula.
+            if (!double.IsFinite(request.NewSortOrder))
+                return BadRequest(new { error = $"newSortOrder must be a finite number (got {request.NewSortOrder})." });
+
+            var result = _broker.ReorderTask(taskId, request.NewStatus, request.NewSortOrder, request.UpdatedBy);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
         /// Delete a task
         /// </summary>
         [HttpDelete("{taskId}")]
@@ -785,6 +829,19 @@ namespace MultiTerminal.API.Controllers
     public class UpdateStatusRequest
     {
         public string Status { get; set; }
+        public string UpdatedBy { get; set; }
+    }
+
+    public class RenameTaskRequest
+    {
+        public string NewTitle { get; set; }
+        public string UpdatedBy { get; set; }
+    }
+
+    public class ReorderTaskRequest
+    {
+        public string NewStatus { get; set; }
+        public double NewSortOrder { get; set; }
         public string UpdatedBy { get; set; }
     }
 

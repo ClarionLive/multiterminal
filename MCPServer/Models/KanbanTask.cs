@@ -154,6 +154,15 @@ namespace MultiTerminal.MCPServer.Models
         public bool IsQuickTask { get; set; }
 
         /// <summary>
+        /// Manual sort order within the task's status column. Lower values render first.
+        /// Gap-based (1000-unit increments at seed time), midpoint-inserted on drag-rank.
+        /// Auto-rebalanced when the minimum gap between adjacent siblings shrinks below epsilon.
+        /// Null only on rows that pre-date the migration AND were never reordered;
+        /// such rows sort last via NULLS LAST in list queries (see TaskDatabase.LoadAllTasks).
+        /// </summary>
+        public double? SortOrder { get; set; }
+
+        /// <summary>
         /// When true, parent task status is auto-derived from checklist item positions:
         /// - All in Planning → "todo"
         /// - Any in Coding/Testing → "in_progress"

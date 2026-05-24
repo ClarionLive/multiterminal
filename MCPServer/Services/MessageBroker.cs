@@ -2728,7 +2728,11 @@ namespace MultiTerminal.MCPServer.Services
                 CreatedBy = createdBy,
                 Status = status,
                 Priority = priority,
-                ProjectId = canonicalProjectId
+                ProjectId = canonicalProjectId,
+                // Seed sort_order at the end of the target column so new tasks
+                // land at the bottom — matches typical kanban UX (new work
+                // appears at the bottom of To Do, not the top).
+                SortOrder = _taskDb.GetNextSortOrderForStatus(status)
             };
 
             if (_tasks.TryAdd(task.Id, task))
@@ -2811,7 +2815,8 @@ namespace MultiTerminal.MCPServer.Services
                 ProjectId = canonicalProjectId,
                 IsQuickTask = true,
                 ChecklistJson = "[]",
-                ImplementationChecklistJson = "[]"
+                ImplementationChecklistJson = "[]",
+                SortOrder = _taskDb.GetNextSortOrderForStatus("done")
             };
 
             if (_tasks.TryAdd(task.Id, task))
@@ -3629,6 +3634,92 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Move a task to a new position in the kanban. Handles both same-column
+        /// reorder and cross-column move (status change) atomically: if newStatus
+        /// differs from the current status, status updates first via the standard
+        /// path (which fires resume-stack / activity / changelog side-effects),
+        /// then sort_order is written. If sort_order is unchanged (newSortOrder
+        /// equals current), the call is a no-op past the status update.
+        ///
+        /// Gap-collapse guard: when the chosen newSortOrder lands within
+        /// MIN_SORT_GAP of either neighbor in the target column, the column is
+        /// rebalanced into 1000-unit gaps and newSortOrder is recomputed via the
+        /// post-rebalance neighbor midpoint. Prevents float collapse over many
+        /// successive midpoint insertions (item 7).
+        /// </summary>
+        public UpdateTaskStatusResult ReorderTask(string taskId, string newStatus, double newSortOrder, string updatedBy)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+                return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            if (task.IsQuickTask)
+                return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: task {taskId} is a quick-task (immutable)." };
+
+            // Reject NaN / ±Infinity. Either would poison the sort_order column —
+            // SQL comparisons against NaN are undefined and Infinity defeats the
+            // rebalance midpoint formula. Defense-in-depth: the WebView handler
+            // also guards this, but a future API/MCP caller could bypass it.
+            if (!double.IsFinite(newSortOrder))
+                return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: newSortOrder must be a finite number (got {newSortOrder})." };
+
+            // Status change first — UpdateTaskStatus handles validation, side-effects,
+            // and persistence. If it fails, bail before touching sort_order.
+            if (!string.IsNullOrEmpty(newStatus) && task.Status != newStatus)
+            {
+                var statusResult = UpdateTaskStatus(taskId, newStatus);
+                if (!statusResult.Success)
+                    return statusResult;
+            }
+
+            const double MIN_SORT_GAP = 1e-6;
+
+            // Collapse guard: snapshot neighbors in the target column AFTER the
+            // status change (the task may have just moved between columns).
+            var siblings = _tasks.Values
+                .Where(t => t.Status == task.Status && t.Id != taskId && t.SortOrder.HasValue)
+                .OrderBy(t => t.SortOrder.Value)
+                .ToList();
+
+            double? prevOrder = null, nextOrder = null;
+            foreach (var sib in siblings)
+            {
+                if (sib.SortOrder.Value < newSortOrder) prevOrder = sib.SortOrder.Value;
+                else if (sib.SortOrder.Value > newSortOrder && nextOrder == null) nextOrder = sib.SortOrder.Value;
+            }
+
+            bool tooCloseBelow = prevOrder.HasValue && (newSortOrder - prevOrder.Value) < MIN_SORT_GAP;
+            bool tooCloseAbove = nextOrder.HasValue && (nextOrder.Value - newSortOrder) < MIN_SORT_GAP;
+
+            if (tooCloseBelow || tooCloseAbove)
+            {
+                // Rebalance the whole column. The current task is still in the
+                // column at its previous sort_order; the rebalance will give it
+                // a clean integer slot, then we compute a fresh midpoint from
+                // the user-intended position. To preserve the visual rank the
+                // user dragged to, set sort_order to the desired endpoint of
+                // the gap before rebalance.
+                task.SortOrder = newSortOrder;
+                _taskDb.UpdateSortOrder(taskId, newSortOrder);
+                _taskDb.RebalanceSortOrder(task.Status);
+
+                // Reload affected tasks' sort_order from DB into in-memory map
+                foreach (var t in _tasks.Values.Where(t => t.Status == task.Status).ToList())
+                {
+                    var refreshed = _taskDb.GetTask(t.Id);
+                    if (refreshed != null) t.SortOrder = refreshed.SortOrder;
+                }
+            }
+            else
+            {
+                task.SortOrder = newSortOrder;
+                _taskDb.UpdateSortOrder(taskId, newSortOrder);
+            }
+
+            BroadcastTaskUpdate();
+            return new UpdateTaskStatusResult { Success = true };
+        }
+
+        /// <summary>
         /// Update a task's title and description.
         /// </summary>
         public UpdateTaskResult UpdateTask(string taskId, string title, string description, string updatedBy = null, string plan = null, string implementationSummary = null, string testResults = null, string implementationChecklistJson = null)
@@ -3671,6 +3762,55 @@ namespace MultiTerminal.MCPServer.Services
                 Content = previousTitle != title
                     ? $"Renamed task: '{previousTitle}' → '{title}'"
                     : $"Updated task: {title}",
+                RelatedId = taskId
+            });
+
+            return new UpdateTaskResult { Success = true };
+        }
+
+        /// <summary>
+        /// Title-only rename for a task — the narrow-surface counterpart to
+        /// <see cref="UpdateTask"/>'s multi-field edit. Works for both regular
+        /// and quick-tasks (a quick-task's title is the one field its
+        /// immutability contract allows to change). Used by the rename_task
+        /// MCP tool / PATCH /api/tasks/{id}/title — neither needs the full
+        /// edit_task surface, so this path skips description/plan/priority/
+        /// project/status touches that <see cref="UpdateTask"/> would either
+        /// require or clobber.
+        /// </summary>
+        public UpdateTaskResult RenameTask(string taskId, string newTitle, string updatedBy)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+            {
+                return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
+            }
+
+            if (string.IsNullOrWhiteSpace(newTitle))
+            {
+                return new UpdateTaskResult { Success = false, Error = "Title cannot be empty" };
+            }
+
+            var previousTitle = task.Title;
+            if (previousTitle == newTitle)
+            {
+                return new UpdateTaskResult { Success = true };
+            }
+
+            task.Title = newTitle;
+
+            try { _taskDb.SaveTask(task); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to rename task: {ex.Message}"); }
+
+            BroadcastTaskUpdate();
+
+            RecordActivity(new ActivityEvent
+            {
+                Terminal = updatedBy ?? task.Assignee ?? "System",
+                Type = "task",
+                Action = "edited",
+                Content = task.IsQuickTask
+                    ? $"Renamed quick task: '{previousTitle}' → '{newTitle}'"
+                    : $"Renamed task: '{previousTitle}' → '{newTitle}'",
                 RelatedId = taskId
             });
 

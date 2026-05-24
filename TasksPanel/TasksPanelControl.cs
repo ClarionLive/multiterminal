@@ -353,7 +353,11 @@ namespace MultiTerminal.TasksPanel
                                 var dataObj = new DataObject(DataFormats.Text, payload);
                                 BeginInvoke(new Action(() =>
                                 {
-                                    _webView.DoDragDrop(dataObj, DragDropEffects.Move | DragDropEffects.Copy);
+                                    // Deferred until the cursor left the WebView (see tasks-panel.html
+                                    // handleDocumentDragLeave) so the modal OLE loop doesn't starve
+                                    // the in-page HTML5 drop pipeline that same-WebView reorder uses.
+                                    var oleEffect = _webView.DoDragDrop(dataObj, DragDropEffects.Move | DragDropEffects.Copy);
+                                    DebugLog($"DoDragDrop returned effect={oleEffect} for task={dragTaskId}");
                                     // OLE drag ended (user released mouse) — clear side-channel
                                     ClearPendingDragData();
                                 }));
@@ -487,6 +491,68 @@ namespace MultiTerminal.TasksPanel
                             root.TryGetProperty("status", out var statusEl))
                         {
                             _broker?.UpdateTaskStatus(updateTaskIdEl.GetString(), statusEl.GetString());
+                        }
+                        break;
+
+                    case "reorder_task":
+                        // Same-column reorder OR cross-column drag with explicit
+                        // sort_order. Frontend (handleDrop) computes the midpoint
+                        // sort_order from neighbor cards and sends {taskId,
+                        // newStatus, newSortOrder, reorderedBy}. Broker applies
+                        // both status (if changed) and sort_order in one call so
+                        // a single TasksUpdated broadcast covers the move.
+                        if (root.TryGetProperty("taskId", out var reorderTaskIdEl) &&
+                            root.TryGetProperty("newStatus", out var reorderStatusEl) &&
+                            root.TryGetProperty("newSortOrder", out var reorderSortEl))
+                        {
+                            var reorderTaskId = reorderTaskIdEl.GetString();
+                            var reorderStatus = reorderStatusEl.GetString();
+                            // Tolerate Number or String wire shapes — handleDrop
+                            // sends a JS number but a future agent-driven caller
+                            // could stringify it.
+                            double newSortOrder;
+                            if (reorderSortEl.ValueKind == JsonValueKind.Number)
+                            {
+                                newSortOrder = reorderSortEl.GetDouble();
+                            }
+                            else if (reorderSortEl.ValueKind == JsonValueKind.String
+                                     && double.TryParse(reorderSortEl.GetString(),
+                                         System.Globalization.NumberStyles.Float,
+                                         System.Globalization.CultureInfo.InvariantCulture,
+                                         out var parsedSort))
+                            {
+                                newSortOrder = parsedSort;
+                            }
+                            else
+                            {
+                                PostErrorMessage($"Cannot reorder task: 'newSortOrder' must be a number (got {reorderSortEl.ValueKind}).");
+                                break;
+                            }
+
+                            // NaN/Infinity guard. Covers both branches above:
+                            // (a) JSON Number overflow (e.g. 1e500) deserializes
+                            // to ±Infinity via GetDouble(); (b) String parse with
+                            // NumberStyles.Float accepts the literals "NaN",
+                            // "Infinity", "-Infinity". Non-finite values poison
+                            // the broker's neighbor comparison loop (NaN < x and
+                            // NaN > x are both false) so the rebalance guard
+                            // wouldn't fire and SortOrder = NaN would persist.
+                            // Defence-in-depth alongside the broker + REST
+                            // endpoint guards. Pipeline Codex security MED.
+                            if (!double.IsFinite(newSortOrder))
+                            {
+                                PostErrorMessage("Cannot reorder task: 'newSortOrder' must be a finite number (NaN/Infinity rejected).");
+                                break;
+                            }
+
+                            var reorderedBy = root.TryGetProperty("reorderedBy", out var reorderedByEl)
+                                ? reorderedByEl.GetString() : null;
+
+                            var reorderResult = _broker?.ReorderTask(reorderTaskId, reorderStatus, newSortOrder, reorderedBy);
+                            if (reorderResult?.Success == false)
+                            {
+                                PostErrorMessage(reorderResult.Error ?? "Failed to reorder task");
+                            }
                         }
                         break;
 
@@ -1020,7 +1086,8 @@ namespace MultiTerminal.TasksPanel
                     ContinuationNotes = t.ContinuationNotes,
                     SubStatus = t.SubStatus,
                     ImplementationChecklistJson = t.ImplementationChecklistJson ?? "[]",
-                    AutoStatus = t.AutoStatus
+                    AutoStatus = t.AutoStatus,
+                    sortOrder = t.SortOrder
                 }), JsonOptions.Unicode);
 
                 DebugLog($"SendTasksToWebView: JSON serialized, length={tasksJson.Length}");
