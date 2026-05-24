@@ -525,6 +525,22 @@ namespace MultiTerminal.TasksPanel
                                 break;
                             }
 
+                            // NaN/Infinity guard. Covers both branches above:
+                            // (a) JSON Number overflow (e.g. 1e500) deserializes
+                            // to ±Infinity via GetDouble(); (b) String parse with
+                            // NumberStyles.Float accepts the literals "NaN",
+                            // "Infinity", "-Infinity". Non-finite values poison
+                            // the broker's neighbor comparison loop (NaN < x and
+                            // NaN > x are both false) so the rebalance guard
+                            // wouldn't fire and SortOrder = NaN would persist.
+                            // Defence-in-depth alongside the broker + REST
+                            // endpoint guards. Pipeline Codex security MED.
+                            if (!double.IsFinite(newSortOrder))
+                            {
+                                PostErrorMessage("Cannot reorder task: 'newSortOrder' must be a finite number (NaN/Infinity rejected).");
+                                break;
+                            }
+
                             var reorderedBy = root.TryGetProperty("reorderedBy", out var reorderedByEl)
                                 ? reorderedByEl.GetString() : null;
 
