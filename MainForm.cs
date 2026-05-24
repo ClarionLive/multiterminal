@@ -431,6 +431,17 @@ namespace MultiTerminal
                 // Wire up BranchMetadataService — per-branch outcome strings for the HUD Git tree (HudGitRenderer reads via broker; REST controllers get their own DI instance)
                 _mcpServer.Broker.BranchMetadata = new Services.BranchMetadataService(_mcpServer.Broker.TaskDb.Connection, _mcpServer.Broker);
 
+                // Wire up ChangelogAttributionService (Phase 4b, task d42423e3 D3) — drives the HUD Git
+                // auto-link pass that routes .claude/project.json changelog edits to the right kanban
+                // task instead of "Needs a quick task". Parser list is built explicitly per D3 ("no
+                // registry on day one") — new file formats (CHANGELOG.md, RELEASES.md) plug in by
+                // adding their IChangelogParser to this list.
+                _mcpServer.Broker.ChangelogAttribution = new Services.ChangelogAttributionService(
+                    new System.Collections.Generic.List<Services.IChangelogParser>
+                    {
+                        new Services.ProjectJsonChangelogParser(),
+                    });
+
                 // Note: Session memory crash recovery moved to after _mcpServer.StartAsync()
                 // so that ProjectService is available (it's wired during server startup)
 

@@ -219,6 +219,14 @@ html, body {
     white-space: nowrap;
     min-width: 0;
 }
+/* Unlinked group header carries an extra bulk-action button after the
+   count chip. The default `flex: 1 1 auto` on .tg-title pushes count +
+   bulk to the right edge where `body { overflow-x: hidden }` clips
+   them. Pin the title to natural width here so the title / count /
+   bulk-button trio clusters on the LEFT and stays visible. */
+.tree-row.unlinked-group .tg-title {
+    flex: 0 1 auto;
+}
 .tree-row .tg-agent,
 .tree-row .tg-count {
     color: var(--fg-muted);
@@ -995,6 +1003,92 @@ html, body {
 .branch-name {
     direction: ltr;
     unicode-bidi: isolate;
+}
+
+/* Phase 2b: per-file inline quick-task form. Shows only on rows in the
+   "Needs a quick task" group. Default state is a compact button; click
+   expands to a text input + Submit / Cancel buttons in the same row. */
+.qt-btn {
+    margin-left: 8px;
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 14px;
+    border: 1px solid #4a8;
+    background: transparent;
+    color: #6c9;
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0.85;
+    flex: 0 0 auto;
+}
+.tree-row:hover .qt-btn,
+.file-row:hover .qt-btn,
+.qt-btn:hover,
+.qt-btn:focus {
+    opacity: 1;
+}
+.qt-form {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.qt-input {
+    flex: 1 1 auto;
+    min-width: 80px;
+    padding: 1px 4px;
+    font-size: 12px;
+    line-height: 16px;
+    border: 1px solid #555;
+    background: rgba(255, 255, 255, 0.05);
+    color: inherit;
+    border-radius: 3px;
+}
+body.light .qt-input {
+    background: rgba(0, 0, 0, 0.03);
+    border-color: #bbb;
+}
+.qt-submit, .qt-cancel {
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 14px;
+    border: 1px solid #555;
+    background: transparent;
+    color: inherit;
+    border-radius: 3px;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+.qt-submit { border-color: #4a8; color: #6c9; }
+.qt-error {
+    margin-left: 8px;
+    font-size: 11px;
+    color: #d66;
+    flex: 0 0 auto;
+}
+.qt-busy { opacity: 0.5; pointer-events: none; }
+
+/* Phase 2c: group-level "Wrap all in one quick task" button. Sits on the
+   "Needs a quick task" group header next to the count chip. Slightly
+   more prominent than the per-file .qt-btn since it's the bulk-action
+   primary path. */
+.qt-bulk-btn {
+    margin-left: 12px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 14px;
+    border: 1px solid #4a8;
+    background: transparent;
+    color: #6c9;
+    border-radius: 3px;
+    cursor: pointer;
+    opacity: 0.85;
+    flex: 0 0 auto;
+}
+.qt-bulk-btn:hover, .qt-bulk-btn:focus {
+    opacity: 1;
 }
 </style>
 </head>
@@ -1954,7 +2048,9 @@ html, body {
             nodeId: nodeId,
             depth: depth,
             defaultExpanded: defaultExpanded,
-            classes: ['task-group'],
+            // 'unlinked-group' marker class pairs with a CSS rule that
+            // un-grows .tg-title so the bulk button below stays visible.
+            classes: ['task-group', 'unlinked-group'],
         });
 
         const title = document.createElement('span');
@@ -1963,13 +2059,21 @@ html, body {
         title.title = 'Files with no task attribution — each needs a quick-task to anchor commit history. Done tasks touched in the last 3 days appear in their own group above; older ones aren’t matched.';
         node.row.appendChild(title);
 
+        // Phase 2c: group-level bulk wrap button. Passes the FLAT unlinked
+        // file list (not the porcelain partition) — the partition is purely
+        // visual; "wrap all" means every uncommitted unlinked file gets a
+        // task_file_links row, including the inner files of untracked-dir roots.
+        // Appended BEFORE count so it sits in the left-clustered visible area
+        // rather than past the right edge (see CSS .tree-row.unlinked-group).
+        attachBulkQuickTaskUI(node.row, unlinked);
+
         const count = document.createElement('span');
         count.className = 'tg-count';
         count.textContent = '· ' + porcelainEntries;
         node.row.appendChild(count);
 
         for (const file of partition.topLevel) {
-            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath));
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath, /*isUnlinked*/ true));
         }
         for (const group of partition.dirGroups) {
             node.children.appendChild(buildUntrackedDirNode(group, depth + 1, worktreePath, idPrefix));
@@ -2021,8 +2125,11 @@ html, body {
         count.textContent = '· ' + group.files.length;
         node.row.appendChild(count);
 
+        // Children of an untracked-dir node are themselves unlinked files
+        // (their parent dir landed in the "Needs a quick task" group via
+        // partitionByUntrackedRoots), so propagate the unlinked flag here too.
         for (const file of group.files) {
-            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath));
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath, /*isUnlinked*/ true));
         }
 
         return node.wrap;
@@ -2031,7 +2138,9 @@ html, body {
     // File row — leaf in the tree. Status marker (M/A/D/U/R/T/C glyph) +
     // path + line stats. Click handler + right-click → Open Code Review
     // are wired in item 5 from the existing handlers.
-    function buildFileRow(file, depth, worktreePath) {
+    // isUnlinked (Phase 2b): when true, append the inline quick-task form
+    // (collapsed "+ Quick task" button by default).
+    function buildFileRow(file, depth, worktreePath, isUnlinked) {
         const row = document.createElement('div');
         row.className = 'tree-row';
         row.setAttribute('role', 'treeitem');
@@ -2057,6 +2166,14 @@ html, body {
         pathSpan.className = 'file-path';
         pathSpan.textContent = (file && file.path) || '';
         row.appendChild(pathSpan);
+
+        // Place qt-btn to the LEFT of the path (immediately after the file
+        // marker) so it sits at a predictable position regardless of path
+        // length and is never pushed past the right edge by the .tree's
+        // `overflow-x: hidden` / scrollbar. Mirrors the bulk button on the
+        // "Needs a quick task" group header. Visual order becomes:
+        // [chevron] [marker] [+ Quick task] [path…] [stats]
+        if (isUnlinked) attachQuickTaskUI(row, file, pathSpan);
 
         const added = (file && file.linesAdded) | 0;
         const deleted = (file && file.linesDeleted) | 0;
@@ -2433,6 +2550,15 @@ html, body {
         infoIcon.setAttribute('aria-label', 'About the needs-a-quick-task group');
         summary.appendChild(infoIcon);
 
+        // Phase 2c: group-level bulk wrap button (parity with the unified
+        // tree-mode buildUnlinkedGroupNode). Lives inside the <summary> so
+        // it sits on the same row as the title/count, NOT inside <details>'s
+        // collapsible body. Appended BEFORE the count chip because count
+        // carries `margin-left: auto` and pins itself to the right edge —
+        // anything appended AFTER count ends up past the panel's
+        // `body { overflow-x: hidden }` clip and goes invisible.
+        attachBulkQuickTaskUI(summary, unlinked);
+
         const count = document.createElement('span');
         count.className = 'wt-group-count';
         count.textContent = unlinked.length + (unlinked.length === 1 ? ' file' : ' files');
@@ -2447,7 +2573,7 @@ html, body {
             return (a.path || '').localeCompare(b.path || '');
         });
         for (const f of sortedFiles) {
-            details.appendChild(buildLegacyFileRow(f, /*suppressTaskChip*/ false));
+            details.appendChild(buildLegacyFileRow(f, /*suppressTaskChip*/ false, /*isUnlinked*/ true));
         }
         return details;
     }
@@ -2458,7 +2584,7 @@ html, body {
     // switch case until that branch is excised. Distinct from the
     // tree-mode `buildFileRow` (data-depth driven) — the old name was
     // hoisting over the new one and stripping depth from every file row.
-    function buildLegacyFileRow(f, suppressTaskChip) {
+    function buildLegacyFileRow(f, suppressTaskChip, isUnlinked) {
         const row = document.createElement('div');
         row.className = 'file-row';
         row.dataset.path = f.path;
@@ -2529,6 +2655,12 @@ html, body {
 
         row.appendChild(marker);
         row.appendChild(path);
+        // Place qt-btn to the LEFT of the path (between marker and path)
+        // so it sits at a predictable position and is never pushed past
+        // the right edge by trailing siblings. Mirrors the tree-mode
+        // buildFileRow placement. Visual order:
+        // [marker] [+ Quick task] [path…] [stats] [chips]
+        if (isUnlinked) attachQuickTaskUI(row, f, path);
         row.appendChild(stats);
         row.appendChild(chips);
 
@@ -2539,6 +2671,250 @@ html, body {
         });
 
         return row;
+    }
+
+    // Phase 2b: per-file inline quick-task form. Appends a compact
+    // "+ Quick task" button to the file row that, on click, expands into
+    // a text input pre-filled with the file basename + Submit/Cancel
+    // buttons. Enter submits, Esc cancels. Tab uses default focus
+    // traversal (button-by-button across rows — no magic auto-expand).
+    // The submit posts {type:'create_quick_task', filePath, title} to the
+    // C# host; success triggers a fresh git_state_tree which moves the
+    // file out of the Needs-a-quick-task group on the next render pass.
+    function attachQuickTaskUI(row, file, insertBefore) {
+        const path = (file && file.path) || '';
+        if (!path) return;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'qt-btn';
+        btn.textContent = '+ Quick task';
+        btn.title = 'Create a quick-task anchoring this file (commit-message-style title).';
+        // Stop click from selecting the file or opening the context menu —
+        // the button lives inside an interactive row.
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            expandQuickTaskForm(row, btn, path);
+        });
+        if (insertBefore && insertBefore.parentNode === row) {
+            row.insertBefore(btn, insertBefore);
+        } else {
+            row.appendChild(btn);
+        }
+    }
+
+    function expandQuickTaskForm(row, btn, filePath) {
+        btn.style.display = 'none';
+
+        const form = document.createElement('span');
+        form.className = 'qt-form';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'qt-input';
+        input.value = basenameOf(filePath);
+        input.setAttribute('aria-label', 'Quick-task title for ' + filePath);
+        input.spellcheck = false;
+
+        const submit = document.createElement('button');
+        submit.type = 'button';
+        submit.className = 'qt-submit';
+        submit.textContent = 'Create';
+        submit.title = 'Create quick-task (Enter)';
+
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'qt-cancel';
+        cancel.textContent = '✕';
+        cancel.title = 'Cancel (Esc)';
+
+        const err = document.createElement('span');
+        err.className = 'qt-error';
+        err.style.display = 'none';
+
+        function collapse() {
+            form.remove();
+            err.remove();
+            btn.style.display = '';
+            btn.focus();
+        }
+
+        function submitForm() {
+            const title = (input.value || '').trim();
+            if (!title) {
+                showError('Title required');
+                input.focus();
+                return;
+            }
+            form.classList.add('qt-busy');
+            err.style.display = 'none';
+            // Stash on row so the inbound 'quick_task_created' echo can
+            // find this form (path-keyed; multiple rows can have open forms).
+            row._qtPending = { input, submit, cancel, form, err, collapse, showError };
+            send({ type: 'create_quick_task', filePath: filePath, title: title });
+        }
+
+        function showError(msg) {
+            err.textContent = String(msg || 'failed');
+            err.style.display = '';
+            form.classList.remove('qt-busy');
+        }
+
+        // Stop bubbling so the row's click/contextmenu don't fire when the
+        // user is typing in the input. Also prevent Enter from doing
+        // anything weird inside a non-<form> ancestor.
+        ['click', 'contextmenu', 'mousedown'].forEach(ev => {
+            form.addEventListener(ev, e => e.stopPropagation());
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitForm();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                collapse();
+            }
+        });
+        submit.addEventListener('click', e => { e.stopPropagation(); submitForm(); });
+        cancel.addEventListener('click', e => { e.stopPropagation(); collapse(); });
+
+        form.appendChild(input);
+        form.appendChild(submit);
+        form.appendChild(cancel);
+        // Insert form + err immediately after the (now-hidden) btn so they
+        // occupy the same DOM slot the btn was rendered at. Since the btn
+        // now sits left-of-path, appendChild-to-row would shove the form
+        // past .file-stats / .file-chips and clip it under the scrollbar.
+        btn.insertAdjacentElement('afterend', form);
+        form.insertAdjacentElement('afterend', err);
+        input.focus();
+        input.select();
+    }
+
+    function basenameOf(p) {
+        if (!p) return '';
+        const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+        return i >= 0 ? p.substring(i + 1) : p;
+    }
+
+    // Phase 2c: group-level "Wrap all in one quick task" UI. Appended to
+    // the "Needs a quick task" group header in both render paths
+    // (buildUnlinkedGroupNode tree-mode + buildUnlinkedDetails legacy).
+    // Submits {type: 'create_quick_task_bulk', title, filePaths[], requestId}
+    // to the C# host, which atomically creates one quick-task and links every
+    // file to it — rolling back if ANY link fails.
+    //
+    // Multiple unlinked groups can exist (one per worktree folder in tree
+    // mode), so pending forms are keyed by a generated requestId rather than
+    // by header element.
+    const _bulkQtPendingByReqId = new Map();
+    let _bulkQtSeq = 0;
+
+    function attachBulkQuickTaskUI(headerEl, files) {
+        if (!headerEl || !Array.isArray(files) || files.length === 0) return;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'qt-bulk-btn';
+        btn.textContent = '+ Wrap all in one quick task';
+        btn.title = 'Create one quick-task and attribute every unlinked file in this group to it.';
+        // Defensive: keep the click off any parent click handler (e.g. the
+        // tree-row chevron toggle, or a <summary> click that would collapse
+        // <details>). preventDefault on the click matters specifically for
+        // <summary> — which would otherwise toggle the parent <details>.
+        btn.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            expandBulkQuickTaskForm(headerEl, btn, files);
+        });
+        headerEl.appendChild(btn);
+    }
+
+    function expandBulkQuickTaskForm(headerEl, btn, files) {
+        btn.style.display = 'none';
+
+        const form = document.createElement('span');
+        form.className = 'qt-form';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'qt-input';
+        input.placeholder = 'Commit message…';
+        input.setAttribute('aria-label', 'Quick-task title wrapping ' + files.length + ' files');
+        input.spellcheck = false;
+
+        const submit = document.createElement('button');
+        submit.type = 'button';
+        submit.className = 'qt-submit';
+        submit.textContent = 'Create (' + files.length + ')';
+        submit.title = 'Create one quick-task linking all ' + files.length + ' files (Enter)';
+
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'qt-cancel';
+        cancel.textContent = '✕';
+        cancel.title = 'Cancel (Esc)';
+
+        const err = document.createElement('span');
+        err.className = 'qt-error';
+        err.style.display = 'none';
+
+        function collapse() {
+            form.remove();
+            err.remove();
+            btn.style.display = '';
+            btn.focus();
+        }
+
+        function showError(msg) {
+            err.textContent = String(msg || 'failed');
+            err.style.display = '';
+            form.classList.remove('qt-busy');
+        }
+
+        function submitForm() {
+            const title = (input.value || '').trim();
+            if (!title) {
+                showError('Title required');
+                input.focus();
+                return;
+            }
+            form.classList.add('qt-busy');
+            err.style.display = 'none';
+
+            const reqId = 'bulk-' + (++_bulkQtSeq) + '-' + Date.now();
+            _bulkQtPendingByReqId.set(reqId, { input, submit, cancel, form, err, collapse, showError });
+
+            const filePaths = files.map(f => (f && f.path) || '').filter(p => p.length > 0);
+            send({
+                type: 'create_quick_task_bulk',
+                title: title,
+                filePaths: filePaths,
+                requestId: reqId,
+            });
+        }
+
+        ['click', 'contextmenu', 'mousedown'].forEach(ev => {
+            form.addEventListener(ev, e => e.stopPropagation());
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submitForm();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                collapse();
+            }
+        });
+        submit.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); submitForm(); });
+        cancel.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); collapse(); });
+
+        form.appendChild(input);
+        form.appendChild(submit);
+        form.appendChild(cancel);
+        headerEl.appendChild(form);
+        headerEl.appendChild(err);
+        input.focus();
     }
 
     function pipelineGlyph(verdict) {
@@ -2949,6 +3325,53 @@ html, body {
                         // (or an explicit set_branch_outcome_failed echo) will recover.
                     } catch (e) { /* non-fatal — let timeout handle it */ }
                 }
+                break;
+            case 'quick_task_created':
+                // Phase 2b echo from HudGitRenderer.HandleCreateQuickTask.
+                // Find the file row whose form is awaiting this echo (matched
+                // by filePath) and either collapse it on success or show an
+                // inline error message. On success, the upcoming
+                // git_state_tree push will re-render the tree without this
+                // file in the Needs-a-quick-task group.
+                try {
+                    const matchPath = String(m.filePath || '');
+                    if (!matchPath) break;
+                    const rows = document.querySelectorAll('[data-path]');
+                    for (const r of rows) {
+                        if (r.dataset.path !== matchPath) continue;
+                        if (!r._qtPending) continue;
+                        const p = r._qtPending;
+                        if (m.success) {
+                            p.collapse();
+                            r._qtPending = null;
+                        } else {
+                            p.showError(m.error || 'failed');
+                            p.input.focus();
+                            p.input.select();
+                        }
+                    }
+                } catch (e) { /* non-fatal — next refresh will reconcile */ }
+                break;
+            case 'quick_task_bulk_created':
+                // Phase 2c echo from HudGitRenderer.HandleCreateQuickTaskBulk.
+                // Looked up by requestId so multiple worktree-folder groups
+                // can have concurrent bulk forms. On success the upcoming
+                // git_state_tree push empties the group; on failure the form
+                // stays open with the error inline.
+                try {
+                    const reqId = String(m.requestId || '');
+                    if (!reqId) break;
+                    const p = _bulkQtPendingByReqId.get(reqId);
+                    if (!p) break;
+                    if (m.success) {
+                        p.collapse();
+                        _bulkQtPendingByReqId.delete(reqId);
+                    } else {
+                        p.showError(m.error || 'failed');
+                        p.input.focus();
+                        p.input.select();
+                    }
+                } catch (e) { /* non-fatal — next refresh will reconcile */ }
                 break;
             case 'set_branch_outcome_failed':
                 // C# echo when SetOutcome was dropped (project unregistered,

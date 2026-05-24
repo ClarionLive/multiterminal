@@ -17,7 +17,8 @@ namespace MultiTerminal.Services
     /// the in-panel path goes away when task d29512ef item 5 lands).
     ///
     /// Surface:
-    ///   <see cref="GetCodeReviewData"/>  — read-only fetch of files + diffs + latest agent report.
+    ///   <see cref="GetCodeReviewData(string)"/>  — task-scoped fetch: files + diffs (branch-aware when the task has a worktree) + latest agent report.
+    ///   <see cref="GetCodeReviewData(string, IList{string})"/>  — ad-hoc working-tree fetch: diff a caller-supplied file list against HEAD without a task (Phase 3a — entry path for the "Needs a quick task" group right-click and any other taskless review).
     ///   <see cref="HandleVerdict"/>     — apply pass/fail verdict (sanitize, persist, transition).
     ///
     /// All persistence flows through the supplied <see cref="MessageBroker"/>
@@ -155,6 +156,294 @@ namespace MultiTerminal.Services
             {
                 Debug.WriteLine($"[CodeReviewService] GetCodeReviewData failed: {ex.Message}");
                 return null;
+            }
+        }
+
+        // Working-tree mode caps. Per-file diff size is already bounded by
+        // RunGitDiff (MaxDiffBytes); these cap the request shape itself so a
+        // caller can't ask us to spawn 10k git processes or stuff arbitrarily
+        // long path strings through ProcessStartInfo.
+        private const int MaxWorkingTreeFiles = 200;
+        private const int MaxWorkingTreeFilePathChars = 1024;
+
+        /// <summary>
+        /// Working-tree review fetch: returns diffs for a caller-supplied set of
+        /// files in <paramref name="repoRoot"/>, with no task context. This is
+        /// the Phase 3a entry path for ad-hoc review of files in the "Needs a
+        /// quick task" group (and any future taskless review).
+        ///
+        /// Differences from the task-scoped overload:
+        ///   - No <c>task_file_links</c> lookup — caller owns the file list.
+        ///   - No <c>task_worktrees</c> lookup — diffs are working-tree vs HEAD
+        ///     (with the HEAD~1 fallback the legacy task path uses).
+        ///   - No agent report fetch — there's no task to attach reports to,
+        ///     so <see cref="CodeReviewData.AgentReportJson"/> is always null.
+        ///   - <see cref="CodeReviewData.ReviewBaseError"/> is always null.
+        ///
+        /// Returns <c>null</c> when <paramref name="repoRoot"/> is missing,
+        /// is not a git working tree, or arguments are otherwise unusable.
+        /// Returns a result with an empty <see cref="CodeReviewData.FilesJson"/>
+        /// array (<c>"[]"</c>) when <paramref name="filePaths"/> is empty or
+        /// every supplied path was rejected by validation.
+        /// </summary>
+        public Task<CodeReviewData> GetCodeReviewData(string repoRoot, IList<string> filePaths)
+        {
+            if (string.IsNullOrEmpty(repoRoot) || filePaths == null)
+                return Task.FromResult<CodeReviewData>(null);
+
+            // Snapshot the input on the caller's thread so the worker thread
+            // can't observe mutation of a caller-owned collection mid-iteration.
+            var snapshot = new List<string>(filePaths.Count);
+            int copyLimit = Math.Min(filePaths.Count, MaxWorkingTreeFiles);
+            for (int i = 0; i < copyLimit; i++) snapshot.Add(filePaths[i]);
+
+            // Same offload reasoning as the task-scoped overload: git diff is
+            // 5s-per-process and the popup runs on the WebView2 message pump.
+            return Task.Run(() => GetCodeReviewDataWorkingTreeCore(repoRoot, snapshot));
+        }
+
+        private CodeReviewData GetCodeReviewDataWorkingTreeCore(string repoRoot, IList<string> filePaths)
+        {
+            try
+            {
+                // Canonicalize the repo root once. Every per-file traversal
+                // check uses StartsWith against this canonical form so a path
+                // like "C:\repo\..\..\Windows" can't sneak through.
+                string canonicalRoot;
+                try
+                {
+                    canonicalRoot = Path.GetFullPath(repoRoot);
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+                if (!Directory.Exists(canonicalRoot))
+                    return null;
+
+                // Confirm it's actually a git working tree before spawning any
+                // diff processes — `.git` is a directory in a normal checkout,
+                // a small "gitlink" text file in a `git worktree add` worktree.
+                // Both forms count. See FindGitRoot for the same rationale on
+                // the task-scoped path.
+                var dotGit = Path.Combine(canonicalRoot, ".git");
+                if (!Directory.Exists(dotGit) && !File.Exists(dotGit))
+                    return null;
+
+                // Construct a ReviewBase that drives GetGitDiffForFile into its
+                // legacy fallback: HasBranch=false means "no branch-aware diff",
+                // WorktreePath=canonicalRoot makes pathspecs land in the right
+                // cwd. Result: `git diff -- file` (working tree vs HEAD), with
+                // `git diff HEAD~1 -- file` if the working tree is clean.
+                var reviewBase = new ReviewBase
+                {
+                    HasBranch = false,
+                    WorktreePath = canonicalRoot,
+                };
+
+                var fileObjects = new List<object>();
+                foreach (var raw in filePaths)
+                {
+                    if (string.IsNullOrWhiteSpace(raw)) continue;
+                    if (raw.Length > MaxWorkingTreeFilePathChars) continue;
+
+                    // Resolve the caller-supplied path against the repo root.
+                    // Absolute paths are taken as-is; relative paths are
+                    // interpreted relative to canonicalRoot. Both are then
+                    // canonicalized and validated against canonicalRoot so
+                    // "..\..\Windows" or "C:\Windows" can't escape.
+                    string resolved;
+                    try
+                    {
+                        resolved = Path.IsPathRooted(raw)
+                            ? Path.GetFullPath(raw)
+                            : Path.GetFullPath(Path.Combine(canonicalRoot, raw));
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+
+                    if (!resolved.StartsWith(canonicalRoot, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string diff = GetGitDiffForFile(resolved, reviewBase);
+                    fileObjects.Add(new
+                    {
+                        filePath = resolved,
+                        description = (string)null,
+                        lineStart = (int?)null,
+                        lineEnd = (int?)null,
+                        addedBy = (string)null,
+                        hasDiff = !string.IsNullOrEmpty(diff),
+                        diff = diff ?? string.Empty,
+                    });
+                }
+
+                return new CodeReviewData
+                {
+                    FilesJson = JsonSerializer.Serialize(fileObjects),
+                    AgentReportJson = null,
+                    ReviewBaseError = null,
+                };
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[CodeReviewService] GetCodeReviewData(working-tree) failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        // =============================================
+        // WrapInQuickTask (Phase 3c)
+        // =============================================
+
+        /// <summary>
+        /// Atomic "wrap working-tree files into a quick-task" operation: creates
+        /// the quick-task, links every file to it, rolls the task back if ANY
+        /// link write fails. Phase 3c counterpart to <see cref="GetCodeReviewData(string, IList{string})"/> —
+        /// the working-tree popup calls this from its inline form to convert an
+        /// ad-hoc review into permanent attribution.
+        ///
+        /// Mirrors the logic in <c>HudGitRenderer.HandleCreateQuickTask</c> +
+        /// <c>HandleCreateQuickTaskBulk</c>; consolidated here so the popup
+        /// doesn't have to repeat the rollback dance. Single source of
+        /// correctness once we (eventually) collapse the HUD path onto this too.
+        ///
+        /// <paramref name="projectId"/> is optional — when null/empty, resolved
+        /// by matching <paramref name="repoRoot"/> against the registered
+        /// project list (same lookup the HUD renderer does). A failed resolve
+        /// falls through with a null projectId; the underlying CreateQuickTask
+        /// accepts that and lets the broker assign the task to the default
+        /// project bucket.
+        /// </summary>
+        public WrapInQuickTaskResult WrapInQuickTask(
+            string title,
+            string repoRoot,
+            IList<string> filePaths,
+            string createdBy,
+            string projectId)
+        {
+            if (_broker == null)
+                return new WrapInQuickTaskResult { Ok = false, Error = "broker not wired" };
+            if (string.IsNullOrWhiteSpace(title))
+                return new WrapInQuickTaskResult { Ok = false, Error = "title required" };
+            if (string.IsNullOrEmpty(repoRoot))
+                return new WrapInQuickTaskResult { Ok = false, Error = "repoRoot required" };
+            if (filePaths == null || filePaths.Count == 0)
+                return new WrapInQuickTaskResult { Ok = false, Error = "at least one filePath required" };
+
+            string canonicalRoot;
+            try
+            {
+                canonicalRoot = Path.GetFullPath(repoRoot);
+            }
+            catch (Exception ex)
+            {
+                return new WrapInQuickTaskResult { Ok = false, Error = $"repoRoot resolution failed: {ex.Message}" };
+            }
+
+            // Pre-resolve every path on the request side so we can fail fast
+            // (and refuse to create an orphan quick-task) if any path is bad.
+            // Reuses the same StartsWith-canonicalRoot guard the working-tree
+            // fetch path uses (GetCodeReviewDataWorkingTreeCore).
+            var resolvedPaths = new List<string>(filePaths.Count);
+            foreach (var raw in filePaths)
+            {
+                if (string.IsNullOrWhiteSpace(raw))
+                    return new WrapInQuickTaskResult { Ok = false, Error = "empty filePath in list" };
+                string resolved;
+                try
+                {
+                    resolved = Path.IsPathRooted(raw)
+                        ? Path.GetFullPath(raw)
+                        : Path.GetFullPath(Path.Combine(canonicalRoot, raw));
+                }
+                catch (Exception ex)
+                {
+                    return new WrapInQuickTaskResult { Ok = false, Error = $"path resolution failed for '{raw}': {ex.Message}" };
+                }
+                if (!resolved.StartsWith(canonicalRoot, StringComparison.OrdinalIgnoreCase))
+                    return new WrapInQuickTaskResult { Ok = false, Error = $"path escapes repo root: {raw}" };
+                resolvedPaths.Add(resolved);
+            }
+
+            // Resolve projectId lazily — only worth touching ProjectService if
+            // caller didn't already supply one. The lookup walks the registry
+            // matching by path; HudGitRenderer.ResolveProjectIdFromPath uses
+            // exactly the same dialect.
+            string effectiveProjectId = projectId;
+            if (string.IsNullOrEmpty(effectiveProjectId))
+            {
+                try
+                {
+                    var svc = _broker.ProjectService;
+                    if (svc != null)
+                    {
+                        foreach (var entry in svc.GetAllRegisteredProjects())
+                        {
+                            if (entry == null) continue;
+                            if (string.Equals(entry.Path, canonicalRoot, StringComparison.OrdinalIgnoreCase))
+                            {
+                                effectiveProjectId = entry.Id;
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[CodeReviewService] WrapInQuickTask projectId resolve failed: {ex.Message} — falling through with null projectId");
+                }
+            }
+
+            string effectiveCreatedBy = string.IsNullOrWhiteSpace(createdBy) ? "CodeReview" : createdBy;
+
+            try
+            {
+                var createResult = _broker.CreateQuickTask(title.Trim(), createdBy: effectiveCreatedBy, projectId: effectiveProjectId);
+                if (createResult == null || !createResult.Success)
+                {
+                    return new WrapInQuickTaskResult
+                    {
+                        Ok = false,
+                        Error = createResult?.Error ?? "create failed",
+                    };
+                }
+
+                // Link every file. First failure rolls the whole thing back so
+                // we never leave a quick-task pointing at a partial file set.
+                for (int i = 0; i < resolvedPaths.Count; i++)
+                {
+                    var linkResult = _broker.LinkFile(
+                        createResult.TaskId,
+                        resolvedPaths[i],
+                        description: title.Trim(),
+                        lineStart: null,
+                        lineEnd: null,
+                        addedBy: effectiveCreatedBy);
+                    if (linkResult == null || !linkResult.Success)
+                    {
+                        try { _broker.DeleteTask(createResult.TaskId, effectiveCreatedBy); } catch { }
+                        return new WrapInQuickTaskResult
+                        {
+                            Ok = false,
+                            Error = $"link failed for '{resolvedPaths[i]}': {linkResult?.Error ?? "unknown"} (quick-task rolled back)",
+                        };
+                    }
+                }
+
+                return new WrapInQuickTaskResult
+                {
+                    Ok = true,
+                    TaskId = createResult.TaskId,
+                    LinkedCount = resolvedPaths.Count,
+                };
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[CodeReviewService] WrapInQuickTask threw: {ex.Message}");
+                return new WrapInQuickTaskResult { Ok = false, Error = ex.Message };
             }
         }
 
@@ -1021,5 +1310,14 @@ namespace MultiTerminal.Services
         /// knows to retry. Other Ok=false cases are silent (log only).
         /// </summary>
         public bool RequiresOperatorAttention { get; set; }
+    }
+
+    /// <summary>Result envelope returned by <see cref="CodeReviewService.WrapInQuickTask"/>.</summary>
+    public sealed class WrapInQuickTaskResult
+    {
+        public bool Ok { get; set; }
+        public string TaskId { get; set; }
+        public int LinkedCount { get; set; }
+        public string Error { get; set; }
     }
 }

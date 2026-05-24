@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
@@ -16,9 +17,21 @@ namespace MultiTerminal.Dialogs
 {
     /// <summary>
     /// Standalone popup window that hosts the extracted Code Review editor
-    /// (Dialogs/code-review.html). One instance per taskId — coordinated by
+    /// (Dialogs/code-review.html). One instance per taskId (or per
+    /// working-tree key for the ad-hoc Phase 3b path) — coordinated by
     /// <see cref="CodeReviewPopupManager"/>. Communicates with C# in-proc via
     /// <see cref="CodeReviewService"/> (no HTTP).
+    ///
+    /// Two modes:
+    ///   - Task mode: bound to a kanban task, fetches diffs via
+    ///     <see cref="CodeReviewService.GetCodeReviewData(string)"/>, supports
+    ///     Pass/Submit-Notes verdict flow.
+    ///   - Working-tree mode (Phase 3b): bound to a (repoRoot, filePaths[])
+    ///     pair, fetches via
+    ///     <see cref="CodeReviewService.GetCodeReviewData(string, IList{string})"/>,
+    ///     read-only — Pass and Submit-Notes are hidden in the HTML because
+    ///     there is no task to transition. Phase 3c replaces them with a
+    ///     "Wrap in quick task" affordance.
     /// </summary>
     public sealed class CodeReviewPopupForm : Form
     {
@@ -30,8 +43,15 @@ namespace MultiTerminal.Dialogs
         private const int DefaultWidth = 1100;
         private const int DefaultHeight = 750;
 
+        // Task-mode fields. Null/empty when in working-tree mode.
         private readonly string _taskId;
         private readonly string _taskTitle;
+        // Working-tree mode fields. Null when in task mode.
+        private readonly string _workingTreeKey;
+        private readonly string _repoRoot;
+        private readonly IList<string> _filePaths;
+        private readonly bool _isWorkingTreeMode;
+
         private readonly string _initialFilePath;
         private readonly WebView2 _webView;
         private MessageBroker _broker;
@@ -43,15 +63,84 @@ namespace MultiTerminal.Dialogs
         private string _pendingPreselectFilePath;
         private EventHandler<CoreWebView2WebMessageReceivedEventArgs> _webMsgHandler;
 
+        /// <summary>Task ID this popup is bound to, or null in working-tree mode.</summary>
         public string TaskId => _taskId;
+
+        /// <summary>Working-tree key this popup is bound to, or null in task mode.</summary>
+        public string WorkingTreeKey => _workingTreeKey;
+
+        /// <summary>True when the popup was constructed in working-tree mode (no task).</summary>
+        public bool IsWorkingTreeMode => _isWorkingTreeMode;
+
+        /// <summary>
+        /// Fires after a successful "Wrap in quick task" round-trip in
+        /// working-tree mode. <see cref="CodeReviewPopupManager"/> bridges this
+        /// to a caller-supplied callback so the host panel (HUD Git) can
+        /// auto-refresh its tree and move the wrapped files out of the
+        /// "Needs a quick task" bucket without the user clicking Refresh.
+        /// The string arg is the newly-created task ID (may be null if the
+        /// wrap reported success without one — defensive, shouldn't happen).
+        /// </summary>
+        public event EventHandler<string> QuickTaskCreated;
 
         public CodeReviewPopupForm(string taskId, string taskTitle, string initialFilePath)
         {
             _taskId = taskId ?? throw new ArgumentNullException(nameof(taskId));
             _taskTitle = taskTitle ?? string.Empty;
             _initialFilePath = initialFilePath;
+            _isWorkingTreeMode = false;
 
             Text = $"Code Review: {(_taskTitle.Length > 0 ? _taskTitle : _taskId)}";
+            StartPosition = FormStartPosition.CenterParent;
+            Width = DefaultWidth;
+            Height = DefaultHeight;
+            BackColor = Color.FromArgb(26, 26, 46);
+
+            ApplyPersistedBounds();
+
+            _webView = new WebView2 { Dock = DockStyle.Fill };
+            Controls.Add(_webView);
+
+            FormClosed += OnFormClosed;
+        }
+
+        /// <summary>
+        /// Working-tree-mode constructor (Phase 3b). No task is associated;
+        /// diffs are fetched against the working tree of <paramref name="repoRoot"/>
+        /// for <paramref name="filePaths"/>. <paramref name="workingTreeKey"/>
+        /// is the registry key used by <see cref="CodeReviewPopupManager"/> to
+        /// deduplicate concurrent opens against the same (repo, file) target —
+        /// callers should derive it via the manager's helper, not freelance it.
+        /// </summary>
+        public CodeReviewPopupForm(
+            string workingTreeKey,
+            string repoRoot,
+            IList<string> filePaths,
+            string initialFilePath)
+        {
+            _workingTreeKey = workingTreeKey ?? throw new ArgumentNullException(nameof(workingTreeKey));
+            _repoRoot = repoRoot ?? throw new ArgumentNullException(nameof(repoRoot));
+            _filePaths = filePaths ?? throw new ArgumentNullException(nameof(filePaths));
+            _initialFilePath = initialFilePath;
+            _isWorkingTreeMode = true;
+
+            // Title bar surfaces the leaf file name (or count) so users with
+            // multiple ad-hoc popups open can tell them apart. Falls back to
+            // repo root leaf when no initial file is provided.
+            string titleSubject;
+            if (!string.IsNullOrEmpty(initialFilePath))
+            {
+                titleSubject = Path.GetFileName(initialFilePath);
+            }
+            else if (filePaths.Count == 1)
+            {
+                titleSubject = Path.GetFileName(filePaths[0]);
+            }
+            else
+            {
+                titleSubject = $"{Path.GetFileName(repoRoot.TrimEnd(Path.DirectorySeparatorChar))} ({filePaths.Count} files)";
+            }
+            Text = $"Code Review: {titleSubject} (working tree)";
             StartPosition = FormStartPosition.CenterParent;
             Width = DefaultWidth;
             Height = DefaultHeight;
@@ -239,13 +328,31 @@ namespace MultiTerminal.Dialogs
                         }
                         break;
                     case "fetch_data":
-                        // F-R2-3: bind to the form's own taskId — ignore any
-                        // inbound taskId in the message so a compromised JS
-                        // payload can't redirect this form's fetches to a
-                        // different task. The form is per-taskId by construction.
-                        _ = HandleFetchDataAsync(_taskId);
+                        // F-R2-3: bind to the form's own taskId/working-tree
+                        // identity — ignore any inbound id in the message so a
+                        // compromised JS payload can't redirect this form's
+                        // fetches elsewhere. The form is per-target by construction.
+                        _ = HandleFetchDataAsync();
+                        break;
+                    case "wrap_in_quick_task":
+                        // Phase 3c: working-tree-only path. Replaces the Phase-3b
+                        // placeholder hint with a real "create quick-task + link
+                        // these files" round-trip. A wrap message in task mode
+                        // is either a stale handler or hostile JS — drop it.
+                        if (!_isWorkingTreeMode) break;
+                        if (root.TryGetProperty("title", out var wrapTitleEl))
+                        {
+                            string wrapTitle = wrapTitleEl.GetString();
+                            HandleWrapInQuickTask(wrapTitle);
+                        }
                         break;
                     case "code_review_verdict":
+                        // Working-tree mode has no task to transition — Phase 3c
+                        // replaces Pass/Submit-Notes with the wrap_in_quick_task
+                        // affordance handled above. A verdict message arriving
+                        // here in working-tree mode is either a stale handler
+                        // firing or hostile JS; either way, drop it.
+                        if (_isWorkingTreeMode) break;
                         if (root.TryGetProperty("verdict", out var crVerdictEl))
                         {
                             string reviewNotesJson = null;
@@ -291,6 +398,11 @@ namespace MultiTerminal.Dialogs
             _ = PostToWebViewAsync(new
             {
                 type = "init",
+                // mode lets the JS branch its post-init fetch shape and hide
+                // verdict UI in working-tree mode (Phase 3b). The JS still
+                // never sees the form's taskId / repoRoot as authoritative —
+                // C# binds those off form state when fetch_data lands.
+                mode = _isWorkingTreeMode ? "workingTree" : "task",
                 taskId = _taskId,
                 taskTitle = _taskTitle,
                 filePath = _initialFilePath,
@@ -298,7 +410,7 @@ namespace MultiTerminal.Dialogs
             });
         }
 
-        private async Task HandleFetchDataAsync(string taskId)
+        private async Task HandleFetchDataAsync()
         {
             string filesJson = null;
             string agentReportJson = null;
@@ -307,7 +419,15 @@ namespace MultiTerminal.Dialogs
             {
                 if (_crService != null)
                 {
-                    var data = await _crService.GetCodeReviewData(taskId);
+                    CodeReviewData data;
+                    if (_isWorkingTreeMode)
+                    {
+                        data = await _crService.GetCodeReviewData(_repoRoot, _filePaths);
+                    }
+                    else
+                    {
+                        data = await _crService.GetCodeReviewData(_taskId);
+                    }
                     if (data != null)
                     {
                         filesJson = data.FilesJson;
@@ -331,6 +451,70 @@ namespace MultiTerminal.Dialogs
             sb.Append(string.IsNullOrEmpty(reviewBaseError) ? "null" : JsonSerializer.Serialize(reviewBaseError));
             sb.Append("}}");
             await PostRawJsonToWebViewAsync(sb.ToString());
+        }
+
+        private void HandleWrapInQuickTask(string title)
+        {
+            bool ok = false;
+            string taskId = null;
+            string error = null;
+            try
+            {
+                if (_crService == null)
+                {
+                    error = "CodeReviewService not wired";
+                }
+                else
+                {
+                    // F-R2-3 (parity with HandleVerdict): bind to the form's own
+                    // working-tree identity. Inbound title is the only field
+                    // taken from JS; repoRoot + filePaths come from form state
+                    // so a compromised JS payload can't re-aim the wrap.
+                    var result = _crService.WrapInQuickTask(
+                        title,
+                        _repoRoot,
+                        _filePaths,
+                        createdBy: "CodeReview",
+                        projectId: null);
+                    ok = result?.Ok == true;
+                    taskId = result?.TaskId;
+                    error = result?.Error;
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+
+            var sb = new StringBuilder();
+            sb.Append("{\"type\":\"wrap_result\",\"ok\":");
+            sb.Append(ok ? "true" : "false");
+            if (!string.IsNullOrEmpty(taskId))
+            {
+                sb.Append(",\"taskId\":");
+                sb.Append(JsonSerializer.Serialize(taskId));
+            }
+            if (!string.IsNullOrEmpty(error))
+            {
+                sb.Append(",\"error\":");
+                sb.Append(JsonSerializer.Serialize(error));
+            }
+            sb.Append('}');
+            _ = PostRawJsonToWebViewAsync(sb.ToString());
+
+            // Fire cross-panel signal AFTER the JS ack is dispatched. Wrapped
+            // in try/catch so a misbehaving subscriber can't mask the wrap
+            // success from JS (the popup-side state is the user-visible source
+            // of truth; HUD Git auto-refresh is convenience on top).
+            if (ok)
+            {
+                try { QuickTaskCreated?.Invoke(this, taskId); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[CodeReviewPopupForm] QuickTaskCreated subscriber threw: {ex.Message}");
+                }
+            }
         }
 
         private void HandleVerdict(string taskId, string verdict, string reviewNotesJson)

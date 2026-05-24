@@ -185,11 +185,15 @@
     }
 
     // ── Host → Page protocol ──
-    // init           — { taskId, taskTitle, filePath?, theme }                              once after 'ready'
+    // init           — { mode, taskId?, taskTitle?, filePath?, theme }                       once after 'ready'
+    //                   mode: 'task' (default — bound to a kanban task) or 'workingTree'
+    //                   (Phase 3b — ad-hoc review of files with no task; verdict UI hidden).
     // preselect_file — { filePath }                                                          on focus-reuse of an existing popup
     // theme_changed  — { theme }                                                              live theme switch
     // data           — { payload: { files, agentReport? } }                                   response to fetch_data
-    // submit_result  — { ok, error? }                                                         response to code_review_verdict
+    // submit_result  — { ok, error? }                                                         response to code_review_verdict (task mode)
+    // wrap_result    — { ok, taskId?, error? }                                                response to wrap_in_quick_task (workingTree mode, Phase 3c)
+    var _crMode = 'task';
     function onHostMessage(rawData) {
         let msg;
         try {
@@ -201,12 +205,22 @@
         if (!msg || !msg.type) return;
         switch (msg.type) {
             case 'init':
+                // Working-tree mode lands here without a taskId. C# binds the
+                // form's repo+files identity off form state when fetch_data
+                // arrives, so the JS doesn't need to send anything but the
+                // request itself.
+                _crMode = msg.mode === 'workingTree' ? 'workingTree' : 'task';
                 _crTaskId = msg.taskId || null;
                 _crTaskTitle = msg.taskTitle || '';
                 applyTheme(msg.theme);
                 if (msg.filePath) _crPendingPreselect = msg.filePath;
-                if (_crTaskId) sendToHost({ type: 'fetch_data', taskId: _crTaskId });
-                else showError('No taskId supplied by host.');
+                if (_crMode === 'workingTree') {
+                    sendToHost({ type: 'fetch_data' });
+                } else if (_crTaskId) {
+                    sendToHost({ type: 'fetch_data', taskId: _crTaskId });
+                } else {
+                    showError('No taskId supplied by host.');
+                }
                 break;
             case 'data':
                 showCodeReviewOverlay(_crTaskId, msg.payload || {}, _crPendingPreselect);
@@ -233,6 +247,10 @@
                     const err = msg.error || 'unknown error';
                     alert('Could not save review verdict:\n\n' + err);
                 }
+                break;
+            case 'wrap_result':
+                // Phase 3c (working-tree mode): response to wrap_in_quick_task.
+                crHandleWrapResult(msg);
                 break;
             default:
                 // Unknown message type — log and ignore.
@@ -283,7 +301,10 @@
             ? `<div class="cr-review-base-error"><span class="cr-review-base-error-label">Review base unavailable:</span>${escapeHtml(data.reviewBaseError)}</div>`
             : '';
         if (files.length === 0) {
-            root.innerHTML = reviewBaseErrorHtml + '<div id="cr-empty">No linked files found for this task.<br>Agents should call <code style="margin:0 4px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;">link_task_file</code> to track changed files.</div>';
+            const emptyHtml = _crMode === 'workingTree'
+                ? '<div id="cr-empty">No diff available &mdash; the working tree matches HEAD for the requested file(s).</div>'
+                : '<div id="cr-empty">No linked files found for this task.<br>Agents should call <code style="margin:0 4px;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;">link_task_file</code> to track changed files.</div>';
+            root.innerHTML = reviewBaseErrorHtml + emptyHtml;
             return;
         }
 
@@ -335,8 +356,20 @@
                     <div class="cr-summary" id="cr-summary"></div>
                     <div class="cr-actions">
                         <button class="cr-toggle-sidebar" onclick="toggleSummarySidebar()" id="cr-sidebar-toggle" style="display:none;">&#x1F4CB; Changes</button>
+                        ${_crMode === 'workingTree' ? `
+                        <div id="cr-wrap-collapsed">
+                            <button class="cr-btn cr-wrap-btn" onclick="crBeginWrap()">&#x1F517; Wrap in Quick Task</button>
+                        </div>
+                        <div id="cr-wrap-form" style="display:none;align-items:center;gap:6px;flex:1;">
+                            <input type="text" id="cr-wrap-input" placeholder="What was this change about?" style="flex:1;padding:4px 8px;background:rgba(255,255,255,0.06);border:1px solid var(--border-color,#333);color:var(--text-color,#ddd);border-radius:3px;" onkeydown="crWrapKeydown(event)">
+                            <button class="cr-btn" id="cr-wrap-create-btn" onclick="crSubmitWrap()">Create</button>
+                            <button class="cr-btn" onclick="crCancelWrap()" style="opacity:0.7;">Cancel</button>
+                            <span id="cr-wrap-err" style="color:#f88;font-size:0.85em;margin-left:8px;display:none;"></span>
+                        </div>
+                        ` : `
                         <button class="cr-btn submit-notes" id="cr-submit-btn" onclick="crSubmitNotes()">&#x1F4DD; Submit Notes &mdash; Back to Coding</button>
-                        <button class="cr-btn pass" onclick="codeReviewVerdict('${escapeHtml(taskId)}', 'pass')">&#x2705; Pass &mdash; Approve</button>
+                        <button class="cr-btn pass" onclick="codeReviewVerdict('${escapeHtml(taskId || '')}', 'pass')">&#x2705; Pass &mdash; Approve</button>
+                        `}
                     </div>
                 </div>
             </div>
@@ -683,6 +716,73 @@
         _crSubmitInFlight = true;
         disableActions();
         sendToHost({ type: 'code_review_verdict', taskId: taskId, verdict: verdict });
+    }
+
+    // ── Wrap-in-quick-task (Phase 3c, working-tree mode only) ──
+    // Expands the "Wrap in Quick Task" button into an inline title input.
+    // Pre-fills the input with a sensible default (the first file's basename)
+    // so a one-keystroke wrap is feasible. Mirrors the snappy keyboard flow
+    // of hud-git.html's per-file form (Enter submits, Escape cancels).
+    var _crWrapInFlight = false;
+    function crBeginWrap() {
+        const collapsed = document.getElementById('cr-wrap-collapsed');
+        const form = document.getElementById('cr-wrap-form');
+        const input = document.getElementById('cr-wrap-input');
+        const err = document.getElementById('cr-wrap-err');
+        if (!collapsed || !form || !input) return;
+        collapsed.style.display = 'none';
+        form.style.display = 'flex';
+        if (err) { err.style.display = 'none'; err.textContent = ''; }
+        if (!input.value && _crFiles && _crFiles.length > 0 && _crFiles[0].filePath) {
+            const leaf = _crFiles[0].filePath.split(/[/\\]/).pop() || '';
+            input.value = leaf;
+            input.select();
+        } else {
+            input.focus();
+        }
+    }
+    function crCancelWrap() {
+        if (_crWrapInFlight) return;
+        const collapsed = document.getElementById('cr-wrap-collapsed');
+        const form = document.getElementById('cr-wrap-form');
+        if (collapsed) collapsed.style.display = '';
+        if (form) form.style.display = 'none';
+    }
+    function crWrapKeydown(ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); crSubmitWrap(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); crCancelWrap(); }
+    }
+    function crSubmitWrap() {
+        if (_crWrapInFlight) return;
+        const input = document.getElementById('cr-wrap-input');
+        const err = document.getElementById('cr-wrap-err');
+        const createBtn = document.getElementById('cr-wrap-create-btn');
+        const title = input ? (input.value || '').trim() : '';
+        if (!title) {
+            if (err) { err.textContent = 'Title required'; err.style.display = ''; }
+            if (input) input.focus();
+            return;
+        }
+        _crWrapInFlight = true;
+        if (input) input.setAttribute('disabled', 'disabled');
+        if (createBtn) createBtn.setAttribute('disabled', 'disabled');
+        if (err) err.style.display = 'none';
+        sendToHost({ type: 'wrap_in_quick_task', title: title });
+    }
+    function crHandleWrapResult(msg) {
+        _crWrapInFlight = false;
+        const input = document.getElementById('cr-wrap-input');
+        const createBtn = document.getElementById('cr-wrap-create-btn');
+        const err = document.getElementById('cr-wrap-err');
+        if (msg.ok) {
+            // Quick-task created, files linked. Close the popup; the HUD git
+            // TasksUpdated subscription handles the regroup on its own refresh.
+            sendToHost({ type: 'close' });
+            return;
+        }
+        if (input) input.removeAttribute('disabled');
+        if (createBtn) createBtn.removeAttribute('disabled');
+        if (err) { err.textContent = msg.error || 'wrap failed'; err.style.display = ''; }
     }
 
     // ── Summary Sidebar ──

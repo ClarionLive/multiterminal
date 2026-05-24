@@ -578,6 +578,15 @@ namespace MultiTerminal.MCPServer.Services
         public MultiTerminal.Services.BranchMetadataService BranchMetadata { get; set; }
 
         /// <summary>
+        /// Phase 4b auto-link service (task d42423e3 D3) — consults registered
+        /// <see cref="MultiTerminal.Services.IChangelogParser"/> implementations
+        /// to attribute working-tree files to kanban tasks before they land in
+        /// the HUD Git "Needs a quick task" bucket. Set via MainForm wire-up;
+        /// null when no parsers are registered (auto-link becomes a no-op).
+        /// </summary>
+        public MultiTerminal.Services.ChangelogAttributionService ChangelogAttribution { get; set; }
+
+        /// <summary>
         /// Project service for managing .claude/project.json files.
         /// Set via DI after broker is created.
         /// </summary>

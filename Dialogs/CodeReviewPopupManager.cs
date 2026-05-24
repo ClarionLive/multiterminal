@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using MultiTerminal.MCPServer.Services;
@@ -8,19 +9,56 @@ using MultiTerminal.Services;
 namespace MultiTerminal.Dialogs
 {
     /// <summary>
-    /// Tracks live <see cref="CodeReviewPopupForm"/> instances keyed by taskId.
-    /// One popup per task; reopening for the same taskId activates the
-    /// existing window and (optionally) preselects a file. Concurrent reviews
-    /// of different tasks are supported.
+    /// Tracks live <see cref="CodeReviewPopupForm"/> instances keyed by
+    /// taskId (task mode) or a synthesized "wt:" key (working-tree mode,
+    /// Phase 3b). Reopening for the same key activates the existing window
+    /// and (optionally) preselects a file. Concurrent reviews of different
+    /// targets are supported. Task and working-tree keys live in the same
+    /// dict but cannot collide: working-tree keys carry a fixed "wt:" prefix
+    /// that task IDs (random 8-char hex) cannot.
     ///
     /// Plus a process-wide theme-broadcast helper so MainForm.ApplyTheme can
     /// keep live popups in sync without holding direct references.
     /// </summary>
     public static class CodeReviewPopupManager
     {
+        private const string WorkingTreeKeyPrefix = "wt:";
+
         private static readonly object _sync = new object();
         private static readonly Dictionary<string, CodeReviewPopupForm> _instances =
             new Dictionary<string, CodeReviewPopupForm>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Build the registry key for a working-tree popup. Stable for a given
+        /// (canonicalized repoRoot, filePath) pair so a repeated right-click
+        /// reuses the open window instead of stacking duplicates. filePath
+        /// participates in the key because each ad-hoc popup is presently
+        /// constructed against a single file; multi-file working-tree popups
+        /// will need a list-hashed key.
+        /// </summary>
+        public static string BuildWorkingTreeKey(string repoRoot, string filePath)
+        {
+            string canonicalRoot;
+            try
+            {
+                canonicalRoot = string.IsNullOrEmpty(repoRoot)
+                    ? string.Empty
+                    : Path.GetFullPath(repoRoot);
+            }
+            catch (Exception)
+            {
+                canonicalRoot = repoRoot ?? string.Empty;
+            }
+            string canonicalFile = filePath ?? string.Empty;
+            // Lower-case both halves: NTFS is case-insensitive, but a key
+            // mismatch from differing case would silently spawn a duplicate
+            // popup. OrdinalIgnoreCase-style normalization here matches the
+            // path validation in CodeReviewService.GetCodeReviewDataWorkingTreeCore.
+            return WorkingTreeKeyPrefix
+                + canonicalRoot.ToLowerInvariant()
+                + "|"
+                + canonicalFile.ToLowerInvariant();
+        }
 
         /// <summary>
         /// Open a popup for <paramref name="taskId"/>, or focus the existing
@@ -89,6 +127,92 @@ namespace MultiTerminal.Dialogs
             // Fire-and-forget Initialize — the WebView2 bootstrap is async but
             // the form is non-modal and must be Shown immediately so the user
             // sees the chrome while the webview loads.
+            _ = InitializeAndShowAsync(form, broker, crService, isDarkTheme, owner);
+        }
+
+        /// <summary>
+        /// Open a working-tree popup against <paramref name="filePaths"/> in
+        /// <paramref name="repoRoot"/>, or focus the existing one when a popup
+        /// is already open for the same target. Phase 3b path for files in
+        /// the "Needs a quick task" group (and any other taskless review).
+        ///
+        /// Currently shaped for single-file callers — the registry key is
+        /// derived from <paramref name="preselectFilePath"/> (or
+        /// <c>filePaths[0]</c> as a fallback). Multi-file working-tree popups
+        /// will need a list-hashed key before this signature broadens.
+        /// </summary>
+        public static void OpenOrFocusWorkingTree(
+            string repoRoot,
+            IList<string> filePaths,
+            string preselectFilePath,
+            bool isDarkTheme,
+            MessageBroker broker,
+            CodeReviewService crService,
+            Form owner,
+            Action<string> onQuickTaskCreated = null)
+        {
+            if (string.IsNullOrEmpty(repoRoot)) return;
+            if (filePaths == null || filePaths.Count == 0) return;
+
+            string keyFile = !string.IsNullOrEmpty(preselectFilePath)
+                ? preselectFilePath
+                : filePaths[0];
+            string key = BuildWorkingTreeKey(repoRoot, keyFile);
+
+            CodeReviewPopupForm form;
+            bool isNew;
+            lock (_sync)
+            {
+                if (_instances.TryGetValue(key, out var existing) &&
+                    existing != null && !existing.IsDisposed)
+                {
+                    form = existing;
+                    isNew = false;
+                }
+                else
+                {
+                    form = new CodeReviewPopupForm(key, repoRoot, filePaths, preselectFilePath);
+                    _instances[key] = form;
+                    isNew = true;
+                }
+            }
+
+            if (!isNew)
+            {
+                try { form.PreselectFile(preselectFilePath); } catch { }
+                return;
+            }
+
+            // Subscribe the caller's wrap-success callback ONLY on the new-form
+            // path. Focus-existing reuses the original subscription wired when
+            // the form was first created; re-subscribing here would accumulate
+            // handlers (N opens => N RefreshAsync calls per wrap, each now
+            // writing to SQLite via the auto-link pass).
+            if (onQuickTaskCreated != null)
+            {
+                form.QuickTaskCreated += (s, taskId) =>
+                {
+                    try { onQuickTaskCreated(taskId); }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Trace.WriteLine(
+                            $"[CodeReviewPopupManager] onQuickTaskCreated threw: {ex.Message}");
+                    }
+                };
+            }
+
+            form.FormClosed += (s, e) =>
+            {
+                lock (_sync)
+                {
+                    if (_instances.TryGetValue(key, out var current) &&
+                        ReferenceEquals(current, form))
+                    {
+                        _instances.Remove(key);
+                    }
+                }
+            };
+
             _ = InitializeAndShowAsync(form, broker, crService, isDarkTheme, owner);
         }
 

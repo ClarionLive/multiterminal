@@ -576,6 +576,23 @@ namespace MultiTerminal.Controls
                         // re-renders both the row label and the Details tab.
                         HandleSetBranchOutcome(doc.RootElement);
                         break;
+
+                    case "create_quick_task":
+                        // Posted from the per-file inline form in the
+                        // "Needs a quick task" group (task d42423e3 Phase 2b).
+                        // Creates a quick-task + links the file to it, then
+                        // pushes a fresh git_state_tree so the file moves out
+                        // of the unlinked bucket without an extra round-trip.
+                        HandleCreateQuickTask(doc.RootElement);
+                        break;
+
+                    case "create_quick_task_bulk":
+                        // Posted from the group-level "Wrap all in one quick
+                        // task" form (task d42423e3 Phase 2c). Atomic create +
+                        // multi-link: rolls the orphan quick-task back if ANY
+                        // file link fails (mirrors TasksController.CreateQuickTask).
+                        HandleCreateQuickTaskBulk(doc.RootElement);
+                        break;
                 }
             }
             catch { }
@@ -642,6 +659,251 @@ namespace MultiTerminal.Controls
             catch (Exception ex)
             {
                 System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleSetBranchOutcome] Failed for branch='{branchName}': {ex.Message}");
+                NotifyFailed(ex.Message ?? ex.GetType().Name);
+            }
+        }
+
+        private void HandleCreateQuickTask(JsonElement root)
+        {
+            string filePath = null;
+            string title = null;
+            if (root.TryGetProperty("filePath", out var fpEl))
+                filePath = fpEl.GetString();
+            if (root.TryGetProperty("title", out var titleEl))
+                title = titleEl.GetString();
+
+            void NotifyFailed(string reason)
+            {
+                try
+                {
+                    PostJson(new
+                    {
+                        type = "quick_task_created",
+                        success = false,
+                        filePath = filePath ?? string.Empty,
+                        error = reason ?? "unknown",
+                    });
+                }
+                catch { /* non-fatal — JS form has its own timeout fallback */ }
+            }
+
+            if (string.IsNullOrWhiteSpace(filePath))
+            {
+                NotifyFailed("missing filePath");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                NotifyFailed("title required");
+                return;
+            }
+            if (_broker == null)
+            {
+                NotifyFailed("broker unavailable");
+                return;
+            }
+
+            string repoRoot = _currentService?.RepoRoot;
+            if (string.IsNullOrEmpty(repoRoot))
+            {
+                NotifyFailed("no active repo");
+                return;
+            }
+
+            // JS sends repo-relative paths (file.path in git_state_tree); resolve
+            // against the renderer's authoritative repo root so we never trust a
+            // client-composed absolute path.
+            string absolutePath = filePath;
+            if (!Path.IsPathRooted(filePath))
+            {
+                try { absolutePath = Path.GetFullPath(Path.Combine(repoRoot, filePath)); }
+                catch (Exception ex)
+                {
+                    NotifyFailed("path resolution failed: " + ex.Message);
+                    return;
+                }
+            }
+
+            try
+            {
+                var createResult = _broker.CreateQuickTask(title.Trim(), createdBy: "HUD", projectId: _projectId);
+                if (createResult == null || !createResult.Success)
+                {
+                    NotifyFailed(createResult?.Error ?? "create failed");
+                    return;
+                }
+
+                var linkResult = _broker.LinkFile(
+                    createResult.TaskId,
+                    absolutePath,
+                    description: title.Trim(),
+                    lineStart: null,
+                    lineEnd: null,
+                    addedBy: "HUD");
+
+                if (linkResult == null || !linkResult.Success)
+                {
+                    // Best-effort rollback so we don't accumulate orphan quick-tasks
+                    // when the link write fails (mirrors TasksController.CreateQuickTask).
+                    try { _broker.DeleteTask(createResult.TaskId, "HUD"); } catch { }
+                    NotifyFailed(linkResult?.Error ?? "link failed");
+                    return;
+                }
+
+                PostJson(new
+                {
+                    type = "quick_task_created",
+                    success = true,
+                    taskId = createResult.TaskId,
+                    filePath = filePath,
+                });
+
+                // Re-fetch git_state_tree so the file moves out of the
+                // "Needs a quick task" group on the next render pass.
+                _ = RefreshAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleCreateQuickTask] Failed for filePath='{filePath}': {ex.Message}");
+                NotifyFailed(ex.Message ?? ex.GetType().Name);
+            }
+        }
+
+        private void HandleCreateQuickTaskBulk(JsonElement root)
+        {
+            string title = null;
+            string requestId = null;
+            if (root.TryGetProperty("title", out var titleEl))
+                title = titleEl.GetString();
+            if (root.TryGetProperty("requestId", out var reqEl))
+                requestId = reqEl.GetString();
+
+            void NotifyFailed(string reason, int linked = 0)
+            {
+                try
+                {
+                    PostJson(new
+                    {
+                        type = "quick_task_bulk_created",
+                        success = false,
+                        requestId = requestId ?? string.Empty,
+                        error = reason ?? "unknown",
+                        linkedCount = linked,
+                    });
+                }
+                catch { /* non-fatal — JS form has its own timeout fallback */ }
+            }
+
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                NotifyFailed("title required");
+                return;
+            }
+
+            // Collect repo-relative file paths from the JSON array.
+            var relativePaths = new List<string>();
+            if (root.TryGetProperty("filePaths", out var pathsEl)
+                && pathsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in pathsEl.EnumerateArray())
+                {
+                    if (el.ValueKind != JsonValueKind.String) continue;
+                    string s = el.GetString();
+                    if (!string.IsNullOrWhiteSpace(s)) relativePaths.Add(s);
+                }
+            }
+            if (relativePaths.Count == 0)
+            {
+                NotifyFailed("at least one filePath is required");
+                return;
+            }
+
+            if (_broker == null)
+            {
+                NotifyFailed("broker unavailable");
+                return;
+            }
+            string repoRoot = _currentService?.RepoRoot;
+            if (string.IsNullOrEmpty(repoRoot))
+            {
+                NotifyFailed("no active repo");
+                return;
+            }
+
+            // Resolve repo-relative paths against the authoritative repo root
+            // BEFORE creating the task — if any resolution fails we bail out
+            // without an orphan to clean up.
+            var absolutePaths = new List<string>(relativePaths.Count);
+            foreach (var rel in relativePaths)
+            {
+                string abs = rel;
+                if (!Path.IsPathRooted(rel))
+                {
+                    try { abs = Path.GetFullPath(Path.Combine(repoRoot, rel)); }
+                    catch (Exception ex)
+                    {
+                        NotifyFailed($"path resolution failed for '{rel}': {ex.Message}");
+                        return;
+                    }
+                }
+                absolutePaths.Add(abs);
+            }
+
+            try
+            {
+                var createResult = _broker.CreateQuickTask(title.Trim(), createdBy: "HUD", projectId: _projectId);
+                if (createResult == null || !createResult.Success)
+                {
+                    NotifyFailed(createResult?.Error ?? "create failed");
+                    return;
+                }
+
+                int linkedCount = 0;
+                string linkError = null;
+                for (int i = 0; i < absolutePaths.Count; i++)
+                {
+                    var linkResult = _broker.LinkFile(
+                        createResult.TaskId,
+                        absolutePaths[i],
+                        description: title.Trim(),
+                        lineStart: null,
+                        lineEnd: null,
+                        addedBy: "HUD");
+
+                    if (linkResult == null || !linkResult.Success)
+                    {
+                        linkError = $"link failed for '{relativePaths[i]}': {linkResult?.Error ?? "unknown"}";
+                        break;
+                    }
+                    linkedCount++;
+                }
+
+                if (linkError != null)
+                {
+                    // Best-effort rollback so a partial link batch doesn't leave
+                    // an orphan quick-task attributing to only some of the files
+                    // the user wrapped (mirrors TasksController.CreateQuickTask).
+                    try { _broker.DeleteTask(createResult.TaskId, "HUD"); } catch { }
+                    NotifyFailed(linkError + " (quick-task rolled back)", linkedCount);
+                    return;
+                }
+
+                PostJson(new
+                {
+                    type = "quick_task_bulk_created",
+                    success = true,
+                    requestId = requestId ?? string.Empty,
+                    taskId = createResult.TaskId,
+                    linkedCount,
+                });
+
+                // Re-fetch git_state_tree so all wrapped files move out of the
+                // "Needs a quick task" group on the next render pass.
+                _ = RefreshAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleCreateQuickTaskBulk] Failed for title='{title}', count={relativePaths.Count}: {ex.Message}");
                 NotifyFailed(ex.Message ?? ex.GetType().Name);
             }
         }
@@ -813,6 +1075,11 @@ namespace MultiTerminal.Controls
             // reference for the duration of this background pass.
             var attributionSvc = _broker?.GitAttribution;
             var worktreeSvc = _broker?.WorktreeList;
+            // Phase 4b auto-link (task d42423e3 D3): same capture-before-Task.Run
+            // discipline for the changelog parser pipeline and the broker handle
+            // BuildWorkingChanges uses to write task_file_links rows.
+            var changelogSvc = _broker?.ChangelogAttribution;
+            var brokerCaptured = _broker;
             string repoRoot = svc.RepoRoot;
 
             string projectPath = _projectPath;
@@ -1024,7 +1291,7 @@ namespace MultiTerminal.Controls
                         try
                         {
                             using var perSvc = new GitRepoService(wt.Path);
-                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured);
+                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured, changelogSvc, brokerCaptured);
                             recentCommits = BuildRecentCommits(perSvc);
                         }
                         catch
@@ -1108,7 +1375,9 @@ namespace MultiTerminal.Controls
         private static object BuildWorkingChanges(
             GitRepoService svc,
             string svcRepoRoot,
-            GitAttributionService attributionSvc)
+            GitAttributionService attributionSvc,
+            ChangelogAttributionService changelogSvc,
+            MessageBroker broker)
         {
             var status = svc.GetWorkingTreeStatus();
             var statusList = status ?? (System.Collections.Generic.IReadOnlyList<GitFileStatus>)Array.Empty<GitFileStatus>();
@@ -1197,6 +1466,206 @@ namespace MultiTerminal.Controls
                     attrByPath[a.FilePath] = a;
             }
 
+            // Phase 4b auto-link (task d42423e3 D3): set of repo-relative
+            // paths the changelog-parser pipeline freshly attributed in this
+            // pass. Used downstream to bypass the WorktreeConfig.IsEnabled
+            // gate on groupedByTask — that gate masks STALE task_file_links
+            // rows in mode=OFF, but our rows are fresh writes from a
+            // self-evident source (the file's own changelog text) and
+            // shouldn't share the stale-row blast radius.
+            var autoLinkedPaths = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+            // Phase 4b auto-link (task d42423e3 D3): for any file with no
+            // existing task linkage, ask the changelog-parser pipeline whether
+            // the file's content implies a task ID. If so, write a
+            // task_file_links row (INSERT OR IGNORE — idempotent across
+            // refreshes) and synthesize an attribution so the file rebuckets
+            // out of "Needs a quick task" and into the matched task's group
+            // in this same refresh pass.
+            //
+            // The auto-link bypasses the WorktreeConfig.IsEnabled gate above
+            // because the gate exists to mask stale task_file_links rows
+            // (mode=OFF leaves the table polluted from prior cycles), not to
+            // block fresh writes — and we're writing a fresh row from a
+            // self-evident source (the file's own changelog text). Gating
+            // auto-link too would mean the new row would still be present in
+            // the DB but invisible in the UI on the next refresh, which is
+            // exactly the user-confusion failure mode the gate exists to
+            // prevent in the OTHER direction.
+            if (changelogSvc != null && broker != null && statusList.Count > 0)
+            {
+                foreach (var fileStatus in statusList)
+                {
+                    var relPath = fileStatus?.Path ?? string.Empty;
+                    if (string.IsNullOrEmpty(relPath)) continue;
+                    // Skip if a real attribution already exists — don't
+                    // overwrite GitAttributionService's verdict with ours.
+                    if (attrByPath.TryGetValue(relPath, out var existing)
+                        && existing != null
+                        && !string.IsNullOrEmpty(existing.TaskId))
+                    {
+                        continue;
+                    }
+
+                    string absPath;
+                    try
+                    {
+                        absPath = System.IO.Path.GetFullPath(
+                            System.IO.Path.Combine(svcRepoRoot, relPath.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    System.Collections.Generic.IList<ChangelogAttribution> autoLinks;
+                    try
+                    {
+                        autoLinks = changelogSvc.AttributeFile(svcRepoRoot, absPath);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if (autoLinks == null || autoLinks.Count == 0) continue;
+
+                    // Resolve the project this repo represents — used to
+                    // gate every auto-link against cross-project attribution
+                    // theft. A hostile .claude/project.json could plant a
+                    // real task ID owned by ANOTHER project on the user's
+                    // board; without this gate, broker.LinkFile would
+                    // faithfully write a task_file_links row connecting this
+                    // repo's file to that foreign task. Resolved once per
+                    // file (cheap registry walk) so a multi-match changelog
+                    // doesn't pay the lookup cost N times.
+                    //
+                    // Failure mode is fail-CLOSED: if the repo isn't
+                    // registered as a project, or the lookup throws, we
+                    // skip auto-link entirely for this file. Better to
+                    // leave a file in "Needs a quick task" than to write
+                    // an unverifiable cross-project link.
+                    string repoProjectId = ResolveProjectIdForRepo(broker, svcRepoRoot);
+
+                    // Multiple matches: take the first as the chip-display
+                    // attribution (one file can only render under one task
+                    // group in the HUD), but write LinkFile rows for ALL
+                    // matches so the underlying linkage record is complete.
+                    string primaryTaskId = null;
+                    string primaryTaskTitle = null;
+                    string primaryAgent = null;
+                    foreach (var link in autoLinks)
+                    {
+                        if (link == null || string.IsNullOrEmpty(link.TaskId)) continue;
+
+                        // Project-scope authorization (security HIGH, run 2):
+                        // resolve the task FIRST and confirm it belongs to
+                        // this repo's project before writing the link row.
+                        // GetTask returns null for unknown IDs — treated the
+                        // same as cross-project (fail closed). The Success
+                        // gate below would also catch unknown IDs, but doing
+                        // the project check up front means we never write
+                        // even a transiently-bogus row that another reader
+                        // could observe between LinkFile and the Success
+                        // gate.
+                        MultiTerminal.MCPServer.Models.KanbanTask task;
+                        try
+                        {
+                            task = broker.GetTask(link.TaskId);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Trace.WriteLine(
+                                $"[HudGitRenderer.BuildWorkingChanges] auto-link task lookup failed for '{relPath}' -> '{link.TaskId}': {ex.Message}");
+                            continue;
+                        }
+
+                        if (task == null)
+                        {
+                            System.Diagnostics.Trace.WriteLine(
+                                $"[HudGitRenderer.BuildWorkingChanges] auto-link skipped — task '{link.TaskId}' not found on board (file '{relPath}').");
+                            continue;
+                        }
+
+                        // Cross-project guard. If we couldn't resolve a
+                        // project for this repo (repoProjectId == null),
+                        // skip — we can't authorize the write.
+                        if (string.IsNullOrEmpty(repoProjectId)
+                            || !string.Equals(task.ProjectId, repoProjectId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            System.Diagnostics.Trace.WriteLine(
+                                $"[HudGitRenderer.BuildWorkingChanges] auto-link skipped — task '{link.TaskId}' project '{task.ProjectId ?? "<null>"}' does not match repo project '{repoProjectId ?? "<unresolved>"}' (file '{relPath}').");
+                            continue;
+                        }
+
+                        MultiTerminal.MCPServer.Models.LinkFileResult linkResult;
+                        try
+                        {
+                            // INSERT OR IGNORE inside AddFileLink makes this
+                            // safe to call every refresh — duplicate rows
+                            // are dropped server-side. We MUST pass absPath
+                            // (not relPath) so the row matches what
+                            // GitAttributionService / GetActiveTaskLinkageForFiles
+                            // query on (absolute, canonical). Storing relPath
+                            // would make this write invisible to attribution
+                            // reads and cause a fresh duplicate-row write every
+                            // refresh.
+                            linkResult = broker.LinkFile(
+                                taskId: link.TaskId,
+                                filePath: absPath,
+                                description: link.Reason,
+                                lineStart: null,
+                                lineEnd: null,
+                                addedBy: "auto:" + (link.ParserName ?? "changelog"),
+                                checklistItemIndex: null);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Trace.WriteLine(
+                                $"[HudGitRenderer.BuildWorkingChanges] auto-link write failed for '{relPath}' -> '{link.TaskId}': {ex.Message}");
+                            continue;
+                        }
+
+                        // LinkFile returns Success=false (no exception) for
+                        // unknown task IDs — e.g. a hostile or stale 8-hex
+                        // token from the changelog that doesn't match any
+                        // task on this board. Without this gate, the phantom
+                        // ID flows through to attribution synthesis below and
+                        // creates a bogus empty-title task group.
+                        if (linkResult?.Success != true) continue;
+
+                        if (primaryTaskId == null)
+                        {
+                            // Task already resolved above for the project
+                            // check; reuse its Title/Assignee for the chip
+                            // overlay rather than calling GetTask twice.
+                            // Collapse null → string.Empty HERE so the
+                            // attribution-synthesis site below doesn't have
+                            // to re-do it (NIT 2, cycle 3): the contract is
+                            // that the locals are always non-null past this
+                            // assignment.
+                            primaryTaskId = link.TaskId;
+                            primaryTaskTitle = task.Title ?? string.Empty;
+                            primaryAgent = task.Assignee ?? string.Empty;
+                        }
+                    }
+
+                    if (primaryTaskId == null) continue;
+
+                    // Synthesize an attribution so workingTree / groupedByTask
+                    // pick this file up in the active bucket on this same pass.
+                    attrByPath[relPath] = new GitFileAttribution
+                    {
+                        FilePath = relPath,
+                        Agent = primaryAgent,
+                        TaskId = primaryTaskId,
+                        TaskTitle = primaryTaskTitle,
+                        PipelineStatus = string.Empty,
+                        LinkageState = "active",
+                    };
+                    autoLinkedPaths.Add(relPath);
+                }
+            }
+
             var workingTree = statusList
                 .Select(f =>
                 {
@@ -1225,8 +1694,12 @@ namespace MultiTerminal.Controls
             // misattribute fresh trunk edits to old shipped tasks.
             // When the gate is OFF, the linkage filter below matches
             // nothing and groupedByTask collapses to an empty array.
+            //
+            // Phase 4b carve-out (d42423e3): auto-linked paths bypass the
+            // gate because they're fresh writes from the changelog parser,
+            // not stale rows. See the autoLinkedPaths comment upstream.
             var groupedByTask = workingTree
-                .Where(f => WorktreeConfig.IsEnabled
+                .Where(f => (WorktreeConfig.IsEnabled || autoLinkedPaths.Contains(f.path))
                     && (f.linkageState == "active" || f.linkageState == "shipped"))
                 .Where(f => !string.IsNullOrEmpty(f.taskId))
                 .GroupBy(f => f.taskId)
@@ -1290,6 +1763,219 @@ namespace MultiTerminal.Controls
                 untrackedDirRoots,
                 porcelainEntryCount,
             };
+        }
+
+        /// <summary>
+        /// Resolve the registered project ID for a given repo root, used to
+        /// gate <see cref="BuildWorkingChanges"/>'s changelog auto-link
+        /// against cross-project attribution theft (security HIGH, run 2).
+        /// Returns null if the repo isn't registered as a project, the
+        /// <see cref="MessageBroker.ProjectService"/> isn't wired, or any
+        /// lookup throws — callers MUST fail closed on null (skip auto-link)
+        /// rather than treat null as "any project allowed".
+        ///
+        /// <para>The lookup walks the project registry once and matches on
+        /// <see cref="ProjectRegistryEntry.Path"/> via canonical
+        /// <c>Path.GetFullPath</c> equality (case-insensitive on Windows).
+        /// Both sides are normalized through <c>Path.GetFullPath</c> to
+        /// collapse trailing-slash and mixed-separator drift before
+        /// comparing — the same dialect <c>ProjectJsonChangelogParser</c>
+        /// uses to compare paths.</para>
+        /// </summary>
+        private static string ResolveProjectIdForRepo(MessageBroker broker, string repoRoot)
+        {
+            if (broker == null || string.IsNullOrEmpty(repoRoot)) return null;
+            var projectSvc = broker.ProjectService;
+            if (projectSvc == null) return null;
+
+            string canonicalRepoRoot;
+            try
+            {
+                canonicalRepoRoot = System.IO.Path.GetFullPath(repoRoot);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.ResolveProjectIdForRepo] Path.GetFullPath failed for '{repoRoot}': {ex.Message}");
+                return null;
+            }
+
+            try
+            {
+                var projects = projectSvc.GetAllRegisteredProjects();
+                if (projects == null) return null;
+                foreach (var p in projects)
+                {
+                    if (p == null || string.IsNullOrEmpty(p.Path) || string.IsNullOrEmpty(p.Id)) continue;
+                    string canonicalProjectPath;
+                    try
+                    {
+                        canonicalProjectPath = System.IO.Path.GetFullPath(p.Path);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if (string.Equals(canonicalProjectPath, canonicalRepoRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return p.Id;
+                    }
+                }
+
+                // Worktree fallback (task d42423e3 Phase 2 follow-up): when
+                // BuildWorkingChanges is invoked from a linked worktree (which
+                // is the common case — changelog catchups run inside
+                // per-task worktrees), no registered project's Path equals
+                // the worktree path. The registered project Path is the
+                // parent (main) checkout. Resolve the parent checkout from
+                // the `.git` gitlink file and retry the registry match
+                // against THAT path. If the parent matches a registered
+                // project, return its ID — the auto-link is still confined
+                // to the same logical project.
+                string parentRepoRoot = TryResolveParentRepoRoot(canonicalRepoRoot);
+                if (!string.IsNullOrEmpty(parentRepoRoot))
+                {
+                    foreach (var p in projects)
+                    {
+                        if (p == null || string.IsNullOrEmpty(p.Path) || string.IsNullOrEmpty(p.Id)) continue;
+                        string canonicalProjectPath;
+                        try
+                        {
+                            canonicalProjectPath = System.IO.Path.GetFullPath(p.Path);
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+                        if (string.Equals(canonicalProjectPath, parentRepoRoot, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return p.Id;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.ResolveProjectIdForRepo] registry walk failed for '{canonicalRepoRoot}': {ex.Message}");
+                return null;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Best-effort sync resolution of a linked worktree's parent (main)
+        /// repo root. Reads the worktree's <c>.git</c> gitlink file, parses
+        /// the <c>gitdir: …/.git/worktrees/&lt;name&gt;</c> line, and returns
+        /// the directory containing that <c>.git</c> dir (the parent
+        /// checkout). Returns <c>null</c> for standard checkouts (where
+        /// <c>.git</c> is a directory, not a file), for non-worktree
+        /// gitlinks (submodules), or on any I/O / parse failure — callers
+        /// MUST treat null as "couldn't establish parent, skip the
+        /// fallback."
+        ///
+        /// <para>Mirrors the gitlink-classification dialect used by
+        /// <see cref="GitRepoManager.ClassifyGitlink"/> (the <c>gitdir:</c>
+        /// prefix + <c>/worktrees/</c> segment). Kept local rather than
+        /// reusing that helper because it returns a layout enum, not the
+        /// parent path itself.</para>
+        ///
+        /// <para>Cheap: one file read (~1 KB cap) + a few string operations,
+        /// no git invocation. Safe to call from inside <c>Task.Run</c>.</para>
+        /// </summary>
+        private static string TryResolveParentRepoRoot(string worktreeRoot)
+        {
+            if (string.IsNullOrEmpty(worktreeRoot)) return null;
+            string gitLinkPath;
+            try
+            {
+                gitLinkPath = System.IO.Path.Combine(worktreeRoot, ".git");
+            }
+            catch
+            {
+                return null;
+            }
+
+            // Standard checkout — `.git` is a directory; no parent to resolve.
+            // Also short-circuits when `.git` doesn't exist at all.
+            try
+            {
+                if (!System.IO.File.Exists(gitLinkPath)) return null;
+            }
+            catch
+            {
+                return null;
+            }
+
+            string head;
+            try
+            {
+                using var stream = new System.IO.FileStream(
+                    gitLinkPath,
+                    System.IO.FileMode.Open,
+                    System.IO.FileAccess.Read,
+                    System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete);
+                using var reader = new System.IO.StreamReader(stream);
+                char[] buf = new char[1024];
+                int read = reader.Read(buf, 0, buf.Length);
+                if (read <= 0) return null;
+                head = new string(buf, 0, read);
+            }
+            catch
+            {
+                return null;
+            }
+
+            string firstLine = null;
+            foreach (var raw in head.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r').Trim();
+                if (line.Length == 0) continue;
+                firstLine = line;
+                break;
+            }
+            if (firstLine == null) return null;
+
+            const string Prefix = "gitdir:";
+            int idx = firstLine.IndexOf(Prefix, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+            string gitDir = firstLine.Substring(idx + Prefix.Length).Trim();
+            if (gitDir.Length == 0) return null;
+
+            // Resolve relative gitdirs against the worktree root so the
+            // result is comparable to the registered project Path.
+            string absGitDir;
+            try
+            {
+                absGitDir = System.IO.Path.IsPathRooted(gitDir)
+                    ? System.IO.Path.GetFullPath(gitDir)
+                    : System.IO.Path.GetFullPath(System.IO.Path.Combine(worktreeRoot, gitDir));
+            }
+            catch
+            {
+                return null;
+            }
+
+            // Worktree-shaped gitdir: …/<parent-repo>/.git/worktrees/<name>.
+            // Submodules use …/.git/modules/<name> — those have no "parent
+            // checkout" in the worktree sense, so we return null and let the
+            // caller fail closed.
+            string normalized = absGitDir.Replace('\\', '/');
+            int wtIdx = normalized.IndexOf("/.git/worktrees/", StringComparison.OrdinalIgnoreCase);
+            if (wtIdx < 0) return null;
+
+            // The parent repo root is the directory containing the `.git`
+            // folder — i.e., everything up to (but not including) `/.git/`.
+            string parentRepoRoot = normalized.Substring(0, wtIdx);
+            try
+            {
+                return System.IO.Path.GetFullPath(parentRepoRoot.Replace('/', System.IO.Path.DirectorySeparatorChar));
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>

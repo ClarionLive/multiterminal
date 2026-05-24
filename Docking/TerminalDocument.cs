@@ -1294,15 +1294,57 @@ namespace MultiTerminal.Docking
                     }
                 }
 
+                // Resolve the repo-relative path to absolute once; both the
+                // task-mode and working-tree-mode popup paths need it (task
+                // mode for file_links preselect match, working-tree mode as
+                // the entire file list).
+                string absoluteFilePathForAll = repoRelativePath;
+                if (!string.IsNullOrEmpty(repoRoot))
+                {
+                    try
+                    {
+                        absoluteFilePathForAll = Path.Combine(
+                            repoRoot,
+                            repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                    }
+                    catch (Exception pathEx)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[TerminalDocument] absoluteFilePath resolve failed: {pathEx.Message}");
+                    }
+                }
+
                 if (string.IsNullOrEmpty(taskId))
                 {
-                    MessageBox.Show(
-                        $"'{repoRelativePath}' isn't linked to an active task.\n\n" +
-                        "Link the file to a task first (use the link_task_file MCP tool " +
-                        "or the kanban file-link UI), then right-click → Open Code Review again.",
-                        "No Task Linked",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
+                    // Phase 3b: file isn't linked to a task — instead of the
+                    // old "No Task Linked" dead-end, open the popup in
+                    // working-tree mode against the single file. The popup
+                    // hides Pass/Submit-Notes since there's no task to
+                    // transition; Phase 3c will replace those with a
+                    // "Wrap in quick task" affordance.
+                    if (string.IsNullOrEmpty(repoRoot))
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            "[TerminalDocument] no repoRoot resolved for taskless review request — dropping");
+                        return;
+                    }
+                    var crServiceWt = _codeReviewService ??= new MultiTerminal.Services.CodeReviewService(_messageBroker);
+                    bool isDarkWt = _currentTheme?.IsDark ?? true;
+                    Dialogs.CodeReviewPopupManager.OpenOrFocusWorkingTree(
+                        repoRoot,
+                        new[] { absoluteFilePathForAll },
+                        absoluteFilePathForAll,
+                        isDarkWt,
+                        _messageBroker,
+                        crServiceWt,
+                        FindForm(),
+                        // Phase 3c follow-up: when the popup's "Wrap in quick task"
+                        // create succeeds, re-fetch git_state_tree so the wrapped
+                        // file moves out of the "Needs a quick task" group without
+                        // the user having to click HUD Git's Refresh button.
+                        // Mirrors the in-panel HandleCreateQuickTask path which
+                        // calls RefreshAsync after a successful link.
+                        onQuickTaskCreated: _ => _hudGit?.RequestRefresh());
                     return;
                 }
 
@@ -1315,32 +1357,15 @@ namespace MultiTerminal.Docking
                 }
 
                 // F-R2-6: task file_links store absolute paths; the JS
-                // findFileIndex matches strictly. Resolve the repo-relative
-                // path to absolute here so the popup preselects the correct
-                // file instead of silently falling back to file 0.
-                string absoluteFilePath = repoRelativePath;
-                if (!string.IsNullOrEmpty(repoRoot))
-                {
-                    try
-                    {
-                        absoluteFilePath = Path.Combine(
-                            repoRoot,
-                            repoRelativePath.Replace('/', Path.DirectorySeparatorChar));
-                    }
-                    catch (Exception pathEx)
-                    {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TerminalDocument] absoluteFilePath resolve failed: {pathEx.Message}");
-                        // Fall through with repoRelativePath — JS will console.warn on no-match.
-                    }
-                }
-
+                // findFileIndex matches strictly. The absolute path was
+                // resolved above (absoluteFilePathForAll) so both the task
+                // and working-tree branches see the same canonical form.
                 var crService = _codeReviewService ??= new MultiTerminal.Services.CodeReviewService(_messageBroker);
                 bool isDark = _currentTheme?.IsDark ?? true;
                 Dialogs.CodeReviewPopupManager.OpenOrFocus(
                     taskId,
                     taskTitle,
-                    absoluteFilePath,
+                    absoluteFilePathForAll,
                     isDark,
                     _messageBroker,
                     crService,
