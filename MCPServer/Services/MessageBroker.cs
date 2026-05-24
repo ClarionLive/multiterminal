@@ -2728,7 +2728,11 @@ namespace MultiTerminal.MCPServer.Services
                 CreatedBy = createdBy,
                 Status = status,
                 Priority = priority,
-                ProjectId = canonicalProjectId
+                ProjectId = canonicalProjectId,
+                // Seed sort_order at the end of the target column so new tasks
+                // land at the bottom — matches typical kanban UX (new work
+                // appears at the bottom of To Do, not the top).
+                SortOrder = _taskDb.GetNextSortOrderForStatus(status)
             };
 
             if (_tasks.TryAdd(task.Id, task))
@@ -2811,7 +2815,8 @@ namespace MultiTerminal.MCPServer.Services
                 ProjectId = canonicalProjectId,
                 IsQuickTask = true,
                 ChecklistJson = "[]",
-                ImplementationChecklistJson = "[]"
+                ImplementationChecklistJson = "[]",
+                SortOrder = _taskDb.GetNextSortOrderForStatus("done")
             };
 
             if (_tasks.TryAdd(task.Id, task))
@@ -3625,6 +3630,85 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
+            return new UpdateTaskStatusResult { Success = true };
+        }
+
+        /// <summary>
+        /// Move a task to a new position in the kanban. Handles both same-column
+        /// reorder and cross-column move (status change) atomically: if newStatus
+        /// differs from the current status, status updates first via the standard
+        /// path (which fires resume-stack / activity / changelog side-effects),
+        /// then sort_order is written. If sort_order is unchanged (newSortOrder
+        /// equals current), the call is a no-op past the status update.
+        ///
+        /// Gap-collapse guard: when the chosen newSortOrder lands within
+        /// MIN_SORT_GAP of either neighbor in the target column, the column is
+        /// rebalanced into 1000-unit gaps and newSortOrder is recomputed via the
+        /// post-rebalance neighbor midpoint. Prevents float collapse over many
+        /// successive midpoint insertions (item 7).
+        /// </summary>
+        public UpdateTaskStatusResult ReorderTask(string taskId, string newStatus, double newSortOrder, string updatedBy)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+                return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
+
+            if (task.IsQuickTask)
+                return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: task {taskId} is a quick-task (immutable)." };
+
+            // Status change first — UpdateTaskStatus handles validation, side-effects,
+            // and persistence. If it fails, bail before touching sort_order.
+            if (!string.IsNullOrEmpty(newStatus) && task.Status != newStatus)
+            {
+                var statusResult = UpdateTaskStatus(taskId, newStatus);
+                if (!statusResult.Success)
+                    return statusResult;
+            }
+
+            const double MIN_SORT_GAP = 1e-6;
+
+            // Collapse guard: snapshot neighbors in the target column AFTER the
+            // status change (the task may have just moved between columns).
+            var siblings = _tasks.Values
+                .Where(t => t.Status == task.Status && t.Id != taskId && t.SortOrder.HasValue)
+                .OrderBy(t => t.SortOrder.Value)
+                .ToList();
+
+            double? prevOrder = null, nextOrder = null;
+            foreach (var sib in siblings)
+            {
+                if (sib.SortOrder.Value < newSortOrder) prevOrder = sib.SortOrder.Value;
+                else if (sib.SortOrder.Value > newSortOrder && nextOrder == null) nextOrder = sib.SortOrder.Value;
+            }
+
+            bool tooCloseBelow = prevOrder.HasValue && (newSortOrder - prevOrder.Value) < MIN_SORT_GAP;
+            bool tooCloseAbove = nextOrder.HasValue && (nextOrder.Value - newSortOrder) < MIN_SORT_GAP;
+
+            if (tooCloseBelow || tooCloseAbove)
+            {
+                // Rebalance the whole column. The current task is still in the
+                // column at its previous sort_order; the rebalance will give it
+                // a clean integer slot, then we compute a fresh midpoint from
+                // the user-intended position. To preserve the visual rank the
+                // user dragged to, set sort_order to the desired endpoint of
+                // the gap before rebalance.
+                task.SortOrder = newSortOrder;
+                _taskDb.UpdateSortOrder(taskId, newSortOrder);
+                _taskDb.RebalanceSortOrder(task.Status);
+
+                // Reload affected tasks' sort_order from DB into in-memory map
+                foreach (var t in _tasks.Values.Where(t => t.Status == task.Status).ToList())
+                {
+                    var refreshed = _taskDb.GetTask(t.Id);
+                    if (refreshed != null) t.SortOrder = refreshed.SortOrder;
+                }
+            }
+            else
+            {
+                task.SortOrder = newSortOrder;
+                _taskDb.UpdateSortOrder(taskId, newSortOrder);
+            }
+
+            BroadcastTaskUpdate();
             return new UpdateTaskStatusResult { Success = true };
         }
 

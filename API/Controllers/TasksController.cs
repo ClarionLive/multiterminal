@@ -218,6 +218,25 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Reorder a task within (or across) kanban columns. Atomic: if newStatus
+        /// differs from current status, the move-between-columns side-effects fire
+        /// before sort_order is written. Drag-rank UI sends both the target column
+        /// (newStatus) and the midpoint sort_order between drop-position neighbors.
+        /// </summary>
+        [HttpPatch("{taskId}/order")]
+        public IActionResult ReorderTask(string taskId, [FromBody] ReorderTaskRequest request)
+        {
+            if (request == null)
+                return BadRequest(new { error = "Body required" });
+
+            var result = _broker.ReorderTask(taskId, request.NewStatus, request.NewSortOrder, request.UpdatedBy);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
         /// Delete a task
         /// </summary>
         [HttpDelete("{taskId}")]
@@ -810,6 +829,13 @@ namespace MultiTerminal.API.Controllers
     public class RenameTaskRequest
     {
         public string NewTitle { get; set; }
+        public string UpdatedBy { get; set; }
+    }
+
+    public class ReorderTaskRequest
+    {
+        public string NewStatus { get; set; }
+        public double NewSortOrder { get; set; }
         public string UpdatedBy { get; set; }
     }
 

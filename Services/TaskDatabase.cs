@@ -1169,10 +1169,17 @@ namespace MultiTerminal.Services
         {
             var tasks = new List<KanbanTask>();
 
+            // ORDER BY: sort_order is the manual rank (lower first) within a status
+            // column. NULLS LAST (encoded via CASE for portability — `NULLS LAST` is
+            // only valid SQLite 3.30+) keeps any unseeded rows at the bottom of their
+            // column rather than first. Within equal sort_order (or both null), fall
+            // back to created_at ASC so the order is deterministic.
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
-                ORDER BY created_at ASC
+                ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END,
+                         sort_order ASC,
+                         created_at ASC
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -1195,7 +1202,7 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Helper method to read a KanbanTask from a data reader.
-        /// Expects columns: id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+        /// Expects columns: id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
         /// </summary>
         private static KanbanTask ReadTaskFromReader(SQLiteDataReader reader)
         {
@@ -1224,7 +1231,8 @@ namespace MultiTerminal.Services
                 ContinuationNotes = reader.IsDBNull(21) ? null : reader.GetString(21),
                 AutoStatus = !reader.IsDBNull(22) && reader.GetInt32(22) != 0,
                 ReviewNotes = reader.IsDBNull(23) ? null : reader.GetString(23),
-                IsQuickTask = !reader.IsDBNull(24) && reader.GetInt32(24) != 0
+                IsQuickTask = !reader.IsDBNull(24) && reader.GetInt32(24) != 0,
+                SortOrder = reader.IsDBNull(25) ? (double?)null : reader.GetDouble(25)
             };
         }
 
@@ -1233,9 +1241,13 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveTask(KanbanTask task)
         {
+            // sort_order in the UPDATE clause uses COALESCE so that a SaveTask call
+            // with task.SortOrder=null does NOT overwrite an existing non-null DB
+            // value. UpdateSortOrder() is the single source of truth for changing
+            // the rank; SaveTask round-trips it when the caller knows the value.
             const string sql = @"
-                INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task)
-                VALUES (@id, @title, @description, @status, @assignee, @createdBy, @createdAt, @updatedAt, @projectId, @subStatus, @pausedAt, @flaggedStaleAt, @staleLevel, @staleNotifiedAt, @staleResponse, @priority, @checklistJson, @plan, @implementationSummary, @testResults, @implementationChecklistJson, @continuationNotes, @autoStatus, @reviewNotes, @isQuickTask)
+                INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order)
+                VALUES (@id, @title, @description, @status, @assignee, @createdBy, @createdAt, @updatedAt, @projectId, @subStatus, @pausedAt, @flaggedStaleAt, @staleLevel, @staleNotifiedAt, @staleResponse, @priority, @checklistJson, @plan, @implementationSummary, @testResults, @implementationChecklistJson, @continuationNotes, @autoStatus, @reviewNotes, @isQuickTask, @sortOrder)
                 ON CONFLICT(id) DO UPDATE SET
                     title = @title,
                     description = @description,
@@ -1258,6 +1270,7 @@ namespace MultiTerminal.Services
                     auto_status = @autoStatus,
                     review_notes = @reviewNotes,
                     is_quick_task = @isQuickTask,
+                    sort_order = COALESCE(@sortOrder, sort_order),
                     updated_at = @updatedAt
             ";
 
@@ -1287,8 +1300,87 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@autoStatus", task.AutoStatus ? 1 : 0);
             command.Parameters.AddWithValue("@reviewNotes", (object)task.ReviewNotes ?? DBNull.Value);
             command.Parameters.AddWithValue("@isQuickTask", task.IsQuickTask ? 1 : 0);
+            command.Parameters.AddWithValue("@sortOrder", (object)task.SortOrder ?? DBNull.Value);
 
             command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Returns the next sort_order value to seed for a new task in the given
+        /// status column. Tasks are inserted at the END of their column with a
+        /// 1000-unit gap from the current max, leaving room for midpoint inserts
+        /// on drag-rank without renumbering.
+        /// </summary>
+        public double GetNextSortOrderForStatus(string status)
+        {
+            const string sql = "SELECT MAX(sort_order) FROM tasks WHERE status = @status";
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@status", status ?? "todo");
+            var result = command.ExecuteScalar();
+            if (result == null || result == DBNull.Value)
+                return 1000.0;
+            return Convert.ToDouble(result) + 1000.0;
+        }
+
+        /// <summary>
+        /// Update the sort_order of a single task. Called by MessageBroker.ReorderTask
+        /// after the broker computes the midpoint between drag-rank neighbors.
+        /// Returns false if the row does not exist.
+        /// </summary>
+        public bool UpdateSortOrder(string taskId, double newSortOrder)
+        {
+            const string sql = @"
+                UPDATE tasks
+                SET sort_order = @sortOrder,
+                    updated_at = @updatedAt
+                WHERE id = @id
+            ";
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@id", taskId);
+            command.Parameters.AddWithValue("@sortOrder", newSortOrder);
+            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+            return command.ExecuteNonQuery() > 0;
+        }
+
+        /// <summary>
+        /// Renumber every task in the given status column to 1000-unit gaps,
+        /// preserving the current order. Called from MessageBroker.ReorderTask
+        /// when the gap between drag-rank neighbors collapses below epsilon
+        /// (item 7 — float-collapse guard).
+        /// </summary>
+        public void RebalanceSortOrder(string status)
+        {
+            // CTE assigns 1000, 2000, 3000... in the current visible order
+            // (sort_order asc, created_at asc — matches LoadAllTasks). The
+            // UPDATE then writes the new rank back. Wrapped in a transaction so
+            // a partial write can't leave the column half-rebalanced.
+            using var tx = _connection.BeginTransaction();
+            try
+            {
+                const string sql = @"
+                    WITH ordered AS (
+                        SELECT id, ROW_NUMBER() OVER (
+                            ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END,
+                                     sort_order ASC,
+                                     created_at ASC
+                        ) AS rn
+                        FROM tasks
+                        WHERE status = @status
+                    )
+                    UPDATE tasks
+                    SET sort_order = (SELECT rn * 1000.0 FROM ordered WHERE ordered.id = tasks.id)
+                    WHERE status = @status
+                ";
+                using var command = new SQLiteCommand(sql, _connection, tx);
+                command.Parameters.AddWithValue("@status", status ?? "todo");
+                command.ExecuteNonQuery();
+                tx.Commit();
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
         }
 
         /// <summary>
@@ -2787,7 +2879,7 @@ namespace MultiTerminal.Services
         public KanbanTask GetTask(string taskId)
         {
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
                 WHERE id = @taskId
             ";
@@ -2811,7 +2903,7 @@ namespace MultiTerminal.Services
         public KanbanTask GetActiveTaskForAgent(string agentName)
         {
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
                 WHERE assignee = @agentName
                   AND status = 'in_progress'
@@ -2845,7 +2937,7 @@ namespace MultiTerminal.Services
             var sevenDaysAgo = DateTime.UtcNow.AddDays(-7);
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
                 WHERE sub_status = 'paused'
                   AND paused_at < @sevenDaysAgo
@@ -2875,7 +2967,7 @@ namespace MultiTerminal.Services
             var fourteenDaysAgo = DateTime.UtcNow.AddDays(-14);
 
             const string sql = @"
-                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
                 WHERE sub_status = 'paused'
                   AND paused_at < @fourteenDaysAgo
@@ -2984,7 +3076,7 @@ namespace MultiTerminal.Services
 
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
-                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
                 WHERE sub_status = 'paused' AND paused_at IS NOT NULL AND paused_at <= @cutoffDate
                 ORDER BY paused_at ASC
@@ -3013,7 +3105,7 @@ namespace MultiTerminal.Services
 
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
-                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task
+                       project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
                 WHERE assignee = @assignee AND stale_level > 0
                 ORDER BY stale_level DESC, paused_at ASC
