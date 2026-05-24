@@ -227,7 +227,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult ReorderTask(string taskId, [FromBody] ReorderTaskRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "Body required" });
+                return BadRequest(new { error = "Request body is required and must include newStatus + newSortOrder." });
+
+            // Reject NaN / ±Infinity at the ingress (the broker also guards).
+            // Either poisons the sort_order column — SQL ordering against NaN
+            // is undefined and Infinity defeats the rebalance midpoint formula.
+            if (!double.IsFinite(request.NewSortOrder))
+                return BadRequest(new { error = $"newSortOrder must be a finite number (got {request.NewSortOrder})." });
 
             var result = _broker.ReorderTask(taskId, request.NewStatus, request.NewSortOrder, request.UpdatedBy);
             if (!result.Success)

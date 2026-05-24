@@ -3655,6 +3655,13 @@ namespace MultiTerminal.MCPServer.Services
             if (task.IsQuickTask)
                 return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: task {taskId} is a quick-task (immutable)." };
 
+            // Reject NaN / ±Infinity. Either would poison the sort_order column —
+            // SQL comparisons against NaN are undefined and Infinity defeats the
+            // rebalance midpoint formula. Defense-in-depth: the WebView handler
+            // also guards this, but a future API/MCP caller could bypass it.
+            if (!double.IsFinite(newSortOrder))
+                return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: newSortOrder must be a finite number (got {newSortOrder})." };
+
             // Status change first — UpdateTaskStatus handles validation, side-effects,
             // and persistence. If it fails, bail before touching sort_order.
             if (!string.IsNullOrEmpty(newStatus) && task.Status != newStatus)
