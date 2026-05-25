@@ -245,13 +245,32 @@ namespace MultiTerminal.Services
         {
             if (string.IsNullOrEmpty(projectRoot)) return;
             string resolvedKey = ResolveRepoRoot(projectRoot);
-            string canonical = resolvedKey == null ? CanonicalizeProjectRoot(projectRoot) : null;
+            // Always compute the canonical form too. We need it as a FALLBACK
+            // when resolvedKey is non-null but doesn't match the cache — which
+            // happens after a worktree directory has been deleted: walking up
+            // for .git now finds the MAIN repo's .git instead of the worktree's
+            // own gitlink, so resolvedKey is the main-repo path even though the
+            // cache entry we want to evict is keyed by the worktree path. The
+            // ancestor-fallback scan on `canonical` recovers it.
+            string canonical = CanonicalizeProjectRoot(projectRoot);
 
             GitRepoService toDispose = null;
             lock (_lock)
             {
                 string keyToRemove = null;
-                if (resolvedKey != null && _byPath.ContainsKey(resolvedKey))
+                // 1. Exact match on the canonical input path. The cache key
+                //    that GetOrCreate created for a worktree is the worktree's
+                //    own resolved path; once the worktree directory is deleted
+                //    ResolveRepoRoot can no longer reach that key (its walk-up
+                //    lands on the main repo's .git instead), but the canonical
+                //    input string still matches the original key character-for-
+                //    character. Check this FIRST so the deleted-worktree case
+                //    doesn't fall into branch 2 and evict the wrong cache.
+                if (canonical != null && _byPath.ContainsKey(canonical))
+                {
+                    keyToRemove = canonical;
+                }
+                else if (resolvedKey != null && _byPath.ContainsKey(resolvedKey))
                 {
                     keyToRemove = resolvedKey;
                 }
@@ -287,13 +306,24 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Canonicalises an external path for prefix/equality comparisons.
+        /// Exposes <see cref="CanonicalizeProjectRoot"/> to other components
+        /// (e.g. <c>HudGitRenderer</c>) so they don't need their own (and
+        /// inevitably drifting) canonicalisation routine before calling
+        /// <see cref="IsSameOrAncestor"/>. Returns <c>null</c> on malformed
+        /// input.
+        /// </summary>
+        internal static string Canonicalize(string path) => CanonicalizeProjectRoot(path);
+
+        /// <summary>
         /// Returns true if <paramref name="descendant"/> is the same path as
         /// <paramref name="ancestor"/> or sits underneath it. Both inputs are
         /// expected to be canonical (trailing separators trimmed, full paths)
-        /// — see <see cref="CanonicalizeProjectRoot"/>. Case-insensitive to
-        /// match the rest of the cache-key comparisons on this class.
+        /// — see <see cref="CanonicalizeProjectRoot"/> / <see cref="Canonicalize"/>.
+        /// Case-insensitive to match the rest of the cache-key comparisons
+        /// on this class.
         /// </summary>
-        private static bool IsSameOrAncestor(string ancestor, string descendant)
+        internal static bool IsSameOrAncestor(string ancestor, string descendant)
         {
             if (string.IsNullOrEmpty(ancestor) || string.IsNullOrEmpty(descendant)) return false;
             if (string.Equals(ancestor, descendant, StringComparison.OrdinalIgnoreCase)) return true;

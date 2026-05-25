@@ -324,6 +324,19 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<WorktreePruningEventArgs> WorktreePruning;
 
         /// <summary>
+        /// Fired AFTER PruneForTaskAsync and MergeForTaskAsync both complete
+        /// in the task-done flow. Subscribers (HudGitRenderer) can rebind to
+        /// the post-merge state without racing the merge — by the time this
+        /// fires, refs/heads/{trunk} has been written. <see cref="WorktreePruning"/>
+        /// is for "the worktree is about to disappear, drop your handles";
+        /// this event is for "the new repo state is ready, refresh your view".
+        /// Two events, two concerns. Fires once per task-done attempt regardless
+        /// of whether the merge succeeded, was skipped, or failed — the
+        /// post-state is durable either way.
+        /// </summary>
+        public event EventHandler<WorktreeReadyEventArgs> WorktreeReady;
+
+        /// <summary>
         /// Janitor-callable retry for a prune that was deferred at task-done
         /// time. Cycle-4 contract:
         /// <list type="bullet">
@@ -372,6 +385,20 @@ namespace MultiTerminal.MCPServer.Services
                 WorktreePruneCoordinator.MarkPruning(markedPath); // idempotent; broker already marked at defer time
                 bool removed = await _worktrees.PruneForTaskAsync(taskId, projectPath).ConfigureAwait(false);
                 clearMarkOnExit = removed; // only unmark on success
+
+                // Cycle-4 dbbb8de2 fix: when the deferred prune finally
+                // succeeds, run the same post-prune sequence the synchronous
+                // task-done path runs — auto-merge + fire WorktreeReady. The
+                // synchronous path had already returned to the user minutes
+                // earlier with the task marked done; without this call, the
+                // task branch was never merged AND any HUD panel that was
+                // bound to the worktree stayed bound to a now-deleted
+                // directory until the user manually refreshed.
+                if (removed)
+                {
+                    PerformPostPruneMergeAndFireReady(taskId, task, projectPath, markedPath);
+                }
+
                 return removed;
             }
             catch (Exception ex)
@@ -412,6 +439,105 @@ namespace MultiTerminal.MCPServer.Services
                 System.Diagnostics.Debug.WriteLine($"[MessageBroker] WorktreePruning subscribers threw: {ex.Message}");
             }
             return args;
+        }
+
+        // Fires WorktreeReady AFTER prune + auto-merge complete in the task-done
+        // flow. Used by HUD panels to rebind to the post-merge repo state without
+        // racing the synchronous merge. Exception-isolated like the other broker
+        // event fires — a misbehaving subscriber doesn't break the task-done path.
+        private void FireWorktreeReady(string taskId, string worktreePath, string repoRoot, string agentName)
+        {
+            var args = new WorktreeReadyEventArgs(taskId, worktreePath, repoRoot, agentName);
+            try
+            {
+                WorktreeReady?.Invoke(this, args);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] WorktreeReady subscribers threw: {ex.Message}");
+            }
+        }
+
+        // Post-prune flow shared by the synchronous task-done path and the
+        // janitor's deferred-prune retry. Attempts the auto-merge (with full
+        // activity logging for the four outcomes: skipped, merged, failed-clean,
+        // threw), then fires WorktreeReady so HUD panels rebind to the post-
+        // merge repo state. Cycle-4 factored this out of the inline if(prunedOK)
+        // block in UpdateTaskStatus so the janitor's TryDeferredPruneRetryAsync
+        // can run the same sequence after its delayed prune succeeds.
+        // (Cross-model adversary HIGH from pipeline run 3.)
+        //
+        // Callers must only invoke this AFTER a successful prune. Failed/
+        // deferred prunes don't fire WorktreeReady (the worktree may still be
+        // alive on disk and rebinding to repo root would yank the user off it).
+        private void PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath)
+        {
+            string taskIdShort = taskId.Substring(0, Math.Min(8, taskId.Length));
+            try
+            {
+                var mergeResult = _merge.MergeForTaskAsync(taskId, projectPath).GetAwaiter().GetResult();
+
+                if (mergeResult.Success)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Auto-merge for {taskId}: " +
+                        (mergeResult.SkippedReason ?? $"merged into {mergeResult.MergedInto}"));
+
+                    if (!string.IsNullOrEmpty(mergeResult.SkippedReason))
+                    {
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "auto_merge_skipped",
+                            Content = $"Auto-merge skipped for '{task.Title}': {mergeResult.SkippedReason}",
+                            RelatedId = taskId
+                        });
+                    }
+                    else
+                    {
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "auto_merge",
+                            Content = $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; task branch deleted.",
+                            RelatedId = taskId
+                        });
+                    }
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Auto-merge for {taskId} FAILED" +
+                        (mergeResult.HadConflicts ? " (conflict)" : "") +
+                        $": {mergeResult.Stderr}");
+                    string conflictTag = mergeResult.HadConflicts ? "Merge conflict" : "Merge failed";
+                    RecordActivity(new ActivityEvent
+                    {
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = "auto_merge_failed",
+                        Content = $"{conflictTag} for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
+                        RelatedId = taskId
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MessageBroker] Auto-merge threw for task {taskId}: {ex.Message}");
+                RecordActivity(new ActivityEvent
+                {
+                    Terminal = task.Assignee ?? "System",
+                    Type = "worktree",
+                    Action = "auto_merge_failed",
+                    Content = $"Auto-merge threw for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
+                    RelatedId = taskId
+                });
+            }
+
+            FireWorktreeReady(taskId, worktreePath, projectPath, task.Assignee);
         }
 
         /// <summary>
@@ -3444,6 +3570,11 @@ namespace MultiTerminal.MCPServer.Services
                 }
 
                 bool prunedOK = false;
+                // Hoisted out of the if(shouldPrune) block so the FireWorktreeReady
+                // call (now after the if(prunedOK) block) can pass the same path
+                // and inspect `deferred` for the fire decision.
+                string worktreePathToPrune = null;
+                bool deferred = false;
                 if (shouldPrune)
                 {
                     // Pre-prune broadcast (task db4b18c6): tell every live
@@ -3462,9 +3593,8 @@ namespace MultiTerminal.MCPServer.Services
                     //     so a concurrent SpawnTerminal can refuse to launch
                     //     into a soon-to-be-deleted worktree (closes the
                     //     TOCTOU window adversary flagged).
-                    string worktreePathToPrune = _worktrees?.GetWorktreePathForTask(taskId);
+                    worktreePathToPrune = _worktrees?.GetWorktreePathForTask(taskId);
                     bool marked = false;
-                    bool deferred = false;
                     if (!string.IsNullOrEmpty(worktreePathToPrune))
                     {
                         WorktreePruneCoordinator.MarkPruning(worktreePathToPrune);
@@ -3538,73 +3668,14 @@ namespace MultiTerminal.MCPServer.Services
                 // Prune releases the branch lock so git can merge the task
                 // branch into the main checkout's current trunk. Merge failure
                 // does NOT roll back commit or prune (those are durable); the
-                // dev resolves the merge manually.
+                // dev resolves the merge manually. WorktreeReady is fired
+                // inside the helper after the merge attempt completes so HUD
+                // panels rebind to the post-merge state without racing the
+                // merge. Cycle-4 factored this into a helper so the janitor's
+                // deferred-prune retry can run the same post-prune sequence.
                 if (prunedOK)
                 {
-                    string taskIdShort = taskId.Substring(0, Math.Min(8, taskId.Length));
-                    try
-                    {
-                        var mergeResult = _merge.MergeForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
-
-                        if (mergeResult.Success)
-                        {
-                            System.Diagnostics.Debug.WriteLine(
-                                $"[MessageBroker] Auto-merge for {taskId}: " +
-                                (mergeResult.SkippedReason ?? $"merged into {mergeResult.MergedInto}"));
-
-                            if (!string.IsNullOrEmpty(mergeResult.SkippedReason))
-                            {
-                                RecordActivity(new ActivityEvent
-                                {
-                                    Terminal = task.Assignee ?? "System",
-                                    Type = "worktree",
-                                    Action = "auto_merge_skipped",
-                                    Content = $"Auto-merge skipped for '{task.Title}': {mergeResult.SkippedReason}",
-                                    RelatedId = taskId
-                                });
-                            }
-                            else
-                            {
-                                RecordActivity(new ActivityEvent
-                                {
-                                    Terminal = task.Assignee ?? "System",
-                                    Type = "worktree",
-                                    Action = "auto_merge",
-                                    Content = $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; task branch deleted.",
-                                    RelatedId = taskId
-                                });
-                            }
-                        }
-                        else
-                        {
-                            System.Diagnostics.Debug.WriteLine(
-                                $"[MessageBroker] Auto-merge for {taskId} FAILED" +
-                                (mergeResult.HadConflicts ? " (conflict)" : "") +
-                                $": {mergeResult.Stderr}");
-                            string conflictTag = mergeResult.HadConflicts ? "Merge conflict" : "Merge failed";
-                            RecordActivity(new ActivityEvent
-                            {
-                                Terminal = task.Assignee ?? "System",
-                                Type = "worktree",
-                                Action = "auto_merge_failed",
-                                Content = $"{conflictTag} for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
-                                RelatedId = taskId
-                            });
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Auto-merge threw for task {taskId}: {ex.Message}");
-                        RecordActivity(new ActivityEvent
-                        {
-                            Terminal = task.Assignee ?? "System",
-                            Type = "worktree",
-                            Action = "auto_merge_failed",
-                            Content = $"Auto-merge threw for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
-                            RelatedId = taskId
-                        });
-                    }
+                    PerformPostPruneMergeAndFireReady(taskId, task, doneProj.Path, worktreePathToPrune);
                 }
             }
 
@@ -4511,14 +4582,12 @@ namespace MultiTerminal.MCPServer.Services
             string newWorktreePath = _worktrees?.GetWorktreePathForTask(taskId);
             try
             {
-                TaskActiveChanged?.Invoke(this, new TaskActiveChangedEventArgs
-                {
-                    AgentName = assignee,
-                    OldTaskId = oldTaskId,
-                    OldWorktreePath = oldWorktreePath,
-                    NewTaskId = taskId,
-                    NewWorktreePath = newWorktreePath,
-                });
+                TaskActiveChanged?.Invoke(this, new TaskActiveChangedEventArgs(
+                    agentName: assignee,
+                    oldTaskId: oldTaskId,
+                    oldWorktreePath: oldWorktreePath,
+                    newTaskId: taskId,
+                    newWorktreePath: newWorktreePath));
             }
             catch (Exception ex)
             {
@@ -7175,15 +7244,35 @@ namespace MultiTerminal.MCPServer.Services
     /// </summary>
     public class TaskActiveChangedEventArgs : EventArgs
     {
-        public string AgentName { get; set; }
+        // Constructor-set immutable args. Cycle-6 codex-security/adversary
+        // MEDIUM fix: prior mutable-property shape let an earlier in-proc
+        // subscriber rewrite AgentName/OldTaskId/etc before later subscribers
+        // ran, redirecting both the HUD rebind path (TerminalDocument) and
+        // the channel push (MainForm) at attacker-chosen identity/paths.
+        // Mirrors the WorktreeReadyEventArgs hardening from cycle-5.
+        public TaskActiveChangedEventArgs(
+            string agentName,
+            string oldTaskId,
+            string oldWorktreePath,
+            string newTaskId,
+            string newWorktreePath)
+        {
+            AgentName = agentName;
+            OldTaskId = oldTaskId;
+            OldWorktreePath = oldWorktreePath;
+            NewTaskId = newTaskId;
+            NewWorktreePath = newWorktreePath;
+        }
 
-        public string OldTaskId { get; set; }
+        public string AgentName { get; }
 
-        public string OldWorktreePath { get; set; }
+        public string OldTaskId { get; }
 
-        public string NewTaskId { get; set; }
+        public string OldWorktreePath { get; }
 
-        public string NewWorktreePath { get; set; }
+        public string NewTaskId { get; }
+
+        public string NewWorktreePath { get; }
     }
 
     /// <summary>
@@ -7215,6 +7304,37 @@ namespace MultiTerminal.MCPServer.Services
         /// moved on. Cycle-3 adversary HIGH fix.
         /// </summary>
         public bool AllDelivered { get; set; } = true;
+    }
+
+    /// <summary>
+    /// Event args for <see cref="MessageBroker.WorktreeReady"/>. Fired once per
+    /// task-done attempt AFTER both prune and auto-merge complete. Tells HUD
+    /// panels "the new post-merge repo state is durable, refresh your view."
+    /// Fields mirror <see cref="WorktreePruningEventArgs"/> (same task context)
+    /// so subscribers don't need a different shape to react to both events.
+    ///
+    /// <para>Immutable so a misbehaving earlier subscriber can't rewrite
+    /// <see cref="WorktreePath"/> or <see cref="RepoRoot"/> and redirect a
+    /// later subscriber's GitRepos cache eviction / SetProject call at a
+    /// different repository (codex-security-auditor MEDIUM cycle-5 fix).</para>
+    /// </summary>
+    public class WorktreeReadyEventArgs : EventArgs
+    {
+        public WorktreeReadyEventArgs(string taskId, string worktreePath, string repoRoot, string agentName)
+        {
+            TaskId = taskId;
+            WorktreePath = worktreePath;
+            RepoRoot = repoRoot;
+            AgentName = agentName;
+        }
+
+        public string TaskId { get; }
+
+        public string WorktreePath { get; }
+
+        public string RepoRoot { get; }
+
+        public string AgentName { get; }
     }
 
     /// <summary>

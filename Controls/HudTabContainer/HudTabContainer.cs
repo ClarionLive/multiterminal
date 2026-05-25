@@ -357,13 +357,16 @@ namespace MultiTerminal.Controls
         /// Updates the persistent "uncommitted changes" strip at the top of the HUD.
         /// Hidden when <paramref name="count"/> is 0; otherwise shows a clickable
         /// warning ("N uncommitted file(s) on &lt;branch&gt;") that deep-links to the
-        /// Git tab. Safe to call from any thread.
+        /// Git tab. When <paramref name="aggregateText"/> is supplied it replaces
+        /// the default per-worktree body — used by the multi-worktree roll-up so
+        /// the strip mirrors the Git tab's aggregate header
+        /// ("5 uncommitted · 1 master · 4 worktrees (2)"). Safe to call from any thread.
         /// </summary>
-        public void SetWorkingTreeDirty(int count, string branch)
+        public void SetWorkingTreeDirty(int count, string branch, string aggregateText = null)
         {
             if (InvokeRequired)
             {
-                try { BeginInvoke(new Action(() => SetWorkingTreeDirty(count, branch))); }
+                try { BeginInvoke(new Action(() => SetWorkingTreeDirty(count, branch, aggregateText))); }
                 catch { }
                 return;
             }
@@ -375,9 +378,18 @@ namespace MultiTerminal.Controls
                 return;
             }
 
-            string branchPart = string.IsNullOrEmpty(branch) ? "" : " on " + branch;
-            string fileWord = count == 1 ? "file" : "files";
-            _dirtyLabel.Text = $"⚠ {count} uncommitted {fileWord}{branchPart} — click to view in Git tab";
+            string body;
+            if (!string.IsNullOrEmpty(aggregateText))
+            {
+                body = $"⚠ {aggregateText} — click to view in Git tab";
+            }
+            else
+            {
+                string branchPart = string.IsNullOrEmpty(branch) ? "" : " on " + branch;
+                string fileWord = count == 1 ? "file" : "files";
+                body = $"⚠ {count} uncommitted {fileWord}{branchPart} — click to view in Git tab";
+            }
+            _dirtyLabel.Text = body;
             if (!_dirtyStrip.Visible) _dirtyStrip.Visible = true;
         }
 

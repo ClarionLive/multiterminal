@@ -139,6 +139,7 @@ namespace MultiTerminal.Controls
             if (_broker != null)
             {
                 _broker.BranchOutcomeUpdated += OnBranchOutcomeUpdated;
+                _broker.WorktreeReady += OnWorktreeReady;
             }
         }
 
@@ -165,6 +166,153 @@ namespace MultiTerminal.Controls
                 System.Diagnostics.Trace.WriteLine(
                     $"[HudGitRenderer.OnBranchOutcomeUpdated] {ex.GetType().Name}: {ex.Message}");
             }
+        }
+
+        // Fires once per task-done flow AFTER both PruneForTaskAsync and
+        // MergeForTaskAsync have been attempted (or skipped on prune-failed).
+        // Does NOT fire on the deferred-prune branch where the worktree stays
+        // alive on disk. By this point refs/heads/{trunk} has been written;
+        // rebinding cannot race the merge (dbbb8de2 cross-model-adversary HIGH
+        // run 1 fix).
+        //
+        // Cycle 3 consolidates the prior cycle-2 split between OnWorktreePruning
+        // (cleanup) and OnWorktreeReady (rebind) into this one handler:
+        //
+        //   1. Snapshot _projectId before any state mutation so the rebound
+        //      panel keeps per-(project, branch) features (code-reviewer
+        //      MINOR from run 2 — SetProject(null, ...) strands worktree-
+        //      subdir panels' BranchOutcomeUpdated filter).
+        //   2. Release the actual pruned path (args.WorktreePath), NOT
+        //      _projectPath. The prior cycle-2 cleanup-via-_projectPath
+        //      released the WRONG cache in the switcher-pinned case where
+        //      _projectPath was a sibling worktree the user clicked to
+        //      (debugger HIGH + adversary HIGH 1 from run 2). This also
+        //      cleans up SwitchToRepo's pre-existing _originalProjectPath
+        //      leak (adversary MEDIUM run 2) in the common case where the
+        //      originating worktree eventually completes its task.
+        //   3. Only REBIND when args.WorktreePath matches the current view
+        //      (_projectPath). If the match was via _originalProjectPath
+        //      only (switcher case), the cleanup did its job — preserve the
+        //      user's switcher pin (debugger MEDIUM + adversary HIGH 1
+        //      part 2 from run 2).
+        private void OnWorktreeReady(object sender, MCPServer.Services.WorktreeReadyEventArgs args)
+        {
+            if (IsDisposed) return;
+            if (args == null || string.IsNullOrEmpty(args.RepoRoot)) return;
+            if (string.IsNullOrEmpty(args.WorktreePath)) return;
+            if (!IsEventForOurWorktree(args.WorktreePath)) return;
+
+            try
+            {
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action(() => HandleWorktreeReady(args)));
+                }
+                else
+                {
+                    HandleWorktreeReady(args);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.OnWorktreeReady] {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // UI-thread handler for OnWorktreeReady. Splits in three:
+        // cleanup the doomed cache, decide whether to rebind, and rebind
+        // with a preserved projectId so the panel keeps per-(project, branch)
+        // features. See OnWorktreeReady comment for the cycle-3 motivation.
+        private void HandleWorktreeReady(MCPServer.Services.WorktreeReadyEventArgs args)
+        {
+            if (IsDisposed) return;
+
+            try
+            {
+                // Capture before any state mutation. SetProject(null, ...)
+                // would strand the panel's projectId via the path-only
+                // resolver (which fails for worktree subdirs).
+                string preservedProjectId = _projectId;
+
+                // Canonicalize once at the boundary — IsPathInsideOrEqual's
+                // contract requires the `ancestor` argument to be pre-
+                // canonicalized (only `descendant` is canonicalized inside).
+                // Without this, mixed-separator/junction worktree paths could
+                // bypass the rebind branch even though IsEventForOurWorktree
+                // correctly filtered the event through (cycle-6 CR MINOR fix).
+                var canonicalEventPath = MultiTerminal.Services.GitRepoManager.Canonicalize(args.WorktreePath);
+                if (canonicalEventPath == null) return;
+
+                // Release the specific path that was pruned (NOT _projectPath
+                // which may be a still-alive switcher pin). Idempotent — Release
+                // on an unknown path is a no-op.
+                _broker?.GitRepos?.Release(canonicalEventPath);
+
+                // Only rebind if the doomed path was actually our current view.
+                // Switcher-pinned panels (matched via _originalProjectPath only)
+                // get the cleanup above but keep the user's pinned view.
+                if (!IsPathInsideOrEqual(canonicalEventPath, _projectPath)) return;
+
+                // _projectPath was the pruned path — switch to the post-merge
+                // repo root with the preserved projectId so outcome edits +
+                // fit suggestions stay wired.
+                SetProject(preservedProjectId, args.RepoRoot);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.HandleWorktreeReady] {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        // Broker-thread pre-filter for WorktreePruning / WorktreeReady events.
+        // Cheap, over-permissive string-prefix check — does NOT touch the
+        // filesystem (cycle-6 codex-adversary MEDIUM fix: prior cycle-5 impl
+        // called GitRepoManager.Canonicalize which does DirectoryInfo.Exists +
+        // ResolveLinkTarget, blocking the broker's task-done thread on slow/
+        // broken paths). False positives are fine — HandleWorktreeReady's
+        // canonical re-check on the UI thread short-circuits any mismatch.
+        //
+        // Matches against BOTH _projectPath AND _originalProjectPath so a
+        // switcher-pinned panel still reacts when its underlying worktree
+        // (the one the agent ran in) is the one being pruned, even though
+        // the displayed pane was switched to a sibling.
+        private bool IsEventForOurWorktree(string eventWorktreePath)
+        {
+            if (string.IsNullOrEmpty(eventWorktreePath)) return false;
+            if (CheapPathInsideOrEqual(eventWorktreePath, _projectPath)) return true;
+            if (CheapPathInsideOrEqual(eventWorktreePath, _originalProjectPath)) return true;
+            return false;
+        }
+
+        // Pure-string prefix match (no filesystem probe). Used by the broker-
+        // thread event pre-filter. Tolerant of mixed separators so HudGit's
+        // bound path (typically WinFS native) still matches event paths fed
+        // by git output (forward slashes). HandleWorktreeReady follows up
+        // with the authoritative canonical comparison.
+        private static bool CheapPathInsideOrEqual(string parent, string child)
+        {
+            if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(child)) return false;
+            var p = parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var c = child.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(p, c, StringComparison.OrdinalIgnoreCase)) return true;
+            return c.StartsWith(p + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || c.StartsWith(p + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Authoritative canonical comparison used by HandleWorktreeReady on
+        // the UI thread (post-handoff). Delegates to the canonical impl in
+        // GitRepoManager so cache-eviction and the rebind-decision filter
+        // can never drift. Caller is responsible for canonicalizing
+        // `ancestor` once; `descendant` is canonicalized here because it's
+        // the bound-side path which may have been stored unnormalized.
+        private static bool IsPathInsideOrEqual(string canonicalAncestor, string descendantPath)
+        {
+            if (string.IsNullOrEmpty(canonicalAncestor) || string.IsNullOrEmpty(descendantPath)) return false;
+            var dc = MultiTerminal.Services.GitRepoManager.Canonicalize(descendantPath);
+            if (dc == null) return false;
+            return MultiTerminal.Services.GitRepoManager.IsSameOrAncestor(canonicalAncestor, dc);
         }
 
         private void ResolveProjectIdFromPath(string projectPath)
@@ -511,7 +659,27 @@ namespace MultiTerminal.Controls
                         break;
 
                     case "refresh":
-                        _ = RefreshAsync();
+                        // Hard-reset: release the cached GitRepoService for
+                        // _projectPath so LibGit2Sharp re-opens the Repository
+                        // and re-reads refs from disk. Covers the case where
+                        // the file watcher missed an external mutation (or our
+                        // handle is pointing at a since-pruned directory and
+                        // RepoStateChanged never fired). ApplyProject() then
+                        // re-binds and calls RefreshAsync internally. If the
+                        // release/rebind path throws (e.g. layout detection
+                        // races a concurrent prune), fall back to the bare
+                        // refresh so the button is never a silent no-op.
+                        try
+                        {
+                            _broker?.GitRepos?.Release(_projectPath);
+                            ApplyProject();
+                        }
+                        catch (Exception refreshEx)
+                        {
+                            System.Diagnostics.Trace.WriteLine(
+                                $"[HudGitRenderer.refresh] hard-reset failed, falling back: {refreshEx.GetType().Name}: {refreshEx.Message}");
+                            _ = RefreshAsync();
+                        }
                         break;
 
                     case "fetch":
@@ -1288,11 +1456,32 @@ namespace MultiTerminal.Controls
 
                         object workingChanges;
                         object[] recentCommits;
+                        bool hasRemote = false;
+                        int aheadBy = 0;
+                        int behindBy = 0;
+                        string lastFetch = null;
                         try
                         {
                             using var perSvc = new GitRepoService(wt.Path);
                             workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured, changelogSvc, brokerCaptured);
                             recentCommits = BuildRecentCommits(perSvc);
+                            // Remote tracking is per-worktree (each worktree has its
+                            // own HEAD and tracking branch). The unified-tree header
+                            // renders the MAIN worktree's remote info as the repo-
+                            // wide identity; per-worktree slices remain available for
+                            // future per-branch detail views.
+                            hasRemote = perSvc.HasRemote;
+                            if (hasRemote)
+                            {
+                                var ab = perSvc.GetAheadBehind();
+                                if (ab != null)
+                                {
+                                    aheadBy = ab.Ahead;
+                                    behindBy = ab.Behind;
+                                }
+                                var t = perSvc.GetLastFetchTime();
+                                if (t.HasValue) lastFetch = FormatRelativeTime(t.Value);
+                            }
                         }
                         catch
                         {
@@ -1314,6 +1503,10 @@ namespace MultiTerminal.Controls
                             linkedTaskTitle = wt.LinkedTaskTitle,
                             workingChanges,
                             recentCommits,
+                            hasRemote,
+                            aheadBy,
+                            behindBy,
+                            lastFetch,
                         });
                     }
 
@@ -2141,6 +2334,7 @@ namespace MultiTerminal.Controls
                 if (_broker != null)
                 {
                     try { _broker.BranchOutcomeUpdated -= OnBranchOutcomeUpdated; } catch { /* non-fatal */ }
+                    try { _broker.WorktreeReady -= OnWorktreeReady; } catch { /* non-fatal */ }
                 }
                 if (_webView != null)
                 {

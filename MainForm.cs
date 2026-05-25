@@ -1065,12 +1065,19 @@ namespace MultiTerminal
                     Invoke(new Action(() =>
                     {
                         targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
+                        // Broker-confirmed registration is an authoritative
+                        // identity source — promote into stable agent name
+                        // for OnBrokerTaskActiveChanged filtering. First-wins,
+                        // so StartTerminal's prior promotion (if any) keeps
+                        // priority (cycle-7 codex-adversary HIGH fix).
+                        targetDoc.PromoteOriginalAgentName(e.Name);
                         targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
                     }));
                 }
                 else
                 {
                     targetDoc.CustomTitle = e.Name;  // Display the Claude name in the tab
+                    targetDoc.PromoteOriginalAgentName(e.Name);
                     targetDoc.UpdateStatusBar();     // Update the terminal banner with name, avatar, and task
                 }
             }

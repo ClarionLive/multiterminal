@@ -142,6 +142,10 @@ html, body {
     background: var(--accent);
     border-color: var(--accent);
 }
+.tree-row .wt-dot.dirty {
+    background: var(--red);
+    border-color: var(--red);
+}
 .tree-row .wt-branch {
     font-weight: 600;
     flex: 0 0 auto;
@@ -1303,11 +1307,18 @@ body.light .qt-input {
     function renderHeader(s) {
         $('branch').textContent = s.branch || '—';
 
-        const c = s.changes | 0;
+        // changesText override lets the unified-tree renderer pass a
+        // multi-worktree aggregate string ("5 uncommitted · 1 master · 4
+        // worktree(s)") in place of the single-worktree default.
         let changesText;
-        if (c === 0) changesText = 'clean';
-        else if (c === 1) changesText = '1 uncommitted change';
-        else changesText = c + ' uncommitted changes';
+        if (typeof s.changesText === 'string' && s.changesText.length > 0) {
+            changesText = s.changesText;
+        } else {
+            const c = s.changes | 0;
+            if (c === 0) changesText = 'clean';
+            else if (c === 1) changesText = '1 uncommitted change';
+            else changesText = c + ' uncommitted changes';
+        }
         $('changes').textContent = changesText;
 
         if (s.hasRemote) {
@@ -1551,6 +1562,88 @@ body.light .qt-input {
         const folders = Array.isArray(lastTreeState.folders) ? lastTreeState.folders : [];
         const selectedPath = lastTreeState.selectedWorktreePath || '';
 
+        // Header + contamination banner. The unified tree spans ALL
+        // worktrees, so the header is an aggregate roll-up rather than a
+        // per-worktree summary. Branch label stays on the main worktree's
+        // branch (typically "master") since that's the repo's identity;
+        // the changes line totals all uncommitted files and breaks them
+        // out by main vs. task-worktrees so a user can see at a glance
+        // where the dirt lives.
+        //
+        // Format: "5 uncommitted · 1 master · 4 worktrees (2)"
+        // (final paren is the number of dirty non-main worktrees; singular is
+        // "1 worktree (1)")
+        //   • zero across the board → "clean"
+        //   • only main dirty       → "N uncommitted · N <mainBranch>"
+        //   • only worktrees dirty  → "N uncommitted · N worktree(s) (M)"
+        //   • mixed                 → "T uncommitted · M <mainBranch> · N worktree(s) (P)"
+        //
+        // **MUST mirror the format in Docking/TerminalDocument.cs
+        // RefreshWorkingTreeDirty (~line 2670) — that helper builds the same
+        // string for the top yellow HudTabContainer ticker. If you change the
+        // parts order/separators here, change them there too (cycle-5 dedup note).
+        //
+        // Contamination banner stays driven by the main worktree's slice
+        // (cross-task warnings are repo-wide, not per-worktree).
+        const mainFolder = folders.find(f => f && f.isMain) || null;
+        const folderDirtyCount = function (f) {
+            if (!f) return 0;
+            const wc = f.workingChanges || {};
+            if (typeof wc.porcelainEntryCount === 'number') return wc.porcelainEntryCount;
+            if (typeof f.dirtyCount === 'number') return f.dirtyCount;
+            return 0;
+        };
+        const mainDirty = folderDirtyCount(mainFolder);
+        let nonMainDirty = 0;
+        let nonMainDirtyTrees = 0;
+        for (const f of folders) {
+            if (!f || f.isMain) continue;
+            const n = folderDirtyCount(f);
+            if (n > 0) {
+                nonMainDirty += n;
+                nonMainDirtyTrees++;
+            }
+        }
+        const totalDirty = mainDirty + nonMainDirty;
+        const mainBranchLabel = (mainFolder && mainFolder.branch) ? String(mainFolder.branch) : 'master';
+
+        if (folders.length === 0) {
+            // No worktrees in payload at all — wipe header + banner so they
+            // can't show stale data from a previous project.
+            renderHeader({ branch: '', changes: 0, hasRemote: false });
+            renderContaminationBanner([], []);
+        } else {
+            let aggregateText;
+            if (totalDirty === 0) {
+                aggregateText = 'clean';
+            } else {
+                const parts = [totalDirty + ' uncommitted'];
+                if (mainDirty > 0) parts.push(mainDirty + ' ' + mainBranchLabel);
+                if (nonMainDirtyTrees > 0) {
+                    parts.push(nonMainDirty + ' worktree' + (nonMainDirtyTrees === 1 ? '' : 's')
+                        + ' (' + nonMainDirtyTrees + ')');
+                }
+                aggregateText = parts.join(' · ');
+            }
+            // Remote info comes from the main worktree's slice — the unified
+            // header represents the repo's identity, so ahead/behind/fetch
+            // should reflect the main checkout's tracking branch, not whichever
+            // task-worktree happens to be selected.
+            const mainHasRemote = !!(mainFolder && mainFolder.hasRemote);
+            renderHeader({
+                branch: mainBranchLabel,
+                changesText: aggregateText,
+                hasRemote: mainHasRemote,
+                ahead: mainHasRemote ? (mainFolder.aheadBy | 0) : 0,
+                behind: mainHasRemote ? (mainFolder.behindBy | 0) : 0,
+                lastFetch: mainHasRemote ? (mainFolder.lastFetch || '') : '',
+            });
+            const mainWc = (mainFolder && mainFolder.workingChanges) || {};
+            renderContaminationBanner(
+                Array.isArray(mainWc.workingTree) ? mainWc.workingTree : [],
+                Array.isArray(mainWc.contamTaskIds) ? mainWc.contamTaskIds : []);
+        }
+
         // ROOT — project node (depth 0). Always expanded.
         const rootNode = makeTreeNode({
             nodeId: 'root',
@@ -1750,8 +1843,20 @@ body.light .qt-input {
                 node.row.setAttribute('aria-current', 'true');
             }
 
+            // Dirty-state dot: red when the worktree has uncommitted
+            // files (preferring porcelainEntryCount, falling back to the
+            // worktree-list dirtyCount). Lets a collapsed branch row
+            // signal "expand me to see uncommitted work" at a glance.
+            // Orphan branches (no worktree) stay outlined; checked-out
+            // clean worktrees get the existing accent-blue filled dot.
+            let isDirty = false;
+            if (folder) {
+                const wc = folder.workingChanges || {};
+                if (typeof wc.porcelainEntryCount === 'number') isDirty = wc.porcelainEntryCount > 0;
+                else if (typeof folder.dirtyCount === 'number') isDirty = folder.dirtyCount > 0;
+            }
             const dot = document.createElement('span');
-            dot.className = 'wt-dot' + (hasWorktree ? ' filled' : '');
+            dot.className = 'wt-dot' + (hasWorktree ? ' filled' : '') + (isDirty ? ' dirty' : '');
             node.row.appendChild(dot);
 
             const brName = document.createElement('span');

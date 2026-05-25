@@ -50,6 +50,21 @@ namespace MultiTerminal.Docking
 #pragma warning restore CA2213
         private System.Windows.Forms.Timer _agentPanelSanityTimer;
         private MessageBroker _messageBroker;
+        // Stable agent identity for broker-event filtering. Survives tab
+        // renames (cycle-5 fix). Cycle-7: ONLY set via PromoteOriginalAgentName
+        // from authoritative identity sources — StartTerminal (live launch
+        // terminalName) and MainForm.OnMcpTerminalRegistered (broker-confirmed
+        // registration). The CustomTitle setter no longer seeds this, because
+        // restored sessionInfo.CustomTitle could otherwise lock a stale title
+        // as the stable broker identity (codex-cross-model-adversary HIGH
+        // Run 3 fix).
+        private string _originalAgentName;
+        // Latch so the empty-name diagnostic Trace fires at most once per
+        // terminal lifetime instead of per-event. Volatile because broker
+        // events can fire concurrently from broker threads; without it, two
+        // simultaneous fires could race past the !_loggedEmptyAgentName check
+        // and log twice (cycle-7 debugger LOW NIT, logging-only correctness).
+        private volatile bool _loggedEmptyAgentName;
         private MultiTerminal.Services.CodeReviewService _codeReviewService;
         private DebugLogService _debugLogService;
         private static int _instanceCount = 0;
@@ -243,10 +258,40 @@ namespace MultiTerminal.Docking
             {
                 System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.CustomTitle.set] Instance={InstanceId} DocId='{_docId}' old='{_customTitle}' new='{value}' _projectName='{_projectName}'");
                 _customTitle = value;
+                // NOTE: cycle-7 removed the setter-side promotion of
+                // _originalAgentName — restored sessionInfo.CustomTitle (set
+                // here pre-launch) could otherwise lock a stale title as the
+                // stable broker identity (codex-cross-model-adversary HIGH
+                // Run 3). The promotion now happens only via the dedicated
+                // PromoteOriginalAgentName method called from authoritative
+                // identity sources: StartTerminal (live launch) and MainForm's
+                // OnMcpTerminalRegistered (broker-confirmed registration).
                 UpdateTabTitle();
                 // Start polling for status line data once we know the terminal name
                 StartStatusLinePolling();
             }
+        }
+
+        /// <summary>
+        /// Promotes <paramref name="authoritativeAgentName"/> into
+        /// <c>_originalAgentName</c> if it isn't already set. Called from
+        /// authoritative identity sources only — <see cref="StartTerminal"/>
+        /// (live launch with its terminalName parameter) and MainForm's
+        /// <c>OnMcpTerminalRegistered</c> (broker-confirmed name). NOT called
+        /// from the <see cref="CustomTitle"/> setter, because that setter is
+        /// also reachable via session-restore (`doc.CustomTitle = sessionInfo.CustomTitle`)
+        /// where the value is persisted UI state rather than a freshly-confirmed
+        /// broker identity. First authoritative value wins; subsequent calls
+        /// are no-ops so this preserves the cycle-5 stable-identity contract
+        /// across tab renames AND late-arriving registrations.
+        /// </summary>
+        public void PromoteOriginalAgentName(string authoritativeAgentName)
+        {
+            if (string.IsNullOrEmpty(authoritativeAgentName)) return;
+            if (!string.IsNullOrEmpty(_originalAgentName)) return;
+            _originalAgentName = authoritativeAgentName;
+            System.Diagnostics.Trace.WriteLine(
+                $"[TerminalDocument.PromoteOriginalAgentName] DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
         }
 
         private void UpdateTabTitle()
@@ -972,11 +1017,17 @@ namespace MultiTerminal.Docking
             }
             System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] Final _projectName='{_projectName}' for projectId='{projectId}'");
 
-            // Set terminal name as custom title if provided
+            // Set terminal name as custom title if provided. StartTerminal is
+            // an AUTHORITATIVE identity source — the terminalName comes from
+            // the live launch context, not from persisted UI state — so we
+            // also promote it into _originalAgentName for stable broker-event
+            // filtering. PromoteOriginalAgentName is first-wins so subsequent
+            // launches (rare) won't clobber.
             if (!string.IsNullOrEmpty(terminalName))
             {
                 System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Setting CustomTitle to '{terminalName}'");
                 CustomTitle = terminalName;
+                PromoteOriginalAgentName(terminalName);
             }
 
             // Pre-write a fallback statusline file with the folder path so the header
@@ -2082,17 +2133,42 @@ namespace MultiTerminal.Docking
 
             if (_messageBroker?.ActivityService != null)
             {
-                // Subscribe to activity updates for this terminal
+                // Subscribe to activity updates for this terminal. Pre-detach
+                // for symmetry with the other broker subscriptions below — re-
+                // entry into SetMessageBroker would otherwise leak duplicate
+                // handlers.
+                _messageBroker.ActivityService.ActivityUpdated -= OnActivityUpdated;
                 _messageBroker.ActivityService.ActivityUpdated += OnActivityUpdated;
             }
 
             // Keep the Input: Local/Remote pill in sync with server-side remoteMode flips.
+            // Pre-detach pattern matches the TaskActiveChanged subscription below so
+            // re-entry into SetMessageBroker (e.g. broker re-assignment) doesn't double-
+            // subscribe and double-fire handlers.
             if (_messageBroker != null)
             {
                 _messageBroker.RemoteModeChanged -= OnRemoteModeChanged;
                 _messageBroker.RemoteModeChanged += OnRemoteModeChanged;
                 // Push current state immediately (renderer buffers if not yet ready)
                 _statusBar?.SetRemoteMode(_messageBroker.IsRemoteMode);
+
+                // Rebind the HUD Git panel when this terminal's active task
+                // moves to a different worktree. SetMessageBroker is the right
+                // hook because (a) broker assignment happens before any task
+                // can be activated by this terminal's agent, and (b) detach
+                // happens in Dispose alongside the other broker unsubscribes.
+                //
+                // Subscribe ONLY — don't seed _originalAgentName here. The
+                // broker can arrive before any title is set (the documented
+                // late-name path) and before the live launch identity is
+                // known, so promoting from CustomTitle at this site can lock
+                // in a non-authoritative value (restored sessionInfo title,
+                // empty string, etc.). PromoteOriginalAgentName is called
+                // from authoritative sources only — StartTerminal and
+                // MainForm.OnMcpTerminalRegistered (cycle-7 codex-adversary
+                // HIGH fix).
+                _messageBroker.TaskActiveChanged -= OnBrokerTaskActiveChanged;
+                _messageBroker.TaskActiveChanged += OnBrokerTaskActiveChanged;
             }
 
             // Wire task HUD to broker.
@@ -2147,6 +2223,91 @@ namespace MultiTerminal.Docking
                 return;
             }
             _statusBar?.SetRemoteMode(enabled);
+        }
+
+        // Rebind the HUD Git panel when our terminal's active task moves to a
+        // different worktree (or to none). TaskActiveChanged is broadcast in-
+        // proc to every subscriber; filter by _originalAgentName (captured at
+        // subscribe time, immune to subsequent tab renames) so we don't react
+        // to other agents' task switches and don't go silently no-op after a
+        // user renames this tab.
+        //
+        // When the resolved worktree path is null/empty (worktree mode off or
+        // task without a worktree), leave the panel where it is — the user
+        // explicitly opened the terminal on a particular repo and the kanban
+        // state change shouldn't yank it away.
+        //
+        // Path comes from broker.Worktrees.GetWorktreePathForTask, NOT from
+        // args.NewWorktreePath. TaskActiveChangedEventArgs is now immutable
+        // (cycle-6 fix), so the original mutation attack is closed at the
+        // type level — we still re-resolve here as fresh-state preference:
+        // GetWorktreePathForTask reads broker DB at handler-run time, which
+        // is more current than the snapshot captured by the event producer
+        // if any worktree state shifted between fire and dispatch.
+        private void OnBrokerTaskActiveChanged(object sender, MCPServer.Services.TaskActiveChangedEventArgs args)
+        {
+            if (args == null) return;
+            if (string.IsNullOrEmpty(_originalAgentName))
+            {
+                // One-shot diagnostic — if a terminal reaches this branch its
+                // PromoteOriginalAgentName hasn't been called yet. Cycle-7:
+                // promotion happens via StartTerminal and MainForm's
+                // OnMcpTerminalRegistered. In the restored-terminal window
+                // BEFORE the user picks a project (no Claude process running
+                // for this doc yet) this branch will fire for cross-agent
+                // broker chatter and the event is correctly dropped. If you
+                // see this log AFTER a deliberate launch, the registration
+                // ordering needs investigation.
+                if (!_loggedEmptyAgentName)
+                {
+                    _loggedEmptyAgentName = true;
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[TerminalDocument.OnBrokerTaskActiveChanged] Empty _originalAgentName — dropping event AgentName='{args.AgentName}' NewTaskId='{args.NewTaskId}'. Expected during the restored-terminal window before user launches; investigate if seen after StartTerminal/OnMcpTerminalRegistered have run.");
+                }
+                return;
+            }
+            if (!string.Equals(args.AgentName, _originalAgentName, StringComparison.Ordinal)) return;
+            if (_hudGit == null) return;
+
+            // Re-resolve worktree path AND projectId from broker-owned state
+            // rather than trusting the (mutable) event payload.
+            string resolvedWorktreePath = null;
+            string newProjectId = null;
+            try
+            {
+                if (!string.IsNullOrEmpty(args.NewTaskId))
+                {
+                    resolvedWorktreePath = _messageBroker?.Worktrees?.GetWorktreePathForTask(args.NewTaskId);
+                    newProjectId = _messageBroker?.GetTask(args.NewTaskId)?.ProjectId;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[TerminalDocument.OnBrokerTaskActiveChanged] broker lookup failed: {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(resolvedWorktreePath)) return;
+
+            try
+            {
+                if (InvokeRequired)
+                {
+                    string capturedProjectId = newProjectId;
+                    string capturedWorktreePath = resolvedWorktreePath;
+                    BeginInvoke(new Action(() => _hudGit?.SetProject(capturedProjectId, capturedWorktreePath)));
+                }
+                else
+                {
+                    _hudGit.SetProject(newProjectId, resolvedWorktreePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[TerminalDocument.OnBrokerTaskActiveChanged] SetProject failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -2560,10 +2721,11 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(folder) || broker == null) return;
 
             _workingTreeRefreshInFlight = true;
-            System.Threading.Tasks.Task.Run(() =>
+            System.Threading.Tasks.Task.Run(async () =>
             {
                 int count = 0;
                 string branch = "";
+                string aggregateText = null;
                 try
                 {
                     var svc = broker.GitRepos?.GetOrCreate(folder);
@@ -2571,6 +2733,58 @@ namespace MultiTerminal.Docking
                     {
                         count = svc.GetWorkingTreeSummaryCount();
                         branch = svc.CurrentBranch ?? "";
+                    }
+
+                    // Aggregate roll-up across ALL worktrees of this repo so the
+                    // top dirty strip mirrors the Git tab's panel header
+                    // ("5 uncommitted · 1 master · 4 worktrees (2)") instead of
+                    // showing only the count for this terminal's bound worktree.
+                    // Falls back to the single-worktree path if the list service
+                    // isn't wired or returns no entries.
+                    //
+                    // **MUST mirror the format in Controls/HudGitPanel/hud-git.html
+                    // renderUnifiedTree (~line 1610) — that helper builds the same
+                    // string from the git_state_tree payload for the panel header.
+                    // If you change the parts order/separators here, change them
+                    // there too (cycle-5 dedup note).
+                    var wtList = broker.WorktreeList;
+                    if (wtList != null)
+                    {
+                        var entries = await wtList.GetWorktreesForRepoAsync(folder).ConfigureAwait(false);
+                        if (entries != null && entries.Count > 0)
+                        {
+                            int mainDirty = 0;
+                            int nonMainDirty = 0;
+                            int nonMainDirtyTrees = 0;
+                            string mainBranchLabel = "master";
+                            foreach (var e in entries)
+                            {
+                                if (e == null) continue;
+                                if (e.IsMain)
+                                {
+                                    mainDirty = e.DirtyCount;
+                                    if (!string.IsNullOrEmpty(e.Branch)) mainBranchLabel = e.Branch;
+                                }
+                                else if (e.DirtyCount > 0)
+                                {
+                                    nonMainDirty += e.DirtyCount;
+                                    nonMainDirtyTrees++;
+                                }
+                            }
+                            int totalDirty = mainDirty + nonMainDirty;
+                            count = totalDirty;
+                            if (totalDirty > 0)
+                            {
+                                var parts = new System.Collections.Generic.List<string> { totalDirty + " uncommitted" };
+                                if (mainDirty > 0) parts.Add(mainDirty + " " + mainBranchLabel);
+                                if (nonMainDirtyTrees > 0)
+                                {
+                                    parts.Add(nonMainDirty + " worktree" + (nonMainDirtyTrees == 1 ? "" : "s")
+                                        + " (" + nonMainDirtyTrees + ")");
+                                }
+                                aggregateText = string.Join(" · ", parts);
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -2585,7 +2799,7 @@ namespace MultiTerminal.Docking
 
                 try
                 {
-                    _hudTabContainer?.SetWorkingTreeDirty(count, branch);
+                    _hudTabContainer?.SetWorkingTreeDirty(count, branch, aggregateText);
                     _hudGit?.RequestRefresh();
                 }
                 catch { }
@@ -2763,6 +2977,7 @@ namespace MultiTerminal.Docking
                 if (_messageBroker != null)
                 {
                     _messageBroker.RemoteModeChanged -= OnRemoteModeChanged;
+                    _messageBroker.TaskActiveChanged -= OnBrokerTaskActiveChanged;
                 }
 
                 // Unsubscribe splitter events BEFORE disposing child controls
