@@ -36,6 +36,7 @@ namespace MultiTerminal.Controls
         private WebView2 _webView;
         private bool _isInitialized;
         private bool _isInitializing;
+        private bool _channelRecoveryInFlight;
         private bool _isDarkTheme = true;
         private double _pendingZoom = 1.0;
 
@@ -608,6 +609,20 @@ namespace MultiTerminal.Controls
                 s.AreDevToolsEnabled = false;
                 s.IsStatusBarEnabled = false;
                 _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+                // Proactive channel-health: ProcessFailed fires when the Edge
+                // renderer subprocess dies (OS memory pressure, sandbox
+                // terminate, long suspension while panel hidden). Without
+                // this, the renderer death is only discoverable when the next
+                // PostWebMessageAsJson throws — which used to be silently
+                // swallowed, leaving the UI frozen on the last successful
+                // render for the rest of the session.
+                _webView.CoreWebView2.ProcessFailed += (s, args) =>
+                {
+                    _broker?.DebugLogService?.Warning(
+                        "HudGitRenderer.WebView",
+                        $"ProcessFailed: kind={args.ProcessFailedKind}, reason={args.Reason}, exitCode={args.ExitCode}");
+                    MarkChannelBrokenAndRecover();
+                };
                 string htmlPath = FindHtml("Controls/HudGitPanel/hud-git.html", "HudGitPanel/hud-git.html");
                 if (File.Exists(htmlPath))
                     _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
@@ -659,6 +674,17 @@ namespace MultiTerminal.Controls
                         break;
 
                     case "refresh":
+                        // If the channel itself is broken (CoreWebView2
+                        // disposed / renderer died), Git-side work is
+                        // invisible — the resulting payload can't reach JS.
+                        // Recover the channel first; the post-Reload ready
+                        // handshake re-runs ApplyProject as a side-effect.
+                        if (_webView?.CoreWebView2 == null || !_isInitialized)
+                        {
+                            MarkChannelBrokenAndRecover();
+                            break;
+                        }
+
                         // Hard-reset: release the cached GitRepoService for
                         // _projectPath so LibGit2Sharp re-opens the Repository
                         // and re-reads refs from disk. Covers the case where
@@ -2312,14 +2338,83 @@ namespace MultiTerminal.Controls
         {
             if (!_isInitialized || _webView?.CoreWebView2 == null) return;
             try { _webView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(d)); }
-            catch { }
+            catch (Exception ex)
+            {
+                _broker?.DebugLogService?.Warning(
+                    "HudGitRenderer.PostJson",
+                    $"PostWebMessageAsJson failed: {ex.GetType().Name}: {ex.Message}");
+                MarkChannelBrokenAndRecover();
+            }
         }
 
         private void PostRaw(string json)
         {
             if (!_isInitialized || _webView?.CoreWebView2 == null) return;
             try { _webView.CoreWebView2.PostWebMessageAsJson(json); }
-            catch { }
+            catch (Exception ex)
+            {
+                _broker?.DebugLogService?.Warning(
+                    "HudGitRenderer.PostRaw",
+                    $"PostWebMessageAsJson failed: {ex.GetType().Name}: {ex.Message}");
+                MarkChannelBrokenAndRecover();
+            }
+        }
+
+        // Called from the two PostWebMessageAsJson failure sites (PostJson,
+        // PostRaw) and from CoreWebView2.ProcessFailed. Flips _isInitialized
+        // false (so any pending PostRaw enqueues to _pendingJson instead of
+        // throwing again) and triggers a WebView Reload. The page's existing
+        // 'ready' handshake (OnWebMessageReceived case "ready") will run
+        // ApplyProject() on re-init, which kicks RefreshAsync, which pushes
+        // a fresh payload through the resurrected channel. Single-flight via
+        // _channelRecoveryInFlight so a burst of failed sends doesn't queue
+        // multiple Reloads.
+        private void MarkChannelBrokenAndRecover()
+        {
+            if (_channelRecoveryInFlight) return;
+            if (IsDisposed) return;
+            if (_webView?.CoreWebView2 == null) return;
+            _channelRecoveryInFlight = true;
+            _isInitialized = false;
+            try
+            {
+                if (InvokeRequired)
+                {
+                    BeginInvoke(new Action(DoChannelReload));
+                }
+                else
+                {
+                    DoChannelReload();
+                }
+            }
+            catch (Exception ex)
+            {
+                _broker?.DebugLogService?.Warning(
+                    "HudGitRenderer.Recover",
+                    $"BeginInvoke for Reload failed: {ex.GetType().Name}: {ex.Message}");
+                _channelRecoveryInFlight = false;
+            }
+        }
+
+        private void DoChannelReload()
+        {
+            try
+            {
+                if (_webView?.CoreWebView2 != null)
+                {
+                    _webView.CoreWebView2.Reload();
+                }
+            }
+            catch (Exception ex)
+            {
+                _broker?.DebugLogService?.Warning(
+                    "HudGitRenderer.Recover",
+                    $"Reload failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                _channelRecoveryInFlight = false;
+            }
         }
 
         protected override void Dispose(bool disposing)
