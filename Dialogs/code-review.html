@@ -63,6 +63,23 @@
     .diff-line-content { flex: 1; }
     .diff-line.hunk .diff-line-num { color: transparent; cursor: default; }
     .diff-line.hunk .diff-line-num:hover { color: transparent; text-decoration: none; }
+    /* Full-file view (task 6bf785a0): unchanged files render their full content.
+       Line numbers stay interactive (click to note / suggest), inheriting the
+       default .diff-line-num pointer + hover. */
+    .cr-fullfile-tag { color: var(--timestamp-color, #888); font-style: italic; opacity: 0.85; margin-left: 6px; }
+    /* Suggest-an-edit affordance (task 6bf785a0 item 2). */
+    .cr-suggest-toggle-row { padding: 4px 0 2px; }
+    .cr-suggest-toggle { font-size: 11px; color: var(--timestamp-color, #888); cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 5px; }
+    .cr-suggest-toggle input { margin: 0; cursor: pointer; }
+    .cr-suggest-box { margin-top: 4px; }
+    .cr-suggest-label { font-size: 10px; color: var(--timestamp-color, #888); margin-bottom: 3px; }
+    .cr-suggest-textarea { width: 100%; box-sizing: border-box; background: rgba(76, 175, 80, 0.07); border: 1px solid rgba(76, 175, 80, 0.4); color: var(--text-color, #ddd); border-radius: 3px; padding: 4px 6px; font-family: inherit; font-size: 12px; white-space: pre; overflow-wrap: normal; }
+    /* Inline suggestion mini-diff shown under a comment with a proposed change. */
+    .cr-suggest-minidiff { margin: 4px 0 2px 8px; border-left: 2px solid #4A90D9; border-radius: 0 3px 3px 0; overflow: hidden; font-size: 11px; }
+    .cr-suggest-minidiff .cr-mini-label { color: var(--timestamp-color, #888); padding: 2px 8px; background: rgba(74, 144, 217, 0.06); }
+    .cr-suggest-minidiff .cr-mini-line { padding: 1px 8px; white-space: pre-wrap; word-break: break-all; }
+    .cr-suggest-minidiff .cr-mini-old { background: rgba(244, 67, 54, 0.1); color: #ef9a9a; }
+    .cr-suggest-minidiff .cr-mini-new { background: rgba(76, 175, 80, 0.1); color: #a5d6a7; }
 
     /* Comment input box */
     .cr-comment-input { padding: 8px 12px 8px 48px; background: rgba(74, 144, 217, 0.08); border-left: 3px solid #4A90D9; margin: 2px 0; }
@@ -329,13 +346,23 @@
 
         const fileListHtml = files.map((f, i) => {
             const shortPath = f.filePath.split(/[/\\]/).slice(-2).join('/');
-            const statusIcon = f.hasDiff ? '&#x1F4DD;' : '&#x2796;';
+            // 📝 changed · 📄 unchanged-but-viewable (full file) · ➖ unchanged, no content available
+            const statusIcon = f.hasDiff ? '&#x1F4DD;' : (f.fullContent ? '&#x1F4C4;' : '&#x2796;');
             return `<div class="cr-file-item ${i === initialIndex ? 'active' : ''}" id="cr-file-tab-${i}" onclick="showFileDiff(${i})" title="${escapeHtml(f.filePath)}">${statusIcon} ${escapeHtml(shortPath)}<span class="cr-file-badge" id="cr-file-badge-${i}"></span></div>`;
         }).join('');
 
         const diffHtml = files.map((f, i) => {
-            if (!f.diff) return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===initialIndex?'block':'none'};padding:16px;color:var(--text-color,#ddd);">No changes detected for this file.</div>`;
-            return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${i===initialIndex?'block':'none'};">${renderUnifiedDiff(f.diff, f.filePath, i)}</div>`;
+            const display = i === initialIndex ? 'block' : 'none';
+            if (f.diff) {
+                return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${display};">${renderUnifiedDiff(f.diff, f.filePath, i)}</div>`;
+            }
+            // No diff: unchanged on the branch. Show the full file when the
+            // backend surfaced it (task 6bf785a0 item 1), else a fallback for
+            // binary/oversized/not-on-disk files.
+            if (f.fullContent) {
+                return `<div class="cr-diff-pane cr-fullfile-pane" id="cr-diff-${i}" style="display:${display};">${renderFullFile(f.fullContent, f.filePath, i)}</div>`;
+            }
+            return `<div class="cr-diff-pane" id="cr-diff-${i}" style="display:${display};padding:16px;color:var(--text-color,#ddd);">No changes detected for this file &mdash; full content unavailable (binary, oversized, or not on disk).</div>`;
         }).join('');
 
         root.innerHTML = `
@@ -388,6 +415,31 @@
         document.querySelectorAll('.cr-diff-pane').forEach((el, i) => el.style.display = i === index ? 'block' : 'none');
         document.querySelectorAll('.cr-file-item').forEach((el, i) => el.classList.toggle('active', i === index));
         crRenderSummaryCards(index);
+    }
+
+    // Read-only full-file view (task 6bf785a0 item 1): rendered for files that
+    // are unchanged on the branch (empty diff) so the reviewer can still read
+    // the code instead of hitting "No changes detected". Reuses the
+    // diff-line/.context styling so it inherits the active theme automatically.
+    // Line numbers are purely informational here — the propose-change / note
+    // affordance is wired in a later item.
+    function renderFullFile(content, filePath, fileIndex) {
+        const lines = content.split(/\r?\n/);
+        // A trailing newline produces a final empty element — drop it so we
+        // don't render a phantom blank last line.
+        if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+        let html = '<div class="diff-header">' + escapeHtml(filePath)
+            + '<span class="cr-fullfile-tag">unchanged &middot; full file</span></div>';
+        if (lines.length === 0) {
+            return html + '<div class="diff-line context"><span class="diff-line-num"></span><span class="diff-line-content"><em>(empty file)</em></span></div>';
+        }
+        for (let i = 0; i < lines.length; i++) {
+            const lineRefId = 'cr-line-' + fileIndex + '-0-' + i;
+            // Line numbers are clickable to add a review note or suggest an edit
+            // (task 6bf785a0 item 2) — same crOpenComment hook the diff panes use.
+            html += `<div class="diff-line context" id="${lineRefId}"><span class="diff-line-num" onclick="crOpenComment(${fileIndex},${i + 1},this)" title="Click to add a review note or suggest an edit">${i + 1}</span><span class="diff-line-content">${escapeHtml(lines[i])}</span></div>`;
+        }
+        return html;
     }
 
     function renderUnifiedDiff(diffText, filePath, fileIndex) {
@@ -484,15 +536,37 @@
         const lineContent = lineEl ? lineEl.querySelector('.diff-line-content')?.textContent || '' : '';
         const lineRefId = lineEl ? lineEl.id : '';
 
+        // Suggest-an-edit (task 6bf785a0 item 2). The "original" pre-fill is the
+        // real code without the unified-diff column marker (+/-/space) for diff
+        // panes; full-file panes carry no marker so the content is used as-is.
+        // Hide the affordance on remove lines — the new file has no such line to
+        // replace.
+        const isFullFile = !!(lineEl && lineEl.closest('.cr-fullfile-pane'));
+        const isRemoveLine = !!(lineEl && lineEl.classList.contains('remove'));
+        const originalForSuggest = isFullFile ? lineContent : lineContent.replace(/^[+\- ]/, '');
+
         const inputDiv = document.createElement('div');
         inputDiv.className = 'cr-comment-input';
         inputDiv.setAttribute('data-file-index', fileIndex);
         inputDiv.setAttribute('data-line-num', lineNum);
         inputDiv.setAttribute('data-line-content', lineContent);
         inputDiv.setAttribute('data-line-ref-id', lineRefId);
+        inputDiv.setAttribute('data-suggest-original', originalForSuggest);
         if (editingIndex !== undefined && editingIndex !== null) {
             inputDiv.setAttribute('data-editing-index', editingIndex);
         }
+        // Guard (task 6bf785a0 item 4): suggestions only make sense in task mode,
+        // where Submit Notes bounces them to the agent. Working-tree mode has no
+        // verdict/bounce path (only "Wrap in Quick Task"), so hide the affordance
+        // there rather than capture an edit that could never be submitted.
+        const suggestSectionHtml = (isRemoveLine || _crMode === 'workingTree') ? '' : `
+            <div class="cr-suggest-toggle-row">
+                <label class="cr-suggest-toggle"><input type="checkbox" id="cr-suggest-toggle" onchange="crToggleSuggest(this)">&#x270E; Suggest an edit</label>
+            </div>
+            <div class="cr-suggest-box" id="cr-suggest-box" style="display:none;">
+                <div class="cr-suggest-label">Replace line ${lineNum} with (the agent applies this as a patch):</div>
+                <textarea class="cr-suggest-textarea" id="cr-suggest-text" rows="3" spellcheck="false"></textarea>
+            </div>`;
         inputDiv.innerHTML = `
             <div class="cr-comment-row">
                 <select class="cr-severity-select" id="cr-sev-select">
@@ -503,6 +577,7 @@
                 </select>
                 <textarea class="cr-comment-textarea" id="cr-comment-text" placeholder="What should the agent know about this line?" rows="2"></textarea>
             </div>
+            ${suggestSectionHtml}
             <div class="cr-comment-actions">
                 <button class="cr-comment-btn cancel" onclick="this.closest('.cr-comment-input').remove()">Cancel</button>
                 <button class="cr-comment-btn add" onclick="crAddCommentFromInput(this)">${editingIndex !== undefined && editingIndex !== null ? 'Save Note' : 'Add Note'}</button>
@@ -521,6 +596,27 @@
         });
     }
 
+    // Expand/collapse the "suggest an edit" box (task 6bf785a0 item 2). On first
+    // expand, pre-fill the textarea with the original line so the reviewer edits
+    // a copy instead of starting blank.
+    function crToggleSuggest(cb) {
+        const container = cb.closest('.cr-comment-input');
+        if (!container) return;
+        const box = container.querySelector('#cr-suggest-box');
+        const ta = container.querySelector('#cr-suggest-text');
+        if (!box || !ta) return;
+        if (cb.checked) {
+            box.style.display = 'block';
+            if (!ta.value && !ta.dataset.touched) {
+                ta.value = container.getAttribute('data-suggest-original') || '';
+            }
+            ta.focus();
+            ta.addEventListener('input', () => { ta.dataset.touched = '1'; }, { once: true });
+        } else {
+            box.style.display = 'none';
+        }
+    }
+
     function crAddCommentFromInput(btnEl) {
         const container = btnEl.closest('.cr-comment-input');
         if (!container) return;
@@ -536,7 +632,20 @@
     function crAddComment(fileIndex, lineNum, lineContent, lineRefId, editingIndex) {
         const severity = document.getElementById('cr-sev-select').value;
         const comment = document.getElementById('cr-comment-text').value.trim();
-        if (!comment) return;
+
+        // Optional suggested edit (task 6bf785a0 item 2). Attached only when the
+        // toggle is on AND the replacement actually differs from the original.
+        const suggestToggle = document.getElementById('cr-suggest-toggle');
+        const suggestText = document.getElementById('cr-suggest-text');
+        const container = document.querySelector('.cr-comment-input');
+        const original = container ? (container.getAttribute('data-suggest-original') || '') : '';
+        let suggestion = null;
+        if (suggestToggle && suggestToggle.checked && suggestText && suggestText.value !== original) {
+            suggestion = { original: original, replacement: suggestText.value, lineStart: lineNum, lineEnd: lineNum };
+        }
+
+        // A note needs at least a comment or a proposed change to be worth sending.
+        if (!comment && !suggestion) return;
 
         if (!_crComments[fileIndex]) _crComments[fileIndex] = [];
         const file = _crFiles[fileIndex];
@@ -548,6 +657,7 @@
             const existing = _crComments[fileIndex][editingIndex];
             existing.severity = severity;
             existing.comment = comment;
+            existing.suggestion = suggestion; // may clear a prior suggestion if toggled off
         } else {
             _crComments[fileIndex].push({
                 file: file.filePath,
@@ -555,7 +665,8 @@
                 lineContent: lineContent,
                 severity: severity,
                 comment: comment,
-                lineRefId: lineRefId
+                lineRefId: lineRefId,
+                suggestion: suggestion
             });
         }
 
@@ -605,6 +716,18 @@
             const textArea = document.getElementById('cr-comment-text');
             if (sevSelect) sevSelect.value = comment.severity;
             if (textArea) { textArea.value = comment.comment; textArea.focus(); textArea.select(); }
+            // Restore a previously-attached suggested edit (task 6bf785a0 item 2).
+            if (comment.suggestion) {
+                const tog = document.getElementById('cr-suggest-toggle');
+                const sBox = document.getElementById('cr-suggest-box');
+                const sText = document.getElementById('cr-suggest-text');
+                if (tog && sBox && sText) {
+                    tog.checked = true;
+                    sBox.style.display = 'block';
+                    sText.value = comment.suggestion.replacement;
+                    sText.dataset.touched = '1';
+                }
+            }
         }, 50);
     }
 
@@ -630,11 +753,29 @@
             if (!targetLine) return;
 
             const safeSeverity = validSeverities.includes(c.severity) ? c.severity : 'SUGGESTION';
+            // Inline mini-diff for an attached suggested edit (task 6bf785a0 item 2).
+            // Original/replacement may be multi-line — render one row per line so a
+            // block suggestion reads as a real diff, not a run-on (pipeline Run 1).
+            let suggestionHtml = '';
+            if (c.suggestion) {
+                const mkRows = (text, cls) => String(text == null ? '' : text)
+                    .split('\n')
+                    .map(l => `<div class="cr-mini-line ${cls}">${escapeHtml(l)}</div>`)
+                    .join('');
+                suggestionHtml = `
+                <div class="cr-suggest-minidiff">
+                    <div class="cr-mini-label">proposed change &mdash; line ${escapeHtml(String(c.suggestion.lineStart != null ? c.suggestion.lineStart : c.line))}</div>
+                    ${mkRows(c.suggestion.original, 'cr-mini-old')}
+                    ${mkRows(c.suggestion.replacement, 'cr-mini-new')}
+                </div>`;
+            }
             const badge = document.createElement('div');
             badge.className = 'cr-inline-comment';
+            // cr-comment-text is the flex:1 column — comment prose stacks above the
+            // mini-diff so both share the same indented lane.
             badge.innerHTML = `
                 <span class="cr-sev-tag ${safeSeverity}">${escapeHtml(safeSeverity)}</span>
-                <span class="cr-comment-text">${escapeHtml(c.comment)}</span>
+                <div class="cr-comment-text">${escapeHtml(c.comment)}${suggestionHtml}</div>
                 <span class="cr-comment-edit" onclick="crEditComment(${fileIndex},${ci})" title="Edit">&#x270E;</span>
                 <span class="cr-comment-del" onclick="crDeleteComment(${fileIndex},${ci})" title="Delete">&#x2716;</span>
             `;
@@ -670,6 +811,10 @@
         if (counts.SUGGESTION) parts.push(`<span class="cr-summary-tag cr-sev-tag SUGGESTION">${counts.SUGGESTION} suggestion${counts.SUGGESTION !== 1 ? 's' : ''}</span>`);
         if (counts.NITPICK) parts.push(`<span class="cr-summary-tag cr-sev-tag NITPICK">${counts.NITPICK} nitpick${counts.NITPICK !== 1 ? 's' : ''}</span>`);
         if (counts.QUESTION) parts.push(`<span class="cr-summary-tag cr-sev-tag QUESTION">${counts.QUESTION} question${counts.QUESTION !== 1 ? 's' : ''}</span>`);
+        // Count notes carrying a proposed edit (task 6bf785a0 item 4) so the
+        // reviewer sees how many patches are about to bounce to the agent.
+        const editCount = allComments.filter(c => c.suggestion).length;
+        if (editCount) parts.push(`<span class="cr-summary-tag" style="background:rgba(74,144,217,0.15);color:#4A90D9;">&#x270E; ${editCount} edit${editCount !== 1 ? 's' : ''}</span>`);
         summaryEl.innerHTML = parts.join('');
 
         if (submitBtn) submitBtn.classList.add('enabled');
