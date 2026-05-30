@@ -387,6 +387,28 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
                 }
             }
 
+            // Launch-at-root (task 0134ec2f): when a VALID task worktree is in
+            // play, launch the agent at the repo ROOT rather than inside the
+            // worktree, and let the session-start skill EnterWorktree(path) narrow
+            // into it (CLI >= 2.1.157). The old in-shell `cd '<worktree>'` pinned
+            // the harness cwd to the worktree — when the task completed and the
+            // worktree was pruned, the shell was stranded inside a deleted dir and
+            // `git worktree remove` could not remove its own cwd. Only rewrite when
+            // workingDir actually IS the worktree, so callers that already pass the
+            // repo root (the ConPtyTerminal launch path) are left untouched.
+            // MULTITERMINAL_TASK_WORKTREE (set below) still carries the path so the
+            // skill + MCP tools resolve it.
+            if (!string.IsNullOrEmpty(taskWorktreePath) && PathsEqual(workingDir, taskWorktreePath))
+            {
+                string launchRoot = TryDeriveRepoRootFromWorktree(taskWorktreePath);
+                if (!string.IsNullOrEmpty(launchRoot) && Directory.Exists(launchRoot))
+                {
+                    Debug.WriteLine(
+                        $"[TerminalSpawner] Launch-at-root: workingDir '{workingDir}' -> repo root '{launchRoot}'; EnterWorktree will narrow into the worktree.");
+                    workingDir = launchRoot;
+                }
+            }
+
             ValidateWorkingDir(workingDir);
 
             // Generate unique 8-character doc ID (hex format, like existing system)

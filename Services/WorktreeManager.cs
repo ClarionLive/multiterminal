@@ -16,13 +16,15 @@ namespace MultiTerminal.Services
     /// same manager can serve multiple projects in one MT instance.</para>
     ///
     /// <para>Path conventions: a worktree for task <c>abcd1234</c> lives at
-    /// <c>{repoRoot}/worktrees/abcd1234/</c> on branch <c>task/abcd1234</c>,
+    /// <c>{repoRoot}/.claude/worktrees/abcd1234/</c> on branch <c>task/abcd1234</c>,
     /// forked from the current HEAD of <c>repoRoot</c> at create time. The
-    /// <c>worktrees/</c> dir is a child of the repo root (gitignored) so that
-    /// (a) every worktree is a descendant of the main checkout — important
-    /// for Claude Code's permission scope + harness cwd pinning — and
-    /// (b) all per-task scratch space is contained inside the project
-    /// folder rather than floating in the parent dir.</para>
+    /// <c>.claude/worktrees/</c> dir is a descendant of the repo root (gitignored)
+    /// so that (a) every worktree is a descendant of the main checkout — important
+    /// for Claude Code's permission scope, harness cwd pinning, AND the
+    /// <c>EnterWorktree(path=...)</c> enter-existing form, which requires the target
+    /// be a worktree under <c>.claude/worktrees/</c> for cwd-pinned-at-launch agents
+    /// (task 0134ec2f) — and (b) all per-task scratch space is contained inside the
+    /// project folder rather than floating in the parent dir.</para>
     /// </summary>
     public class WorktreeManager
     {
@@ -76,7 +78,13 @@ namespace MultiTerminal.Services
             string taskIdShort = taskId.Length >= 8 ? taskId.Substring(0, 8) : taskId;
             string trimmed = repoRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-            string worktreesParent = Path.Combine(trimmed, "worktrees");
+            // Worktrees live under .claude/worktrees/ (was <repoRoot>/worktrees/).
+            // Required by Claude Code's EnterWorktree(path=...) enter-existing form:
+            // for cwd-pinned-at-launch agents (= MT terminals) the target MUST be a
+            // worktree under .claude/worktrees/ of the same repo. Still a descendant
+            // of the main checkout, so the permission-scope invariant is preserved.
+            // (Task 0134ec2f.)
+            string worktreesParent = Path.Combine(trimmed, ".claude", "worktrees");
             string worktreePath = Path.Combine(worktreesParent, taskIdShort);
             string branchName = $"task/{taskIdShort}";
 

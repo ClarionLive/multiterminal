@@ -48,6 +48,9 @@ Thumbs.db
 .stint/
 
 # Per-task worktrees (materialized by WorktreeManager on set_task_active)
+# Relocated under .claude/worktrees/ for Claude Code EnterWorktree(path=...) support
+# (task 0134ec2f). Legacy /worktrees/ kept for transition / pre-existing trees.
+.claude/worktrees/
 /worktrees/
 
 # Transient agent/runtime state (regeneratable, not team-wide)

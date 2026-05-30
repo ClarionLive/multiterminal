@@ -392,27 +392,23 @@ namespace MultiTerminal.Terminal
             // If autoRunCommand is specified, append it after the prompt function setup
             // IMPORTANT: Add cd command before autoRunCommand so Claude Code runs from correct directory.
             //
-            // AC7 launch-root strategy (task c6ed236c): when the spawn was scoped
-            // to a task with a materialized worktree, the caller passes the repo
-            // root as workingDirectory AND a non-empty taskWorktreePath. We emit
-            // TWO cds — the first lands in repoRoot (matches the process's
-            // WorkingDirectory; Claude Code reads this as its permission scope),
-            // the second narrows to the task worktree. Worktrees now live as
-            // descendants of repoRoot (Item 1), so the second cd stays in scope
-            // AND future cd's to sibling worktrees work too. When no worktree is
-            // in play, the second cd is omitted.
+            // Launch-at-root strategy (task 0134ec2f, supersedes AC7 c6ed236c):
+            // we emit a SINGLE cd to repoRoot (the caller passes repo root as
+            // workingDirectory) and DO NOT narrow into the task worktree here.
+            // The old second `cd '<worktree>'` pinned the harness cwd to the
+            // worktree — when the task completed and the worktree was pruned, the
+            // shell was stranded inside a deleted dir and `git worktree remove`
+            // could not remove its own cwd. Instead the session-start skill now
+            // calls EnterWorktree(path=.claude/worktrees/<id>) to switch the
+            // process into the worktree (CLI >= 2.1.157), and ExitWorktree(keep)
+            // returns to repoRoot before prune. MULTITERMINAL_TASK_WORKTREE is
+            // still exported above so the skill + MCP tools resolve the path.
             string autoRun = "";
             if (!string.IsNullOrEmpty(autoRunCommand))
             {
                 // Escape single quotes in workingDirectory to prevent PowerShell injection via path names.
                 string safeWorkDir = (workingDirectory ?? "").Replace("'", "''");
                 autoRun = $"; cd '{safeWorkDir}'";
-                if (!string.IsNullOrEmpty(taskWorktreePath))
-                {
-                    string safeTaskWorktree = taskWorktreePath.Replace("'", "''");
-                    autoRun += $"; cd '{safeTaskWorktree}'";
-                    System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] AC7: in-shell cd narrows to worktree '{taskWorktreePath}'");
-                }
                 autoRun += $"; {autoRunCommand}";
             }
             else
