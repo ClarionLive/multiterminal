@@ -40,6 +40,10 @@ debug-log-*.txt
 *.tmp
 *.temp
 
+# Daily-intel CLI changelog scratch (transient; kept changelogs are cc-changelog-*/changelog-*).
+# Without this these tmp-* files surface as unattributed working changes ("Needs a quick task").
+CLI Research/tmp-*.md
+
 # OS files
 .DS_Store
 Thumbs.db
