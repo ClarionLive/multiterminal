@@ -26,6 +26,19 @@ namespace MultiTerminal.Services
     {
         private readonly TaskDatabase _db;
 
+        /// <summary>
+        /// Repo-root-relative paths (forward-slash) that MT writes into the
+        /// working tree as part of its own bookkeeping — NOT user work. When
+        /// the ONLY dirty tracked files at merge time are in this allowlist,
+        /// the merge auto-commits them as a <c>chore:</c> commit instead of
+        /// refusing (task d75d7d6e): MT rewrites <c>.claude/project.json</c>
+        /// during the very task-done flow that triggers the merge, so without
+        /// this carve-out every auto-merge was blocked by MT's own churn.
+        /// Any dirty tracked file OUTSIDE this list still blocks the merge —
+        /// genuine user work is never silently committed.
+        /// </summary>
+        private static readonly string[] BookkeepingPaths = { ".claude/project.json" };
+
         public WorktreeMergeService(TaskDatabase db)
         {
             _db = db ?? throw new ArgumentNullException(nameof(db));
@@ -152,11 +165,53 @@ namespace MultiTerminal.Services
             }
             if (!string.IsNullOrWhiteSpace(dirtyCheck.stdout))
             {
-                return new MergeResult
+                var dirtyPaths = ParsePorcelainPaths(dirtyCheck.stdout);
+                var nonBookkeeping = new System.Collections.Generic.List<string>();
+                var bookkeeping = new System.Collections.Generic.List<string>();
+                foreach (var p in dirtyPaths)
                 {
-                    Success = false,
-                    Stderr = $"Main checkout has uncommitted changes — cannot merge {record.BranchName} into {trunk}. Please commit or stash before closing this task."
-                };
+                    if (IsBookkeepingPath(p)) bookkeeping.Add(p);
+                    else nonBookkeeping.Add(p);
+                }
+
+                if (nonBookkeeping.Count > 0)
+                {
+                    // Genuine user work is dirty — refuse, as before. Never
+                    // auto-commit files outside the bookkeeping allowlist.
+                    return new MergeResult
+                    {
+                        Success = false,
+                        Stderr = $"Main checkout has uncommitted changes — cannot merge {record.BranchName} into {trunk}. Please commit or stash before closing this task. Offending files: {string.Join(", ", nonBookkeeping)}."
+                    };
+                }
+
+                // Only MT's own bookkeeping files are dirty. Commit them as a
+                // chore commit so the merge precondition (clean trunk) is met
+                // and the changelog churn is durably persisted rather than left
+                // floating as a perpetual working-tree change.
+                foreach (var p in bookkeeping)
+                {
+                    var addResult = await RunGitAsync(repoRoot, "add", "--", p).ConfigureAwait(false);
+                    if (addResult.exitCode != 0)
+                    {
+                        return new MergeResult
+                        {
+                            Success = false,
+                            Stderr = $"failed to stage bookkeeping file '{p}' before merge: {addResult.stderr.Trim()}"
+                        };
+                    }
+                }
+
+                var commitResult = await RunGitAsync(
+                    repoRoot, "commit", "-m", $"chore: project.json bookkeeping for {taskId.Substring(0, Math.Min(8, taskId.Length))}").ConfigureAwait(false);
+                if (commitResult.exitCode != 0)
+                {
+                    return new MergeResult
+                    {
+                        Success = false,
+                        Stderr = $"failed to commit bookkeeping files before merge: {commitResult.stderr.Trim()}; stdout: {commitResult.stdout.Trim()}"
+                    };
+                }
             }
 
             var mergeRunResult = await RunGitAsync(
@@ -193,6 +248,54 @@ namespace MultiTerminal.Services
                 Success = true,
                 MergedInto = trunk
             };
+        }
+
+        /// <summary>
+        /// Parses repo-root-relative paths out of <c>git status --porcelain</c>
+        /// (v1) output. Each line is <c>XY PATH</c>; renames/copies are
+        /// <c>XY ORIG -&gt; NEW</c> — we take NEW. Paths are normalized to
+        /// forward slashes for allowlist comparison. Quoted paths (git escapes
+        /// names with special chars) are returned as-is including quotes, which
+        /// keeps them OUT of the bookkeeping allowlist so they correctly block.
+        /// </summary>
+        internal static System.Collections.Generic.List<string> ParsePorcelainPaths(string porcelain)
+        {
+            var paths = new System.Collections.Generic.List<string>();
+            if (string.IsNullOrEmpty(porcelain)) return paths;
+
+            foreach (var rawLine in porcelain.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                // Status is the first 2 chars + a space; path begins at index 3.
+                if (rawLine.Length <= 3) continue;
+                string path = rawLine.Substring(3).Trim();
+
+                int arrow = path.IndexOf(" -> ", StringComparison.Ordinal);
+                if (arrow >= 0)
+                {
+                    path = path.Substring(arrow + 4).Trim();
+                }
+
+                path = path.Replace('\\', '/');
+                if (path.Length > 0) paths.Add(path);
+            }
+            return paths;
+        }
+
+        /// <summary>
+        /// True when <paramref name="repoRelativePath"/> (forward-slash) is an
+        /// MT-managed bookkeeping file safe to auto-commit before a merge.
+        /// </summary>
+        internal static bool IsBookkeepingPath(string repoRelativePath)
+        {
+            if (string.IsNullOrEmpty(repoRelativePath)) return false;
+            foreach (var allowed in BookkeepingPaths)
+            {
+                if (string.Equals(repoRelativePath, allowed, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(

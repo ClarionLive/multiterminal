@@ -416,6 +416,47 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Janitor Pass-2 recovery hook (task d75d7d6e): retries the Phase-3
+        /// auto-merge for a pending-merge branch whose worktree was already
+        /// pruned. Re-validates that the task still exists and is <c>done</c>
+        /// before merging (the janitor snapshot can be stale), then delegates
+        /// to <see cref="WorktreeMergeService.MergeForTaskAsync"/>. On a clean
+        /// merge it also fires <see cref="WorktreeReady"/> so HUD panels rebind
+        /// to the post-merge trunk. Returns the structured result so the janitor
+        /// can count recoveries vs. still-flagged branches. Never throws.
+        /// </summary>
+        public async Task<MultiTerminal.Services.MergeResult> TryAutoMergeForTaskAsync(string taskId, string repoRoot)
+        {
+            if (string.IsNullOrEmpty(taskId) || string.IsNullOrEmpty(repoRoot))
+            {
+                return new MultiTerminal.Services.MergeResult { Success = false, Stderr = "taskId/repoRoot required" };
+            }
+            try
+            {
+                var task = _taskDb.GetTask(taskId);
+                if (task == null || !string.Equals(task.Status, "done", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Task reopened or gone — don't merge its branch into trunk.
+                    return new MultiTerminal.Services.MergeResult { Success = false, Stderr = "task no longer 'done'" };
+                }
+
+                var record = _taskDb.GetWorktreeForTask(taskId);
+                var mergeResult = await _merge.MergeForTaskAsync(taskId, repoRoot).ConfigureAwait(false);
+                if (mergeResult.Success && string.IsNullOrEmpty(mergeResult.SkippedReason))
+                {
+                    // Real merge happened — let HUD rebind to post-merge trunk.
+                    FireWorktreeReady(taskId, record?.WorktreePath, repoRoot, task.Assignee);
+                }
+                return mergeResult;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] TryAutoMergeForTaskAsync({taskId}) threw: {ex.Message}");
+                return new MultiTerminal.Services.MergeResult { Success = false, Stderr = ex.Message };
+            }
+        }
+
+        /// <summary>
         /// Internal helper that invokes <see cref="WorktreePruning"/> with
         /// exception isolation. Returns the event args so callers can inspect
         /// <see cref="WorktreePruningEventArgs.AllDelivered"/> for the
@@ -513,12 +554,13 @@ namespace MultiTerminal.MCPServer.Services
                         (mergeResult.HadConflicts ? " (conflict)" : "") +
                         $": {mergeResult.Stderr}");
                     string conflictTag = mergeResult.HadConflicts ? "Merge conflict" : "Merge failed";
+                    string mergeReason = TruncateReason(mergeResult.Stderr);
                     RecordActivity(new ActivityEvent
                     {
                         Terminal = task.Assignee ?? "System",
                         Type = "worktree",
                         Action = "auto_merge_failed",
-                        Content = $"{conflictTag} for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
+                        Content = $"{conflictTag} for '{task.Title}'.{(string.IsNullOrEmpty(mergeReason) ? "" : $" Reason: {mergeReason}")} Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                         RelatedId = taskId
                     });
                 }
@@ -532,12 +574,30 @@ namespace MultiTerminal.MCPServer.Services
                     Terminal = task.Assignee ?? "System",
                     Type = "worktree",
                     Action = "auto_merge_failed",
-                    Content = $"Auto-merge threw for '{task.Title}'. Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
+                    Content = $"Auto-merge threw for '{task.Title}'. Reason: {TruncateReason(ex.Message)} Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                     RelatedId = taskId
                 });
             }
 
             FireWorktreeReady(taskId, worktreePath, projectPath, task.Assignee);
+        }
+
+        /// <summary>
+        /// Collapses a git stderr / exception message to a single line and caps
+        /// its length so the auto-merge-failed activity entry stays readable in
+        /// the feed while still naming the actual cause (dirty trunk, conflict,
+        /// etc.). Returns empty when there's nothing to show.
+        /// </summary>
+        private static string TruncateReason(string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason)) return string.Empty;
+            string oneLine = reason.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            const int max = 240;
+            if (oneLine.Length > max)
+            {
+                oneLine = oneLine.Substring(0, max) + "…";
+            }
+            return oneLine;
         }
 
         /// <summary>

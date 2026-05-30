@@ -16,12 +16,15 @@ namespace MultiTerminal.Services
     /// (manual <c>rm -rf</c>, OS cleanup, drive remount, etc.) get marked
     /// pruned so the panel and the broker stop trying to use them.</para>
     ///
-    /// <para><b>Pass 2 — pending-merge detection:</b> rows in
+    /// <para><b>Pass 2 — pending-merge detection + bounded recovery:</b> rows in
     /// <c>status='pruned'</c> whose owning task is <c>done</c> AND whose
     /// <c>task/{id}</c> branch still exists in git. These are tasks where Phase
-    /// 3's auto-merge failed (e.g., conflict) and the dev hasn't resolved yet.
-    /// The janitor logs them to the activity feed but does NOT auto-retry —
-    /// avoiding infinite-retry loops on persistent conflicts.</para>
+    /// 3's auto-merge failed and the dev hasn't resolved yet. When a
+    /// <c>tryMergeForTask</c> callback is supplied, the janitor attempts the
+    /// merge ONCE per sweep (task d75d7d6e) — bounded, not a loop — so branches
+    /// orphaned by the now-fixed dirty-trunk blocker self-heal. A genuine
+    /// conflict clean-aborts inside the merge service and the branch stays
+    /// flagged to the activity feed for manual resolution.</para>
     ///
     /// <para><b>Pass 3 — orphan empty-dir sweep:</b> on Windows, when an agent
     /// terminal holds cwd inside a worktree at task-done time,
@@ -73,10 +76,18 @@ namespace MultiTerminal.Services
         /// flow: when the broker's pre-prune broadcast didn't complete in time,
         /// the prune is deferred; this callback lets the janitor retry on a
         /// later sweep once agents have likely released their cwd.</param>
+        /// <param name="tryMergeForTask">Callback (taskId, repoRoot) → MergeResult
+        /// that retries the Phase-3 auto-merge for a pending-merge branch. Pass
+        /// null to keep Pass 2 in flag-only mode. When wired, Pass 2 attempts
+        /// the merge ONCE per sweep (task d75d7d6e): now that the common
+        /// dirty-trunk blocker auto-resolves, most pending merges succeed on
+        /// retry; a genuine conflict clean-aborts inside the merge service and
+        /// the branch stays flagged — bounded per sweep, never a retry loop.</param>
         public async Task<JanitorResult> SweepAsync(
             Func<string, string> getProjectPathForTask,
             JanitorActivityCallback recordActivity,
-            Func<string, Task<bool>> tryDeferredPruneRetry = null)
+            Func<string, Task<bool>> tryDeferredPruneRetry = null,
+            Func<string, string, Task<MergeResult>> tryMergeForTask = null)
         {
             var result = new JanitorResult();
 
@@ -161,6 +172,35 @@ namespace MultiTerminal.Services
                         var branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
                         if (branchExists)
                         {
+                            // Bounded one-shot recovery: attempt the auto-merge
+                            // once this sweep. With the dirty-trunk blocker now
+                            // auto-resolved (task d75d7d6e), most orphaned
+                            // branches merge cleanly on retry. A real conflict
+                            // clean-aborts inside the merge service and we fall
+                            // through to flagging — no retry loop.
+                            if (tryMergeForTask != null)
+                            {
+                                MergeResult retry = null;
+                                try
+                                {
+                                    retry = await tryMergeForTask(record.TaskId, projectPath).ConfigureAwait(false);
+                                }
+                                catch (Exception ex)
+                                {
+                                    result.Errors.Add($"Pass 2 merge-retry {record.TaskId}: {ex.Message}");
+                                }
+
+                                if (retry != null && retry.Success)
+                                {
+                                    result.MergesRecovered++;
+                                    recordActivity?.Invoke(
+                                        "janitor_merge_recovered",
+                                        $"Auto-merge recovered for done task {record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length))}: branch {record.BranchName} merged into {retry.MergedInto ?? "trunk"} and deleted.",
+                                        record.TaskId);
+                                    continue;
+                                }
+                            }
+
                             result.PendingMerges.Add(record.TaskId);
                             recordActivity?.Invoke(
                                 "janitor_pending_merge",
@@ -248,11 +288,11 @@ namespace MultiTerminal.Services
 
             // Summary entry — only if anything notable happened.
             if (recordActivity != null
-                && (result.ReconciledMissing > 0 || result.PendingMerges.Count > 0 || result.OrphansRemoved > 0 || result.DeferredPrunesCompleted > 0 || result.Errors.Count > 0))
+                && (result.ReconciledMissing > 0 || result.PendingMerges.Count > 0 || result.OrphansRemoved > 0 || result.DeferredPrunesCompleted > 0 || result.MergesRecovered > 0 || result.Errors.Count > 0))
             {
                 recordActivity(
                     "janitor_sweep",
-                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
+                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
                     null);
             }
 
@@ -443,6 +483,9 @@ namespace MultiTerminal.Services
 
         /// <summary>Pass 3 — count of empty orphan dirs rmdir'd this sweep.</summary>
         public int OrphansRemoved { get; set; }
+
+        /// <summary>Pass 2 — count of pending merges recovered (merged + branch deleted) this sweep (task d75d7d6e).</summary>
+        public int MergesRecovered { get; set; }
 
         /// <summary>Cycle-3 — count of deferred prunes successfully retried this sweep.</summary>
         public int DeferredPrunesCompleted { get; set; }
