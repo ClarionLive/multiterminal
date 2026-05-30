@@ -38,6 +38,11 @@ namespace MultiTerminal.Services
         private const int MaxLineContentChars = 512;
         private const int MaxTimestampChars = 64;
         private const int MaxLineNumberStringChars = 16;
+        // Per-field cap for a suggested-edit patch (task 6bf785a0 item 3). Applied
+        // to original AND replacement independently. With MaxReviewNotesArrayLength
+        // notes the worst case stays well under the MaxReviewNotesJsonBytes pre-parse
+        // gate, so a flood of large suggestions can't blow up parser allocation.
+        private const int MaxSuggestionChars = 8192;
 
         private readonly MessageBroker _broker;
 
@@ -93,6 +98,19 @@ namespace MultiTerminal.Services
                 foreach (var fileLink in filesResult.Files)
                 {
                     string diff = GetGitDiffForFile(fileLink.FilePath, reviewBase);
+                    // Phase 1 (task 6bf785a0): when a linked file is unchanged on the
+                    // branch (empty diff), surface its full current content so the
+                    // reviewer can still read the code instead of hitting a dead-end.
+                    // Only populated for empty-diff files — changed files already
+                    // carry their diff and doubling the payload would bloat the JSON.
+                    // GUARD (pipeline Run 1, codex-sec MED): only when reviewBase
+                    // resolved cleanly. When reviewBase.Error is set, GetGitDiffForFile
+                    // returns an empty diff meaning "couldn't resolve", NOT "unchanged"
+                    // — showing HEAD/disk content under the error banner would be the
+                    // wrong revision.
+                    string fullContent = (string.IsNullOrEmpty(diff) && string.IsNullOrEmpty(reviewBase.Error))
+                        ? GetFullFileContent(fileLink.FilePath, reviewBase)
+                        : null;
                     fileObjects.Add(new
                     {
                         filePath = fileLink.FilePath,
@@ -102,6 +120,7 @@ namespace MultiTerminal.Services
                         addedBy = fileLink.AddedBy,
                         hasDiff = !string.IsNullOrEmpty(diff),
                         diff = diff ?? string.Empty,
+                        fullContent = fullContent,
                     });
                 }
                 string filesJson = JsonSerializer.Serialize(fileObjects);
@@ -268,6 +287,12 @@ namespace MultiTerminal.Services
                         continue;
 
                     string diff = GetGitDiffForFile(resolved, reviewBase);
+                    // Phase 1 (task 6bf785a0): same full-content fallback as the
+                    // task-scoped path — working-tree files that match HEAD show
+                    // their content instead of "No changes detected".
+                    string fullContent = string.IsNullOrEmpty(diff)
+                        ? GetFullFileContent(resolved, reviewBase)
+                        : null;
                     fileObjects.Add(new
                     {
                         filePath = resolved,
@@ -277,6 +302,7 @@ namespace MultiTerminal.Services
                         addedBy = (string)null,
                         hasDiff = !string.IsNullOrEmpty(diff),
                         diff = diff ?? string.Empty,
+                        fullContent = fullContent,
                     });
                 }
 
@@ -573,6 +599,7 @@ namespace MultiTerminal.Services
                     itemsToBounce = ComputeItemsToBounce(taskId, sanitizedJson, items.GetArrayLength());
                 }
 
+                int transitioned = 0;
                 for (int i = 0; i < items.GetArrayLength(); i++)
                 {
                     var item = items[i];
@@ -584,7 +611,24 @@ namespace MultiTerminal.Services
                             continue;
                         }
                         _broker.TransitionChecklistItem(taskId, i, targetStatus, notes, "CodeReview");
+                        transitioned++;
                     }
+                }
+
+                // Silent-drop guard (pipeline Run 1, codex-adv HIGH): a fail that
+                // transitions zero items delivered the notes nowhere. For a plain-note
+                // fail that's pre-existing behaviour (notes still persisted on the
+                // task), but a SUGGESTED EDIT is an actionable patch that's useless if
+                // no agent receives it — so surface it as operator-attention and keep
+                // the popup open rather than reporting a hollow success.
+                if (verdict == "fail" && transitioned == 0 && NotesContainSuggestion(sanitizedJson))
+                {
+                    return new VerdictResult
+                    {
+                        Ok = false,
+                        RequiresOperatorAttention = true,
+                        Error = "These review notes include a suggested edit, but no checklist item is in testing — so nothing was bounced back to a coding agent and the patch would be lost.\n\nMove the relevant item(s) back to testing (or have the assignee re-activate the task), then resubmit. Your notes were saved.",
+                    };
                 }
 
                 return new VerdictResult { Ok = true };
@@ -599,6 +643,29 @@ namespace MultiTerminal.Services
         // =============================================
         // Private helpers — sanitize / format / route
         // =============================================
+
+        // True if the sanitized review-notes JSON carries at least one attached
+        // suggested edit (pipeline Run 1 silent-drop guard). Tolerant — any parse
+        // failure returns false (treated as "no suggestion present").
+        private static bool NotesContainSuggestion(string sanitizedJson)
+        {
+            if (string.IsNullOrEmpty(sanitizedJson)) return false;
+            try
+            {
+                using var doc = JsonDocument.Parse(sanitizedJson);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array) return false;
+                foreach (var note in doc.RootElement.EnumerateArray())
+                {
+                    if (note.TryGetProperty("suggestion", out var s) && s.ValueKind == JsonValueKind.Object)
+                        return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         // F4: build the set of checklist items whose linked files overlap with
         // the comment files. Returns null when the caller should fall back to
@@ -707,6 +774,35 @@ namespace MultiTerminal.Services
                     {
                         lines.AppendLine($"[{severity}] {shortPath}:{line} — \"{comment}\"");
                     }
+
+                    // Suggested-edit patch (task 6bf785a0 item 3). The reviewer
+                    // proposed a concrete replacement — emit it as an explicit
+                    // original→suggested block so the agent applies a precise Edit
+                    // rather than interpreting prose. Content was fence-neutralized
+                    // by SanitizeMultiLine at the boundary, so '<'/'>' here are
+                    // already fullwidth and cannot break the <review_notes> fence.
+                    if (note.TryGetProperty("suggestion", out var sgEl) && sgEl.ValueKind == JsonValueKind.Object)
+                    {
+                        string sOrig = sgEl.TryGetProperty("original", out var soEl) ? (soEl.GetString() ?? "") : "";
+                        string sRepl = sgEl.TryGetProperty("replacement", out var srEl) ? (srEl.GetString() ?? "") : "";
+                        // Anchor the patch at the reviewer's line number, not a blind
+                        // text search (pipeline Run 2, codex-adv MEDIUM): the same
+                        // original text can occur multiple times in a file, so the
+                        // agent must locate the edit at THIS line rather than replacing
+                        // the first textual match.
+                        string anchorLine = line;
+                        if (sgEl.TryGetProperty("lineStart", out var lsEl))
+                        {
+                            anchorLine = lsEl.ValueKind == JsonValueKind.Number
+                                ? lsEl.GetInt32().ToString(System.Globalization.CultureInfo.InvariantCulture)
+                                : (lsEl.GetString() ?? line);
+                        }
+                        lines.AppendLine($"  proposed change — apply at {shortPath}:{anchorLine} (use this line number to locate the exact occurrence; replace the original block THERE with the suggested block — the same text may appear elsewhere):");
+                        lines.AppendLine("  --- original");
+                        foreach (var ol in sOrig.Split('\n')) lines.AppendLine("  - " + ol);
+                        lines.AppendLine("  +++ suggested");
+                        foreach (var rl in sRepl.Split('\n')) lines.AppendLine("  + " + rl);
+                    }
                 }
                 lines.AppendLine("</review_notes>");
                 var assembled = lines.ToString().TrimEnd();
@@ -796,6 +892,34 @@ namespace MultiTerminal.Services
                         clean["timestamp"] = ts;
                     }
 
+                    // Optional suggested-edit patch (task 6bf785a0 item 3). Uses the
+                    // newline-PRESERVING SanitizeMultiLine (a patch is inherently
+                    // multi-line) rather than SanitizeOneLine — both still neutralize
+                    // the < / > fence tokens and cap length. Kept only when the
+                    // replacement actually differs from the original after sanitize.
+                    if (note.TryGetProperty("suggestion", out var sugEl) && sugEl.ValueKind == JsonValueKind.Object)
+                    {
+                        string original = sugEl.TryGetProperty("original", out var oEl) ? (oEl.GetString() ?? "") : "";
+                        string replacement = sugEl.TryGetProperty("replacement", out var rEl) ? (rEl.GetString() ?? "") : "";
+                        original = SanitizeMultiLine(original);
+                        replacement = SanitizeMultiLine(replacement);
+                        if (original.Length > MaxSuggestionChars) original = original.Substring(0, MaxSuggestionChars) + "…";
+                        if (replacement.Length > MaxSuggestionChars) replacement = replacement.Substring(0, MaxSuggestionChars) + "…";
+                        if (!string.Equals(original, replacement, StringComparison.Ordinal))
+                        {
+                            var sug = new Dictionary<string, object>
+                            {
+                                ["original"] = original,
+                                ["replacement"] = replacement,
+                            };
+                            if (sugEl.TryGetProperty("lineStart", out var lsEl) && lsEl.ValueKind == JsonValueKind.Number)
+                                sug["lineStart"] = lsEl.GetInt32();
+                            if (sugEl.TryGetProperty("lineEnd", out var leEl) && leEl.ValueKind == JsonValueKind.Number)
+                                sug["lineEnd"] = leEl.GetInt32();
+                            clean["suggestion"] = sug;
+                        }
+                    }
+
                     sanitized.Add(clean);
                     kept++;
                 }
@@ -825,6 +949,28 @@ namespace MultiTerminal.Services
             {
                 if (ch == '\r' || ch == '\n') sb.Append(' ');
                 else if (ch < 0x20 && ch != '\t') sb.Append(' ');
+                else if (ch == '<') sb.Append('＜');
+                else if (ch == '>') sb.Append('＞');
+                else sb.Append(ch);
+            }
+            return sb.ToString();
+        }
+
+        // Newline-PRESERVING sibling of SanitizeOneLine for suggested-edit patches
+        // (task 6bf785a0 item 3), which are inherently multi-line. Keeps '\n' and
+        // '\t', normalizes CRLF to LF (drops '\r'), maps other C0 controls to
+        // spaces, and applies the SAME '<'/'>' fullwidth substitution so a
+        // reviewer-supplied literal </review_notes> in a patch body can't close the
+        // agent-prompt data fence. Length is capped by the caller (MaxSuggestionChars).
+        private static string SanitizeMultiLine(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s ?? string.Empty;
+            var sb = new StringBuilder(s.Length);
+            foreach (var ch in s)
+            {
+                if (ch == '\r') continue;
+                else if (ch == '\n' || ch == '\t') sb.Append(ch);
+                else if (ch < 0x20) sb.Append(' ');
                 else if (ch == '<') sb.Append('＜');
                 else if (ch == '>') sb.Append('＞');
                 else sb.Append(ch);
@@ -1191,6 +1337,244 @@ namespace MultiTerminal.Services
                 dir = Path.GetDirectoryName(dir);
             }
             return null;
+        }
+
+        // =============================================
+        // Full-file content (task 6bf785a0 — Phase 1)
+        // =============================================
+        // Per-file content cap mirrors MaxDiffBytes: the popup JSON-serializes
+        // every fullContent body into the same single payload as the diffs, so
+        // bound one unchanged file the same way one diff is bounded.
+        private const int MaxFullContentBytes = MaxDiffBytes;
+
+        /// <summary>
+        /// Returns the full current content of a linked file for the read-only
+        /// viewer shown when its diff is empty (unchanged on the branch). Mirrors
+        /// <see cref="GetGitDiffForFile"/>'s cwd selection with a HARDENED,
+        /// separator-aware containment check (see <see cref="IsPathWithin"/>).
+        /// Prefers the working-tree file ON DISK — that is the file the coder
+        /// currently has open, so the view is honest and a suggested-edit's
+        /// captured "original" anchors to real bytes — and falls back to the
+        /// committed blob (pinned branch-tip SHA in task mode, else HEAD) only
+        /// when the file isn't on disk (deleted-but-linked, or a pruned worktree).
+        /// Returns null for binary, unreadable, or otherwise unavailable files so
+        /// the frontend can show a graceful fallback. Only call this when the diff
+        /// is empty AND the review base resolved cleanly (no reviewBase.Error).
+        /// </summary>
+        private string GetFullFileContent(string filePath, ReviewBase reviewBase)
+        {
+            try
+            {
+                string cwd = !string.IsNullOrEmpty(reviewBase.WorktreePath) && Directory.Exists(reviewBase.WorktreePath)
+                    ? reviewBase.WorktreePath
+                    : FindGitRoot(filePath);
+                if (cwd == null) return null;
+
+                // Separator-aware containment (pipeline Run 1, codex-sec HIGH):
+                // a bare StartsWith lets "C:\repo2\secret" pass the "C:\repo"
+                // prefix on Windows, and the disk read below would then disclose
+                // an out-of-repo sibling file. Require the path to be cwd itself
+                // or a true descendant. Applied before BOTH the disk read and
+                // git show.
+                var canonicalPath = Path.GetFullPath(filePath);
+                var canonicalCwd = Path.GetFullPath(cwd);
+                if (!IsPathWithin(canonicalCwd, canonicalPath))
+                    return null;
+
+                // Disk first — the current working-tree file (pipeline Run 1,
+                // codex-adv HIGH: branch-tip `git show` can be stale vs a dirty
+                // worktree, so a captured suggestion "original" wouldn't match the
+                // real file).
+                //
+                // Reparse-point guard (pipeline Run 2, codex-sec HIGH): IsPathWithin
+                // is purely lexical, so a symlink/junction whose path sits under the
+                // repo could redirect File.OpenRead to an out-of-repo target. If the
+                // leaf is a reparse point, do NOT read it from disk — fall through to
+                // `git show`, which reads the in-repo blob and never follows an OS
+                // link. Unreadable attributes are treated as suspicious (skip disk).
+                bool isReparse;
+                try
+                {
+                    isReparse = File.Exists(canonicalPath)
+                        && (File.GetAttributes(canonicalPath) & FileAttributes.ReparsePoint) != 0;
+                }
+                catch (Exception)
+                {
+                    isReparse = true;
+                }
+                if (!isReparse)
+                {
+                    string content = ReadWorkingTreeFile(canonicalPath);
+                    if (content != null) return content;
+                }
+
+                // Not on disk / reparse point (deleted-but-linked, pruned worktree,
+                // or symlink) — committed in-repo blob.
+                var relativePath = Path.GetRelativePath(cwd, filePath).Replace('\\', '/');
+                string showRef = reviewBase.HasBranch && string.IsNullOrEmpty(reviewBase.Error) && !string.IsNullOrEmpty(reviewBase.BranchTipSha)
+                    ? reviewBase.BranchTipSha
+                    : "HEAD";
+                return RunGitShow(cwd, showRef, relativePath);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[CodeReviewService] GetFullFileContent failed for {filePath}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Separator-aware containment test: true iff <paramref name="candidate"/>
+        /// is <paramref name="root"/> itself or a descendant of it. Replaces the
+        /// prefix-based StartsWith guard, which wrongly accepts "C:\repo2" as
+        /// inside "C:\repo". Both args must already be canonical absolute paths
+        /// (Path.GetFullPath output).
+        /// </summary>
+        private static bool IsPathWithin(string root, string candidate)
+        {
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(candidate)) return false;
+            string rel;
+            try
+            {
+                rel = Path.GetRelativePath(root, candidate);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            // "." = same path; a rooted result = different drive/root (escapes);
+            // a leading ".." segment = escapes upward.
+            if (rel == ".") return true;
+            if (Path.IsPathRooted(rel)) return false;
+            if (rel == ".."
+                || rel.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                || rel.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+                return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Runs <c>git show &lt;ref&gt;:&lt;path&gt;</c> and returns the file
+        /// content at that ref, hardened like <see cref="RunGitDiff"/> (no pager).
+        /// Returns null on non-zero exit (path absent at this ref), binary content
+        /// (a NUL byte was seen), or any error. Truncates at MaxFullContentBytes
+        /// with a trailing marker. <paramref name="objectRef"/> must be a SHA,
+        /// "HEAD", or a ref pre-validated by <see cref="IsSafeGitRefName"/>;
+        /// <paramref name="relativePath"/> is repo-relative and quoted.
+        /// </summary>
+        private static string RunGitShow(string repoRoot, string objectRef, string relativePath)
+        {
+            if (!IsSafeGitRefName(objectRef)) return null;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"-c core.pager=cat show {objectRef}:\"{relativePath}\"",
+                    WorkingDirectory = repoRoot,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var proc = Process.Start(psi);
+                if (proc == null) return null;
+
+                var reader = proc.StandardOutput;
+                var sb = new StringBuilder();
+                var buf = new char[8192];
+                bool truncated = false;
+                bool binary = false;
+                int n;
+                while ((n = reader.Read(buf, 0, buf.Length)) > 0)
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (buf[i] == '\0') { binary = true; break; }
+                    }
+                    if (binary)
+                    {
+                        while (reader.Read(buf, 0, buf.Length) > 0) { }
+                        break;
+                    }
+                    if (sb.Length + n > MaxFullContentBytes)
+                    {
+                        int remaining = Math.Max(0, MaxFullContentBytes - sb.Length);
+                        if (remaining > 0) sb.Append(buf, 0, remaining);
+                        truncated = true;
+                        while (reader.Read(buf, 0, buf.Length) > 0) { }
+                        break;
+                    }
+                    sb.Append(buf, 0, n);
+                }
+                proc.StandardError.ReadToEnd();
+                proc.WaitForExit(5000);
+                if (proc.ExitCode != 0) return null;
+                if (binary) return null;
+                if (truncated)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"... (file truncated at {MaxFullContentBytes / 1024} KB; open the file directly to see the full content)");
+                }
+                return sb.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Disk fallback for files not present at the review ref (untracked but
+        /// linked for review). Size-capped and binary-sniffed identically to the
+        /// git-show path. Returns null for binary or unreadable files.
+        /// </summary>
+        private static string ReadWorkingTreeFile(string canonicalPath)
+        {
+            try
+            {
+                if (!File.Exists(canonicalPath)) return null;
+                using var fs = File.OpenRead(canonicalPath);
+                using var br = new BinaryReader(fs);
+                // Read one byte past the cap so we can detect (and mark) truncation.
+                var bytes = br.ReadBytes(MaxFullContentBytes + 1);
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    if (bytes[i] == 0) return null; // binary
+                }
+                bool truncated = bytes.Length > MaxFullContentBytes;
+                int take = truncated ? MaxFullContentBytes : bytes.Length;
+                if (truncated)
+                {
+                    // Drop a partial trailing UTF-8 sequence so the fixed BYTE cap
+                    // can't split a multibyte codepoint into U+FFFD (debugger
+                    // MEDIUM). RunGitShow caps in chars and never splits; this
+                    // makes the disk path land on a complete-codepoint boundary too.
+                    int i = take - 1;
+                    while (i >= 0 && (bytes[i] & 0xC0) == 0x80) i--; // skip continuation bytes
+                    if (i >= 0)
+                    {
+                        int lead = bytes[i];
+                        int seqLen = lead < 0x80 ? 1
+                                   : (lead & 0xE0) == 0xC0 ? 2
+                                   : (lead & 0xF0) == 0xE0 ? 3
+                                   : (lead & 0xF8) == 0xF0 ? 4
+                                   : 1;
+                        if (take - i < seqLen) take = i; // trailing sequence is incomplete — drop it
+                    }
+                }
+                var text = System.Text.Encoding.UTF8.GetString(bytes, 0, take);
+                if (truncated)
+                {
+                    text += Environment.NewLine
+                        + $"... (file truncated at {MaxFullContentBytes / 1024} KB; open the file directly to see the full content)";
+                }
+                return text;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // Per-file diff cap: branch-vs-trunk diffs can be arbitrarily large
