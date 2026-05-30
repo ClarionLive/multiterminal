@@ -215,7 +215,8 @@ namespace MultiTerminal
                                     }
                                     catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[Janitor] activity log failed: {ex.Message}"); }
                                 },
-                                tryDeferredPruneRetry: id => broker.TryDeferredPruneRetryAsync(id)).GetAwaiter().GetResult();
+                                tryDeferredPruneRetry: id => broker.TryDeferredPruneRetryAsync(id),
+                                tryMergeForTask: (id, root) => broker.TryAutoMergeForTaskAsync(id, root)).GetAwaiter().GetResult();
                         }
                         catch (Exception ex)
                         {
