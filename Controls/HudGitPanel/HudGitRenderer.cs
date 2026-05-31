@@ -1489,7 +1489,7 @@ namespace MultiTerminal.Controls
                         try
                         {
                             using var perSvc = new GitRepoService(wt.Path);
-                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured, changelogSvc, brokerCaptured);
+                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured, changelogSvc, brokerCaptured, wt.LinkedTaskId);
                             recentCommits = BuildRecentCommits(perSvc);
                             // Remote tracking is per-worktree (each worktree has its
                             // own HEAD and tracking branch). The unified-tree header
@@ -1596,7 +1596,8 @@ namespace MultiTerminal.Controls
             string svcRepoRoot,
             GitAttributionService attributionSvc,
             ChangelogAttributionService changelogSvc,
-            MessageBroker broker)
+            MessageBroker broker,
+            string linkedTaskId)
         {
             var status = svc.GetWorkingTreeStatus();
             var statusList = status ?? (System.Collections.Generic.IReadOnlyList<GitFileStatus>)Array.Empty<GitFileStatus>();
@@ -1882,6 +1883,114 @@ namespace MultiTerminal.Controls
                         LinkageState = "active",
                     };
                     autoLinkedPaths.Add(relPath);
+                }
+            }
+
+            // Worktree-ownership fallback (task 5a6d2ce7): a file physically
+            // living inside a task's worktree belongs to that task — the
+            // strongest attribution signal there is. WorktreeListService
+            // populates linkedTaskId from the active task_worktrees row (the
+            // same source as the branch row's "N task" label). For any working
+            // file still lacking a task after the link-table + changelog
+            // passes, synthesize an "active" attribution from the worktree
+            // owner so it renders under the task group instead of the "Needs a
+            // quick task" bucket.
+            //
+            // VALIDATE OWNERSHIP FIRST (pipeline Run 1, two HIGH findings).
+            // linkedTaskId arrives from a task_worktrees path-join and is NOT
+            // self-validating, so — exactly like the changelog auto-link pass
+            // above — resolve the task and gate on it before trusting it:
+            //   * Cross-project guard (OWASP A01): a stale/hostile
+            //     task_worktrees row could point this worktree path at a task
+            //     owned by ANOTHER project; without the ProjectId check its
+            //     title would leak into this repo's HUD. Mirrors the changelog
+            //     path's ResolveProjectIdForRepo + task.ProjectId gate.
+            //   * Liveness guard: a task_worktrees row stays status='active'
+            //     after the owning task is marked done, until the janitor
+            //     prunes it (the deferred-prune window). Requiring the task
+            //     itself to be in_progress stops a done task from painting its
+            //     lingering worktree's files with a false "active" claim.
+            // On any miss (task gone, cross-project, not in_progress) we skip —
+            // the file stays in the quick-task bucket, the honest "no proven
+            // live owner" outcome.
+            //
+            // Display-only: no task_file_links row is written. Worktree linkage
+            // is ephemeral (the dir is pruned on task-done) and the durable
+            // record, when wanted, is the agent's own link_task_file call. The
+            // validated owned paths join autoLinkedPaths to bypass the
+            // WorktreeConfig.IsEnabled gate on groupedByTask — safe now because
+            // the signal is a fresh, validated GetTask lookup, not a stale link
+            // row (the class that gate guards, a401e082).
+            //
+            // The whole fallback is itself gated on WorktreeConfig.IsEnabled.
+            // In mode OFF this method deliberately skips GetAttributionForFiles
+            // so every consumer sees a uniform "no task linkage" view (stale
+            // task_file_links rows would otherwise misattribute — a401e082).
+            // Running the worktree-owner fallback in mode OFF would break that
+            // contract: a file explicitly linked to ANOTHER active task is
+            // invisible to attrByPath there (the lookup was skipped), so the
+            // fallback would silently reassign it to this worktree's owner with
+            // no contamination banner to flag it. So it is gated off too.
+            //
+            // Gap-fill only: a real link/changelog attribution always wins
+            // (the existing-TaskId continue below). The non-empty linkedTaskId
+            // guard leaves the MAIN worktree (no owner) untouched, so master's
+            // orphaned changes keep the + Quick task affordance.
+            MultiTerminal.MCPServer.Models.KanbanTask worktreeOwnerTask = null;
+            if (WorktreeConfig.IsEnabled && !string.IsNullOrEmpty(linkedTaskId) && broker != null)
+            {
+                try { worktreeOwnerTask = broker.GetTask(linkedTaskId); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[HudGitRenderer.BuildWorkingChanges] worktree-owner task lookup failed for '{linkedTaskId}': {ex.Message}");
+                    worktreeOwnerTask = null;
+                }
+            }
+
+            if (worktreeOwnerTask != null)
+            {
+                // Snapshot the validated fields ONCE, before the checks and the
+                // synthesis loop. GetTask returns the live cached KanbanTask,
+                // whose fields can be mutated in-place from another thread;
+                // authorizing one read (status/project) and then rendering a
+                // later read (title/agent) would let the HUD show metadata the
+                // guard never authorized (security TOCTOU). Freezing all four
+                // here makes the authorization decision and the rendered data a
+                // single observation — the same capture-before-the-race-window
+                // idiom this file uses for broker services ahead of Task.Run.
+                string ownerStatus = worktreeOwnerTask.Status;
+                string ownerProjectId = worktreeOwnerTask.ProjectId;
+                string ownerTitle = worktreeOwnerTask.Title ?? string.Empty;
+                string ownerAgent = worktreeOwnerTask.Assignee ?? string.Empty;
+
+                string repoProjectId = ResolveProjectIdForRepo(broker, svcRepoRoot);
+                if (string.Equals(ownerStatus, "in_progress", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrEmpty(repoProjectId)
+                    && string.Equals(ownerProjectId, repoProjectId, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var fileStatus in statusList)
+                    {
+                        var relPath = fileStatus?.Path ?? string.Empty;
+                        if (string.IsNullOrEmpty(relPath)) continue;
+                        if (attrByPath.TryGetValue(relPath, out var existing)
+                            && existing != null
+                            && !string.IsNullOrEmpty(existing.TaskId))
+                        {
+                            continue;
+                        }
+
+                        attrByPath[relPath] = new GitFileAttribution
+                        {
+                            FilePath = relPath,
+                            Agent = ownerAgent,
+                            TaskId = linkedTaskId,
+                            TaskTitle = ownerTitle,
+                            PipelineStatus = string.Empty,
+                            LinkageState = "active",
+                        };
+                        autoLinkedPaths.Add(relPath);
+                    }
                 }
             }
 
