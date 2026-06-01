@@ -300,7 +300,7 @@ namespace MultiTerminal.Services
             {
                 recordActivity(
                     "janitor_sweep",
-                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.StrandedDirsRemaining} still stranded (held), {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
+                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.StrandedDirsRemaining} rmdir-blocked this sweep (held — not a live total; query api/worktrees/stranded for that), {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
                     null);
             }
 
@@ -318,9 +318,9 @@ namespace MultiTerminal.Services
         /// orphan dir. Best-effort: a group whose <c>git worktree list</c> fails
         /// is skipped (conservative — never reports a registered dir as stranded).
         /// </summary>
-        public async Task<List<string>> ScanStrandedDirsAsync()
+        public async Task<StrandedScanResult> ScanStrandedDirsAsync()
         {
-            var stranded = new List<string>();
+            var result = new StrandedScanResult();
             var allPaths = _db.ListAllWorktreePaths();
             var groups = DeriveWorktreeGroups(allPaths);
             AppendLegacyParentsFromActiveRepos(groups);
@@ -335,10 +335,15 @@ namespace MultiTerminal.Services
                 {
                     registered = await ListRegisteredWorktreePathsAsync(group.RepoRoot).ConfigureAwait(false);
                 }
-                catch
+                catch (Exception ex)
                 {
                     // Conservative: skip the group rather than risk flagging a
-                    // registered dir as stranded.
+                    // registered dir as stranded. But COUNT the skip + log it
+                    // (task 248cc2ce): a skipped group makes the scan PARTIAL, and
+                    // the caller must be able to tell "found none" from "couldn't
+                    // look" — otherwise an empty result is a non-falsifiable zero.
+                    result.SkippedGroups++;
+                    Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync skipped group {group.RepoRoot}: {ex.Message}");
                     continue;
                 }
 
@@ -346,11 +351,11 @@ namespace MultiTerminal.Services
                 {
                     if (registered.Contains(NormalizePath(child))) continue;
                     if (!IsDirectoryEmpty(child)) continue;
-                    stranded.Add(child);
+                    result.Dirs.Add(child);
                 }
             }
 
-            return stranded;
+            return result;
         }
 
         /// <summary>
@@ -449,7 +454,14 @@ namespace MultiTerminal.Services
         {
             try
             {
-                return Directory.EnumerateDirectories(parentDir);
+                // Materialize EAGERLY (task 248cc2ce). Directory.EnumerateDirectories
+                // is lazy: a deferred MoveNext() inside the caller's foreach can throw
+                // IOException/DirectoryNotFoundException if a child is deleted mid-walk
+                // (e.g. Pass 3's own Directory.Delete, or a concurrent ScanStrandedDirsAsync).
+                // Forcing the read here means that throw is caught by this try and yields
+                // an empty set, instead of escaping into a caller that may lack an outer
+                // guard (the read-only scan did).
+                return new List<string>(Directory.EnumerateDirectories(parentDir));
             }
             catch
             {
@@ -554,5 +566,26 @@ namespace MultiTerminal.Services
         public int StrandedDirsRemaining { get; set; }
 
         public List<string> Errors { get; } = new List<string>();
+    }
+
+    /// <summary>
+    /// Result of <see cref="WorktreeJanitorService.ScanStrandedDirsAsync"/> (task
+    /// 248cc2ce). A POINT-IN-TIME, read-only view distinct from
+    /// <see cref="JanitorResult.StrandedDirsRemaining"/> (which is a per-sweep
+    /// count of dirs Pass 3 tried and failed to rmdir). <see cref="Dirs"/> is the
+    /// set of empty, de-registered-but-on-disk worktree dirs currently visible.
+    /// <see cref="SkippedGroups"/> counts repo groups whose <c>git worktree list</c>
+    /// failed and were skipped; when &gt; 0 the scan is <see cref="Complete"/> ==
+    /// false (PARTIAL), so a caller must NOT read an empty <see cref="Dirs"/> as a
+    /// trustworthy "no strands" — the whole falsifiability point is to never
+    /// conflate "found none" with "couldn't look".
+    /// </summary>
+    public class StrandedScanResult
+    {
+        public List<string> Dirs { get; } = new List<string>();
+
+        public int SkippedGroups { get; set; }
+
+        public bool Complete => SkippedGroups == 0;
     }
 }

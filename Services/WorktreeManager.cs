@@ -404,10 +404,27 @@ namespace MultiTerminal.Services
                         // to the task, so it's observable in real time. The janitor
                         // still performs the actual cleanup.
                         string strandShortId = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
-                        _activitySink?.Invoke(
-                            "worktree_strand",
-                            $"Worktree dir stranded for task {strandShortId}: git unregistered it but the directory could not be removed (likely a held cwd — e.g. a subagent — or an AV/editor handle). Left as an empty shell at {record.WorktreePath}; the janitor will sweep it on its next pass.",
-                            record.TaskId);
+                        // Minimize the path disclosed in the broadcast/persisted activity
+                        // content to just the dir name — the full absolute path (which
+                        // leaks drive/user/repo layout) stays in the Debug.WriteLine
+                        // above (security finding, task 248cc2ce).
+                        string strandDirName = Path.GetFileName(
+                            record.WorktreePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                        try
+                        {
+                            _activitySink?.Invoke(
+                                "worktree_strand",
+                                $"Worktree dir stranded for task {strandShortId}: git unregistered it but the directory '{strandDirName}' could not be removed (likely a held cwd — e.g. a subagent — or an AV/editor handle). Left as an empty shell; the janitor will sweep it on its next pass.",
+                                record.TaskId);
+                        }
+                        catch (Exception sinkEx)
+                        {
+                            // Observability must NEVER disturb the prune state machine:
+                            // a throwing activity subscriber must not prevent the
+                            // MarkWorktreePruned below, or a tolerated partial prune
+                            // becomes a failed teardown (Adversary HIGH, task 248cc2ce).
+                            Debug.WriteLine($"[WorktreeManager] strand activity sink threw (ignored): {sinkEx.Message}");
+                        }
                     }
 #pragma warning restore CA3003
 

@@ -75,23 +75,50 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// Read-only point-in-time list + count of de-registered-but-on-disk
-        /// worktree strands (empty dirs git no longer tracks) across the repos the
-        /// broker knows about. Surfaces the teardown-reliability signal (task
-        /// 248cc2ce) so strand accumulation is observable instead of discovered by
-        /// stumbling on an orphan dir. Shells <c>git worktree list</c> per repo
-        /// group — call on a refresh cadence, not per UI repaint. Always 200; an
-        /// empty list means no strands (or the janitor is unavailable).
+        /// Read-only point-in-time view of de-registered-but-on-disk worktree
+        /// strands (empty dirs git no longer tracks) across the repos the broker
+        /// knows about. Surfaces the teardown-reliability signal (task 248cc2ce) so
+        /// strand accumulation is observable instead of discovered by stumbling on
+        /// an orphan dir. Shells <c>git worktree list</c> per repo group — call on a
+        /// refresh cadence, not per UI repaint.
+        /// <para>Always HTTP 200, but the payload carries an explicit
+        /// <c>status</c> so a caller can NEVER mistake "couldn't tell" for "none":
+        /// <c>ok</c> = complete scan, <c>count</c> is authoritative; <c>partial</c>
+        /// = at least one repo group was skipped (its <c>git worktree list</c>
+        /// failed — see <c>skippedGroups</c>), so <c>count</c> is a lower bound;
+        /// <c>unavailable</c> = janitor missing or the scan threw, <c>count=0</c>
+        /// is NOT a "no strands" signal. This is the whole point of the feature —
+        /// a silently-wrong zero is the failure mode it exists to prevent.</para>
         /// </summary>
         [HttpGet("stranded")]
         public async Task<IActionResult> GetStrandedDirs()
         {
             var janitor = _broker?.WorktreeJanitor;
             if (janitor == null)
-                return Ok(new { count = 0, dirs = Array.Empty<string>() });
+            {
+                // 'unavailable' — NOT a healthy-looking count=0 (Adversary HIGH).
+                return Ok(new { status = "unavailable", count = 0, skippedGroups = 0, dirs = Array.Empty<string>() });
+            }
 
-            var dirs = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
-            return Ok(new { count = dirs.Count, dirs });
+            try
+            {
+                var scan = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
+                return Ok(new
+                {
+                    status = scan.Complete ? "ok" : "partial",
+                    count = scan.Dirs.Count,
+                    skippedGroups = scan.SkippedGroups,
+                    dirs = scan.Dirs,
+                });
+            }
+            catch (Exception ex)
+            {
+                // Best-effort scan: a transient git/DB failure surfaces as
+                // 'unavailable', never as a healthy-looking zero, and never as a 500
+                // (honours the documented contract; Debugger MEDIUM).
+                System.Diagnostics.Debug.WriteLine($"[WorktreesController] stranded scan failed: {ex.Message}");
+                return Ok(new { status = "unavailable", count = 0, skippedGroups = 0, dirs = Array.Empty<string>() });
+            }
         }
     }
 }
