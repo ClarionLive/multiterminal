@@ -139,7 +139,10 @@ namespace MultiTerminal.Services
                     {
                         if (!Directory.Exists(record.WorktreePath))
                         {
-                            _db.MarkWorktreePruned(record.TaskId);
+                            // Per-agent isolation: mark only THIS agent's row pruned,
+                            // not every worktree row for the task (a task may now have
+                            // multiple agent worktrees).
+                            _db.MarkWorktreePruned(record.TaskId, record.AgentName);
                             result.ReconciledMissing++;
                             recordActivity?.Invoke(
                                 "janitor_reconciled_missing",

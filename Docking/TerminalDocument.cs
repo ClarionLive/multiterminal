@@ -2277,7 +2277,13 @@ namespace MultiTerminal.Docking
             {
                 if (!string.IsNullOrEmpty(args.NewTaskId))
                 {
-                    resolvedWorktreePath = _messageBroker?.Worktrees?.GetWorktreePathForTask(args.NewTaskId);
+                    // Per-agent isolation: resolve THIS terminal's own worktree — the
+                    // event now carries the acting agent (which may be a helper), so a
+                    // single-arg lookup would rebind a helper's HUD to the assignee's
+                    // canonical worktree. Fall back to canonical. Mirrors the REST
+                    // auto-cd path (ResolveTaskWorktreePath) so in-proc + REST agree.
+                    resolvedWorktreePath = _messageBroker?.Worktrees?.GetWorktreePathForTask(args.NewTaskId, args.AgentName)
+                                           ?? _messageBroker?.Worktrees?.GetWorktreePathForTask(args.NewTaskId);
                     newProjectId = _messageBroker?.GetTask(args.NewTaskId)?.ProjectId;
                 }
             }

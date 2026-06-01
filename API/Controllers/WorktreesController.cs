@@ -36,7 +36,11 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(agentName))
                 return BadRequest(new { error = "agentName is required" });
 
-            var activeTask = _broker.GetMyActiveTask(agentName);
+            // Worktree-purpose resolution (helper-aware): a helper is never the
+            // task assignee, so the strict GetMyActiveTask would miss and the tool
+            // would wrongly report "no active worktree" for a helper that owns one
+            // (task bab81a92, acceptance scenario 2b).
+            var activeTask = _broker.ResolveActiveTaskForAgent(agentName);
             string worktreePath = _broker.ResolveTaskWorktreePath(agentName);
             string repoRoot = _broker.ResolveTaskRepoRoot(agentName);
             string branchName = null;
@@ -45,7 +49,11 @@ namespace MultiTerminal.API.Controllers
             {
                 try
                 {
-                    var record = _broker.TaskDb?.GetWorktreeForTask(activeTask.Id);
+                    // Per-agent isolation: resolve THIS agent's worktree row so the
+                    // branch reflects their own (canonical or helper) branch. Falls
+                    // back to the canonical row if the agent has no per-agent row.
+                    var record = _broker.TaskDb?.GetWorktreeForTask(activeTask.Id, agentName)
+                                 ?? _broker.TaskDb?.GetWorktreeForTask(activeTask.Id);
                     branchName = record?.BranchName;
                 }
                 catch

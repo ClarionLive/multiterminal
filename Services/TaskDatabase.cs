@@ -111,6 +111,7 @@ namespace MultiTerminal.Services
             MigrateAddSessionLifecycleStatus();
             MigrateAddTaskWorktrees();
             MigrateAddBranchMetadata();
+            MigrateAddAgentToTaskWorktrees();
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -376,13 +377,17 @@ namespace MultiTerminal.Services
                 CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_file_links(task_id);
 
                 CREATE TABLE IF NOT EXISTS task_worktrees (
-                    task_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
                     worktree_path TEXT NOT NULL,
                     branch_name TEXT NOT NULL,
                     created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-                    status TEXT NOT NULL DEFAULT 'active'
+                    status TEXT NOT NULL DEFAULT 'active',
+                    agent_name TEXT NOT NULL DEFAULT '__legacy__',
+                    is_canonical INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (task_id, agent_name)
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_worktrees_status ON task_worktrees(status);
+                CREATE INDEX IF NOT EXISTS idx_task_worktrees_task ON task_worktrees(task_id);
 
                 CREATE TABLE IF NOT EXISTS project_notes (
                     id TEXT PRIMARY KEY,
@@ -1884,18 +1889,41 @@ namespace MultiTerminal.Services
         /// Phase 1 of per-task worktree isolation — gated by
         /// <c>MULTITERMINAL_WORKTREE_MODE</c>.
         /// </summary>
-        public void SaveWorktreeRecord(string taskId, string worktreePath, string branchName)
+        public void SaveWorktreeRecord(string taskId, string agentName, string worktreePath, string branchName, bool isCanonical)
         {
             const string sql = @"
-                INSERT OR REPLACE INTO task_worktrees (task_id, worktree_path, branch_name, created_at, status)
-                VALUES (@taskId, @worktreePath, @branchName, @createdAt, 'active')
+                INSERT OR REPLACE INTO task_worktrees
+                    (task_id, agent_name, worktree_path, branch_name, created_at, status, is_canonical)
+                VALUES (@taskId, @agentName, @worktreePath, @branchName, @createdAt, 'active', @isCanonical)
             ";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
             cmd.Parameters.AddWithValue("@worktreePath", worktreePath);
             cmd.Parameters.AddWithValue("@branchName", branchName);
             cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
+            cmd.Parameters.AddWithValue("@isCanonical", isCanonical ? 1 : 0);
             cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Maps the standard 7-column worktree projection
+        /// (<c>task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical</c>)
+        /// into a <see cref="MCPServer.Models.TaskWorktree"/>. All worktree readers
+        /// SELECT these columns in this order so they can share this mapper.
+        /// </summary>
+        private static MCPServer.Models.TaskWorktree MapWorktree(System.Data.Common.DbDataReader reader)
+        {
+            return new MCPServer.Models.TaskWorktree
+            {
+                TaskId = reader.GetString(0),
+                WorktreePath = reader.GetString(1),
+                BranchName = reader.GetString(2),
+                CreatedAt = DateTime.Parse(reader.GetString(3)),
+                Status = reader.GetString(4),
+                AgentName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                IsCanonical = !reader.IsDBNull(6) && reader.GetInt32(6) != 0
+            };
         }
 
         /// <summary>
@@ -1905,23 +1933,97 @@ namespace MultiTerminal.Services
         /// </summary>
         public MCPServer.Models.TaskWorktree GetWorktreeForTask(string taskId)
         {
+            // Per-agent isolation: a task can now have multiple worktree rows
+            // (assignee canonical + N helpers). This task-scoped overload returns
+            // the canonical (assignee) row — the representative worktree that all
+            // pre-isolation callers expect — preferring is_canonical, then most
+            // recent. For a specific agent's worktree use the (taskId, agentName)
+            // overload below.
             const string sql = @"
-                SELECT task_id, worktree_path, branch_name, created_at, status
+                SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
                 FROM task_worktrees
                 WHERE task_id = @taskId
+                ORDER BY is_canonical DESC, created_at DESC
+                LIMIT 1
             ";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
             using var reader = cmd.ExecuteReader();
             if (!reader.Read()) return null;
-            return new MCPServer.Models.TaskWorktree
+            return MapWorktree(reader);
+        }
+
+        /// <summary>
+        /// Look up the worktree record for a specific (task, agent) pair, or
+        /// <c>null</c> when that agent has no worktree on the task. This is the
+        /// agent-aware lookup introduced for per-agent isolation (task bab81a92).
+        /// </summary>
+        public MCPServer.Models.TaskWorktree GetWorktreeForTask(string taskId, string agentName)
+        {
+            const string sql = @"
+                SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
+                FROM task_worktrees
+                WHERE task_id = @taskId AND agent_name = @agentName
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return MapWorktree(reader);
+        }
+
+        /// <summary>
+        /// The most-recently-created <c>active</c> worktree row for an agent,
+        /// across all tasks, or <c>null</c>. This is the per-agent "active
+        /// worktree" pointer used to resolve a HELPER's active task: a helper is
+        /// never the task assignee, and <c>tasks.sub_status='active'</c> is a
+        /// task-level flag keyed to the assignee, so it cannot represent a
+        /// helper's active task. The agent's own active <c>task_worktrees</c> row
+        /// is the source of truth. The <c>agent_name = @agentName</c> filter
+        /// excludes the backfilled <c>'__legacy__'</c> bucket, so a legacy row
+        /// never resolves as a real agent's active worktree (task bab81a92).
+        /// </summary>
+        public MCPServer.Models.TaskWorktree GetActiveWorktreeForAgent(string agentName)
+        {
+            if (string.IsNullOrEmpty(agentName)) return null;
+            const string sql = @"
+                SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
+                FROM task_worktrees
+                WHERE status = 'active' AND agent_name = @agentName
+                ORDER BY created_at DESC
+                LIMIT 1
+            ";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@agentName", agentName);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return MapWorktree(reader);
+        }
+
+        /// <summary>
+        /// All worktree records for a task (every agent, both <c>active</c> and
+        /// <c>pruned</c>), canonical first then most recent. Used by the task-done
+        /// teardown (commit/integrate/prune every agent worktree) and per-task
+        /// reconciliation. Callers filter by <c>Status</c> as needed.
+        /// </summary>
+        public List<MCPServer.Models.TaskWorktree> ListWorktreesForTask(string taskId)
+        {
+            const string sql = @"
+                SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
+                FROM task_worktrees
+                WHERE task_id = @taskId
+                ORDER BY is_canonical DESC, created_at DESC
+            ";
+            var results = new List<MCPServer.Models.TaskWorktree>();
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                TaskId = reader.GetString(0),
-                WorktreePath = reader.GetString(1),
-                BranchName = reader.GetString(2),
-                CreatedAt = DateTime.Parse(reader.GetString(3)),
-                Status = reader.GetString(4)
-            };
+                results.Add(MapWorktree(reader));
+            }
+            return results;
         }
 
         /// <summary>
@@ -1932,9 +2034,26 @@ namespace MultiTerminal.Services
         /// </summary>
         public void MarkWorktreePruned(string taskId)
         {
+            // Task-scoped: marks EVERY worktree row for the task pruned. With
+            // per-agent isolation this is the prune-all form used by the task-done
+            // teardown. To prune a single agent's row, use the (taskId, agentName)
+            // overload below.
             const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Mark a single agent's worktree record pruned (one row of the composite
+        /// key). Used when pruning per-agent worktrees individually (task bab81a92).
+        /// </summary>
+        public void MarkWorktreePruned(string taskId, string agentName)
+        {
+            const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId AND agent_name = @agentName";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
             cmd.ExecuteNonQuery();
         }
 
@@ -1959,7 +2078,7 @@ namespace MultiTerminal.Services
         public List<MCPServer.Models.TaskWorktree> ListActiveWorktrees()
         {
             const string sql = @"
-                SELECT task_id, worktree_path, branch_name, created_at, status
+                SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
                 FROM task_worktrees
                 WHERE status = 'active'
                 ORDER BY created_at DESC
@@ -1969,14 +2088,7 @@ namespace MultiTerminal.Services
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new MCPServer.Models.TaskWorktree
-                {
-                    TaskId = reader.GetString(0),
-                    WorktreePath = reader.GetString(1),
-                    BranchName = reader.GetString(2),
-                    CreatedAt = DateTime.Parse(reader.GetString(3)),
-                    Status = reader.GetString(4)
-                });
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -2012,7 +2124,7 @@ namespace MultiTerminal.Services
         public List<MCPServer.Models.TaskWorktree> ListActiveWorktreesForDoneTasks()
         {
             const string sql = @"
-                SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status
+                SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status, w.agent_name, w.is_canonical
                 FROM task_worktrees w
                 JOIN tasks t ON t.id = w.task_id
                 WHERE w.status = 'active' AND t.status = 'done'
@@ -2023,14 +2135,7 @@ namespace MultiTerminal.Services
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new MCPServer.Models.TaskWorktree
-                {
-                    TaskId = reader.GetString(0),
-                    WorktreePath = reader.GetString(1),
-                    BranchName = reader.GetString(2),
-                    CreatedAt = DateTime.Parse(reader.GetString(3)),
-                    Status = reader.GetString(4)
-                });
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -2044,7 +2149,7 @@ namespace MultiTerminal.Services
         public List<MCPServer.Models.TaskWorktree> ListPrunedWorktreesForDoneTasks()
         {
             const string sql = @"
-                SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status
+                SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status, w.agent_name, w.is_canonical
                 FROM task_worktrees w
                 JOIN tasks t ON t.id = w.task_id
                 WHERE w.status = 'pruned' AND t.status = 'done'
@@ -2055,14 +2160,7 @@ namespace MultiTerminal.Services
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add(new MCPServer.Models.TaskWorktree
-                {
-                    TaskId = reader.GetString(0),
-                    WorktreePath = reader.GetString(1),
-                    BranchName = reader.GetString(2),
-                    CreatedAt = DateTime.Parse(reader.GetString(3)),
-                    Status = reader.GetString(4)
-                });
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -5557,16 +5655,84 @@ namespace MultiTerminal.Services
 
             const string createSql = @"
                 CREATE TABLE IF NOT EXISTS task_worktrees (
-                    task_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
                     worktree_path TEXT NOT NULL,
                     branch_name TEXT NOT NULL,
                     created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-                    status TEXT NOT NULL DEFAULT 'active'
+                    status TEXT NOT NULL DEFAULT 'active',
+                    agent_name TEXT NOT NULL DEFAULT '__legacy__',
+                    is_canonical INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (task_id, agent_name)
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_worktrees_status ON task_worktrees(status);
+                CREATE INDEX IF NOT EXISTS idx_task_worktrees_task ON task_worktrees(task_id);
             ";
             using var createCmd = new SQLiteCommand(createSql, _connection);
             createCmd.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Migration for per-agent worktree isolation (task bab81a92 / design ff1dc68f):
+        /// adds the <c>agent_name</c> and <c>is_canonical</c> columns and widens the
+        /// primary key from <c>(task_id)</c> to <c>(task_id, agent_name)</c> so multiple
+        /// agents can each hold their own worktree on the same task. SQLite cannot
+        /// redefine a primary key in place, so the table is rebuilt. Pre-existing rows
+        /// (one worktree per task, implicitly owned by the task's assignee) backfill to
+        /// <c>agent_name = tasks.assignee</c> (or <c>'__legacy__'</c> when unknown) and
+        /// <c>is_canonical = 1</c>. Idempotent: a no-op once <c>agent_name</c> exists
+        /// (already migrated, or a fresh DB whose CreateSchema declared the new layout).
+        /// </summary>
+        private void MigrateAddAgentToTaskWorktrees()
+        {
+            // Guard on the column rather than the table: the table always exists by now
+            // (CreateSchema / MigrateAddTaskWorktrees), so we key off the new column.
+            bool columnExists = false;
+            using (var checkCmd = new SQLiteCommand("PRAGMA table_info(task_worktrees)", _connection))
+            using (var reader = checkCmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (reader.GetString(1).Equals("agent_name", StringComparison.OrdinalIgnoreCase))
+                    {
+                        columnExists = true;
+                        break;
+                    }
+                }
+            }
+
+            if (columnExists) return;
+
+            // Rebuild the table with the composite primary key, in a transaction so a
+            // mid-rebuild failure leaves the original table intact.
+            using var tx = _connection.BeginTransaction();
+            const string rebuildSql = @"
+                CREATE TABLE task_worktrees_new (
+                    task_id TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    branch_name TEXT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    status TEXT NOT NULL DEFAULT 'active',
+                    agent_name TEXT NOT NULL DEFAULT '__legacy__',
+                    is_canonical INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (task_id, agent_name)
+                );
+                INSERT INTO task_worktrees_new
+                    (task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical)
+                SELECT
+                    task_id, worktree_path, branch_name, created_at, status,
+                    COALESCE((SELECT assignee FROM tasks WHERE tasks.id = task_worktrees.task_id), '__legacy__'),
+                    1
+                FROM task_worktrees;
+                DROP TABLE task_worktrees;
+                ALTER TABLE task_worktrees_new RENAME TO task_worktrees;
+                CREATE INDEX IF NOT EXISTS idx_task_worktrees_status ON task_worktrees(status);
+                CREATE INDEX IF NOT EXISTS idx_task_worktrees_task ON task_worktrees(task_id);
+            ";
+            using (var cmd = new SQLiteCommand(rebuildSql, _connection, tx))
+            {
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
         }
 
         #region Project Notes

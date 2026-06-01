@@ -31,6 +31,19 @@ namespace MultiTerminal.MCPServer.Services
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
         private readonly MultiTerminal.Services.WorktreeAutoCommitService _autoCommit;
         private readonly MultiTerminal.Services.WorktreeMergeService _merge;
+
+        // Per-task lock serializing the helper-branch INTEGRATION merge (run in the
+        // canonical worktree at task-done) against activation-time worktree CREATION,
+        // so a helper worktree can't be created/moved while the canonical branch is
+        // mid-merge (per-agent isolation, task bab81a92). Prune-all is intentionally
+        // NOT under this lock — it is guarded by WorktreePruneCoordinator plus the
+        // activation-side status re-check (create is skipped once the task goes done).
+        // Process-scoped; contention is rare (at most one create vs one teardown).
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _taskWorktreeLocks
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, object>();
+
+        private static object TaskWorktreeLock(string taskId)
+            => _taskWorktreeLocks.GetOrAdd(taskId ?? string.Empty, _ => new object());
         private readonly MultiTerminal.Services.WorktreeJanitorService _janitor;
 
         // Project storage
@@ -353,7 +366,7 @@ namespace MultiTerminal.MCPServer.Services
         public async Task<bool> TryDeferredPruneRetryAsync(string taskId)
         {
             if (string.IsNullOrEmpty(taskId)) return false;
-            string markedPath = null;
+            var markedPaths = new List<string>();
             bool clearMarkOnExit = false;
             try
             {
@@ -370,33 +383,110 @@ namespace MultiTerminal.MCPServer.Services
                 var task = _taskDb.GetTask(taskId);
                 if (task == null || !string.Equals(task.Status, "done", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Task no longer wants pruning. Clear any stale defer-mark
-                    // so spawns can resume in the worktree.
+                    // Task no longer wants pruning. Clear any stale defer-mark on
+                    // EVERY agent worktree path so spawns can resume.
+                    foreach (var w in _taskDb.ListWorktreesForTask(taskId))
+                    {
+                        if (!string.IsNullOrEmpty(w.WorktreePath))
+                            WorktreePruneCoordinator.UnmarkPruning(w.WorktreePath);
+                    }
                     WorktreePruneCoordinator.UnmarkPruning(record.WorktreePath);
                     System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Deferred prune for task {taskId} cancelled — task no longer 'done'. Released defer-mark.");
+                        $"[MessageBroker] Deferred prune for task {taskId} cancelled — task no longer 'done'. Released defer-marks.");
                     return false;
                 }
 
                 string projectPath = TryGetProjectPathForTask(taskId);
                 if (string.IsNullOrEmpty(projectPath)) return false;
 
-                markedPath = record.WorktreePath;
-                WorktreePruneCoordinator.MarkPruning(markedPath); // idempotent; broker already marked at defer time
-                bool removed = await _worktrees.PruneForTaskAsync(taskId, projectPath).ConfigureAwait(false);
+                // CRITICAL (item [5], task bab81a92): a helper-integration CONFLICT
+                // in the synchronous done-path halts teardown and leaves the worktree
+                // rows status='active' on a DONE task — which is indistinguishable
+                // HERE from a prune merely deferred for a cwd-lock. Before doing
+                // anything destructive, RE-RUN helper integration. It is idempotent:
+                // helpers already merged in the synchronous pass report "nothing to
+                // merge". If it CONFLICTS, this is NOT a clean deferred prune — BAIL
+                // and preserve every worktree and branch so the helper's committed
+                // work is never force-deleted. Mirrors the synchronous path's
+                // "conflict => halt teardown"; without it the janitor would prune +
+                // force-delete un-integrated helper branches and trunk-merge
+                // canonical-only, silently dropping committed helper commits.
+                // Serialize integration under the per-task lock, exactly as the
+                // synchronous done-path (CommitAndIntegrateHelpers) does, so a concurrent
+                // activation can't create/move a helper worktree while the canonical
+                // branch is mid-merge (bab81a92 pipeline fix #2). The janitor runs on a
+                // background timer thread, so briefly blocking it here is fine; mirror the
+                // sync path's lock + GetAwaiter().GetResult() to share the SAME lock
+                // primitive (a separate SemaphoreSlim would not mutually exclude with the
+                // monitor the sync path and activation hold).
+                MultiTerminal.Services.HelperIntegrationResult integration;
+                lock (TaskWorktreeLock(taskId))
+                {
+                    integration = _merge.IntegrateHelperBranchesAsync(taskId, projectPath).GetAwaiter().GetResult();
+                }
+                if (!integration.Success)
+                {
+                    if (integration.HadConflicts)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Deferred prune for {taskId} aborted: helper integration conflict ({string.Join(", ", integration.ConflictBranches)}). Worktrees + branches preserved for rebase recovery.");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "helper_integration_conflict",
+                            Content = $"Deferred completion of '{task.Title}' blocked: helper branch(es) {string.Join(", ", integration.ConflictBranches)} conflict with the task branch. Worktrees and branches preserved — rebase the helper branch onto the task branch, resolve, then re-mark done.",
+                            RelatedId = taskId
+                        });
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Deferred prune for {taskId} aborted: helper integration failed ({integration.Stderr}). Worktrees preserved.");
+                    }
+                    return false; // nothing marked or pruned yet — everything preserved
+                }
+
+                // Integration confirmed (or a no-op for already-merged / single-agent
+                // tasks): safe to prune EVERY agent worktree (canonical + helpers) and
+                // then force-delete the integrated helper branches once their worktrees
+                // are gone. Only branches IntegrateHelperBranchesAsync actually
+                // integrated are deleted below — never an un-integrated branch.
+                foreach (var w in _taskDb.ListWorktreesForTask(taskId))
+                {
+                    if (!string.Equals(w.Status, "active", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.IsNullOrEmpty(w.WorktreePath) && !markedPaths.Contains(w.WorktreePath))
+                        markedPaths.Add(w.WorktreePath);
+                }
+                if (!string.IsNullOrEmpty(record.WorktreePath) && !markedPaths.Contains(record.WorktreePath))
+                    markedPaths.Add(record.WorktreePath);
+
+                foreach (var p in markedPaths)
+                    WorktreePruneCoordinator.MarkPruning(p); // idempotent; broker already marked at defer time
+
+                bool removed = await _worktrees.PruneAllForTaskAsync(taskId, projectPath).ConfigureAwait(false);
                 clearMarkOnExit = removed; // only unmark on success
 
                 // Cycle-4 dbbb8de2 fix: when the deferred prune finally
                 // succeeds, run the same post-prune sequence the synchronous
-                // task-done path runs — auto-merge + fire WorktreeReady. The
-                // synchronous path had already returned to the user minutes
-                // earlier with the task marked done; without this call, the
-                // task branch was never merged AND any HUD panel that was
-                // bound to the worktree stayed bound to a now-deleted
-                // directory until the user manually refreshed.
+                // task-done path runs — delete integrated helper branches, then
+                // auto-merge the canonical branch + fire WorktreeReady. Without
+                // this the task branch was never merged AND HUD panels bound to
+                // the worktree stayed bound to a now-deleted directory.
                 if (removed)
                 {
-                    PerformPostPruneMergeAndFireReady(taskId, task, projectPath, markedPath);
+                    foreach (var hb in integration.IntegratedBranches)
+                    {
+                        try
+                        {
+                            await _merge.DeleteBranchAsync(projectPath, hb, force: true).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Deferred-retry delete helper branch '{hb}' failed: {ex.Message}");
+                        }
+                    }
+                    PerformPostPruneMergeAndFireReady(taskId, task, projectPath, record.WorktreePath);
                 }
 
                 return removed;
@@ -408,9 +498,10 @@ namespace MultiTerminal.MCPServer.Services
             }
             finally
             {
-                if (clearMarkOnExit && !string.IsNullOrEmpty(markedPath))
+                if (clearMarkOnExit)
                 {
-                    WorktreePruneCoordinator.UnmarkPruning(markedPath);
+                    foreach (var p in markedPaths)
+                        WorktreePruneCoordinator.UnmarkPruning(p);
                 }
             }
         }
@@ -583,6 +674,178 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Phase 2 (helpers) + Phase 2.5 of per-agent worktree isolation
+        /// (task bab81a92): commit every HELPER worktree on its own branch, then
+        /// integrate each helper branch into the canonical branch inside the
+        /// canonical worktree. Returns <c>true</c> to proceed with prune-all +
+        /// trunk merge, or <c>false</c> to HALT teardown (a helper commit failed or
+        /// a helper merge conflicted) — leaving every worktree/branch intact for
+        /// manual resolution. No-op returning <c>true</c> for single-agent tasks
+        /// (the canonical commit already ran in the caller). Populates
+        /// <paramref name="integratedBranches"/> with the helper branches integrated
+        /// (to delete after prune-all).
+        /// </summary>
+        private bool CommitAndIntegrateHelpers(KanbanTask task, string repoRoot, out List<string> integratedBranches)
+        {
+            integratedBranches = new List<string>();
+            string taskId = task.Id;
+
+            List<MultiTerminal.MCPServer.Models.TaskWorktree> all;
+            try
+            {
+                all = _taskDb.ListWorktreesForTask(taskId);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] ListWorktreesForTask({taskId}) threw: {ex.Message}");
+                // Can't enumerate per-agent worktrees — fall back to the canonical-only
+                // path (single-agent behavior); the canonical commit already ran.
+                return true;
+            }
+
+            var helpers = new List<MultiTerminal.MCPServer.Models.TaskWorktree>();
+            foreach (var w in all)
+            {
+                if (!w.IsCanonical && string.Equals(w.Status, "active", StringComparison.OrdinalIgnoreCase))
+                {
+                    helpers.Add(w);
+                }
+            }
+            if (helpers.Count == 0) return true;  // single-agent fast path
+
+            // Phase 2 (helpers): commit each helper worktree on its own branch.
+            foreach (var helper in helpers)
+            {
+                try
+                {
+                    var hc = _autoCommit.CommitForAgentAsync(
+                        taskId, helper.AgentName, repoRoot, task.Title, task.ImplementationSummary).GetAwaiter().GetResult();
+                    if (!hc.Success)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Helper commit failed for {taskId}/{helper.AgentName}: {hc.Stderr}");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = task.Assignee ?? "System",
+                            Type = "worktree",
+                            Action = "helper_commit_failed",
+                            Content = $"Auto-commit of helper '{helper.AgentName}' worktree failed for '{task.Title}'. Teardown halted — see debug log.",
+                            RelatedId = taskId
+                        });
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Helper commit threw for {taskId}/{helper.AgentName}: {ex.Message}");
+                    RecordActivity(new ActivityEvent
+                    {
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = "helper_commit_failed",
+                        Content = $"Auto-commit of helper '{helper.AgentName}' worktree threw for '{task.Title}'. Teardown halted — see debug log.",
+                        RelatedId = taskId
+                    });
+                    return false;
+                }
+            }
+
+            // Phase 2.5: integrate each helper branch into the canonical branch.
+            // Serialized per-task so a concurrent activation can't create/move a
+            // helper worktree while the canonical branch is mid-merge.
+            try
+            {
+                MultiTerminal.Services.HelperIntegrationResult integ;
+                lock (TaskWorktreeLock(taskId))
+                {
+                    integ = _merge.IntegrateHelperBranchesAsync(taskId, repoRoot).GetAwaiter().GetResult();
+                }
+                if (!integ.Success)
+                {
+                    string offending = integ.ConflictBranches != null && integ.ConflictBranches.Count > 0
+                        ? string.Join(", ", integ.ConflictBranches)
+                        : "(see debug log)";
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Helper integration halted for {taskId}: {integ.Stderr}");
+                    RecordActivity(new ActivityEvent
+                    {
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = integ.HadConflicts ? "helper_integration_conflict" : "helper_integration_failed",
+                        Content = integ.HadConflicts
+                            ? $"Helper branch '{offending}' conflicts with the task branch for '{task.Title}'. Teardown halted; worktrees preserved for manual resolution."
+                            : $"Helper integration could not complete for '{task.Title}'. Teardown halted — see debug log.",
+                        RelatedId = taskId
+                    });
+
+                    if (integ.HadConflicts)
+                    {
+                        NotifyHelperIntegrationConflict(task, helpers, offending);
+                    }
+                    return false;
+                }
+                integratedBranches = integ.IntegratedBranches ?? new List<string>();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MessageBroker] Helper integration threw for {taskId}: {ex.Message}");
+                RecordActivity(new ActivityEvent
+                {
+                    Terminal = task.Assignee ?? "System",
+                    Type = "worktree",
+                    Action = "helper_integration_failed",
+                    Content = $"Helper integration threw for '{task.Title}'. Teardown halted — see debug log.",
+                    RelatedId = taskId
+                });
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Best-effort targeted notification when helper-branch integration conflicts
+        /// at task-done: messages the assignee and each helper with retry-after-rebase
+        /// guidance. Delivery failures (offline / unknown terminals) are swallowed —
+        /// the activity-feed entry already recorded the conflict durably.
+        /// </summary>
+        private void NotifyHelperIntegrationConflict(
+            KanbanTask task,
+            List<MultiTerminal.MCPServer.Models.TaskWorktree> helpers,
+            string offendingBranches)
+        {
+            string from = task.Assignee ?? "System";
+            string body = $"⚠ Task-done teardown for '{task.Title}' is blocked: helper branch(es) {offendingBranches} conflict with the task branch. " +
+                          "Rebase your task/<id>--<slug> branch onto the updated task branch, resolve the conflict, then ask the assignee to re-mark the task done to retry integration.";
+
+            var recipients = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(task.Assignee)) recipients.Add(task.Assignee);
+            foreach (var h in helpers)
+            {
+                if (!string.IsNullOrEmpty(h.AgentName)
+                    && !string.Equals(h.AgentName, MultiTerminal.Services.WorktreeNaming.LegacyAgent, StringComparison.Ordinal))
+                {
+                    recipients.Add(h.AgentName);
+                }
+            }
+
+            foreach (var to in recipients)
+            {
+                if (string.Equals(to, from, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    SendMessage(from, to, body, "high").GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Conflict notify to '{to}' failed: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
         /// Collapses a git stderr / exception message to a single line and caps
         /// its length so the auto-merge-failed activity entry stays readable in
         /// the feed while still naming the actual cause (dirty trunk, conflict,
@@ -690,9 +953,13 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(terminalName)) return null;
             try
             {
-                var activeTask = GetMyActiveTask(terminalName);
+                var activeTask = ResolveActiveTaskForAgent(terminalName);
                 if (activeTask == null) return null;
-                string candidate = _worktrees?.GetWorktreePathForTask(activeTask.Id);
+                // Per-agent isolation: resolve THIS terminal's own worktree on the
+                // task (canonical for the assignee, helper for a helper). Fall back
+                // to the canonical worktree when the agent has no per-agent row.
+                string candidate = _worktrees?.GetWorktreePathForTask(activeTask.Id, terminalName)
+                                   ?? _worktrees?.GetWorktreePathForTask(activeTask.Id);
                 if (string.IsNullOrEmpty(candidate) || !System.IO.Directory.Exists(candidate))
                     return null;
                 System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' -> task '{activeTask.Id}' -> '{candidate}'");
@@ -722,7 +989,7 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(terminalName)) return null;
             try
             {
-                var activeTask = GetMyActiveTask(terminalName);
+                var activeTask = ResolveActiveTaskForAgent(terminalName);
                 if (activeTask == null) return null;
                 return TryGetProjectPathForTask(activeTask.Id);
             }
@@ -3629,6 +3896,30 @@ namespace MultiTerminal.MCPServer.Services
                     });
                 }
 
+                // Phase 2 (helpers) + Phase 2.5 (integration) for per-agent isolation:
+                // commit every helper worktree and merge each helper branch into the
+                // canonical branch BEFORE pruning. A helper-commit failure or a merge
+                // conflict halts teardown (shouldPrune=false) so nothing is lost.
+                // No-op for single-agent tasks (the canonical commit already ran).
+                List<string> integratedHelperBranches = new List<string>();
+                if (shouldPrune)
+                {
+                    bool proceedTeardown;
+                    try
+                    {
+                        proceedTeardown = CommitAndIntegrateHelpers(task, doneProj.Path, out integratedHelperBranches);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] CommitAndIntegrateHelpers threw for {taskId}: {ex.Message}");
+                        proceedTeardown = false;
+                    }
+                    if (!proceedTeardown)
+                    {
+                        shouldPrune = false;
+                    }
+                }
+
                 bool prunedOK = false;
                 // Hoisted out of the if(shouldPrune) block so the FireWorktreeReady
                 // call (now after the if(prunedOK) block) can pass the same path
@@ -3654,12 +3945,41 @@ namespace MultiTerminal.MCPServer.Services
                     //     into a soon-to-be-deleted worktree (closes the
                     //     TOCTOU window adversary flagged).
                     worktreePathToPrune = _worktrees?.GetWorktreePathForTask(taskId);
-                    bool marked = false;
-                    if (!string.IsNullOrEmpty(worktreePathToPrune))
+
+                    // Per-agent isolation: every agent worktree for the task is about
+                    // to be pruned, so broadcast + mark EACH active path (not just the
+                    // canonical one) so an agent cwd'd in a helper worktree can also cd
+                    // out before git removes it.
+                    var prunePaths = new List<string>();
+                    try
                     {
-                        WorktreePruneCoordinator.MarkPruning(worktreePathToPrune);
-                        marked = true;
-                        var fireArgs = FireWorktreePruning(taskId, worktreePathToPrune, doneProj.Path, task.Assignee);
+                        foreach (var w in _taskDb.ListWorktreesForTask(taskId))
+                        {
+                            if (string.Equals(w.Status, "active", StringComparison.OrdinalIgnoreCase)
+                                && !string.IsNullOrEmpty(w.WorktreePath)
+                                && !prunePaths.Contains(w.WorktreePath))
+                            {
+                                prunePaths.Add(w.WorktreePath);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Enumerate prune paths for {taskId} failed: {ex.Message}");
+                    }
+                    // Always include the canonical path (covers single-agent + the
+                    // enumerate-failed fallback).
+                    if (!string.IsNullOrEmpty(worktreePathToPrune) && !prunePaths.Contains(worktreePathToPrune))
+                    {
+                        prunePaths.Add(worktreePathToPrune);
+                    }
+
+                    var markedPaths = new List<string>();
+                    foreach (var prunePath in prunePaths)
+                    {
+                        WorktreePruneCoordinator.MarkPruning(prunePath);
+                        markedPaths.Add(prunePath);
+                        var fireArgs = FireWorktreePruning(taskId, prunePath, doneProj.Path, task.Assignee);
 
                         // Cycle-3 adversary HIGH fix: if the broadcast didn't
                         // complete in time, DEFER prune — leave the worktree
@@ -3667,9 +3987,11 @@ namespace MultiTerminal.MCPServer.Services
                         // once agents have likely moved on. Pruning while
                         // agents still hold cwd reduces to the partial-prune
                         // fallback + empty shell, which Pass 3 has to clean
-                        // up anyway. Skipping it removes that window.
-                        deferred = !fireArgs.AllDelivered;
+                        // up anyway. Skipping it removes that window. If ANY
+                        // path's broadcast didn't deliver, defer the whole prune.
+                        if (!fireArgs.AllDelivered) deferred = true;
                     }
+                    bool marked = markedPaths.Count > 0;
 
                     if (deferred)
                     {
@@ -3690,7 +4012,9 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         try
                         {
-                            _worktrees.PruneForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                            // Prune ALL agent worktrees for the task (canonical +
+                            // helpers), not just the canonical one.
+                            _worktrees.PruneAllForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
                             prunedOK = true;
                         }
                         catch (Exception ex)
@@ -3720,7 +4044,10 @@ namespace MultiTerminal.MCPServer.Services
                     // marks the DB pruned), so unmarking is safe.
                     if (marked && !deferred)
                     {
-                        WorktreePruneCoordinator.UnmarkPruning(worktreePathToPrune);
+                        foreach (var markedPath in markedPaths)
+                        {
+                            WorktreePruneCoordinator.UnmarkPruning(markedPath);
+                        }
                     }
                 }
 
@@ -3735,6 +4062,21 @@ namespace MultiTerminal.MCPServer.Services
                 // deferred-prune retry can run the same post-prune sequence.
                 if (prunedOK)
                 {
+                    // Delete integrated helper branches now their worktrees are gone.
+                    // Their commits live in the canonical branch but not yet trunk, so
+                    // force-delete (-D); the canonical branch is deleted by Phase 3.
+                    foreach (var helperBranch in integratedHelperBranches)
+                    {
+                        try
+                        {
+                            _merge.DeleteBranchAsync(doneProj.Path, helperBranch, force: true).GetAwaiter().GetResult();
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Delete helper branch '{helperBranch}' failed for {taskId}: {ex.Message}");
+                        }
+                    }
+
                     PerformPostPruneMergeAndFireReady(taskId, task, doneProj.Path, worktreePathToPrune);
                 }
             }
@@ -4476,6 +4818,16 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             var assignee = task.Assignee ?? updatedBy;
+
+            // Per-agent worktree isolation (task bab81a92): the agent performing the
+            // activation owns its own worktree. The assignee holds the canonical
+            // worktree (task/<id>); any other activator is a helper on a
+            // task/<id>--<slug> branch. Auto-pause + activity tracking below stay
+            // keyed on the task assignee (unchanged single-active-task model).
+            string actingAgent = updatedBy ?? assignee;
+            bool isActingAssignee = string.IsNullOrEmpty(task.Assignee)
+                || string.Equals(actingAgent, task.Assignee, StringComparison.OrdinalIgnoreCase);
+
             var pausedIds = new List<string>();
             var pausedTitles = new List<string>();
 
@@ -4498,7 +4850,8 @@ namespace MultiTerminal.MCPServer.Services
                     if (oldTaskId == null)
                     {
                         oldTaskId = other.Id;
-                        oldWorktreePath = _worktrees?.GetWorktreePathForTask(other.Id);
+                        oldWorktreePath = _worktrees?.GetWorktreePathForTask(other.Id, actingAgent)
+                                          ?? _worktrees?.GetWorktreePathForTask(other.Id);
                     }
 
                     other.SubStatus = "paused";
@@ -4517,6 +4870,24 @@ namespace MultiTerminal.MCPServer.Services
 
             try { _taskDb.SaveTask(task); }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to set task active: {ex.Message}"); }
+
+            // Auto-helper: an agent that activates a task it doesn't own (not the
+            // assignee, not already a helper) is registered as a helper so the
+            // helper list stays consistent with the per-agent worktree it's about
+            // to receive. Emits the standard helper-added notification.
+            if (!isActingAssignee
+                && !string.IsNullOrEmpty(actingAgent)
+                && !task.Helpers.Contains(actingAgent, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    AddHelper(taskId, actingAgent, actingAgent).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-add helper '{actingAgent}' on task {taskId} failed: {ex.Message}");
+                }
+            }
 
             // Phase 1 worktree isolation — gated by MULTITERMINAL_WORKTREE_MODE.
             // Materialize a fresh worktree on `git worktree add` so subsequent agent
@@ -4570,7 +4941,18 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     try
                     {
-                        _worktrees.CreateForTaskAsync(taskId, activeProj.Path).GetAwaiter().GetResult();
+                        // Serialize against task-done helper integration so a helper
+                        // worktree can't be created while the canonical branch is mid-merge.
+                        lock (TaskWorktreeLock(taskId))
+                        {
+                            // Re-check under the lock: if the task went done (teardown
+                            // started) since we entered SetTaskActive, don't create a
+                            // worktree the teardown would never see / prune.
+                            if (string.Equals(task.Status, "in_progress", StringComparison.OrdinalIgnoreCase))
+                            {
+                                _worktrees.CreateForTaskAsync(taskId, actingAgent, isActingAssignee, activeProj.Path).GetAwaiter().GetResult();
+                            }
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -4639,11 +5021,15 @@ namespace MultiTerminal.MCPServer.Services
             // react). Resolve newWorktreePath fresh from the worktree manager
             // so we reflect whatever the create attempt above produced (null
             // when worktree mode is off, project unresolvable, or git failed).
-            string newWorktreePath = _worktrees?.GetWorktreePathForTask(taskId);
+            // Resolve the ACTING agent's own worktree (canonical for the assignee,
+            // helper for a helper) so the event — and the agent-side auto-cd hook —
+            // target the worktree that agent will actually work in.
+            string newWorktreePath = _worktrees?.GetWorktreePathForTask(taskId, actingAgent)
+                                     ?? _worktrees?.GetWorktreePathForTask(taskId);
             try
             {
                 TaskActiveChanged?.Invoke(this, new TaskActiveChangedEventArgs(
-                    agentName: assignee,
+                    agentName: actingAgent,
                     oldTaskId: oldTaskId,
                     oldWorktreePath: oldWorktreePath,
                     newTaskId: taskId,
@@ -4942,6 +5328,49 @@ namespace MultiTerminal.MCPServer.Services
                     t.SubStatus == "active");
 
             return activeTask ?? _taskDb.GetActiveTaskForAgent(agentName);
+        }
+
+        /// <summary>
+        /// Resolve the agent's active task for WORKTREE/CWD purposes. Distinct
+        /// from <see cref="GetMyActiveTask"/>, which is strict (assignee +
+        /// <c>sub_status='active'</c>) and must stay that way so kanban callers
+        /// (session-start, get_my_active_task) never see a paused task.
+        ///
+        /// <para>A HELPER is never the task assignee, so the strict lookup always
+        /// misses for them — yet a helper still owns a per-agent worktree it must
+        /// be routed into (get_active_worktree, and the spawn-cwd resolvers
+        /// <see cref="ResolveTaskWorktreePath"/> / <see cref="ResolveTaskRepoRoot"/>).
+        /// The helper's own active <c>task_worktrees</c> row is the per-agent
+        /// active pointer; resolve the task from it. Falls back to the strict
+        /// result for the assignee (unchanged), so assignee resolution is
+        /// byte-identical. Most-recent active worktree row wins when an agent
+        /// helps on several tasks (task bab81a92, fixes acceptance scenario 2b).</para>
+        /// </summary>
+        public KanbanTask ResolveActiveTaskForAgent(string agentName)
+        {
+            if (string.IsNullOrEmpty(agentName)) return null;
+
+            // Assignee path — strict, unchanged.
+            var strict = GetMyActiveTask(agentName);
+            if (strict != null) return strict;
+
+            // Helper path — resolve via the agent's own active worktree row.
+            try
+            {
+                var wt = _taskDb?.GetActiveWorktreeForAgent(agentName);
+                if (wt != null && !string.IsNullOrEmpty(wt.TaskId))
+                {
+                    return _tasks.TryGetValue(wt.TaskId, out var helperTask)
+                        ? helperTask
+                        : _taskDb.GetTask(wt.TaskId);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[ResolveActiveTaskForAgent] '{agentName}' threw: {ex.Message} — no helper worktree resolved");
+            }
+
+            return null;
         }
 
         /// <summary>

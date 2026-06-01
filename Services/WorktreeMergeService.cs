@@ -73,6 +73,12 @@ namespace MultiTerminal.Services
                 };
             }
 
+            // Phase 3 always merges the CANONICAL task branch into trunk, derived by
+            // name (not from the record, which can resolve to a helper row when the
+            // assignee never materialized a canonical worktree). In the normal case
+            // this equals the canonical record's branch.
+            string branchName = WorktreeNaming.CanonicalBranch(taskId);
+
             var trunkResult = await RunGitAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
             if (trunkResult.exitCode != 0)
             {
@@ -93,7 +99,7 @@ namespace MultiTerminal.Services
                 };
             }
 
-            if (string.Equals(trunk, record.BranchName, StringComparison.Ordinal))
+            if (string.Equals(trunk, branchName, StringComparison.Ordinal))
             {
                 return new MergeResult
                 {
@@ -102,7 +108,7 @@ namespace MultiTerminal.Services
                 };
             }
 
-            var branchListResult = await RunGitAsync(repoRoot, "branch", "--list", record.BranchName).ConfigureAwait(false);
+            var branchListResult = await RunGitAsync(repoRoot, "branch", "--list", branchName).ConfigureAwait(false);
             if (branchListResult.exitCode != 0)
             {
                 return new MergeResult
@@ -116,24 +122,24 @@ namespace MultiTerminal.Services
                 return new MergeResult
                 {
                     Success = true,
-                    SkippedReason = $"task branch '{record.BranchName}' already deleted"
+                    SkippedReason = $"task branch '{branchName}' already deleted"
                 };
             }
 
             var aheadResult = await RunGitAsync(
-                repoRoot, "log", "--oneline", $"{trunk}..{record.BranchName}").ConfigureAwait(false);
+                repoRoot, "log", "--oneline", $"{trunk}..{branchName}").ConfigureAwait(false);
             if (aheadResult.exitCode != 0)
             {
                 return new MergeResult
                 {
                     Success = false,
-                    Stderr = $"git log {trunk}..{record.BranchName} failed: {aheadResult.stderr.Trim()}"
+                    Stderr = $"git log {trunk}..{branchName} failed: {aheadResult.stderr.Trim()}"
                 };
             }
             if (string.IsNullOrWhiteSpace(aheadResult.stdout))
             {
                 // Task branch has no commits beyond trunk — safe to delete without merging.
-                var deleteEmpty = await RunGitAsync(repoRoot, "branch", "-d", record.BranchName).ConfigureAwait(false);
+                var deleteEmpty = await RunGitAsync(repoRoot, "branch", "-d", branchName).ConfigureAwait(false);
                 if (deleteEmpty.exitCode != 0)
                 {
                     return new MergeResult
@@ -146,7 +152,7 @@ namespace MultiTerminal.Services
                 {
                     Success = true,
                     MergedInto = trunk,
-                    SkippedReason = $"no commits to merge; branch '{record.BranchName}' deleted"
+                    SkippedReason = $"no commits to merge; branch '{branchName}' deleted"
                 };
             }
 
@@ -181,7 +187,7 @@ namespace MultiTerminal.Services
                     return new MergeResult
                     {
                         Success = false,
-                        Stderr = $"Main checkout has uncommitted changes — cannot merge {record.BranchName} into {trunk}. Please commit or stash before closing this task. Offending files: {string.Join(", ", nonBookkeeping)}."
+                        Stderr = $"Main checkout has uncommitted changes — cannot merge {branchName} into {trunk}. Please commit or stash before closing this task. Offending files: {string.Join(", ", nonBookkeeping)}."
                     };
                 }
 
@@ -215,7 +221,7 @@ namespace MultiTerminal.Services
             }
 
             var mergeRunResult = await RunGitAsync(
-                repoRoot, "merge", "--no-edit", record.BranchName).ConfigureAwait(false);
+                repoRoot, "merge", "--no-edit", branchName).ConfigureAwait(false);
             if (mergeRunResult.exitCode != 0)
             {
                 // Conflict (or other merge error) — abort to keep main clean.
@@ -232,7 +238,7 @@ namespace MultiTerminal.Services
             // Use lowercase -d (refuses if not merged). The merge just succeeded
             // so this should always work; if it doesn't, surface as partial
             // success — the merge is durable, only the branch cleanup failed.
-            var deleteBranchResult = await RunGitAsync(repoRoot, "branch", "-d", record.BranchName).ConfigureAwait(false);
+            var deleteBranchResult = await RunGitAsync(repoRoot, "branch", "-d", branchName).ConfigureAwait(false);
             if (deleteBranchResult.exitCode != 0)
             {
                 return new MergeResult
@@ -248,6 +254,225 @@ namespace MultiTerminal.Services
                 Success = true,
                 MergedInto = trunk
             };
+        }
+
+        /// <summary>
+        /// Resolve the trunk branch (the main checkout's current branch) to root a new
+        /// canonical task branch at. Returns <c>ok=false</c> with an explanatory error
+        /// when HEAD is detached or on a <c>task/</c> branch — rooting the canonical
+        /// branch there would silently fork it from the wrong commit (bab81a92 pipeline
+        /// fix #4). Non-throwing: callers fold the error into their HelperIntegrationResult.
+        /// </summary>
+        private async Task<(bool ok, string trunk, string error)> ResolveTrunkAsync(string repoRoot)
+        {
+            var r = await RunGitAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (r.exitCode != 0)
+                return (false, null, $"git rev-parse --abbrev-ref HEAD failed: {r.stderr.Trim()}");
+            string trunk = r.stdout.Trim();
+            if (string.Equals(trunk, "HEAD", StringComparison.OrdinalIgnoreCase))
+                return (false, null, "main checkout is in detached HEAD; refusing to create the canonical branch from an unknown base");
+            if (trunk.StartsWith("task/", StringComparison.Ordinal))
+                return (false, null, $"main checkout is on a task branch ({trunk}), not trunk; refusing to root the canonical branch there");
+            return (true, trunk, null);
+        }
+
+        /// <summary>
+        /// Phase 2.5 of per-agent isolation (task bab81a92): integrate each helper
+        /// branch <c>task/&lt;id&gt;--&lt;slug&gt;</c> into the canonical branch
+        /// <c>task/&lt;id&gt;</c> by merging INSIDE the canonical worktree (still
+        /// checked out, pre-prune). Runs BEFORE prune-all + the Phase 3 trunk merge
+        /// so the trunk merge of <c>task/&lt;id&gt;</c> carries every agent's work.
+        ///
+        /// <para>On a merge conflict the merge is aborted (canonical worktree left
+        /// clean) and the branch recorded in <see cref="HelperIntegrationResult.ConflictBranches"/>;
+        /// integration stops and the caller HALTS teardown so nothing is lost.
+        /// Returns success with nothing integrated for single-agent tasks.</para>
+        /// </summary>
+        public async Task<HelperIntegrationResult> IntegrateHelperBranchesAsync(string taskId, string repoRoot)
+        {
+            if (string.IsNullOrEmpty(taskId))
+                throw new ArgumentException("taskId is required", nameof(taskId));
+            if (string.IsNullOrEmpty(repoRoot))
+                throw new ArgumentException("repoRoot is required", nameof(repoRoot));
+
+            var result = new HelperIntegrationResult { Success = true };
+
+            string canonicalBranch = WorktreeNaming.CanonicalBranch(taskId);
+
+            // Find the canonical (is_canonical) record and collect the helper branches
+            // to integrate. Two sources, unioned (bab81a92 pipeline fix #3): (a) active
+            // non-canonical worktree rows, and (b) every task/<id>--<slug> branch that
+            // still exists in git. Source (b) recovers a helper whose worktree row was
+            // already marked pruned (janitor Pass-1 reconcile / partial prune) while its
+            // committed branch survives — without it that branch would never be
+            // integrated, never trunk-merged, and its commits silently stranded.
+            TaskWorktree canonicalRec = null;
+            var helperBranches = new System.Collections.Generic.List<string>();
+            var seenBranches = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+            foreach (var w in _db.ListWorktreesForTask(taskId))
+            {
+                if (w.IsCanonical)
+                {
+                    if (canonicalRec == null) canonicalRec = w;
+                }
+                else if (string.Equals(w.Status, "active", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrEmpty(w.BranchName) && seenBranches.Add(w.BranchName))
+                {
+                    helperBranches.Add(w.BranchName);
+                }
+            }
+
+            // (b) Helper branches present in git but not covered by an active row.
+            string helperPrefix = canonicalBranch + "--"; // task/<idShort>--
+            var branchList = await RunGitAsync(
+                repoRoot, "for-each-ref", "--format=%(refname:short)", $"refs/heads/{canonicalBranch}*").ConfigureAwait(false);
+            if (branchList.exitCode == 0)
+            {
+                foreach (var raw in branchList.stdout.Split('\n'))
+                {
+                    string b = raw.Trim();
+                    if (b.StartsWith(helperPrefix, StringComparison.Ordinal) && seenBranches.Add(b))
+                    {
+                        helperBranches.Add(b);
+                    }
+                }
+            }
+
+            if (helperBranches.Count == 0)
+            {
+                result.SkippedReason = "no helper worktrees or branches";
+                return result;
+            }
+
+            // Determine the worktree that hosts the integration merges — normally the
+            // assignee's canonical worktree. If it isn't on disk (e.g. the assignee
+            // never activated and only helpers worked), materialize a TRANSIENT
+            // worktree on the canonical branch to host integration, then remove it in
+            // the finally below. CA3003: paths are app-derived (repoRoot + taskId
+            // prefix), not user-supplied.
+            string canonicalWorktree = canonicalRec?.WorktreePath;
+#pragma warning disable CA3003
+            bool canonicalOnDisk = !string.IsNullOrEmpty(canonicalWorktree) && System.IO.Directory.Exists(canonicalWorktree);
+#pragma warning restore CA3003
+            bool transient = false;
+            string transientPath = null;
+
+            if (!canonicalOnDisk)
+            {
+                // Ensure the canonical branch exists (helpers create it when they fork,
+                // but be defensive); create from current HEAD if missing.
+                var refCheck = await RunGitAsync(repoRoot, "show-ref", "--verify", "--quiet", $"refs/heads/{canonicalBranch}").ConfigureAwait(false);
+                if (refCheck.exitCode != 0)
+                {
+                    // Root the canonical branch at trunk, not at whatever HEAD points to
+                    // (bab81a92 pipeline fix #4): a detached/task-branch HEAD here would
+                    // silently fork the canonical branch from the wrong commit.
+                    var (trunkOk, trunk, trunkErr) = await ResolveTrunkAsync(repoRoot).ConfigureAwait(false);
+                    if (!trunkOk)
+                    {
+                        result.Success = false;
+                        result.Stderr = $"could not create canonical branch '{canonicalBranch}' for integration: {trunkErr}";
+                        return result;
+                    }
+                    var branchCreate = await RunGitAsync(repoRoot, "branch", canonicalBranch, trunk).ConfigureAwait(false);
+                    if (branchCreate.exitCode != 0)
+                    {
+                        result.Success = false;
+                        result.Stderr = $"could not create canonical branch '{canonicalBranch}' from '{trunk}' for integration: {branchCreate.stderr.Trim()}";
+                        return result;
+                    }
+                }
+
+                transientPath = System.IO.Path.Combine(
+                    repoRoot.TrimEnd('\\', '/'), ".claude", "worktrees", WorktreeNaming.ShortId(taskId) + "__integrate");
+                // Self-heal: a prior crash mid-integration can leave a stale transient
+                // worktree registered, which would make the `git worktree add` below
+                // fail. Best-effort remove it first (no-op when absent), then prune any
+                // dangling administrative entry.
+                await RunGitAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
+                await RunGitAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
+                var add = await RunGitAsync(repoRoot, "worktree", "add", transientPath, canonicalBranch).ConfigureAwait(false);
+                if (add.exitCode != 0)
+                {
+                    result.Success = false;
+                    result.Stderr = $"could not create transient canonical worktree for integration: {add.stderr.Trim()}";
+                    return result;
+                }
+                canonicalWorktree = transientPath;
+                transient = true;
+            }
+
+            try
+            {
+                // Confirm the host worktree is on the canonical branch before merging.
+                var headResult = await RunGitAsync(canonicalWorktree, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+                if (headResult.exitCode != 0
+                    || !string.Equals(headResult.stdout.Trim(), canonicalBranch, StringComparison.Ordinal))
+                {
+                    result.Success = false;
+                    result.Stderr = $"canonical worktree not on '{canonicalBranch}' (HEAD='{headResult.stdout.Trim()}'); refusing to integrate";
+                    return result;
+                }
+
+                foreach (var helperBranch in helperBranches)
+                {
+                    var ahead = await RunGitAsync(
+                        repoRoot, "log", "--oneline", $"{canonicalBranch}..{helperBranch}").ConfigureAwait(false);
+                    if (ahead.exitCode != 0)
+                    {
+                        result.Success = false;
+                        result.Stderr = $"git log {canonicalBranch}..{helperBranch} failed: {ahead.stderr.Trim()}";
+                        return result;
+                    }
+                    if (string.IsNullOrWhiteSpace(ahead.stdout))
+                    {
+                        // No commits beyond canonical — nothing to merge, but still a
+                        // branch to clean up after prune.
+                        result.IntegratedBranches.Add(helperBranch);
+                        continue;
+                    }
+
+                    var merge = await RunGitAsync(canonicalWorktree, "merge", "--no-edit", helperBranch).ConfigureAwait(false);
+                    if (merge.exitCode != 0)
+                    {
+                        // Conflict — abort to keep the canonical worktree clean, record
+                        // the branch, and stop. Caller preserves all worktrees/branches.
+                        await RunGitAsync(canonicalWorktree, "merge", "--abort").ConfigureAwait(false);
+                        result.Success = false;
+                        result.HadConflicts = true;
+                        result.ConflictBranches.Add(helperBranch);
+                        result.Stderr = $"integration of '{helperBranch}' into '{canonicalBranch}' conflicted: {merge.stderr.Trim()}; stdout: {merge.stdout.Trim()}";
+                        return result;
+                    }
+
+                    result.IntegratedBranches.Add(helperBranch);
+                }
+
+                return result;
+            }
+            finally
+            {
+                if (transient && !string.IsNullOrEmpty(transientPath))
+                {
+                    // Remove the transient host worktree; integration commits live on
+                    // the canonical branch ref, so --force is safe.
+                    await RunGitAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Deletes a local branch. <paramref name="force"/> uses <c>-D</c> (delete
+        /// regardless of merge state) vs <c>-d</c> (refuse if unmerged). Returns
+        /// <c>true</c> on success. Used to clean up integrated helper branches after
+        /// prune-all (their commits live in the canonical branch but not yet trunk,
+        /// so <c>-D</c> is required).
+        /// </summary>
+        public async Task<bool> DeleteBranchAsync(string repoRoot, string branchName, bool force)
+        {
+            if (string.IsNullOrEmpty(repoRoot) || string.IsNullOrEmpty(branchName)) return false;
+            var res = await RunGitAsync(repoRoot, "branch", force ? "-D" : "-d", branchName).ConfigureAwait(false);
+            return res.exitCode == 0;
         }
 
         /// <summary>
@@ -348,6 +573,38 @@ namespace MultiTerminal.Services
         /// treats Success=true as the user-visible state regardless of
         /// SkippedReason being set.
         /// </summary>
+        public string SkippedReason { get; set; }
+    }
+
+    /// <summary>
+    /// Outcome of Phase 2.5 helper-branch integration (per-agent isolation,
+    /// task bab81a92). <see cref="Success"/> is true when every helper branch was
+    /// integrated into the canonical branch (or there were none / nothing to merge).
+    /// On conflict, <see cref="Success"/> is false, <see cref="HadConflicts"/> is
+    /// true, and <see cref="ConflictBranches"/> names the offending branch — the
+    /// caller halts teardown and preserves all worktrees/branches.
+    /// </summary>
+    public class HelperIntegrationResult
+    {
+        public bool Success { get; set; }
+
+        /// <summary>True when a helper merge conflicted (and was aborted).</summary>
+        public bool HadConflicts { get; set; }
+
+        /// <summary>
+        /// Helper branches integrated into the canonical branch (including those
+        /// with no commits ahead). These are the branches to delete after prune-all.
+        /// </summary>
+        public System.Collections.Generic.List<string> IntegratedBranches { get; set; }
+            = new System.Collections.Generic.List<string>();
+
+        /// <summary>Helper branches whose merge conflicted and was aborted.</summary>
+        public System.Collections.Generic.List<string> ConflictBranches { get; set; }
+            = new System.Collections.Generic.List<string>();
+
+        public string Stderr { get; set; }
+
+        /// <summary>Set when integration was a no-op for a benign reason.</summary>
         public string SkippedReason { get; set; }
     }
 }
