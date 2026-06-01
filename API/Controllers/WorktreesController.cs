@@ -76,11 +76,16 @@ namespace MultiTerminal.API.Controllers
 
         /// <summary>
         /// Read-only point-in-time view of de-registered-but-on-disk worktree
-        /// strands (empty dirs git no longer tracks) across the repos the broker
-        /// knows about. Surfaces the teardown-reliability signal (task 248cc2ce) so
-        /// strand accumulation is observable instead of discovered by stumbling on
-        /// an orphan dir. Shells <c>git worktree list</c> per repo group — call on a
-        /// refresh cadence, not per UI repaint.
+        /// strands (empty dirs git no longer tracks). Surfaces the teardown-
+        /// reliability signal (task 248cc2ce) so strand accumulation is observable
+        /// instead of discovered by stumbling on an orphan dir. Shells
+        /// <c>git worktree list</c> per repo group — call on a refresh cadence, not
+        /// per UI repaint.
+        /// <para>SCOPE: coverage is limited to worktree parent dirs derivable from
+        /// <c>task_worktrees</c> history (plus their legacy sibling parents). A repo
+        /// with no surviving <c>task_worktrees</c> rows is outside this scope and is
+        /// not scanned — its strands won't be reported. This matches the janitor's
+        /// own Pass-3 sweep scope; it is not broker-wide repo coverage.</para>
         /// <para>Always HTTP 200, but the payload carries an explicit
         /// <c>status</c> so a caller can NEVER mistake "couldn't tell" for "none":
         /// <c>ok</c> = complete scan, <c>count</c> is authoritative; <c>partial</c>

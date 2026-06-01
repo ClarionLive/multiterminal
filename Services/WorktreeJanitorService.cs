@@ -347,7 +347,26 @@ namespace MultiTerminal.Services
                     continue;
                 }
 
-                foreach (var child in EnumerateChildren(group.ParentDir))
+                // Materialize children with the scan's OWN guard (task 248cc2ce,
+                // adversary run 2). The shared EnumerateChildren swallows enumeration
+                // failures into an empty list — fine for Pass 3 (it has outer guards
+                // and doesn't report completeness) but WRONG here: a swallowed failure
+                // would be indistinguishable from a genuinely empty parent, letting a
+                // failed scan read as status="ok"/count=0. Count the failure as a
+                // skipped group instead so the result degrades to 'partial'.
+                List<string> children;
+                try
+                {
+                    children = new List<string>(Directory.EnumerateDirectories(group.ParentDir));
+                }
+                catch (Exception ex)
+                {
+                    result.SkippedGroups++;
+                    Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync child-enum failed for {group.ParentDir}: {ex.Message}");
+                    continue;
+                }
+
+                foreach (var child in children)
                 {
                     if (registered.Contains(NormalizePath(child))) continue;
                     if (!IsDirectoryEmpty(child)) continue;
@@ -574,8 +593,9 @@ namespace MultiTerminal.Services
     /// <see cref="JanitorResult.StrandedDirsRemaining"/> (which is a per-sweep
     /// count of dirs Pass 3 tried and failed to rmdir). <see cref="Dirs"/> is the
     /// set of empty, de-registered-but-on-disk worktree dirs currently visible.
-    /// <see cref="SkippedGroups"/> counts repo groups whose <c>git worktree list</c>
-    /// failed and were skipped; when &gt; 0 the scan is <see cref="Complete"/> ==
+    /// <see cref="SkippedGroups"/> counts repo groups skipped because EITHER their
+    /// <c>git worktree list</c> OR their child-directory enumeration failed; when
+    /// &gt; 0 the scan is <see cref="Complete"/> ==
     /// false (PARTIAL), so a caller must NOT read an empty <see cref="Dirs"/> as a
     /// trustworthy "no strands" — the whole falsifiability point is to never
     /// conflate "found none" with "couldn't look".
