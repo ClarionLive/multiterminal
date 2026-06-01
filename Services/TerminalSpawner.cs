@@ -484,7 +484,15 @@ claude {claudeFlags}
                 Arguments = $"-NoExit -Command \"{command}\"",
                 UseShellExecute = true, // Opens in new window
                 CreateNoWindow = false,
-                WorkingDirectory = workingDir
+                // CWD STRATEGY (mirrors ConPtyTerminal.cs, task 6a48caa4): do NOT set a
+                // native working directory here. ShellExecuteEx's lpDirectory pins the
+                // child's cwd at launch, which makes the Claude Code harness classify the
+                // session as a cwd-overridden / isolated agent and refuse ExitWorktree
+                // (breaking the EnterWorktree/ExitWorktree lifecycle, task 0134ec2f).
+                // Empty => inherit the host's cwd; the shell `cd '{safeDir}';` in the
+                // command template lands the session in the project folder the "normal
+                // interactive" way instead. CONFIRMED fix: ExitWorktree now succeeds.
+                WorkingDirectory = string.Empty
             };
 
             // Cycle-3 adversary HIGH fix: last-moment re-check before
@@ -503,8 +511,11 @@ claude {claudeFlags}
                     string repoRoot = TryDeriveRepoRootFromWorktree(taskWorktreePath);
                     if (!string.IsNullOrEmpty(repoRoot))
                     {
+                        // Reassign workingDir so the rebuilt command's `cd` (below) and the
+                        // teammate metadata point at repoRoot. Do NOT set a native
+                        // psi.WorkingDirectory override — the shell `cd` lands the session
+                        // there instead (see CWD STRATEGY note above, task 6a48caa4).
                         workingDir = repoRoot;
-                        psi.WorkingDirectory = workingDir;
                     }
                 }
                 // Rebuild the command without the env var. Cheapest path: a

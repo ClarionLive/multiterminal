@@ -403,13 +403,27 @@ namespace MultiTerminal.Terminal
             // process into the worktree (CLI >= 2.1.157), and ExitWorktree(keep)
             // returns to repoRoot before prune. MULTITERMINAL_TASK_WORKTREE is
             // still exported above so the skill + MCP tools resolve the path.
+            // CWD STRATEGY (ExitWorktree-compatibility experiment): do NOT pass a
+            // native working directory to CreateProcess (lpCurrentDirectory=null below,
+            // so the child inherits the host's cwd). Instead `cd` into the project
+            // folder in the shell itself, then run the autoRunCommand. Passing an
+            // explicit native working directory is suspected of making the Claude Code
+            // harness classify the session as a cwd-overridden / isolated agent, which
+            // makes ExitWorktree refuse to run and breaks the EnterWorktree/ExitWorktree
+            // worktree lifecycle (task 0134ec2f follow-up). The shell `cd` lands the
+            // session in the project folder the "normal interactive" way instead.
+            string cdPrefix = "";
+            if (!string.IsNullOrEmpty(workingDirectory))
+            {
+                // Escape single quotes to prevent PowerShell injection via path names.
+                string safeWorkDir = workingDirectory.Replace("'", "''");
+                cdPrefix = $"cd '{safeWorkDir}'; ";
+            }
+
             string autoRun = "";
             if (!string.IsNullOrEmpty(autoRunCommand))
             {
-                // Escape single quotes in workingDirectory to prevent PowerShell injection via path names.
-                string safeWorkDir = (workingDirectory ?? "").Replace("'", "''");
-                autoRun = $"; cd '{safeWorkDir}'";
-                autoRun += $"; {autoRunCommand}";
+                autoRun = $"; {autoRunCommand}";
             }
             else
             {
@@ -420,7 +434,7 @@ namespace MultiTerminal.Terminal
             // specified (e.g. Claude Code), PowerShell should exit after the command finishes so
             // that ProcessExited fires and the terminal returns to the Start Screen.
             string noExit = string.IsNullOrEmpty(autoRunCommand) ? "-NoExit " : "";
-            string commandLine = $"\"{shellPath}\" -NoLogo -ExecutionPolicy Bypass {noExit}-Command \"{envSetup}{promptFunc}{autoRun}\"";
+            string commandLine = $"\"{shellPath}\" -NoLogo -ExecutionPolicy Bypass {noExit}-Command \"{envSetup}{cdPrefix}{promptFunc}{autoRun}\"";
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Final command line:");
             System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess]   {commandLine}");
 
@@ -434,7 +448,9 @@ namespace MultiTerminal.Terminal
                 false,
                 NativeMethods.EXTENDED_STARTUPINFO_PRESENT,
                 IntPtr.Zero,
-                workingDirectory,
+                null, // lpCurrentDirectory: NULL => inherit host cwd. The shell `cd`'s into
+                      // the project folder (cdPrefix above) so the session is NOT launched
+                      // with a native cwd override (ExitWorktree-compatibility experiment).
                 ref startupInfo,
                 out var processInfo))
             {
