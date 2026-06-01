@@ -369,7 +369,20 @@ namespace MultiTerminal.Services
                 foreach (var child in children)
                 {
                     if (registered.Contains(NormalizePath(child))) continue;
-                    if (!IsDirectoryEmpty(child)) continue;
+
+                    // Tri-state emptiness probe (task 248cc2ce, adversary run 3).
+                    // The bare IsDirectoryEmpty swallows probe exceptions and returns
+                    // false, which would silently drop a real (de-registered, empty)
+                    // strand whose probe throws — leaving status="ok"/count=0. Here a
+                    // probe FAILURE degrades the scan to 'partial' (same contract as a
+                    // skipped group) so "ok" stays authoritative.
+                    if (!TryIsDirectoryEmpty(child, out bool isEmpty))
+                    {
+                        result.SkippedGroups++;
+                        Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync empty-probe failed for {child}");
+                        continue;
+                    }
+                    if (!isEmpty) continue;
                     result.Dirs.Add(child);
                 }
             }
@@ -497,6 +510,32 @@ namespace MultiTerminal.Services
             }
             catch
             {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Tri-state emptiness probe (task 248cc2ce): returns <c>true</c> when the
+        /// probe succeeded (with the answer in <paramref name="isEmpty"/>) and
+        /// <c>false</c> when the probe itself failed (transient IO/access/race).
+        /// Unlike <see cref="IsDirectoryEmpty"/> — whose swallow-to-<c>false</c> is
+        /// the safe choice for Pass 3's DELETE (a probe failure means "don't
+        /// delete") — the read-only scan must NOT treat a probe failure as
+        /// "non-empty", or it would silently drop a real strand from the count
+        /// while reporting <c>status="ok"</c>. The scan uses this to degrade to
+        /// <c>partial</c> on probe failure instead.
+        /// </summary>
+        private static bool TryIsDirectoryEmpty(string dir, out bool isEmpty)
+        {
+            try
+            {
+                using var en = Directory.EnumerateFileSystemEntries(dir).GetEnumerator();
+                isEmpty = !en.MoveNext();
+                return true;
+            }
+            catch
+            {
+                isEmpty = false;
                 return false;
             }
         }
