@@ -1,6 +1,0 @@
-CONFLICT TEST — canonical / Alice side.
-Task: c475a5f2 [TEST-DISPOSABLE]
-Branch: task/c475a5f2
-This line is intentionally DIFFERENT from the helper's version to force an add/add merge conflict in Phase 2.5.
-ALICE-CANONICAL-MARKER-AAAA
-Delete after acceptance run.

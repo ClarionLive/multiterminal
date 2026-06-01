@@ -1,3 +1,0 @@
-owner: FRANK (helper)
-scenario 4 transient canonical
-task: 6d06a4c1

@@ -1,5 +1,0 @@
-Scenario 2c done-flow acceptance marker (canonical / Alice).
-Task: 923ab7dd [TEST-DISPOSABLE]
-Branch: task/923ab7dd
-Purpose: validate Phase 2 per-agent auto-commit + Phase 3 trunk merge.
-Delete after acceptance run.
