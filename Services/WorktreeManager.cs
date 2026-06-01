@@ -51,23 +51,54 @@ namespace MultiTerminal.Services
         /// <exception cref="InvalidOperationException">Thrown when
         /// <c>git worktree add</c> exits non-zero. The exception message
         /// includes the captured stderr.</exception>
-        public async Task<TaskWorktree> CreateForTaskAsync(string taskId, string repoRoot)
+        public Task<TaskWorktree> CreateForTaskAsync(string taskId, string repoRoot)
+        {
+            // Back-compat shim for callers that don't yet thread the agent name.
+            // Resolves the task's assignee and creates the canonical worktree.
+            // New call sites (task activation) should use the agent-aware overload
+            // directly so helpers get their own worktree.
+            if (string.IsNullOrEmpty(taskId))
+                throw new ArgumentException("taskId is required", nameof(taskId));
+            string assignee = _db.GetTask(taskId)?.Assignee;
+            return CreateForTaskAsync(taskId, assignee, isAssignee: true, repoRoot);
+        }
+
+        /// <summary>
+        /// Materializes a git worktree for a specific agent on a task and persists a
+        /// per-agent record. Idempotent per <c>(taskId, agentName)</c>: if that
+        /// agent already has an <c>active</c> worktree on disk it is returned unchanged.
+        ///
+        /// <para>When <paramref name="isAssignee"/> is true this is the canonical
+        /// worktree — branch <c>task/&lt;idShort&gt;</c> at
+        /// <c>.claude/worktrees/&lt;idShort&gt;</c> (byte-identical to the pre-isolation
+        /// layout). Otherwise it is a helper worktree — branch
+        /// <c>task/&lt;idShort&gt;--&lt;slug&gt;</c> at
+        /// <c>.claude/worktrees/&lt;idShort&gt;--&lt;slug&gt;</c>, forked from the
+        /// canonical branch's tip (the canonical branch is created first if absent).</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">Thrown when a git command
+        /// (branch / worktree add) exits non-zero. Message includes captured stderr.</exception>
+        public async Task<TaskWorktree> CreateForTaskAsync(string taskId, string agentName, bool isAssignee, string repoRoot)
         {
             if (string.IsNullOrEmpty(taskId))
                 throw new ArgumentException("taskId is required", nameof(taskId));
             if (string.IsNullOrEmpty(repoRoot))
                 throw new ArgumentException("repoRoot is required", nameof(repoRoot));
 
-            // CA3003: taskId is an app-generated GUID (created by MessageBroker.CreateTask)
-            // and repoRoot is a Project.Path field stored at registration time. Both
-            // values are application-managed; existing.WorktreePath is read from the
-            // task_worktrees table, which is only ever written by this class. None of
-            // the path operations below take untrusted user-supplied path text.
+            // For the canonical worktree the owning agent IS the assignee; fall back
+            // to the legacy sentinel only when the name is genuinely unknown.
+            string ownerAgent = string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName;
+
+            // CA3003: taskId is an app-generated GUID, repoRoot is a registered
+            // Project.Path, agentName is sanitized to a slug for path/branch use, and
+            // existing.WorktreePath is read from task_worktrees (written only by this
+            // class). No untrusted user-supplied path text flows into the path ops.
 #pragma warning disable CA3003
             if (!Directory.Exists(repoRoot))
                 throw new DirectoryNotFoundException($"Repo root does not exist: {repoRoot}");
 
-            var existing = _db.GetWorktreeForTask(taskId);
+            // Idempotent per (task, agent): an existing active worktree on disk wins.
+            var existing = _db.GetWorktreeForTask(taskId, ownerAgent);
             if (existing != null
                 && string.Equals(existing.Status, "active", StringComparison.OrdinalIgnoreCase)
                 && Directory.Exists(existing.WorktreePath))
@@ -75,7 +106,6 @@ namespace MultiTerminal.Services
                 return existing;
             }
 
-            string taskIdShort = taskId.Length >= 8 ? taskId.Substring(0, 8) : taskId;
             string trimmed = repoRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
             // Worktrees live under .claude/worktrees/ (was <repoRoot>/worktrees/).
@@ -85,8 +115,10 @@ namespace MultiTerminal.Services
             // of the main checkout, so the permission-scope invariant is preserved.
             // (Task 0134ec2f.)
             string worktreesParent = Path.Combine(trimmed, ".claude", "worktrees");
-            string worktreePath = Path.Combine(worktreesParent, taskIdShort);
-            string branchName = $"task/{taskIdShort}";
+            string canonicalBranch = WorktreeNaming.CanonicalBranch(taskId);
+            string worktreePath = Path.Combine(
+                worktreesParent, WorktreeNaming.DirNameFor(taskId, ownerAgent, isAssignee));
+            string branchName = WorktreeNaming.BranchFor(taskId, ownerAgent, isAssignee);
 
             if (!Directory.Exists(worktreesParent))
             {
@@ -94,13 +126,27 @@ namespace MultiTerminal.Services
             }
 #pragma warning restore CA3003
 
-            var (exitCode, stdout, stderr) = await RunGitAsync(
-                repoRoot, "worktree", "add", worktreePath, "-b", branchName).ConfigureAwait(false);
-
-            if (exitCode != 0)
+            if (isAssignee)
             {
-                throw new InvalidOperationException(
-                    $"git worktree add failed (exit {exitCode}). stderr: {stderr.Trim()}; stdout: {stdout.Trim()}");
+                // Canonical worktree on task/<idShort>. The branch may already exist
+                // if a helper created it first (EnsureCanonicalBranchAsync) — in that
+                // case check it out instead of re-creating it with -b. When creating
+                // it fresh, root it explicitly at trunk (NOT at whatever HEAD points
+                // to) and fail loudly on a detached/task-branch HEAD — bab81a92
+                // pipeline fix. Behaviour is unchanged in the normal case (HEAD on
+                // trunk), since `-b <name> <path> <trunk>` == `-b <name> <path>` there.
+                bool canonicalExists = await BranchExistsAsync(repoRoot, canonicalBranch).ConfigureAwait(false);
+                string startPoint = canonicalExists ? null : await ResolveTrunkAsync(repoRoot).ConfigureAwait(false);
+                await AddWorktreeAsync(repoRoot, worktreePath, branchName, createNewBranch: !canonicalExists, startPoint: startPoint)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                // Helper worktree: ensure the canonical branch exists, then fork the
+                // helper branch from its tip.
+                await EnsureCanonicalBranchAsync(repoRoot, canonicalBranch).ConfigureAwait(false);
+                await AddWorktreeAsync(repoRoot, worktreePath, branchName, createNewBranch: true, startPoint: canonicalBranch)
+                    .ConfigureAwait(false);
             }
 
             // Phase 1 smoke-test finding: a fresh worktree contains only tracked
@@ -112,9 +158,104 @@ namespace MultiTerminal.Services
             // (e.g. a script in .claude/ that runs after worktree add).
             SeedVendoredArtifacts(repoRoot, worktreePath);
 
-            _db.SaveWorktreeRecord(taskId, worktreePath, branchName);
-            return _db.GetWorktreeForTask(taskId);
+            _db.SaveWorktreeRecord(taskId, ownerAgent, worktreePath, branchName, isAssignee);
+            return _db.GetWorktreeForTask(taskId, ownerAgent);
         }
+
+        /// <summary>True when <paramref name="branch"/> exists as a local head.</summary>
+        private static async Task<bool> BranchExistsAsync(string repoRoot, string branch)
+        {
+            var (exitCode, _, _) = await RunGitAsync(
+                repoRoot, "show-ref", "--verify", "--quiet", $"refs/heads/{branch}").ConfigureAwait(false);
+            return exitCode == 0;
+        }
+
+        /// <summary>
+        /// Resolve the trunk branch (the main checkout's current branch) that a new
+        /// canonical task branch must be rooted at. Pipeline finding (bab81a92,
+        /// cross-model adversary): a bare <c>git branch &lt;name&gt;</c> roots at
+        /// whatever HEAD currently points to. If the main checkout is detached
+        /// (e.g. the eea2c533 cwd-footgun left it so) or sitting on another
+        /// <c>task/</c> branch, that silently roots the canonical branch at the wrong
+        /// commit and pollutes the eventual trunk merge. Fail loudly instead.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">Thrown when HEAD is detached or
+        /// on a task branch — i.e. not a usable trunk to fork from.</exception>
+        private static async Task<string> ResolveTrunkAsync(string repoRoot)
+        {
+            var (exitCode, stdout, stderr) = await RunGitAsync(
+                repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"git rev-parse --abbrev-ref HEAD failed (exit {exitCode}). stderr: {stderr.Trim()}");
+            }
+            string trunk = stdout.Trim();
+            if (string.Equals(trunk, "HEAD", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Main checkout is in detached HEAD; refusing to create the canonical task branch from an unknown base. Check out trunk first.");
+            }
+            if (trunk.StartsWith("task/", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Main checkout is on a task branch ({trunk}), not trunk; refusing to root the canonical task branch there. Check out trunk first.");
+            }
+            return trunk;
+        }
+
+        /// <summary>
+        /// Ensure the canonical task branch exists so helper branches can fork from
+        /// it. Creates it from <b>trunk</b> (the main checkout's branch, via
+        /// <see cref="ResolveTrunkAsync"/>) when absent — NOT from whatever HEAD
+        /// happens to be (bab81a92 pipeline fix). Just the ref, no worktree. No-op
+        /// when it already exists.
+        /// </summary>
+        private static async Task EnsureCanonicalBranchAsync(string repoRoot, string canonicalBranch)
+        {
+            if (await BranchExistsAsync(repoRoot, canonicalBranch).ConfigureAwait(false)) return;
+            string trunk = await ResolveTrunkAsync(repoRoot).ConfigureAwait(false);
+            var (exitCode, stdout, stderr) = await RunGitAsync(
+                repoRoot, "branch", canonicalBranch, trunk).ConfigureAwait(false);
+            if (exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"git branch {canonicalBranch} {trunk} failed (exit {exitCode}). stderr: {stderr.Trim()}; stdout: {stdout.Trim()}");
+            }
+        }
+
+        /// <summary>
+        /// Runs <c>git worktree add</c>, optionally creating a new branch (<c>-b</c>)
+        /// and/or forking from <paramref name="startPoint"/>. When
+        /// <paramref name="createNewBranch"/> is false the existing
+        /// <paramref name="branchName"/> is checked out into the new worktree.
+        /// </summary>
+        // CA3003: worktreePath/branchName are app-generated (taskId GUID prefix +
+        // sanitized agent slug) — same trust model as the rest of this class.
+#pragma warning disable CA3003
+        private static async Task AddWorktreeAsync(
+            string repoRoot, string worktreePath, string branchName, bool createNewBranch, string startPoint)
+        {
+            var args = new System.Collections.Generic.List<string> { "worktree", "add", worktreePath };
+            if (createNewBranch)
+            {
+                args.Add("-b");
+                args.Add(branchName);
+                if (!string.IsNullOrEmpty(startPoint)) args.Add(startPoint);
+            }
+            else
+            {
+                args.Add(branchName);
+            }
+
+            var (exitCode, stdout, stderr) = await RunGitAsync(repoRoot, args.ToArray()).ConfigureAwait(false);
+            if (exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"git worktree add failed (exit {exitCode}). stderr: {stderr.Trim()}; stdout: {stdout.Trim()}");
+            }
+        }
+#pragma warning restore CA3003
 
         /// <summary>
         /// Removes the worktree associated with the given task and marks the
@@ -136,8 +277,59 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(repoRoot))
                 throw new ArgumentException("repoRoot is required", nameof(repoRoot));
 
+            // Task-scoped: prunes the canonical (representative) worktree record.
             var record = _db.GetWorktreeForTask(taskId);
             if (record == null) return false;
+            return await PruneRecordAsync(record, repoRoot).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Prune a single agent's worktree on a task (one row of the composite key).
+        /// Returns <c>false</c> when that agent has no active worktree record.
+        /// </summary>
+        public async Task<bool> PruneForTaskAsync(string taskId, string agentName, string repoRoot)
+        {
+            if (string.IsNullOrEmpty(taskId))
+                throw new ArgumentException("taskId is required", nameof(taskId));
+            if (string.IsNullOrEmpty(repoRoot))
+                throw new ArgumentException("repoRoot is required", nameof(repoRoot));
+
+            var record = _db.GetWorktreeForTask(taskId, agentName);
+            if (record == null) return false;
+            return await PruneRecordAsync(record, repoRoot).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Prune EVERY agent worktree for a task (assignee canonical + all helpers).
+        /// Used by the task-done teardown. Returns <c>true</c> if at least one active
+        /// worktree was pruned. Individual prune failures propagate as exceptions.
+        /// </summary>
+        public async Task<bool> PruneAllForTaskAsync(string taskId, string repoRoot)
+        {
+            if (string.IsNullOrEmpty(taskId))
+                throw new ArgumentException("taskId is required", nameof(taskId));
+            if (string.IsNullOrEmpty(repoRoot))
+                throw new ArgumentException("repoRoot is required", nameof(repoRoot));
+
+            bool anyPruned = false;
+            foreach (var record in _db.ListWorktreesForTask(taskId))
+            {
+                if (!string.Equals(record.Status, "active", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (await PruneRecordAsync(record, repoRoot).ConfigureAwait(false))
+                    anyPruned = true;
+            }
+            return anyPruned;
+        }
+
+        /// <summary>
+        /// Core prune for one worktree record: removes the worktree from git and
+        /// marks that agent's row <c>pruned</c>. Handles the already-gone-directory
+        /// case and the Windows partial-prune fallback. Returns <c>false</c> when the
+        /// record is already pruned.
+        /// </summary>
+        private async Task<bool> PruneRecordAsync(MCPServer.Models.TaskWorktree record, string repoRoot)
+        {
             if (string.Equals(record.Status, "pruned", StringComparison.OrdinalIgnoreCase))
                 return false;
 
@@ -151,7 +343,7 @@ namespace MultiTerminal.Services
 #pragma warning restore CA3003
             {
                 await RunGitAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
-                _db.MarkWorktreePruned(taskId);
+                _db.MarkWorktreePruned(record.TaskId, record.AgentName);
                 return true;
             }
 
@@ -188,7 +380,7 @@ namespace MultiTerminal.Services
                     }
 #pragma warning restore CA3003
 
-                    _db.MarkWorktreePruned(taskId);
+                    _db.MarkWorktreePruned(record.TaskId, record.AgentName);
                     return true;
                 }
 
@@ -196,7 +388,7 @@ namespace MultiTerminal.Services
                     $"git worktree remove failed (exit {exitCode}). stderr: {stderr.Trim()}; stdout: {stdout.Trim()}");
             }
 
-            _db.MarkWorktreePruned(taskId);
+            _db.MarkWorktreePruned(record.TaskId, record.AgentName);
             return true;
         }
 
@@ -255,6 +447,21 @@ namespace MultiTerminal.Services
         {
             if (string.IsNullOrEmpty(taskId)) return null;
             var record = _db.GetWorktreeForTask(taskId);
+            if (record == null) return null;
+            return string.Equals(record.Status, "active", StringComparison.OrdinalIgnoreCase)
+                ? record.WorktreePath
+                : null;
+        }
+
+        /// <summary>
+        /// Returns the absolute path to a specific agent's active worktree on the
+        /// task, or <c>null</c> if that agent has no active worktree. Agent-aware
+        /// counterpart of <see cref="GetWorktreePathForTask(string)"/>.
+        /// </summary>
+        public string GetWorktreePathForTask(string taskId, string agentName)
+        {
+            if (string.IsNullOrEmpty(taskId)) return null;
+            var record = _db.GetWorktreeForTask(taskId, agentName);
             if (record == null) return null;
             return string.Equals(record.Status, "active", StringComparison.OrdinalIgnoreCase)
                 ? record.WorktreePath

@@ -24,5 +24,22 @@ namespace MultiTerminal.MCPServer.Models
         /// post-prune for audit / history.
         /// </summary>
         public string Status { get; set; }
+
+        /// <summary>
+        /// Terminal/agent name that owns this worktree. Part of the composite
+        /// key <c>(TaskId, AgentName)</c> introduced for per-agent worktree
+        /// isolation (task bab81a92 / design ff1dc68f): the assignee holds the
+        /// canonical worktree while each helper gets their own. Legacy rows
+        /// (pre-migration) backfill to the task's assignee or <c>"__legacy__"</c>.
+        /// </summary>
+        public string AgentName { get; set; }
+
+        /// <summary>
+        /// True for the task's canonical worktree (the assignee's, on branch
+        /// <c>task/&lt;id&gt;</c>); false for a helper worktree (on branch
+        /// <c>task/&lt;id&gt;--&lt;slug&gt;</c>). The canonical worktree is the
+        /// integration target at task-done and the source of the trunk merge.
+        /// </summary>
+        public bool IsCanonical { get; set; }
     }
 }

@@ -44,7 +44,7 @@ namespace MultiTerminal.Services
         /// (4) single squash commit (no per-checklist-item history);
         /// (5) pre-commit hooks honored — failure surfaces stderr.</para>
         /// </summary>
-        public async Task<AutoCommitResult> CommitForTaskAsync(
+        public Task<AutoCommitResult> CommitForTaskAsync(
             string taskId,
             string repoRoot,
             string taskTitle,
@@ -56,7 +56,41 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(repoRoot))
                 throw new ArgumentException("repoRoot is required", nameof(repoRoot));
 
+            // Canonical (assignee) worktree — the representative record.
             var record = _db.GetWorktreeForTask(taskId);
+            return CommitRecordAsync(taskId, record, repoRoot, taskTitle, implementationSummary, agentName);
+        }
+
+        /// <summary>
+        /// Agent-aware counterpart of <see cref="CommitForTaskAsync"/>: commits a
+        /// specific agent's worktree on the task (per-agent isolation, task bab81a92).
+        /// Used by the task-done teardown to commit every helper worktree on its own
+        /// branch before integration.
+        /// </summary>
+        public Task<AutoCommitResult> CommitForAgentAsync(
+            string taskId,
+            string agentName,
+            string repoRoot,
+            string taskTitle,
+            string implementationSummary)
+        {
+            if (string.IsNullOrEmpty(taskId))
+                throw new ArgumentException("taskId is required", nameof(taskId));
+            if (string.IsNullOrEmpty(repoRoot))
+                throw new ArgumentException("repoRoot is required", nameof(repoRoot));
+
+            var record = _db.GetWorktreeForTask(taskId, agentName);
+            return CommitRecordAsync(taskId, record, repoRoot, taskTitle, implementationSummary, agentName);
+        }
+
+        private async Task<AutoCommitResult> CommitRecordAsync(
+            string taskId,
+            MCPServer.Models.TaskWorktree record,
+            string repoRoot,
+            string taskTitle,
+            string implementationSummary,
+            string agentName)
+        {
             if (record == null || !string.Equals(record.Status, "active", StringComparison.OrdinalIgnoreCase))
             {
                 return new AutoCommitResult

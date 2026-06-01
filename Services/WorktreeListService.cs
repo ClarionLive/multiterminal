@@ -42,6 +42,18 @@ namespace MultiTerminal.Services
         /// <summary>Title of the linked task, or <c>null</c> when no link.
         /// Resolved via <c>MessageBroker.GetTask</c> for the cached title.</summary>
         public string LinkedTaskTitle { get; set; }
+
+        /// <summary>Agent that owns this worktree row (per-agent isolation,
+        /// task bab81a92), or <c>null</c> when no link. The assignee owns the
+        /// canonical worktree; helpers own <c>task/&lt;id&gt;--&lt;slug&gt;</c>
+        /// worktrees. Lets the HUD group/label multiple worktrees under one task
+        /// by agent.</summary>
+        public string LinkedAgent { get; set; }
+
+        /// <summary><c>true</c> when this is the task's canonical (assignee)
+        /// worktree; <c>false</c> for a helper worktree. Mirrors
+        /// <c>task_worktrees.is_canonical</c>.</summary>
+        public bool LinkedIsCanonical { get; set; }
     }
 
     /// <summary>
@@ -196,6 +208,8 @@ namespace MultiTerminal.Services
                         entryCanonical,
                         StringComparison.OrdinalIgnoreCase)) continue;
                     entry.LinkedTaskId = record.TaskId;
+                    entry.LinkedAgent = record.AgentName;
+                    entry.LinkedIsCanonical = record.IsCanonical;
                     try
                     {
                         var task = _broker.GetTask(record.TaskId);
