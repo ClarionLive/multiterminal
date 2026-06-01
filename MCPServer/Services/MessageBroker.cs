@@ -1062,7 +1062,21 @@ namespace MultiTerminal.MCPServer.Services
                 throw new InvalidOperationException($"Failed to create TaskDatabase: {ex.Message}", ex);
             }
 
-            _worktrees = new MultiTerminal.Services.WorktreeManager(_taskDb);
+            // Route notable worktree events (e.g. a partial-prune strand,
+            // task 248cc2ce) to the activity feed. The lambda captures `this`
+            // but is only invoked post-construction (at prune time), so it is
+            // safe to wire here. Keeps WorktreeManager free of any broker /
+            // MCPServer dependency.
+            _worktrees = new MultiTerminal.Services.WorktreeManager(
+                _taskDb,
+                (action, content, relatedId) => RecordActivity(new ActivityEvent
+                {
+                    Terminal = "Worktree",
+                    Type = "worktree",
+                    Action = action,
+                    Content = content,
+                    RelatedId = relatedId,
+                }));
             _autoCommit = new MultiTerminal.Services.WorktreeAutoCommitService(_taskDb);
             _merge = new MultiTerminal.Services.WorktreeMergeService(_taskDb);
             _janitor = new MultiTerminal.Services.WorktreeJanitorService(_taskDb);

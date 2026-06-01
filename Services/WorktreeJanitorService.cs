@@ -274,7 +274,10 @@ namespace MultiTerminal.Services
                         {
                             // Empty-looking but rmdir refused — handle held by
                             // another process (terminal cwd, antivirus). Leave
-                            // it; the next sweep will retry.
+                            // it; the next sweep will retry. Count it as a strand
+                            // that did NOT self-heal this round so the sweep
+                            // summary can surface it (task 248cc2ce).
+                            result.StrandedDirsRemaining++;
                             result.Errors.Add($"Pass 3 rmdir {child}: {ex.Message}");
                         }
                         catch (Exception ex)
@@ -289,17 +292,65 @@ namespace MultiTerminal.Services
                 result.Errors.Add($"Pass 3 outer: {ex.Message}");
             }
 
-            // Summary entry — only if anything notable happened.
+            // Summary entry — only if anything notable happened. StrandedDirsRemaining
+            // is included in the notable test (task 248cc2ce) so a wedged strand that
+            // persists across sweeps stays visible even on an otherwise-quiet round.
             if (recordActivity != null
-                && (result.ReconciledMissing > 0 || result.PendingMerges.Count > 0 || result.OrphansRemoved > 0 || result.DeferredPrunesCompleted > 0 || result.MergesRecovered > 0 || result.Errors.Count > 0))
+                && (result.ReconciledMissing > 0 || result.PendingMerges.Count > 0 || result.OrphansRemoved > 0 || result.DeferredPrunesCompleted > 0 || result.MergesRecovered > 0 || result.StrandedDirsRemaining > 0 || result.Errors.Count > 0))
             {
                 recordActivity(
                     "janitor_sweep",
-                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
+                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.StrandedDirsRemaining} still stranded (held), {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
                     null);
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Read-only scan (task 248cc2ce): enumerate the parent dirs that have
+        /// ever hosted a worktree, ask git which children are still registered,
+        /// and return any empty children git no longer knows about — i.e. the
+        /// de-registered-but-on-disk strands — WITHOUT deleting anything. Shares
+        /// the same detection primitives as Pass 3 of <see cref="SweepAsync"/>;
+        /// backs the on-demand stranded-dir count surface (REST + HUD) so
+        /// reliability is observable rather than discovered by stumbling on an
+        /// orphan dir. Best-effort: a group whose <c>git worktree list</c> fails
+        /// is skipped (conservative — never reports a registered dir as stranded).
+        /// </summary>
+        public async Task<List<string>> ScanStrandedDirsAsync()
+        {
+            var stranded = new List<string>();
+            var allPaths = _db.ListAllWorktreePaths();
+            var groups = DeriveWorktreeGroups(allPaths);
+            AppendLegacyParentsFromActiveRepos(groups);
+
+            foreach (var group in groups)
+            {
+                if (!Directory.Exists(group.ParentDir)) continue;
+                if (!WorktreeLayout.IsLikelyGitRepoRoot(group.RepoRoot)) continue;
+
+                HashSet<string> registered;
+                try
+                {
+                    registered = await ListRegisteredWorktreePathsAsync(group.RepoRoot).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Conservative: skip the group rather than risk flagging a
+                    // registered dir as stranded.
+                    continue;
+                }
+
+                foreach (var child in EnumerateChildren(group.ParentDir))
+                {
+                    if (registered.Contains(NormalizePath(child))) continue;
+                    if (!IsDirectoryEmpty(child)) continue;
+                    stranded.Add(child);
+                }
+            }
+
+            return stranded;
         }
 
         /// <summary>
@@ -492,6 +543,15 @@ namespace MultiTerminal.Services
 
         /// <summary>Cycle-3 — count of deferred prunes successfully retried this sweep.</summary>
         public int DeferredPrunesCompleted { get; set; }
+
+        /// <summary>
+        /// Task 248cc2ce — point-in-time count of empty, de-registered-but-on-disk
+        /// worktree dirs that Pass 3 found but could NOT rmdir this sweep (a handle
+        /// is still held — commonly a subagent cwd or AV). These are strands that
+        /// are not self-healing this round; a non-zero value persisting across
+        /// sweeps is the observable signal that something is wedged.
+        /// </summary>
+        public int StrandedDirsRemaining { get; set; }
 
         public List<string> Errors { get; } = new List<string>();
     }

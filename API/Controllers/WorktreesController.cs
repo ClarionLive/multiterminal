@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
 
@@ -71,6 +72,26 @@ namespace MultiTerminal.API.Controllers
                 repoRoot,
                 branchName,
             });
+        }
+
+        /// <summary>
+        /// Read-only point-in-time list + count of de-registered-but-on-disk
+        /// worktree strands (empty dirs git no longer tracks) across the repos the
+        /// broker knows about. Surfaces the teardown-reliability signal (task
+        /// 248cc2ce) so strand accumulation is observable instead of discovered by
+        /// stumbling on an orphan dir. Shells <c>git worktree list</c> per repo
+        /// group — call on a refresh cadence, not per UI repaint. Always 200; an
+        /// empty list means no strands (or the janitor is unavailable).
+        /// </summary>
+        [HttpGet("stranded")]
+        public async Task<IActionResult> GetStrandedDirs()
+        {
+            var janitor = _broker?.WorktreeJanitor;
+            if (janitor == null)
+                return Ok(new { count = 0, dirs = Array.Empty<string>() });
+
+            var dirs = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
+            return Ok(new { count = dirs.Count, dirs });
         }
     }
 }

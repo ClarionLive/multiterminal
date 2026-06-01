@@ -29,14 +29,30 @@ namespace MultiTerminal.Services
     public class WorktreeManager
     {
         private readonly TaskDatabase _db;
+        private readonly WorktreeActivityCallback _activitySink;
+
+        /// <summary>
+        /// Activity-log callback signature: <c>(action, content, relatedId)</c>.
+        /// Lets <see cref="WorktreeManager"/> surface notable events (e.g. a
+        /// partial-prune strand) to the activity feed without taking a hard
+        /// dependency on the broker / MCPServer namespace — same decoupling
+        /// pattern as <see cref="WorktreeJanitorService.JanitorActivityCallback"/>.
+        /// The wire-up site (the broker) routes this to its RecordActivity.
+        /// </summary>
+        public delegate void WorktreeActivityCallback(string action, string content, string relatedId);
 
         /// <summary>
         /// Creates a new WorktreeManager backed by the supplied
         /// <see cref="TaskDatabase"/> for record persistence.
         /// </summary>
-        public WorktreeManager(TaskDatabase db)
+        /// <param name="db">Task database for worktree-record persistence.</param>
+        /// <param name="activitySink">Optional sink for surfacing notable
+        /// worktree events to the activity feed (e.g. a partial-prune strand,
+        /// task 248cc2ce). Pass null to suppress (headless / test contexts).</param>
+        public WorktreeManager(TaskDatabase db, WorktreeActivityCallback activitySink = null)
         {
             _db = db ?? throw new ArgumentNullException(nameof(db));
+            _activitySink = activitySink;
         }
 
         /// <summary>
@@ -377,6 +393,21 @@ namespace MultiTerminal.Services
                     {
                         Debug.WriteLine(
                             $"[WorktreeManager] Worktree '{record.WorktreePath}' unregistered from git but rmdir failed (likely held by child cwd): {rmdirEx.Message}");
+
+                        // Loud strand signal (task 248cc2ce). git has unregistered
+                        // the worktree but the OS won't let us rmdir the empty
+                        // shell — almost always because a process still holds a cwd
+                        // / handle inside it (commonly an Agent-tool subagent, which
+                        // cannot ExitWorktree; or AV / an editor). Without this the
+                        // strand is invisible until the janitor's Pass-3 sweep
+                        // removes it up to ~5 min later. Surface it now, attributed
+                        // to the task, so it's observable in real time. The janitor
+                        // still performs the actual cleanup.
+                        string strandShortId = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
+                        _activitySink?.Invoke(
+                            "worktree_strand",
+                            $"Worktree dir stranded for task {strandShortId}: git unregistered it but the directory could not be removed (likely a held cwd — e.g. a subagent — or an AV/editor handle). Left as an empty shell at {record.WorktreePath}; the janitor will sweep it on its next pass.",
+                            record.TaskId);
                     }
 #pragma warning restore CA3003
 
