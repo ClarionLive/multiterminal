@@ -453,6 +453,21 @@
   -d '{"checklistJson":"[{\"item\":\"Setup database\",\"status\":\"pending\",\"notes\":[]}]"}'</code></pre>
 
   <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/tasks/{taskId}/checklist/append</code>
+  </div>
+  <p>Append items to the existing checklist (preserves existing items). Appended items default to status <code>pending</code>.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "itemsJson": "[{\"item\":\"Add validation\",\"status\":\"pending\",\"notes\":[]}]"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{ "success": true }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/tasks/c0ce8037/checklist/append \
+  -H "Content-Type: application/json" \
+  -d '{"itemsJson":"[{\"item\":\"Add validation\",\"status\":\"pending\",\"notes\":[]}]"}'</code></pre>
+
+  <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/tasks/{taskId}/checklist/{itemIndex}/transition</code>
   </div>
   <p>Transition a checklist item to a new status. Enforces the state machine and tracks cycle count for escalation.</p>

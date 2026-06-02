@@ -13,7 +13,7 @@ MainForm.cs (5.2K LOC) - UI Host, 11 WebView2 panels
   MessageBroker.cs (5.5K LOC) - Central hub, routes messages, fires events
   SQLite (TaskDatabase.cs 4.6K LOC) - 21+ tables: tasks, sessions, knowledge, profiles
   CodeGraph (Roslyn) - CodeGraphDatabase + CSharpCodeGraphIndexer, cg_ tables in same SQLite
-  MCP Server (Node.js) - 89 tools at %APPDATA%/multiterminal/mcp
+  MCP Server (Node.js) - 90 tools at %APPDATA%/multiterminal/mcp
 ```
 
 ## Critical Files

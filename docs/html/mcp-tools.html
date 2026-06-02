@@ -250,6 +250,27 @@
 )</code></pre>
   </div>
 
+  <!-- append_checklist_items -->
+  <div class="tool-block" id="append_checklist_items">
+    <h3>append_checklist_items</h3>
+    <p>Append items to a task's existing checklist <strong>without</strong> replacing it. Use this to add new items (e.g. to Pending) -- unlike <code>update_checklist</code> (full replace), you do not need to fetch and resend the existing list (no risk of mangling existing items when rebuilding them). New items default to status <code>pending</code>. The server is authoritative: it validates the status, ignores any caller-supplied notes/assignedTo/cycleCount, and serializes the write so a concurrent append/transition won't clobber it.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
+        <tr><td><code>itemsJson</code></td><td>string</td><td>Yes</td><td>JSON array of items to append. Each element may be a plain description string or an <code>{item,status?}</code> object.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Success confirmation with the number of items appended.</p>
+    <h4>Example</h4>
+    <pre><code>append_checklist_items(
+  taskId="c0ce8037",
+  itemsJson='["Add validation","Write tests"]'
+)</code></pre>
+  </div>
+
   <!-- assign_checklist_item -->
   <div class="tool-block" id="assign_checklist_item">
     <h3>assign_checklist_item</h3>

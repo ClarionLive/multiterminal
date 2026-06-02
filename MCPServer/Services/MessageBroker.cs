@@ -27,6 +27,11 @@ namespace MultiTerminal.MCPServer.Services
 
         // Kanban task storage
         private readonly ConcurrentDictionary<string, KanbanTask> _tasks = new ConcurrentDictionary<string, KanbanTask>();
+
+        // Serializes checklist read-modify-write across all checklist mutators (append, full-replace,
+        // transition, assign). _tasks being concurrent only guards the lookup, not the per-task
+        // GetChecklist()->mutate->SetChecklist()->SaveTask() sequence, which is otherwise last-writer-wins.
+        private readonly object _checklistMutationLock = new object();
         private readonly TaskDatabase _taskDb;
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
         private readonly MultiTerminal.Services.WorktreeAutoCommitService _autoCommit;
@@ -4317,14 +4322,119 @@ namespace MultiTerminal.MCPServer.Services
             if (task.IsQuickTask)
                 return new UpdateTaskResult { Success = false, Error = $"Cannot set checklist: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
 
-            task.ChecklistJson = checklistJson ?? "[]";
+            lock (_checklistMutationLock)
+            {
+                task.ChecklistJson = checklistJson ?? "[]";
 
-            // Auto-derive parent task status from checklist item positions
-            RecalculateAutoStatus(task);
+                // Auto-derive parent task status from checklist item positions
+                RecalculateAutoStatus(task);
 
-            // Persist to database
-            try { _taskDb.SaveTask(task); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update task checklist: {ex.Message}"); }
+                // Persist to database
+                try { _taskDb.SaveTask(task); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update task checklist: {ex.Message}"); }
+            }
+
+            BroadcastTaskUpdate();
+
+            return new UpdateTaskResult { Success = true };
+        }
+
+        /// <summary>
+        /// Append items to a task's existing checklist without replacing it.
+        /// Unlike <see cref="UpdateTaskChecklist"/> (a full replace), the caller does not have to
+        /// round-trip and faithfully rebuild the whole list (which risks dropping an existing item's
+        /// status/notes when re-serializing a stale snapshot). This is server-authoritative: each
+        /// appended item is rebuilt from a whitelist (a non-empty "item" description plus a validated
+        /// initial status); caller-supplied Done/Notes/AssignedTo/CycleCount/SortOrder are ignored so
+        /// append can't forge audit history or bypass the transition state machine. The
+        /// read-modify-write is serialized under <see cref="_checklistMutationLock"/> (shared with the
+        /// other checklist mutators) so it won't clobber a concurrent append/transition/assign, and it
+        /// fails closed if persistence throws.
+        /// </summary>
+        public UpdateTaskResult AppendChecklistItems(string taskId, string itemsJson)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+            {
+                return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
+            }
+
+            if (task.IsQuickTask)
+                return new UpdateTaskResult { Success = false, Error = $"Cannot append checklist: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
+
+            if (string.IsNullOrWhiteSpace(itemsJson))
+                return new UpdateTaskResult { Success = false, Error = "No items to append (itemsJson was empty)." };
+
+            List<ChecklistItem> rawItems;
+            try
+            {
+                rawItems = System.Text.Json.JsonSerializer.Deserialize<List<ChecklistItem>>(itemsJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                return new UpdateTaskResult { Success = false, Error = $"Invalid itemsJson: {ex.Message}" };
+            }
+
+            if (rawItems == null || rawItems.Count == 0)
+                return new UpdateTaskResult { Success = false, Error = "No items to append (itemsJson contained no items)." };
+
+            // Server-side whitelist: rebuild each item from only the fields append is allowed to set.
+            // A valid status is honored (defaults to "pending"); an invalid status is rejected up front
+            // rather than silently corrupting the lifecycle board via RecalculateAutoStatus.
+            var sanitized = new List<ChecklistItem>(rawItems.Count);
+            foreach (var raw in rawItems)
+            {
+                if (raw == null || string.IsNullOrWhiteSpace(raw.Item))
+                    return new UpdateTaskResult { Success = false, Error = "Each appended item must have a non-empty 'item' description." };
+
+                var status = string.IsNullOrWhiteSpace(raw.Status) ? "pending" : raw.Status.Trim().ToLowerInvariant();
+                if (System.Array.IndexOf(ChecklistItem.ValidStatuses, status) < 0)
+                    return new UpdateTaskResult { Success = false, Error = $"Invalid status '{raw.Status}' on appended item '{raw.Item}'. Valid statuses: {string.Join(", ", ChecklistItem.ValidStatuses)}." };
+
+                sanitized.Add(new ChecklistItem
+                {
+                    Item = raw.Item,
+                    Status = status,
+                    Done = status == "done",
+                    Notes = new List<ChecklistItemNote>(),
+                    AssignedTo = null,
+                    CycleCount = 0
+                });
+            }
+
+            // Serialize the read-modify-write-save against the other checklist mutators, and fail
+            // closed: if persistence throws, revert the in-memory mutation so we don't broadcast or
+            // report success for a change that never hit the database.
+            lock (_checklistMutationLock)
+            {
+                // Snapshot every field RecalculateAutoStatus can touch (Status/SubStatus/PausedAt)
+                // plus the checklist, so the fail-closed revert fully restores the in-memory task.
+                var originalJson = task.ChecklistJson;
+                var originalStatus = task.Status;
+                var originalSubStatus = task.SubStatus;
+                var originalPausedAt = task.PausedAt;
+
+                var checklist = task.GetChecklist();
+                checklist.AddRange(sanitized);
+                task.SetChecklist(checklist);
+
+                // Auto-derive parent task status from checklist item positions
+                RecalculateAutoStatus(task);
+
+                try
+                {
+                    _taskDb.SaveTask(task);
+                }
+                catch (Exception ex)
+                {
+                    task.ChecklistJson = originalJson;
+                    task.Status = originalStatus;
+                    task.SubStatus = originalSubStatus;
+                    task.PausedAt = originalPausedAt;
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to append task checklist items: {ex.Message}");
+                    return new UpdateTaskResult { Success = false, Error = $"Failed to persist appended checklist items: {ex.Message}" };
+                }
+            }
 
             BroadcastTaskUpdate();
 
@@ -4550,70 +4660,79 @@ namespace MultiTerminal.MCPServer.Services
             if (task.IsQuickTask)
                 return new UpdateChecklistItemResult { Success = false, Error = $"Cannot transition checklist: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
 
-            var checklist = task.GetChecklist();
-            if (itemIndex < 0 || itemIndex >= checklist.Count)
-            {
-                return new UpdateChecklistItemResult { Success = false, Error = $"Invalid item index: {itemIndex}. Checklist has {checklist.Count} items." };
-            }
+            List<ChecklistItem> checklist;
+            ChecklistItem item;
+            string previousStatus;
 
-            var item = checklist[itemIndex];
-            var previousStatus = item.Status ?? "pending";
-
-            // Validate the transition
-            var validTransitions = new Dictionary<string, string[]>
+            // Serialize the read-modify-write against the other checklist mutators (append, full-replace,
+            // assign) so a concurrent write can't clobber this transition's status/notes/cycle update.
+            lock (_checklistMutationLock)
             {
-                { "pending", new[] { "coding" } },
-                { "coding", new[] { "testing" } },
-                { "testing", new[] { "coding", "done" } }
-            };
-
-            if (!validTransitions.ContainsKey(previousStatus) || !validTransitions[previousStatus].Contains(newStatus))
-            {
-                return new UpdateChecklistItemResult
+                checklist = task.GetChecklist();
+                if (itemIndex < 0 || itemIndex >= checklist.Count)
                 {
-                    Success = false,
-                    Error = $"Invalid transition: {previousStatus} → {newStatus}. Valid transitions from '{previousStatus}': {string.Join(", ", validTransitions.ContainsKey(previousStatus) ? validTransitions[previousStatus] : new[] { "none" })}"
-                };
-            }
+                    return new UpdateChecklistItemResult { Success = false, Error = $"Invalid item index: {itemIndex}. Checklist has {checklist.Count} items." };
+                }
 
-            // Notes are mandatory for coding→testing, testing→coding, testing→done
-            if ((previousStatus == "coding" || previousStatus == "testing") && string.IsNullOrWhiteSpace(notes))
-            {
-                return new UpdateChecklistItemResult
+                item = checklist[itemIndex];
+                previousStatus = item.Status ?? "pending";
+
+                // Validate the transition
+                var validTransitions = new Dictionary<string, string[]>
                 {
-                    Success = false,
-                    Error = $"Notes are required for {previousStatus} → {newStatus} transition. Describe what was done or what needs fixing."
+                    { "pending", new[] { "coding" } },
+                    { "coding", new[] { "testing" } },
+                    { "testing", new[] { "coding", "done" } }
                 };
+
+                if (!validTransitions.ContainsKey(previousStatus) || !validTransitions[previousStatus].Contains(newStatus))
+                {
+                    return new UpdateChecklistItemResult
+                    {
+                        Success = false,
+                        Error = $"Invalid transition: {previousStatus} → {newStatus}. Valid transitions from '{previousStatus}': {string.Join(", ", validTransitions.ContainsKey(previousStatus) ? validTransitions[previousStatus] : new[] { "none" })}"
+                    };
+                }
+
+                // Notes are mandatory for coding→testing, testing→coding, testing→done
+                if ((previousStatus == "coding" || previousStatus == "testing") && string.IsNullOrWhiteSpace(notes))
+                {
+                    return new UpdateChecklistItemResult
+                    {
+                        Success = false,
+                        Error = $"Notes are required for {previousStatus} → {newStatus} transition. Describe what was done or what needs fixing."
+                    };
+                }
+
+                // Update the item
+                item.Status = newStatus;
+                item.Done = newStatus == "done";
+
+                // Track cycles (testing→coding = another cycle)
+                if (previousStatus == "testing" && newStatus == "coding")
+                {
+                    item.CycleCount++;
+                }
+
+                // Add the transition note
+                if (item.Notes == null) item.Notes = new List<ChecklistItemNote>();
+                item.Notes.Add(new ChecklistItemNote
+                {
+                    By = updatedBy,
+                    At = DateTime.UtcNow.ToString("o"),
+                    Transition = $"{previousStatus} → {newStatus}",
+                    Text = notes ?? ""
+                });
+
+                // Save
+                task.SetChecklist(checklist);
+
+                // Auto-derive parent task status from checklist item positions
+                RecalculateAutoStatus(task);
+
+                try { _taskDb.SaveTask(task); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save checklist transition: {ex.Message}"); }
             }
-
-            // Update the item
-            item.Status = newStatus;
-            item.Done = newStatus == "done";
-
-            // Track cycles (testing→coding = another cycle)
-            if (previousStatus == "testing" && newStatus == "coding")
-            {
-                item.CycleCount++;
-            }
-
-            // Add the transition note
-            if (item.Notes == null) item.Notes = new List<ChecklistItemNote>();
-            item.Notes.Add(new ChecklistItemNote
-            {
-                By = updatedBy,
-                At = DateTime.UtcNow.ToString("o"),
-                Transition = $"{previousStatus} → {newStatus}",
-                Text = notes ?? ""
-            });
-
-            // Save
-            task.SetChecklist(checklist);
-
-            // Auto-derive parent task status from checklist item positions
-            RecalculateAutoStatus(task);
-
-            try { _taskDb.SaveTask(task); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save checklist transition: {ex.Message}"); }
 
             BroadcastTaskUpdate();
 
@@ -4704,17 +4823,20 @@ namespace MultiTerminal.MCPServer.Services
                 return new UpdateTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
-            var checklist = task.GetChecklist();
-            if (itemIndex < 0 || itemIndex >= checklist.Count)
+            lock (_checklistMutationLock)
             {
-                return new UpdateTaskResult { Success = false, Error = $"Invalid item index: {itemIndex}. Checklist has {checklist.Count} items." };
+                var checklist = task.GetChecklist();
+                if (itemIndex < 0 || itemIndex >= checklist.Count)
+                {
+                    return new UpdateTaskResult { Success = false, Error = $"Invalid item index: {itemIndex}. Checklist has {checklist.Count} items." };
+                }
+
+                checklist[itemIndex].AssignedTo = assignee;
+                task.SetChecklist(checklist);
+
+                try { _taskDb.SaveTask(task); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save checklist assignment: {ex.Message}"); }
             }
-
-            checklist[itemIndex].AssignedTo = assignee;
-            task.SetChecklist(checklist);
-
-            try { _taskDb.SaveTask(task); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save checklist assignment: {ex.Message}"); }
 
             BroadcastTaskUpdate();
 
