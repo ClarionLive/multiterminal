@@ -392,6 +392,31 @@ namespace MultiTerminal.Docking
                 {
                     _statusBar.SetRemoteMode(_messageBroker.IsRemoteMode);
                 }
+
+                // Force the statusline (folder + model/git/context rows) to be
+                // re-delivered now that the WebView is confirmed ready. Rows 2-3
+                // start hidden and only un-hide when a `statusline:` message is
+                // processed. Unlike Row 1 above, they have no direct re-push on
+                // ready — they depend on the poll timer hitting the renderer's
+                // single-shot _pendingStatusLineJson slot at the right moment
+                // relative to the WebView's async ready. When ready fires before
+                // the first poll tick, the pending slot is empty and the cached
+                // content then suppresses redelivery of the unchanged fallback,
+                // so rows 2-3 never arrive (~50% of launches). Clearing the
+                // change-detection cache makes the next poll tick re-deliver to
+                // the ready WebView.
+                _lastStatusLineContent = null;
+                _lastSharedQuotaContent = null;
+
+                // Don't wait up to ~2s for the next scheduled poll tick: fire one
+                // immediately so the just-ready WebView gets the statusline right
+                // away. Reuses the timer's existing read+parse+deliver path (no
+                // duplication) and is idempotent. If polling hasn't started yet
+                // (_statusLineTimer null) or is being torn down, this no-ops and
+                // the cache-clear above still makes the first/next real tick
+                // deliver. Guarded because Change() throws if the timer raced a
+                // Dispose during teardown.
+                try { _statusLineTimer?.Change(0, 2000); } catch { /* timer disposed during teardown */ }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
