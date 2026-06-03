@@ -1565,7 +1565,13 @@ namespace MultiTerminal
 
             try
             {
-                var terminals = _mcpServer?.Broker?.GetAllConnectedTerminals();
+                // Task d32c80eb: target only the task's own agents (assignee +
+                // helpers + all temporary "Agent *" subagents) instead of every
+                // connected terminal, so unrelated peer terminals don't render
+                // the control envelope as visible channel noise. The agents that
+                // can actually be stranded cwd-inside the worktree are still
+                // covered; only named bystanders are trimmed.
+                var terminals = _mcpServer?.Broker?.GetWorktreeEvictionAudience(e.TaskId, e.AgentName);
                 if (terminals == null || terminals.Count == 0) return;
 
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
