@@ -181,9 +181,11 @@ namespace MultiTerminal.Services
                             // branches merge cleanly on retry. A real conflict
                             // clean-aborts inside the merge service and we fall
                             // through to flagging — no retry loop.
+                            // Hoisted out of the if-block so the pending-merge path
+                            // below can surface retry.Stderr (the refusal reason).
+                            MergeResult retry = null;
                             if (tryMergeForTask != null)
                             {
-                                MergeResult retry = null;
                                 try
                                 {
                                     retry = await tryMergeForTask(record.TaskId, projectPath).ConfigureAwait(false);
@@ -193,21 +195,53 @@ namespace MultiTerminal.Services
                                     result.Errors.Add($"Pass 2 merge-retry {record.TaskId}: {ex.Message}");
                                 }
 
-                                if (retry != null && retry.Success)
+                                if (retry != null && retry.Merged)
                                 {
+                                    // A REAL merge landed the branch in trunk. On the
+                                    // partial path (merge succeeded, branch -d failed)
+                                    // Stderr is set and the branch is still alive — don't
+                                    // claim "and deleted" (task 90c2acc6, Codex security
+                                    // MEDIUM, mirroring the broker fix). The next sweep
+                                    // re-detects the leftover branch and cleans it up as a
+                                    // benign skip.
                                     result.MergesRecovered++;
+                                    bool cleanupPending = !string.IsNullOrWhiteSpace(retry.Stderr);
+                                    string shortId = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
                                     recordActivity?.Invoke(
                                         "janitor_merge_recovered",
-                                        $"Auto-merge recovered for done task {record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length))}: branch {record.BranchName} merged into {retry.MergedInto ?? "trunk"} and deleted.",
+                                        cleanupPending
+                                            ? $"Auto-merge recovered for done task {shortId}: branch {record.BranchName} merged into {retry.MergedInto ?? "trunk"}; branch cleanup pending (will be removed on the next sweep)."
+                                            : $"Auto-merge recovered for done task {shortId}: branch {record.BranchName} merged into {retry.MergedInto ?? "trunk"} and deleted.",
                                         record.TaskId);
+                                    continue;
+                                }
+
+                                // Success WITHOUT a merge (task 90c2acc6, Suspect A):
+                                // a benign skip — no commits to merge, or the branch
+                                // resolved itself (already deleted). Nothing landed,
+                                // but nothing is pending either: do NOT flag it as a
+                                // pending merge AND do NOT count it as a recovery. The
+                                // old code conflated this with a real merge via
+                                // .Success, reporting "merged into trunk" for a no-op.
+                                if (retry != null && retry.Success)
+                                {
                                     continue;
                                 }
                             }
 
+                            // Surface the actual refusal/failure reason from the retry
+                            // (task 90c2acc6, Codex adversary MEDIUM): the wrong-branch
+                            // and fail-closed refusals carry an actionable Stderr (e.g.
+                            // "main checkout is on 'feature/x', expected 'master'"). The
+                            // old generic message discarded it, so operators got the same
+                            // unhelpful line every sweep with no clue to the real cause.
                             result.PendingMerges.Add(record.TaskId);
+                            string failReason = retry != null && !string.IsNullOrWhiteSpace(retry.Stderr)
+                                ? $" Reason: {retry.Stderr.Trim()}"
+                                : "";
                             recordActivity?.Invoke(
                                 "janitor_pending_merge",
-                                $"Branch {record.BranchName} still alive for done task {record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length))} — merge it manually or re-mark the task done to retry auto-merge.",
+                                $"Branch {record.BranchName} still alive for done task {record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length))} — merge it manually or re-mark the task done to retry auto-merge.{failReason}",
                                 record.TaskId);
                         }
                     }

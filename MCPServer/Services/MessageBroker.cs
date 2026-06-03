@@ -537,8 +537,8 @@ namespace MultiTerminal.MCPServer.Services
                 }
 
                 var record = _taskDb.GetWorktreeForTask(taskId);
-                var mergeResult = await _merge.MergeForTaskAsync(taskId, repoRoot).ConfigureAwait(false);
-                if (mergeResult.Success && string.IsNullOrEmpty(mergeResult.SkippedReason))
+                var mergeResult = await _merge.MergeForTaskAsync(taskId, repoRoot, ResolveConfiguredTrunk(task)).ConfigureAwait(false);
+                if (mergeResult.Merged)
                 {
                     // Real merge happened — let HUD rebind to post-merge trunk.
                     FireWorktreeReady(taskId, record?.WorktreePath, repoRoot, task.Assignee);
@@ -595,6 +595,33 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
+        // Resolve the project's configured default branch (git_default_branch) for
+        // a task, or null when unset / unknown. Passed to MergeForTaskAsync as the
+        // authoritative expected trunk (task 90c2acc6, Suspect B): when set, the
+        // merge refuses if the main checkout is parked on a different branch instead
+        // of silently landing the task branch in the wrong place. Null lets the
+        // merge service fall back to its own best-effort detection.
+        private string ResolveConfiguredTrunk(KanbanTask task)
+        {
+            // The cached _projects entries (MCPServer.Models.Project) are the light
+            // model and don't carry git_default_branch — read the rich project row
+            // for it. Returns null ONLY when there is genuinely no configured value
+            // (no project, or git_default_branch unset), in which case the merge
+            // service falls back to its own best-effort detection (and fails closed
+            // if that's ambiguous too).
+            //
+            // FAIL CLOSED on lookup failure (pipeline run 1, Codex security MEDIUM):
+            // a DB exception is NOT swallowed to null. Swallowing would silently
+            // convert a transient failure on the authoritative trust boundary into
+            // an unprotected heuristic merge. We let it propagate — both merge call
+            // sites run inside a try/catch that turns it into an auto_merge_failed
+            // (branch preserved, janitor retries next sweep), which is the safe
+            // outcome for a destructive-ish merge.
+            if (task?.ProjectId == null || _projectDb == null) return null;
+            var rich = _projectDb.GetRichProject(task.ProjectId);
+            return string.IsNullOrWhiteSpace(rich?.GitDefaultBranch) ? null : rich.GitDefaultBranch.Trim();
+        }
+
         // Post-prune flow shared by the synchronous task-done path and the
         // janitor's deferred-prune retry. Attempts the auto-merge (with full
         // activity logging for the four outcomes: skipped, merged, failed-clean,
@@ -612,36 +639,47 @@ namespace MultiTerminal.MCPServer.Services
             string taskIdShort = taskId.Substring(0, Math.Min(8, taskId.Length));
             try
             {
-                var mergeResult = _merge.MergeForTaskAsync(taskId, projectPath).GetAwaiter().GetResult();
+                var mergeResult = _merge.MergeForTaskAsync(taskId, projectPath, ResolveConfiguredTrunk(task)).GetAwaiter().GetResult();
 
-                if (mergeResult.Success)
+                if (mergeResult.Merged)
                 {
+                    // A real merge landed the branch in trunk. The branch is normally
+                    // deleted too — but on the partial path (merge succeeded, branch -d
+                    // failed) Stderr is set and the branch is still alive. Don't claim
+                    // "task branch deleted" in that case (pipeline run 1, Codex adversary
+                    // MEDIUM): the next janitor sweep cleans the leftover branch.
+                    bool cleanupPending = !string.IsNullOrEmpty(mergeResult.Stderr);
                     System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Auto-merge for {taskId}: " +
-                        (mergeResult.SkippedReason ?? $"merged into {mergeResult.MergedInto}"));
-
-                    if (!string.IsNullOrEmpty(mergeResult.SkippedReason))
+                        $"[MessageBroker] Auto-merge for {taskId}: merged into {mergeResult.MergedInto}" +
+                        (cleanupPending ? $" (branch cleanup pending: {mergeResult.Stderr})" : ""));
+                    RecordActivity(new ActivityEvent
                     {
-                        RecordActivity(new ActivityEvent
-                        {
-                            Terminal = task.Assignee ?? "System",
-                            Type = "worktree",
-                            Action = "auto_merge_skipped",
-                            Content = $"Auto-merge skipped for '{task.Title}': {mergeResult.SkippedReason}",
-                            RelatedId = taskId
-                        });
-                    }
-                    else
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = "auto_merge",
+                        Content = cleanupPending
+                            ? $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; branch cleanup is pending (will be removed on the next janitor sweep)."
+                            : $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; task branch deleted.",
+                        RelatedId = taskId
+                    });
+                }
+                else if (mergeResult.Success)
+                {
+                    // Success WITHOUT a merge — a benign skip (no commits, branch
+                    // already gone, no worktree record). Report it as a skip, NOT a
+                    // merge (task 90c2acc6, Suspect A: never claim "merged into trunk"
+                    // when nothing landed).
+                    string skipReason = mergeResult.SkippedReason ?? "no merge performed";
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MessageBroker] Auto-merge for {taskId}: skipped — {skipReason}");
+                    RecordActivity(new ActivityEvent
                     {
-                        RecordActivity(new ActivityEvent
-                        {
-                            Terminal = task.Assignee ?? "System",
-                            Type = "worktree",
-                            Action = "auto_merge",
-                            Content = $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; task branch deleted.",
-                            RelatedId = taskId
-                        });
-                    }
+                        Terminal = task.Assignee ?? "System",
+                        Type = "worktree",
+                        Action = "auto_merge_skipped",
+                        Content = $"Auto-merge skipped for '{task.Title}': {skipReason}",
+                        RelatedId = taskId
+                    });
                 }
                 else
                 {

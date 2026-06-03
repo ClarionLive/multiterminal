@@ -56,7 +56,7 @@ namespace MultiTerminal.Services
         /// clear "commit or stash" message; conflict aborts cleanly and leaves
         /// the task branch alive for manual resolution.</para>
         /// </summary>
-        public async Task<MergeResult> MergeForTaskAsync(string taskId, string repoRoot)
+        public async Task<MergeResult> MergeForTaskAsync(string taskId, string repoRoot, string expectedTrunk = null)
         {
             if (string.IsNullOrEmpty(taskId))
                 throw new ArgumentException("taskId is required", nameof(taskId));
@@ -105,6 +105,50 @@ namespace MultiTerminal.Services
                 {
                     Success = false,
                     Stderr = $"Main checkout is on the task's own branch ({trunk}); refusing to merge into self."
+                };
+            }
+
+            // Suspect B (task 90c2acc6): the merge targets whatever branch the main
+            // checkout currently has checked out. If that's NOT the intended trunk
+            // (someone parked the main checkout on a feature branch, or a prior
+            // operation left it elsewhere), the task branch would silently land in
+            // the wrong branch and never reach the default branch. Resolve the
+            // EXPECTED trunk and refuse rather than merge blind.
+            //
+            // Resolution order: (1) the caller-supplied expectedTrunk (the project's
+            // configured git_default_branch — authoritative); (2) the remote's
+            // published default (origin/HEAD); (3) the SOLE non-task local branch
+            // when exactly one exists (covers custom trunk names like 'develop').
+            //
+            // FAIL CLOSED (pipeline run 1, Codex security + adversary HIGH): if NONE
+            // of these resolve — e.g. a repo carrying BOTH a stale 'main' and the
+            // working 'master', or a non-conventional trunk name with no configured
+            // git_default_branch — we must NOT fall back to "merge into whatever HEAD
+            // is on". That fail-open path reopened the exact silent wrong-branch merge
+            // this guard exists to stop. Instead we refuse and tell the operator to
+            // set the project's git_default_branch. A destructive-ish merge never
+            // proceeds on a guessed trunk.
+            string wantTrunk = string.IsNullOrWhiteSpace(expectedTrunk)
+                ? await DetectDefaultBranchAsync(repoRoot).ConfigureAwait(false)
+                : expectedTrunk.Trim();
+            if (string.IsNullOrWhiteSpace(wantTrunk))
+            {
+                return new MergeResult
+                {
+                    Success = false,
+                    Merged = false,
+                    MergedInto = trunk,
+                    Stderr = $"Could not determine the repository's default branch (no project git_default_branch configured, no origin/HEAD, and more than one non-task branch exists so the trunk is ambiguous). Refusing to auto-merge '{branchName}' to avoid landing it in the wrong branch (main checkout currently on '{trunk}'). Set the project's default branch (git_default_branch) and re-mark the task done to retry."
+                };
+            }
+            if (!string.Equals(trunk, wantTrunk, StringComparison.Ordinal))
+            {
+                return new MergeResult
+                {
+                    Success = false,
+                    Merged = false,
+                    MergedInto = trunk,
+                    Stderr = $"Main checkout is on '{trunk}', but the expected trunk is '{wantTrunk}'. Refusing to merge '{branchName}' into the wrong branch — check out '{wantTrunk}' in the main checkout and re-mark the task done to retry."
                 };
             }
 
@@ -220,6 +264,26 @@ namespace MultiTerminal.Services
                 }
             }
 
+            // TOCTOU guard (pipeline run 2, Codex security HIGH): the trunk was
+            // validated several awaited git calls ago. `git merge` lands in whatever
+            // HEAD currently points to, so if a concurrent actor checked out a
+            // different branch in the main checkout in that window, the merge would
+            // silently land in the wrong branch. Re-read HEAD immediately before the
+            // merge and abort if it no longer matches the validated trunk. This
+            // shrinks the race window to effectively nothing; a stronger repo-wide
+            // mutex is tracked as a follow-up.
+            var headRecheck = await RunGitAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (headRecheck.exitCode != 0 || !string.Equals(headRecheck.stdout.Trim(), trunk, StringComparison.Ordinal))
+            {
+                return new MergeResult
+                {
+                    Success = false,
+                    Merged = false,
+                    MergedInto = trunk,
+                    Stderr = $"Main checkout's branch changed from '{trunk}' to '{headRecheck.stdout.Trim()}' during merge preparation (concurrent checkout?); aborting to avoid merging '{branchName}' into the wrong branch. Re-mark the task done to retry."
+                };
+            }
+
             var mergeRunResult = await RunGitAsync(
                 repoRoot, "merge", "--no-edit", branchName).ConfigureAwait(false);
             if (mergeRunResult.exitCode != 0)
@@ -244,6 +308,7 @@ namespace MultiTerminal.Services
                 return new MergeResult
                 {
                     Success = true,
+                    Merged = true,
                     MergedInto = trunk,
                     Stderr = $"merged but branch -d failed (manual cleanup needed): {deleteBranchResult.stderr.Trim()}"
                 };
@@ -252,6 +317,7 @@ namespace MultiTerminal.Services
             return new MergeResult
             {
                 Success = true,
+                Merged = true,
                 MergedInto = trunk
             };
         }
@@ -523,6 +589,77 @@ namespace MultiTerminal.Services
             return false;
         }
 
+        /// <summary>
+        /// Best-effort resolution of the repository's default branch, used to guard
+        /// against merging a task branch into a non-trunk branch the main checkout
+        /// happens to be parked on (task 90c2acc6, Suspect B). Returns <c>null</c>
+        /// when the default cannot be determined UNAMBIGUOUSLY — callers treat null
+        /// as "skip the assertion" so a legitimate merge is never blocked by a guess.
+        /// </summary>
+        private static async Task<string> DetectDefaultBranchAsync(string repoRoot)
+        {
+            // (2) Remote's published default (origin/HEAD -> origin/<branch>).
+            var remote = await RunGitAsync(repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
+            if (remote.exitCode == 0)
+            {
+                string r = remote.stdout.Trim();
+                const string prefix = "origin/";
+                if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
+                if (!string.IsNullOrEmpty(r)) return r;
+            }
+
+            // (3) The SOLE non-task local branch, if exactly one exists AND it bears a
+            // conventional trunk name. Generalizing past hard-coded main/master to
+            // custom trunk names was pipeline run 2 (Codex adversary HIGH: 'develop'
+            // repos were over-blocked). But accepting an ARBITRARY lone branch was
+            // itself unsafe — pipeline run 3 (Codex adversary HIGH): a lone
+            // 'feature/parked' would be promoted to trunk and the task branch merged
+            // into it, reopening the silent wrong-branch class. So we only trust the
+            // lone branch when its name is a recognized default-branch convention.
+            // Anything else (a lone 'feature/*', 'release', 'stable', ...) gives no
+            // trustworthy signal: return null and let the caller fail closed. A repo
+            // with MORE than one non-task branch is likewise ambiguous → null. Repos
+            // with a genuinely unconventional trunk name must set the project's
+            // git_default_branch (the authoritative source). Task branches
+            // (task/<id>[--<slug>]) are excluded — they're never trunk.
+            var branches = await RunGitAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/").ConfigureAwait(false);
+            if (branches.exitCode == 0)
+            {
+                string sole = null;
+                int count = 0;
+                foreach (var raw in branches.stdout.Split('\n'))
+                {
+                    string b = raw.Trim();
+                    if (b.Length == 0 || b.StartsWith("task/", StringComparison.Ordinal)) continue;
+                    count++;
+                    sole = b;
+                    if (count > 1) break;
+                }
+                if (count == 1 && IsConventionalTrunkName(sole)) return sole;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Recognized default-branch naming conventions. A lone local branch is only
+        /// trusted as the trunk when it matches one of these — an arbitrary branch
+        /// name carries no signal that it is actually the repository default (task
+        /// 90c2acc6, pipeline run 3). Repos whose trunk is named otherwise must set
+        /// the project's git_default_branch.
+        /// </summary>
+        private static readonly string[] ConventionalTrunkNames = { "main", "master", "develop", "trunk" };
+
+        private static bool IsConventionalTrunkName(string branch)
+        {
+            if (string.IsNullOrWhiteSpace(branch)) return false;
+            foreach (var name in ConventionalTrunkNames)
+            {
+                if (string.Equals(branch, name, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
         private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(
             string workingDir, params string[] args)
         {
@@ -555,10 +692,26 @@ namespace MultiTerminal.Services
     /// for a benign reason (e.g. no commits to merge, branch already gone).
     /// Failure populates <see cref="Stderr"/> and (for merge conflicts)
     /// <see cref="HadConflicts"/>.
+    ///
+    /// <para><see cref="Success"/> alone does NOT mean a merge happened — a benign
+    /// skip is also a success. Callers that need to know whether the task branch
+    /// actually landed in trunk (the activity feed, the janitor's recovery
+    /// accounting) MUST check <see cref="Merged"/>, not <see cref="Success"/>.
+    /// Conflating the two (task 90c2acc6, Suspect A) let a no-op be reported as
+    /// "merged into trunk", masking the very failure this class describes.</para>
     /// </summary>
     public class MergeResult
     {
         public bool Success { get; set; }
+
+        /// <summary>
+        /// True ONLY when a real <c>git merge</c> (fast-forward or merge commit)
+        /// landed the task branch in trunk. False for every benign skip
+        /// (no commits to merge, branch already deleted, no worktree record) and
+        /// for every failure. Distinct from <see cref="Success"/>, which is also
+        /// true for benign skips.
+        /// </summary>
+        public bool Merged { get; set; }
 
         /// <summary>Trunk branch the merge targeted, or null on early-exit failure.</summary>
         public string MergedInto { get; set; }
