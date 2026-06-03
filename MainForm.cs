@@ -458,6 +458,63 @@ namespace MultiTerminal
                     System.Diagnostics.Debug.WriteLine($"[MainForm] session_agent_map cleanup failed: {ex.Message}");
                 }
 
+                // One-time cleanup: remove orphan empty note-tab rows that older
+                // terminals created by keying HUD Notes/Sessions to a worktree path
+                // (root cause of task 0ef06717). Only empty rows whose path isn't a
+                // registered project are removed; non-empty rows are always kept.
+                //
+                // FAIL CLOSED: this is a destructive op gated entirely by the keep-set.
+                // If the authoritative project enumeration throws or yields nothing, an
+                // empty keep-set would make EVERY empty note row (incl. real projects'
+                // empty default tabs) look like an orphan. So we only purge when the
+                // ProjectDatabase enumeration succeeds AND produced at least one path.
+                // Both identity fields (SourcePath and Path) are added to the keep-set,
+                // matching how note tabs are now keyed (SourcePath ?? Path).
+                try
+                {
+                    var keepPaths = new List<string>();
+                    bool authoritativeOk = false;
+                    try
+                    {
+                        // GetAllRichProjects (not GetAllProjects): the rich Models.Project
+                        // carries SourcePath, which is the primary note-tab key field.
+                        var dbProjects = _sharedProjectDatabase?.GetAllRichProjects();
+                        if (dbProjects != null)
+                        {
+                            authoritativeOk = true;
+                            foreach (var p in dbProjects)
+                            {
+                                if (!string.IsNullOrEmpty(p.SourcePath)) keepPaths.Add(p.SourcePath);
+                                if (!string.IsNullOrEmpty(p.Path)) keepPaths.Add(p.Path);
+                            }
+                        }
+                    }
+                    catch { authoritativeOk = false; }
+                    try
+                    {
+                        var regProjects = _mcpServer.Broker.ProjectService?.GetAllRegisteredProjects();
+                        if (regProjects != null)
+                            foreach (var p in regProjects)
+                                if (!string.IsNullOrEmpty(p.Path)) keepPaths.Add(p.Path);
+                    }
+                    catch { /* secondary source — best-effort, doesn't gate the purge */ }
+
+                    if (!authoritativeOk || keepPaths.Count == 0)
+                    {
+                        _debugLogService?.Info("MainForm", "Skipped orphan note-tab purge — project enumeration unavailable/empty (fail-closed to avoid deleting legitimate tabs)");
+                    }
+                    else
+                    {
+                        int purged = _mcpServer.Broker.TaskDb.PurgeOrphanEmptyNoteTabs(keepPaths);
+                        if (purged > 0)
+                            _debugLogService?.Info("MainForm", $"Purged {purged} orphan empty note-tab row(s) keyed to non-registered (worktree) paths");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MainForm] orphan note-tab purge failed: {ex.Message}");
+                }
+
                 // Auto-sync Claude Code sessions on startup (background, non-blocking)
                 // Scans all registered projects from SQLite, not just CWD
                 var startupLineageService = _mcpServer.Broker.SessionLineageService;

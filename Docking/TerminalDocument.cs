@@ -201,6 +201,14 @@ namespace MultiTerminal.Docking
         // and re-push so the HUD header tracks Claude Code's workspace instead of the
         // stale launch-dir that came from the global _settings.GetLastDirectory() fallback.
         private string _hudDispatchedFolder;
+        // Canonical project path the Notes/Sessions HUD panes are keyed to. These
+        // panes are per-PROJECT (not per-folder), so they must NOT follow the
+        // worktree the way _hudDispatchedFolder does — a worktree path has no
+        // notes and would render empty (and pollute project_note_tabs with an
+        // auto-created empty "General" row). Resolved to the registered project
+        // path at launch and only ever upgraded (never downgraded to a raw
+        // worktree path) by the StatusLinePoll folder correction.
+        private string _hudNotesProjectKey;
 
         // Track the last known working directory for session persistence
         private string _lastKnownDirectory;
@@ -1071,14 +1079,25 @@ namespace MultiTerminal.Docking
             // Update all HUD tabs with project context
             _hudDashboard?.SetProject(projectId, workingDirectory, _projectName);
             _hudDispatchedFolder = workingDirectory;
-            _hudNotes?.SetProject(workingDirectory);
+            // Notes/Sessions are per-PROJECT: key them to the canonical registered
+            // project path, not the launch dir (which for an active-task terminal is
+            // the worktree path — no notes there, and GetProjectNoteTabs would
+            // auto-create an empty "General" row). Fall back to the normalized
+            // working dir only when the project isn't registered.
+            // Fallback (unregistered project): the RAW working directory — the exact
+            // string old terminals keyed notes under — so existing rows still match.
+            _hudNotesProjectKey = TryResolveCanonicalProjectPath(projectId, workingDirectory)
+                                  ?? workingDirectory;
+            _hudNotes?.SetProject(_hudNotesProjectKey);
+            _hudSessions?.SetProject(_hudNotesProjectKey);
             _hudKnowledge?.SetProject(projectId);
             // Pass projectId explicitly — workingDirectory may be a worktree
             // subfolder that isn't in the project registry, and the path-only
             // overload would silently leave _projectId null (breaks per-(project,
             // branch) outcome read/write). Debugger Run-1 finding.
             _hudGit?.SetProject(projectId, workingDirectory);
-            _hudSessions?.SetProject(workingDirectory);
+            // (_hudSessions is keyed above to the canonical project path, not the
+            // launch/worktree dir — see _hudNotesProjectKey resolution.)
             // Switch HUD to dashboard tab by default when starting a terminal
             _hudTabContainer?.SwitchToTabById("__dashboard__");
 
@@ -2533,6 +2552,126 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Resolves the canonical, registered project path for the Notes/Sessions
+        /// HUD panes (which are keyed per-project, not per-folder). Prefers a lookup
+        /// by projectId; falls back to matching the folder against the registered
+        /// project list. Returns null when the project can't be resolved to a
+        /// registered entry (caller decides the fallback). Never returns a raw
+        /// worktree path — that's the whole point: worktree paths have no notes and
+        /// cause an empty pane plus an orphan auto-created note-tab row.
+        ///
+        /// The canonical key is <c>SourcePath ?? Path</c> — the SAME precedence the
+        /// launcher uses to pick a terminal's working directory (LaunchCommandBuilder
+        /// "SourcePath → Path", Project.cs "Use SourcePath as the canonical field").
+        /// Historical note tabs were keyed by that working directory, so resolving by
+        /// Path alone would re-key Notes to a different path than the data lives under
+        /// for any project whose SourcePath and Path diverge — re-introducing the
+        /// empty pane this fix is meant to eliminate. We also match the folder against
+        /// BOTH identity fields so either one locates the project.
+        /// </summary>
+        private string TryResolveCanonicalProjectPath(string projectId, string folder)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(projectId))
+                {
+                    // GetRichProject (not GetProject): only the rich Models.Project
+                    // carries SourcePath; the lightweight MCPServer.Models.Project doesn't.
+                    string canon = CanonicalProjectKey(_messageBroker?.ProjectDatabase?.GetRichProject(projectId));
+                    if (!string.IsNullOrEmpty(canon)) return canon;
+                }
+
+                if (!string.IsNullOrEmpty(folder))
+                {
+                    string normFolder = NormalizeProjectPath(folder);
+                    // Use the rich project list (carries SourcePath) so the folder
+                    // match can consider both identity fields. Ambiguity guard: if the
+                    // folder matches more than one DISTINCT project key (e.g. project
+                    // A's SourcePath == project B's Path, since the schema enforces no
+                    // uniqueness on those fields), DON'T remap — picking the first row
+                    // would silently bind Notes/Sessions to the wrong project's notes.
+                    var projects = _messageBroker?.ProjectDatabase?.GetAllRichProjects();
+                    if (projects != null)
+                    {
+                        string firstMatch = null;
+                        foreach (var p in projects)
+                        {
+                            if (ProjectFieldMatchesFolder(p?.SourcePath, normFolder) ||
+                                ProjectFieldMatchesFolder(p?.Path, normFolder))
+                            {
+                                string canon = CanonicalProjectKey(p);
+                                if (string.IsNullOrEmpty(canon)) continue;
+                                if (firstMatch == null)
+                                {
+                                    firstMatch = canon;
+                                }
+                                // Compare distinctness on the NORMALIZED key so two registry
+                                // rows for the SAME folder that differ only by formatting
+                                // (trailing slash, slash style, case) don't read as an
+                                // ambiguous multi-project match. Only a genuinely different
+                                // folder trips the guard. We still RETURN the raw firstMatch.
+                                else if (!string.Equals(NormalizeProjectPath(firstMatch), NormalizeProjectPath(canon),
+                                                        StringComparison.OrdinalIgnoreCase))
+                                {
+                                    _debugLogService?.Trace("TerminalDocument",
+                                        $"Notes key: folder '{folder}' matches multiple projects — not remapping to avoid cross-project notes");
+                                    return null;
+                                }
+                            }
+                        }
+                        if (!string.IsNullOrEmpty(firstMatch)) return firstMatch;
+                    }
+                }
+            }
+            catch { /* non-critical — caller falls back */ }
+
+            return null;
+        }
+
+        /// <summary>
+        /// The note-tab key for a project: the RAW <c>SourcePath ?? Path</c>, matching the
+        /// launcher's working-dir precedence; null when the project is null or has neither
+        /// field.
+        ///
+        /// Kept raw here for symmetry with launch/folder resolution — the same
+        /// <c>SourcePath ?? Path</c> identity is also matched against both fields during
+        /// folder lookup, where the original spelling matters. Canonicalization of the
+        /// stored key is owned by the persistence layer: <c>TaskDatabase.NormalizeNoteTabPath</c>
+        /// (full path + trailing-separator trim) runs on every note-tab read/write and a
+        /// one-time migration rewrites pre-existing rows, so trailing-slash / slash-style
+        /// spelling differences in the key handed down from here are absorbed downstream —
+        /// this method need not (and must not, to stay symmetric with folder matching)
+        /// normalize. Case-insensitive needs are applied at each comparison site
+        /// (OrdinalIgnoreCase), not baked into the stored key.
+        /// </summary>
+        private static string CanonicalProjectKey(MultiTerminal.Models.Project project)
+        {
+            if (project == null) return null;
+            string raw = !string.IsNullOrEmpty(project.SourcePath) ? project.SourcePath : project.Path;
+            return string.IsNullOrEmpty(raw) ? null : raw;
+        }
+
+        /// <summary>True when a project identity field normalizes to the given folder.</summary>
+        private static bool ProjectFieldMatchesFolder(string projectField, string normalizedFolder)
+        {
+            if (string.IsNullOrEmpty(projectField)) return false;
+            return string.Equals(NormalizeProjectPath(projectField), normalizedFolder,
+                                 StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Canonicalizes a project path so the same project always maps to one
+        /// note-tab key: full path with trailing separators trimmed. Guards against
+        /// GetFullPath throwing on malformed input by falling back to a simple trim.
+        /// </summary>
+        private static string NormalizeProjectPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            try { return Path.GetFullPath(path).TrimEnd('\\', '/'); }
+            catch { return path.TrimEnd('\\', '/'); }
+        }
+
+        /// <summary>
         /// Starts polling the status line temp file for Claude Code session data.
         /// Called when the terminal identity is known (CustomTitle is set).
         /// </summary>
@@ -2695,11 +2834,20 @@ namespace MultiTerminal.Docking
                             // the stale launch-dir lookup from StartTerminal.
                             _lastKnownDirectory = folderForUi;
                             _hudDashboard?.SetProject(resolvedProjectId, folderForUi, resolvedProjectName);
-                            _hudNotes?.SetProject(folderForUi);
                             _hudKnowledge?.SetProject(resolvedProjectId);
                             // Pass resolvedProjectId — see comment in StartTerminal call site for rationale.
                             _hudGit?.SetProject(resolvedProjectId, folderForUi);
-                            _hudSessions?.SetProject(folderForUi);
+                            // Notes/Sessions are per-project: only UPGRADE their key to a
+                            // canonical registered project path; never downgrade to a raw
+                            // worktree folder (which has no notes and would blank the pane).
+                            string canonNotesKey = TryResolveCanonicalProjectPath(resolvedProjectId, folderForUi);
+                            if (!string.IsNullOrEmpty(canonNotesKey) &&
+                                !string.Equals(canonNotesKey, _hudNotesProjectKey, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _hudNotesProjectKey = canonNotesKey;
+                                _hudNotes?.SetProject(canonNotesKey);
+                                _hudSessions?.SetProject(canonNotesKey);
+                            }
                             _hudDispatchedFolder = folderForUi;
                             UpdateStatusBar();
                         }

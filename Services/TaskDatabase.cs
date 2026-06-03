@@ -112,6 +112,7 @@ namespace MultiTerminal.Services
             MigrateAddTaskWorktrees();
             MigrateAddBranchMetadata();
             MigrateAddAgentToTaskWorktrees();
+            MigrateNormalizeNoteTabPaths();
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
@@ -5781,6 +5782,8 @@ namespace MultiTerminal.Services
         public List<(string Name, string Content, bool IsDefault)> GetProjectNoteTabs(string projectPath)
         {
             if (string.IsNullOrEmpty(projectPath)) return new List<(string, string, bool)>();
+            string rawPath = projectPath;                    // pre-normalization spelling (for legacy fallback)
+            projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
 
             var tabs = new List<(string Name, string Content, bool IsDefault)>();
             const string sql = "SELECT tab_name, content, is_default FROM project_note_tabs WHERE project_path = @path ORDER BY tab_order";
@@ -5798,10 +5801,55 @@ namespace MultiTerminal.Services
                 }
             }
 
+            // Self-heal: correctness must NOT depend on MigrateNormalizeNoteTabPaths
+            // having run/succeeded. If the canonical key found nothing but rows still
+            // exist under the raw (pre-normalization) spelling, adopt them under the
+            // canonical key so this and every future read/write converge. Safe to re-key
+            // here because the canonical lookup above returned zero rows (no tab-name
+            // collision possible). Only on the cold path (no canonical rows).
+            if (tabs.Count == 0 && !string.Equals(rawPath, projectPath, StringComparison.Ordinal))
+            {
+                using (var cmd = new SQLiteCommand(sql, _connection))
+                {
+                    cmd.Parameters.AddWithValue("@path", rawPath);
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        tabs.Add((
+                            reader.GetString(0),
+                            reader.IsDBNull(1) ? "" : reader.GetString(1),
+                            reader.GetInt32(2) == 1
+                        ));
+                    }
+                }
+                if (tabs.Count > 0)
+                {
+                    try
+                    {
+                        using var upd = new SQLiteCommand(
+                            "UPDATE project_note_tabs SET project_path = @norm WHERE project_path = @raw", _connection);
+                        upd.Parameters.AddWithValue("@norm", projectPath);
+                        upd.Parameters.AddWithValue("@raw", rawPath);
+                        upd.ExecuteNonQuery();
+                    }
+                    catch { /* re-key is best-effort; the rows are already returned correctly */ }
+                    return tabs;
+                }
+            }
+
             if (tabs.Count == 0)
             {
-                // Migrate from legacy project_notes or create empty default tab
+                // Migrate from legacy single-note project_notes, or create an empty
+                // default tab. project_notes is NOT path-normalized, so read under the
+                // canonical key first, then fall back to the RAW spelling — otherwise a
+                // legacy note saved under a non-canonical path (trailing slash, etc.)
+                // would be silently lost and replaced by an empty "General" tab.
                 string legacyContent = GetProjectNotes(projectPath);
+                if (string.IsNullOrEmpty(legacyContent) &&
+                    !string.Equals(rawPath, projectPath, StringComparison.Ordinal))
+                {
+                    legacyContent = GetProjectNotes(rawPath);
+                }
                 SaveNoteTab(projectPath, "General", legacyContent, 0, true);
                 tabs.Add(("General", legacyContent, true));
             }
@@ -5815,6 +5863,7 @@ namespace MultiTerminal.Services
         public void SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
         {
             if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return;
+            projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
 
             // Get current max tab_order if not specified
             if (!tabOrder.HasValue)
@@ -5847,6 +5896,7 @@ namespace MultiTerminal.Services
         public bool DeleteNoteTab(string projectPath, string tabName)
         {
             if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
+            projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
             const string sql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND is_default = 0";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", projectPath);
@@ -5860,6 +5910,7 @@ namespace MultiTerminal.Services
         public bool RenameNoteTab(string projectPath, string oldName, string newName)
         {
             if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(oldName) || string.IsNullOrEmpty(newName)) return false;
+            projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
             const string sql = "UPDATE project_note_tabs SET tab_name = @newName, updated_at = datetime('now') WHERE project_path = @path AND tab_name = @oldName";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@path", projectPath);
@@ -5874,6 +5925,7 @@ namespace MultiTerminal.Services
         public void ReorderNoteTabs(string projectPath, List<string> tabNames)
         {
             if (string.IsNullOrEmpty(projectPath) || tabNames == null) return;
+            projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
             const string sql = "UPDATE project_note_tabs SET tab_order = @order WHERE project_path = @path AND tab_name = @name";
             for (int i = 0; i < tabNames.Count; i++)
             {
@@ -5882,6 +5934,251 @@ namespace MultiTerminal.Services
                 cmd.Parameters.AddWithValue("@name", tabNames[i]);
                 cmd.Parameters.AddWithValue("@order", i);
                 cmd.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
+        /// One-time cleanup of orphan note-tab rows that older terminals created by
+        /// keying notes to a worktree path. Deletes only rows with EMPTY content whose
+        /// (normalized) project_path is NOT a registered project. Preserves every
+        /// registered-project row and every non-empty row (incl. notes someone actually
+        /// typed inside a worktree terminal). Returns the number of rows deleted.
+        /// </summary>
+        public int PurgeOrphanEmptyNoteTabs(IEnumerable<string> registeredProjectPaths)
+        {
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (registeredProjectPaths != null)
+            {
+                foreach (var p in registeredProjectPaths)
+                {
+                    string n = NormalizeNoteTabPath(p);
+                    if (!string.IsNullOrEmpty(n)) keep.Add(n);
+                }
+            }
+
+            // Collect empty-content rows whose path isn't a registered project.
+            var orphans = new List<(string Path, string Name)>();
+            const string selectSql = "SELECT project_path, tab_name FROM project_note_tabs WHERE LENGTH(COALESCE(content,'')) = 0";
+            using (var sel = new SQLiteCommand(selectSql, _connection))
+            using (var reader = sel.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    string path = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    string name = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    if (string.IsNullOrEmpty(path) || name == null) continue;
+                    if (keep.Contains(NormalizeNoteTabPath(path))) continue; // registered → preserve
+                    // Provenance guard: only purge rows that actually came from a git
+                    // worktree (the orphan source this cleanup targets). An unregistered
+                    // AD-HOC folder is legitimately supported by the HUD (Notes key to the
+                    // raw working dir), and its empty/named tabs are real user state — never
+                    // delete those just because the folder isn't a registered project.
+                    if (!LooksLikeWorktreePath(path)) continue;
+                    orphans.Add((path, name));
+                }
+            }
+
+            if (orphans.Count == 0) return 0;
+
+            int deleted = 0;
+            // Re-check emptiness IN the DELETE (not just the earlier SELECT) so a row
+            // that gained content between selection and deletion is never removed —
+            // closes the select-then-delete TOCTOU window.
+            const string delSql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND LENGTH(COALESCE(content,'')) = 0";
+            using (var tx = _connection.BeginTransaction())
+            {
+                foreach (var (path, name) in orphans)
+                {
+                    using var cmd = new SQLiteCommand(delSql, _connection, tx);
+                    cmd.Parameters.AddWithValue("@path", path);
+                    cmd.Parameters.AddWithValue("@name", name);
+                    deleted += cmd.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+            return deleted;
+        }
+
+        /// <summary>
+        /// The authoritative canonical form of a note-tab project_path key. Every
+        /// project_note_tabs read/write normalizes through this, and the one-time
+        /// MigrateNormalizeNoteTabPaths migration rewrites existing rows to it, so note
+        /// identity is STABLE across the common path-spelling differences: full path
+        /// (collapses "/" vs "\\" and "." / ".."), trailing separators trimmed. Without
+        /// this, a later edit to a project's path/source_path spelling would strand its
+        /// notes behind an exact project_path match. Used identically by the orphan
+        /// purge so its "registered?" check lines up with how rows are keyed.
+        ///
+        /// Deliberately does NOT case-fold. Lower-casing the persisted key would be
+        /// unsafe on case-SENSITIVE path namespaces (\\wsl$ shares, opt-in
+        /// case-sensitive NTFS directories), where "Foo" and "foo" are genuinely
+        /// different folders — folding them would merge two distinct projects' notes
+        /// during migration (cross-project bleed). Casing-only path edits are rare and,
+        /// on the default case-insensitive Windows FS, equivalent spellings already
+        /// share storage; the small residual (a manual case change re-keying notes) is
+        /// strictly safer than risking note cross-contamination. Comparisons that DO
+        /// want case-insensitivity (purge keep-set, folder match) apply
+        /// OrdinalIgnoreCase at the comparison site, not in the stored key.
+        /// </summary>
+        private static string NormalizeNoteTabPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return path;
+            try { return System.IO.Path.GetFullPath(path).TrimEnd('\\', '/'); }
+            catch { return path.TrimEnd('\\', '/'); }
+        }
+
+        /// <summary>
+        /// True when a path matches a MultiTerminal git-worktree layout — the only kind
+        /// of orphan note-tab row the startup purge is allowed to delete. MT worktrees
+        /// live under three historical layouts, each a "worktrees" directory followed by
+        /// an 8-hex task-id segment: "&lt;repo&gt;\.claude\worktrees\&lt;id&gt;",
+        /// "&lt;repo&gt;\worktrees\&lt;id&gt;", and "&lt;repo&gt;-worktrees\&lt;id&gt;".
+        /// We require BOTH a separator-bounded "worktrees" (or "*-worktrees") directory
+        /// AND a following 8-hex id segment, so a legitimate ad-hoc folder that merely
+        /// contains a "worktrees" directory (e.g. "D:\clients\worktrees\demo") is NOT
+        /// classified as an orphan — a plain substring match would wrongly delete its
+        /// empty tabs.
+        /// </summary>
+        private static bool LooksLikeWorktreePath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            var segs = path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < segs.Length - 1; i++)
+            {
+                bool isWorktreesDir =
+                    segs[i].Equals("worktrees", StringComparison.OrdinalIgnoreCase) ||
+                    segs[i].EndsWith("-worktrees", StringComparison.OrdinalIgnoreCase);
+                if (isWorktreesDir && IsWorktreeIdSegment(segs[i + 1]))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>True when a path segment is an 8-hex MT worktree id (optionally "&lt;id&gt;--&lt;slug&gt;").</summary>
+        private static bool IsWorktreeIdSegment(string seg)
+        {
+            if (string.IsNullOrEmpty(seg)) return false;
+            int dash = seg.IndexOf("--", StringComparison.Ordinal);
+            string id = dash >= 0 ? seg.Substring(0, dash) : seg;
+            if (id.Length != 8) return false;
+            foreach (char c in id)
+                if (!Uri.IsHexDigit(c)) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// One-time migration: rewrite every project_note_tabs.project_path to its
+        /// canonical form (<see cref="NormalizeNoteTabPath"/>) so pre-existing rows keep
+        /// matching now that all note reads/writes normalize the key. Idempotent
+        /// (re-running finds nothing to change). Runs in a single transaction.
+        ///
+        /// Collisions — two spellings of the same folder carrying the same tab name —
+        /// are merged NON-destructively in this priority: drop an empty/identical
+        /// duplicate (no content lost); if the canonical target is empty but this row
+        /// has content, the content wins; if both differ and are non-empty, BOTH are
+        /// preserved (this row moves under a deduped tab name). Content is never deleted.
+        /// </summary>
+        private void MigrateNormalizeNoteTabPaths()
+        {
+            try
+            {
+                var rows = new List<(string Id, string Path, string Tab, string Content)>();
+                using (var sel = new SQLiteCommand(
+                    "SELECT id, project_path, tab_name, COALESCE(content,'') FROM project_note_tabs", _connection))
+                using (var r = sel.ExecuteReader())
+                {
+                    while (r.Read())
+                        rows.Add((r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3)));
+                }
+                if (rows.Count == 0) return;
+
+                using var tx = _connection.BeginTransaction();
+                foreach (var row in rows)
+                {
+                    string canon = NormalizeNoteTabPath(row.Path);
+                    if (string.IsNullOrEmpty(canon) || string.Equals(canon, row.Path, StringComparison.Ordinal))
+                        continue; // already canonical
+
+                    // Is there a DIFFERENT row already at the canonical (path, tab)?
+                    string targetContent = null;
+                    using (var chk = new SQLiteCommand(
+                        "SELECT COALESCE(content,'') FROM project_note_tabs WHERE project_path=@c AND tab_name=@t AND id<>@id",
+                        _connection, tx))
+                    {
+                        chk.Parameters.AddWithValue("@c", canon);
+                        chk.Parameters.AddWithValue("@t", row.Tab);
+                        chk.Parameters.AddWithValue("@id", row.Id);
+                        var o = chk.ExecuteScalar();
+                        if (o != null && o != DBNull.Value) targetContent = (string)o;
+                    }
+
+                    if (targetContent == null)
+                    {
+                        // No collision — just re-key this row.
+                        using var upd = new SQLiteCommand(
+                            "UPDATE project_note_tabs SET project_path=@c WHERE id=@id", _connection, tx);
+                        upd.Parameters.AddWithValue("@c", canon);
+                        upd.Parameters.AddWithValue("@id", row.Id);
+                        upd.ExecuteNonQuery();
+                    }
+                    else if (string.IsNullOrEmpty(row.Content) ||
+                             string.Equals(row.Content, targetContent, StringComparison.Ordinal))
+                    {
+                        // This row is empty or a duplicate of the target — drop it (target keeps the content).
+                        using var del = new SQLiteCommand(
+                            "DELETE FROM project_note_tabs WHERE id=@id", _connection, tx);
+                        del.Parameters.AddWithValue("@id", row.Id);
+                        del.ExecuteNonQuery();
+                    }
+                    else if (string.IsNullOrEmpty(targetContent))
+                    {
+                        // Target is an empty placeholder; this row has real content — content wins.
+                        using (var delT = new SQLiteCommand(
+                            "DELETE FROM project_note_tabs WHERE project_path=@c AND tab_name=@t AND id<>@id", _connection, tx))
+                        {
+                            delT.Parameters.AddWithValue("@c", canon);
+                            delT.Parameters.AddWithValue("@t", row.Tab);
+                            delT.Parameters.AddWithValue("@id", row.Id);
+                            delT.ExecuteNonQuery();
+                        }
+                        using var upd = new SQLiteCommand(
+                            "UPDATE project_note_tabs SET project_path=@c WHERE id=@id", _connection, tx);
+                        upd.Parameters.AddWithValue("@c", canon);
+                        upd.Parameters.AddWithValue("@id", row.Id);
+                        upd.ExecuteNonQuery();
+                    }
+                    else
+                    {
+                        // Both non-empty and different — preserve both under a deduped tab name.
+                        string dedup = UniqueNoteTabName(tx, canon, row.Tab);
+                        using var upd = new SQLiteCommand(
+                            "UPDATE project_note_tabs SET project_path=@c, tab_name=@n WHERE id=@id", _connection, tx);
+                        upd.Parameters.AddWithValue("@c", canon);
+                        upd.Parameters.AddWithValue("@n", dedup);
+                        upd.Parameters.AddWithValue("@id", row.Id);
+                        upd.ExecuteNonQuery();
+                    }
+                }
+                tx.Commit();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TaskDatabase] note-tab path normalization migration failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Finds a tab name not already used under <paramref name="canonPath"/> by appending " (n)".</summary>
+        private string UniqueNoteTabName(SQLiteTransaction tx, string canonPath, string baseName)
+        {
+            for (int n = 2; ; n++)
+            {
+                string candidate = $"{baseName} ({n})";
+                using var cmd = new SQLiteCommand(
+                    "SELECT 1 FROM project_note_tabs WHERE project_path=@c AND tab_name=@t LIMIT 1", _connection, tx);
+                cmd.Parameters.AddWithValue("@c", canonPath);
+                cmd.Parameters.AddWithValue("@t", candidate);
+                if (cmd.ExecuteScalar() == null) return candidate;
+                if (n > 1000) return $"{baseName} ({Guid.NewGuid().ToString("N").Substring(0, 6)})";
             }
         }
 
