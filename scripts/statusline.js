@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 
 let input = '';
@@ -90,8 +91,12 @@ process.stdin.on('end', () => {
 
         // Write to temp file keyed by terminal name + docId so sibling terminals
         // sharing a name (e.g. a zombie session) can't clobber each other.
+        // Atomic write so two near-simultaneous renders can't tear the file.
         const outPath = path.join(os.tmpdir(), `mt-statusline-${terminalName}-${docId}.json`);
-        fs.writeFileSync(outPath, JSON.stringify(output), 'utf8');
+        // Best-effort: a failed per-terminal write (e.g. a transient rename
+        // collision with the C# poller) must NOT skip the shared-quota write
+        // below — the two files are independent.
+        try { atomicWriteFileSync(outPath, JSON.stringify(output)); } catch { /* best-effort */ }
 
         // Write account-level quota data to a shared file so all terminals
         // see the same 5h/7d usage stats. Only overwrite if our data is newer.
@@ -102,27 +107,78 @@ process.stdin.on('end', () => {
                 timestamp: Date.now(),
                 updatedBy: terminalName
             };
+            // Decide whether our data supersedes what's already there. The
+            // read+parse is in its OWN try so a corrupt/unreadable existing file
+            // is treated as "missing" (shouldWrite stays true) and gets repaired
+            // by the atomic write below. The previous code parsed inside the same
+            // try as the write, so a corrupt file threw before the write and the
+            // file stayed corrupt forever — the bug this fixes.
+            let shouldWrite = true;
             try {
-                // Read existing shared file to check timestamp
-                let shouldWrite = true;
                 if (fs.existsSync(sharedPath)) {
                     const existing = JSON.parse(fs.readFileSync(sharedPath, 'utf8'));
-                    // Only skip if existing data is newer (within 500ms tolerance for near-simultaneous writes)
+                    // Only skip if existing data is newer (500ms tolerance for near-simultaneous writes)
                     if (existing.timestamp && existing.timestamp > sharedData.timestamp + 500) {
                         shouldWrite = false;
                     }
                 }
-                if (shouldWrite) {
-                    fs.writeFileSync(sharedPath, JSON.stringify(sharedData), 'utf8');
-                }
             } catch {
-                // Silently fail — shared file is best-effort
+                // Corrupt/unreadable shared file — treat as missing and overwrite to self-heal.
+                shouldWrite = true;
+            }
+            if (shouldWrite) {
+                // Atomic + best-effort: concurrent terminals can't produce a torn file.
+                try { atomicWriteFileSync(sharedPath, JSON.stringify(sharedData)); } catch { /* best-effort */ }
             }
         }
     } catch {
         // Silently fail — don't break Claude Code
     }
 });
+
+// Synchronous sleep without a busy-spin (this is a one-shot CLI process, so
+// blocking the main thread briefly is fine and we have no event loop to yield to).
+function sleepSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Atomic write: write to a unique per-process temp file, then rename it over
+// the target. rename() is a whole-file swap, so a concurrent reader or writer
+// never observes a half-written (torn) file. Torn concurrent writes to the
+// shared quota file were the root cause of the 5h/7d/context stats sticking on
+// "--%" — the file became invalid JSON that no reader could parse.
+//
+// The temp name includes random bytes (not just the pid) so a hostile or racing
+// process in the shared temp dir can't predict/pre-place the path, and two
+// writers never collide on it.
+//
+// On Windows, rename-replacing a file another process holds open (e.g. the C#
+// StatusLinePoll reader) can throw a transient EPERM/EACCES/EBUSY. The C# reader
+// now opens with FileShare.Delete so this is rare, but we still retry a few times
+// with a short backoff so a normal poll collision doesn't drop the update.
+function atomicWriteFileSync(targetPath, content) {
+    const tmpPath = `${targetPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    try {
+        fs.writeFileSync(tmpPath, content, 'utf8');
+        let lastErr;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+                fs.renameSync(tmpPath, targetPath);
+                return;
+            } catch (e) {
+                lastErr = e;
+                const transient = e && (e.code === 'EPERM' || e.code === 'EACCES' || e.code === 'EBUSY');
+                if (!transient) throw e;
+                if (attempt < 3) sleepSync(15); // no point sleeping after the last attempt
+            }
+        }
+        throw lastErr;
+    } catch (e) {
+        // Best-effort cleanup of the temp file; rethrow so the caller can decide.
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        throw e;
+    }
+}
 
 function normalizeModel(model) {
     if (!model) return 'claude';

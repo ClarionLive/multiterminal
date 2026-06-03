@@ -2515,6 +2515,24 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
+        /// Reads a file while allowing other processes to concurrently write, rename,
+        /// or delete it (FileShare.ReadWrite | FileShare.Delete). statusline.js replaces
+        /// these temp files via an atomic write-temp-then-rename; a plain File.ReadAllText
+        /// opens with FileShare.Read only, which on Windows blocks that rename-replace
+        /// (transient EPERM/EACCES on the writer) and can drop a status/quota update —
+        /// the exact cross-process contention the atomic write was meant to eliminate.
+        /// Sharing Delete lets the writer's rename succeed while this handle still reads a
+        /// consistent snapshot of the pre-rename content.
+        /// </summary>
+        private static string ReadAllTextShared(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs);
+            return reader.ReadToEnd();
+        }
+
+        /// <summary>
         /// Starts polling the status line temp file for Claude Code session data.
         /// Called when the terminal identity is known (CustomTitle is set).
         /// </summary>
@@ -2534,13 +2552,13 @@ namespace MultiTerminal.Docking
                     string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
                     if (!File.Exists(filePath)) return;
 
-                    string content = File.ReadAllText(filePath);
+                    string content = ReadAllTextShared(filePath);
                     if (string.IsNullOrEmpty(content)) return;
 
                     // Check if either the per-terminal file or shared quota file changed
                     string sharedQuotaPath = Path.Combine(Path.GetTempPath(), "mt-statusline-quota.json");
                     string sharedContent = null;
-                    try { if (File.Exists(sharedQuotaPath)) sharedContent = File.ReadAllText(sharedQuotaPath); } catch { }
+                    try { if (File.Exists(sharedQuotaPath)) sharedContent = ReadAllTextShared(sharedQuotaPath); } catch { }
 
                     bool perTerminalChanged = content != _lastStatusLineContent;
                     bool sharedQuotaChanged = sharedContent != null && sharedContent != _lastSharedQuotaContent;
@@ -2600,9 +2618,14 @@ namespace MultiTerminal.Docking
                             _lastSharedQuotaContent = sharedContent;
                         }
                     }
-                    catch
+                    catch (Exception sharedEx)
                     {
-                        // Shared file may be mid-write; fall back to per-terminal data
+                        // Shared file may be mid-write; fall back to per-terminal data.
+                        // Log it (not silent) so persistent corruption is observable —
+                        // a torn write that never self-heals previously left this null
+                        // forever, sticking 5h/7d on "--%" for non-Claude terminals.
+                        _debugLogService?.Trace("TerminalDocument",
+                            $"StatusLinePoll: shared quota parse failed ({sharedEx.Message}); falling back to per-terminal quota");
                     }
 
                     // Fall back to per-terminal quota if shared file unavailable
