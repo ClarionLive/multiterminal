@@ -308,6 +308,19 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Append items to a task's existing checklist (preserves existing items).
+        /// </summary>
+        [HttpPost("{taskId}/checklist/append")]
+        public IActionResult AppendChecklist(string taskId, [FromBody] AppendChecklistRequest request)
+        {
+            var result = _broker.AppendChecklistItems(taskId, request.ItemsJson);
+            if (!result.Success)
+                return BadRequest(new { error = result.Error });
+
+            return Ok(new { success = true });
+        }
+
+        /// <summary>
         /// Transition a checklist item status with notes (state machine enforced).
         /// </summary>
         [HttpPost("{taskId}/checklist/{itemIndex}/transition")]
@@ -859,6 +872,11 @@ namespace MultiTerminal.API.Controllers
     public class UpdateChecklistRequest
     {
         public string ChecklistJson { get; set; }
+    }
+
+    public class AppendChecklistRequest
+    {
+        public string ItemsJson { get; set; }
     }
 
     public class TransitionChecklistRequest
