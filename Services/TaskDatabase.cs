@@ -43,15 +43,17 @@ namespace MultiTerminal.Services
         /// </summary>
         public TaskDatabase()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string folder = Path.Combine(appData, "multiterminal");
-
-            if (!Directory.Exists(folder))
+            // Delegate to GetDatabasePath so the MULTITERMINAL_TEST_DB override is
+            // honored here too (tests construct an isolated temp DB the same way
+            // PlanDatabaseTests does). Production-identical when the env var is
+            // unset: GetDatabasePath returns the same %APPDATA%/multiterminal path.
+            _databasePath = GetDatabasePath();
+            string folder = Path.GetDirectoryName(_databasePath);
+            if (!string.IsNullOrEmpty(folder) && !Directory.Exists(folder))
             {
                 Directory.CreateDirectory(folder);
             }
 
-            _databasePath = Path.Combine(folder, "multiterminal.db");
             InitializeDatabase();
         }
 
