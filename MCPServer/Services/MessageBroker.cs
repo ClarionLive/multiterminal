@@ -1757,6 +1757,58 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Narrowed audience for the <see cref="WorktreePruning"/> eviction
+        /// broadcast: only terminals that could plausibly hold cwd inside the
+        /// task's worktree — the <paramref name="actingAgent"/> (the agent that
+        /// drove the task to done — may be a helper, not the recorded
+        /// assignee), the task's assignee + helpers, and ALL temporary
+        /// <c>"Agent *"</c> subagents. Unrelated
+        /// named peer terminals (another agent working a different task) are
+        /// excluded so they don't render the control envelope as visible
+        /// channel noise (task d32c80eb).
+        ///
+        /// <para>Broadcasting <see cref="WorktreePruning"/> to
+        /// <see cref="GetAllConnectedTerminals"/> meant every peer terminal
+        /// surfaced the raw <c>{type:"worktree_pruning",...}</c> JSON as a
+        /// <c>← multiterminal-channel</c> line. The visible render is Claude
+        /// Code's channel feature (MT can't suppress a delivered message per
+        /// se), so the only lever is the recipient set.</para>
+        ///
+        /// <para>Subagents register as <c>"Agent {name}"</c> where
+        /// <c>{name}</c> is the Task-tool label / subagent_type — NOT the
+        /// spawning agent's name (see activity-hook.js <c>registerSubagent</c>)
+        /// — and the spawner link lives only in the subagent's
+        /// <c>MULTITERMINAL_SPAWNER</c> env, not in <see cref="TerminalInfo"/>.
+        /// So a subagent cannot be attributed to its parent by name; we keep
+        /// every connected subagent (transient, few, and the shells most
+        /// likely to be cwd-inside per task db4b18c6) rather than risk
+        /// stranding one. Only named non-assignee/non-helper terminals are
+        /// trimmed — exactly the bystander noise being fixed.</para>
+        /// </summary>
+        public List<TerminalInfo> GetWorktreeEvictionAudience(string taskId, string actingAgent)
+        {
+            var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(actingAgent)) named.Add(actingAgent);
+
+            var task = !string.IsNullOrEmpty(taskId) ? GetTask(taskId) : null;
+            if (task != null)
+            {
+                if (!string.IsNullOrWhiteSpace(task.Assignee)) named.Add(task.Assignee);
+                if (task.Helpers != null)
+                {
+                    foreach (var h in task.Helpers)
+                    {
+                        if (!string.IsNullOrWhiteSpace(h)) named.Add(h);
+                    }
+                }
+            }
+
+            return GetAllConnectedTerminals()
+                .Where(t => t?.Name != null && (IsTemporaryAgent(t.Name) || named.Contains(t.Name)))
+                .ToList();
+        }
+
+        /// <summary>
         /// Get all registered terminals that are online (both connected and have online profiles).
         /// </summary>
         public List<TerminalInfo> GetTerminals()
