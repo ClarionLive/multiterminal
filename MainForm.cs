@@ -660,7 +660,7 @@ namespace MultiTerminal
                 // Start inbox file monitor for nudging idle terminals
                 InitializeInboxMonitor();
 
-                // Initialize and start Oracle advisory agent (always-on hidden popup)
+                // Initialize and start Oracle advisory agent (always-on, dockable/floatable)
                 InitializeOracle();
 
                 // Start MCP server in background
@@ -1825,10 +1825,10 @@ namespace MultiTerminal
 
             _dashboardHeader.SwitchTerminalRequested += (name) =>
             {
-                // Oracle click → toggle popup instead of switching to a docked tab
+                // Oracle click → activate/bring her to front (she's a dockable DockContent now)
                 if (_oracleService != null && string.Equals(name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
                 {
-                    _oracleService.TogglePopup();
+                    _oracleService.Activate();
                     return;
                 }
 
@@ -3990,6 +3990,11 @@ namespace MultiTerminal
             SavePanelState("DebugPanel", _debugPanel);
             SavePanelState("FilePreviewPanel", _filePreviewPanel);
 
+            // Oracle is an OracleService-owned singleton (not a _xxxPanel field), but she's a
+            // DockContent now — persist her dock side here too so EnsureVisible() can restore it
+            // on the no-XML restore path (zero saved terminals), where LoadFromXml never runs.
+            SavePanelState("OraclePanel", _oracleService?.DockContent as DockContent);
+
             // Save session before closing
             SaveSession();
 
@@ -4328,6 +4333,12 @@ namespace MultiTerminal
             RefreshProjectPanel();
             System.Diagnostics.Trace.WriteLine("[RestoreSession] RefreshProjectPanel returned");
 
+            // Ensure Oracle is visible on launch. If the saved layout already restored her
+            // dock/float position (via the "Oracle" factory case above), this is a no-op;
+            // otherwise (first run, zero-terminal relaunch, or a layout saved before Oracle was
+            // dockable) show her at her settings-persisted dock side, falling back to Float.
+            _oracleService?.EnsureVisible(GetSavedDockState("OraclePanel", DockState.Float));
+
             // Signal loading complete (splash will show main form when animation finishes)
             System.Diagnostics.Trace.WriteLine("[RestoreSession] Invoking LoadingComplete event...");
             LoadingComplete?.Invoke(this, EventArgs.Empty);
@@ -4475,6 +4486,14 @@ namespace MultiTerminal
                 persistString == typeof(PromptTreeDocument).FullName)
             {
                 return _projectPanel;
+            }
+
+            // Oracle: re-bind a saved dock/float position to the live always-on singleton
+            // (created in InitializeOracle before this restore runs). Returns null if Oracle
+            // failed to initialize, in which case DockPanelSuite skips the saved entry.
+            if (persistString == "Oracle")
+            {
+                return _oracleService?.DockContent;
             }
 
             if (persistString == typeof(TerminalDocument).FullName)
@@ -5235,9 +5254,9 @@ namespace MultiTerminal
 
         /// <summary>
         /// Initialize and start the Oracle advisory agent.
-        /// Oracle is always-on: launches with MultiTerminal in a hidden popup terminal,
-        /// auto-restarts on crash, only shuts down when MT closes. Clicking Oracle in
-        /// the dashboard header toggles the popup terminal visibility.
+        /// Oracle is always-on: launches with MultiTerminal in a dockable/floatable terminal,
+        /// auto-restarts on crash, only shuts down when MT closes. Her dock/float position is
+        /// persisted across sessions. Clicking Oracle in the dashboard header activates her.
         /// </summary>
         private bool _oracleBootstrapped; // Guard: only send digest bootstrap once per app session
         private System.Windows.Forms.Timer _oracleDigestTimer; // Recurring digest trigger
@@ -5250,8 +5269,11 @@ namespace MultiTerminal
                     log: (source, msg) => _debugLogService?.Info(source, msg),
                     debugLogService: _debugLogService);
 
-                // Start Oracle first so it generates its docId
-                _oracleService.Start(this);
+                // Start Oracle first so it generates its docId. Pass the dock panel so Oracle
+                // is hosted as a dockable/floatable DockContent. The form is created here
+                // (before RestoreSession's LoadFromXml) so the layout-restore factory can
+                // re-bind a saved "Oracle" position to this live instance.
+                _oracleService.Start(_dockPanel);
 
                 // Register Oracle terminal with the same docId so broker and ConPTY are in sync
                 _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
@@ -5266,7 +5288,7 @@ namespace MultiTerminal
                 _oracleDigestTimer.Tick += OnOracleDigestTimerTick;
                 _oracleDigestTimer.Start();
 
-                _debugLogService?.Info("MainForm", $"Oracle started (always-on, hidden popup, docId={_oracleService.DocId}, digest every 2h)");
+                _debugLogService?.Info("MainForm", $"Oracle started (always-on, dockable/floatable, docId={_oracleService.DocId}, digest every 2h)");
             }
             catch (Exception ex)
             {
