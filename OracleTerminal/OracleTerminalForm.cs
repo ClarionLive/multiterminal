@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using WeifenLuo.WinFormsUI.Docking;
 using MultiTerminal.Controls;
 using MultiTerminal.Services;
 using MultiTerminal.Terminal;
@@ -8,16 +9,15 @@ using MultiTerminal.Terminal;
 namespace MultiTerminal.OracleTerminal
 {
     /// <summary>
-    /// Standalone popup Form hosting Oracle's ConPTY terminal.
-    /// Starts hidden. Closing hides instead of destroying (Oracle runs forever).
+    /// Dockable document hosting Oracle's ConPTY terminal.
+    /// As a DockContent, Oracle can float OR dock (drag-to-dock) and her position is
+    /// persisted via the DockPanel layout (SaveAsXml/LoadFromXml + GetPersistString).
+    /// Closing hides instead of destroying (Oracle runs forever) via HideOnClose.
     /// Only truly closes when ForceClose() is called during app shutdown.
     /// </summary>
-    public class OracleTerminalForm : Form
+    public class OracleTerminalForm : DockContent
     {
         private TerminalControl _terminal;
-        private bool _allowClose;
-        private bool _allowVisible;
-        private bool _creatingHandle;
         private DebugLogService _debugLogService;
 
         /// <summary>Fired when the terminal process exits.</summary>
@@ -31,11 +31,22 @@ namespace MultiTerminal.OracleTerminal
             _debugLogService = debugLogService;
 
             Text = "Oracle";
+            TabText = "Oracle";
             Size = new Size(1000, 650);
-            StartPosition = FormStartPosition.CenterScreen;
-            ShowInTaskbar = false;
-            Icon = null;
             MinimumSize = new Size(400, 300);
+            ShowInTaskbar = false;
+            Icon = SystemIcons.Application;
+
+            // Allow Oracle to float or dock anywhere; default to floating until the
+            // user docks her (or a saved layout restores her last position).
+            DockAreas = DockAreas.DockLeft | DockAreas.DockRight | DockAreas.DockBottom |
+                        DockAreas.DockTop | DockAreas.Float | DockAreas.Document;
+            ShowHint = DockState.Float;
+            CloseButtonVisible = true;
+
+            // Hide instead of dispose when closed — Oracle is always-on. ForceClose()
+            // flips this off at shutdown so the form can truly close.
+            HideOnClose = true;
 
             _terminal = new TerminalControl { Dock = DockStyle.Fill };
             _terminal.SetDebugLogService(_debugLogService);
@@ -45,36 +56,12 @@ namespace MultiTerminal.OracleTerminal
         }
 
         /// <summary>
-        /// Suppress visibility until explicitly requested via Show()/ShowPopup().
-        /// Prevents WinForms internals (handle creation, owner relationship) from
-        /// making the form appear before the user asks for it.
-        /// </summary>
-        protected override void SetVisibleCore(bool value)
-        {
-            if (!_allowVisible)
-            {
-                // Still create the handle so WebView2 can initialize in the background.
-                // Guard against recursion: CreateHandle() may re-enter SetVisibleCore.
-                if (!Created && !_creatingHandle)
-                {
-                    _creatingHandle = true;
-                    CreateControl();
-                    _creatingHandle = false;
-                }
-                base.SetVisibleCore(false);
-                return;
-            }
-            base.SetVisibleCore(value);
-        }
-
-        /// <summary>
         /// Start the Claude Code terminal with the given autorun command.
-        /// Forces handle creation so WebView2 initializes while the form stays hidden.
+        /// Forces handle creation so WebView2 initializes before the terminal starts.
         /// </summary>
         public void StartTerminal(string workingDirectory, string docId, string autoRunCommand)
         {
-            // Force handle creation so WebView2 renderer initializes (triggers HandleCreated).
-            // SetVisibleCore override keeps the form hidden during this.
+            // Force handle creation so the WebView2 renderer initializes (triggers HandleCreated).
             if (!Created)
                 CreateControl();
 
@@ -85,16 +72,6 @@ namespace MultiTerminal.OracleTerminal
                 autoRunCommand: autoRunCommand);
 
             IsTerminalRunning = true;
-        }
-
-        /// <summary>
-        /// Show the form (sets _allowVisible so SetVisibleCore lets it through).
-        /// </summary>
-        public new void Show()
-        {
-            _allowVisible = true;
-            base.Show();
-            BringToFront();
         }
 
         /// <summary>
@@ -116,12 +93,12 @@ namespace MultiTerminal.OracleTerminal
         }
 
         /// <summary>
-        /// Force close the form (app shutdown). Bypasses the hide-on-close behavior.
+        /// Force close the form (app shutdown). Bypasses the hide-on-close behavior so
+        /// the DockContent is truly disposed instead of just hidden.
         /// </summary>
         public void ForceClose()
         {
-            _allowClose = true;
-            _allowVisible = true; // Allow visibility changes during shutdown
+            HideOnClose = false;
             IsTerminalRunning = false;
 
             if (!IsDisposed)
@@ -141,16 +118,9 @@ namespace MultiTerminal.OracleTerminal
                 TerminalExited?.Invoke(this, EventArgs.Empty);
         }
 
-        protected override void OnFormClosing(FormClosingEventArgs e)
+        protected override string GetPersistString()
         {
-            if (!_allowClose)
-            {
-                // Hide instead of close — Oracle keeps running
-                e.Cancel = true;
-                Hide();
-                return;
-            }
-            base.OnFormClosing(e);
+            return "Oracle";
         }
 
         protected override void Dispose(bool disposing)

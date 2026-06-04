@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
+using WeifenLuo.WinFormsUI.Docking;
 
 namespace MultiTerminal.Services
 {
@@ -11,9 +12,10 @@ namespace MultiTerminal.Services
     /// daily digest, and routes work to other agents. Oracle never codes.
     ///
     /// Lifecycle: starts with MultiTerminal, auto-restarts on crash with exponential
-    /// backoff (max 10 attempts), only stops when MultiTerminal closes. Runs in a hidden
-    /// OracleTerminalForm that the user can toggle visible by clicking Oracle in the
-    /// dashboard header.
+    /// backoff (max 10 attempts), only stops when MultiTerminal closes. Hosted in a
+    /// dockable OracleTerminalForm (DockContent) that the user can float or dock; her
+    /// position is persisted via the DockPanel layout. Clicking Oracle in the dashboard
+    /// header activates/brings her to front.
     ///
     /// Threading: all public methods must be called from the UI thread.
     /// </summary>
@@ -31,8 +33,8 @@ namespace MultiTerminal.Services
         private bool _isShuttingDown;
         private int _restartAttempt;
         private Timer _restartTimer;
-        private bool _wasVisibleBeforeCrash;
-        private Form _owner;
+        private DockState _lastDockState = DockState.Float;
+        private DockPanel _dockPanel;
         private string _registeredDocId;
 
         /// <summary>Fired after Oracle's terminal process starts successfully.</summary>
@@ -47,6 +49,13 @@ namespace MultiTerminal.Services
         /// <summary>The docId used for Oracle's terminal registration and ConPTY.</summary>
         public string DocId => _registeredDocId;
 
+        /// <summary>
+        /// The dockable content hosting Oracle (null until Start). Used by MainForm's
+        /// layout-restore factory (GetContentFromPersistString) so a saved "Oracle"
+        /// position re-binds to the live singleton instead of creating a new instance.
+        /// </summary>
+        public IDockContent DockContent => _form;
+
         public OracleService(Action<string, string> log = null, DebugLogService debugLogService = null)
         {
             _log = log ?? ((source, msg) => Debug.WriteLine($"[{source}] {msg}"));
@@ -54,16 +63,18 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Start Oracle. Creates the hidden popup form and launches the Claude Code terminal.
+        /// Start Oracle. Creates the dockable form and launches the Claude Code terminal.
         /// Call from MainForm after MessageBroker is ready. The docId is generated once and
-        /// reused across restarts to keep the broker registration in sync.
+        /// reused across restarts to keep the broker registration in sync. The form is NOT
+        /// shown here — MainForm coordinates the initial show after layout restore (so a
+        /// saved dock/float position wins); call EnsureVisible() afterward for first run.
         /// </summary>
-        public void Start(Form owner)
+        public void Start(DockPanel dockPanel)
         {
             if (_isShuttingDown || _isDisposed) return;
             if (_form != null && !_form.IsDisposed) return;
 
-            _owner = owner;
+            _dockPanel = dockPanel;
 
             // Generate docId once on first start; reuse on crash restarts
             if (_registeredDocId == null)
@@ -72,7 +83,6 @@ namespace MultiTerminal.Services
             try
             {
                 _form = new OracleTerminal.OracleTerminalForm(_debugLogService);
-                _form.Owner = owner;
                 _form.TerminalExited += OnTerminalExited;
 
                 string autoRunCommand = BuildAutoRunCommand();
@@ -95,28 +105,61 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Toggle the Oracle popup terminal visibility.
+        /// Show Oracle in the dock panel at the given state (floating by default).
+        /// No-op if the form or dock panel isn't ready.
         /// </summary>
-        public void TogglePopup()
+        public void ShowInDock(DockState state)
         {
             var form = _form;
-            if (form == null || form.IsDisposed) return;
+            if (form == null || form.IsDisposed || _dockPanel == null) return;
 
-            if (form.Visible)
-                form.Hide();
-            else
-                form.Show();
+            if (state == DockState.Unknown || state == DockState.Hidden)
+                state = DockState.Float;
+
+            form.Show(_dockPanel, state);
         }
 
         /// <summary>
-        /// Show the Oracle popup terminal.
+        /// Ensure Oracle is visible on launch. If a saved layout already placed her in the
+        /// dock (DockPanel set and not hidden), leave her where she is; otherwise show her at
+        /// <paramref name="fallbackState"/> (the caller's settings-persisted dock side, or Float).
+        /// This is what preserves "remember last position" on the no-XML restore path
+        /// (e.g. zero saved terminals), where LoadFromXml never runs.
         /// </summary>
-        public void ShowPopup()
+        public void EnsureVisible(DockState fallbackState = DockState.Float)
         {
             var form = _form;
             if (form == null || form.IsDisposed) return;
-            form.Show();
-            form.BringToFront();
+
+            if (form.DockPanel != null && !form.IsHidden && form.DockState != DockState.Hidden)
+                return; // already placed by layout restore
+
+            ShowInDock(fallbackState);
+        }
+
+        /// <summary>
+        /// Activate Oracle — bring her to the front. If never shown, float her; if closed
+        /// to hidden, restore her last dock/float state; then focus her pane.
+        /// Used by the dashboard header click.
+        /// </summary>
+        public void Activate()
+        {
+            var form = _form;
+            if (form == null || form.IsDisposed) return;
+
+            if (form.DockPanel == null)
+            {
+                ShowInDock(DockState.Float);
+            }
+            else if (form.IsHidden || form.DockState == DockState.Hidden)
+            {
+                form.Show(_dockPanel,
+                    (_lastDockState == DockState.Unknown || _lastDockState == DockState.Hidden)
+                        ? DockState.Float
+                        : _lastDockState);
+            }
+
+            form.Activate();
         }
 
         /// <summary>
@@ -149,8 +192,13 @@ namespace MultiTerminal.Services
 
             if (_isShuttingDown || _isDisposed) return;
 
-            // Remember visibility state so we can restore after restart (safe: called on UI thread via BeginInvoke)
-            _wasVisibleBeforeCrash = _form?.Visible ?? false;
+            // Remember dock state so we can restore it after restart (safe: called on UI thread via BeginInvoke).
+            // Default to Float if she was closed-to-hidden or never placed.
+            var form = _form;
+            _lastDockState = (form != null && !form.IsDisposed && form.DockPanel != null
+                              && !form.IsHidden && form.DockState != DockState.Hidden)
+                ? form.DockState
+                : DockState.Float;
 
             ScheduleRestart();
         }
@@ -198,12 +246,11 @@ namespace MultiTerminal.Services
             }
             _form = null;
 
-            // Start fresh using stored owner reference (not from disposed form)
-            Start(_owner);
+            // Start fresh using the stored dock panel reference (not from disposed form)
+            Start(_dockPanel);
 
-            // Restore visibility if the popup was showing before the crash
-            if (_wasVisibleBeforeCrash)
-                ShowPopup();
+            // Re-show Oracle at her last dock/float state (she's always-on and visible by default)
+            ShowInDock(_lastDockState);
         }
 
         /// <summary>
@@ -248,7 +295,7 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Apply theme to Oracle's popup form if it exists.
+        /// Apply theme to Oracle's dockable form if it exists.
         /// </summary>
         public void ApplyTheme(bool isDark)
         {
@@ -258,7 +305,7 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Sets the terminal font size for Oracle's popup form.
+        /// Sets the terminal font size for Oracle's dockable form.
         /// </summary>
         public void SetFontSize(float size)
         {
