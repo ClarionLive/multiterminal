@@ -70,6 +70,10 @@ namespace MultiTerminal.Docking
         private static int _instanceCount = 0;
         private readonly string _docId = Guid.NewGuid().ToString("N").Substring(0, 8);
 
+        // Token meter (task f2702f69): last session this terminal fed, so the shared singleton meter
+        // can drop the session's accumulated state (accumulator + all file-tail offsets) on close.
+        private string _lastTokenSessionId;
+
         // Diff popup saved bounds and zoom (persisted across sessions)
         private static Rectangle? _diffPopupBounds;
         private static double _diffPopupZoom = 1.0;
@@ -2799,6 +2803,12 @@ namespace MultiTerminal.Docking
                     }
                     int? contextPct = root.TryGetProperty("contextPct", out var cp) && cp.ValueKind == JsonValueKind.Number
                         ? cp.GetInt32() : (int?)null;
+                    // Token meter (task f2702f69): sessionId + transcriptPath locate this terminal's
+                    // Claude transcript JSONL to tail for live token totals.
+                    string tokenSessionId = root.TryGetProperty("sessionId", out var sidEl) && sidEl.ValueKind == JsonValueKind.String
+                        ? sidEl.GetString() : null;
+                    string transcriptPath = root.TryGetProperty("transcriptPath", out var tpEl) && tpEl.ValueKind == JsonValueKind.String
+                        ? tpEl.GetString() : null;
                     // Read account-level quota from the shared file so all terminals
                     // show identical 5h/7d stats regardless of which one was updated last.
                     int? quota5h = null, quota7d = null, pace5h = null, pace7d = null;
@@ -2849,11 +2859,90 @@ namespace MultiTerminal.Docking
                             ? r5.GetString() : null;
                     }
 
+                    // --- Token meter (task f2702f69): feed the shared meter from this terminal's
+                    // transcript + subagent JSONLs, then snapshot + price for the banner. Reuses this
+                    // 2s poll (already UI-marshaled) rather than a separate per-terminal watcher. ---
+                    long? tmTotal = null, tmSub = null, tmCache = null;
+                    decimal? tmCost = null;
+                    double? tmBurn = null;
+                    bool tmEstimate = true;
+                    bool tmLowerBound = false;
+                    var tokenMeter = _messageBroker?.TokenMeter;
+                    // SECURITY: tokenSessionId is read from a temp file and used as a PATH SEGMENT in
+                    // the subagent rollup below; reject anything that isn't a strict identifier so a
+                    // hostile temp file can't traverse via '..' or separators (codex-security HIGH,
+                    // mirrors the IsSafeStatusLineSegment gate the docId-scoped poll already uses).
+                    if (tokenMeter != null
+                        && !string.IsNullOrEmpty(tokenSessionId) && IsSafeStatusLineSegment(tokenSessionId)
+                        && !string.IsNullOrEmpty(transcriptPath))
+                    {
+                        try
+                        {
+                            tokenMeter.ProcessTranscriptFile(tokenSessionId, transcriptPath, false);
+
+                            // Subagent rollup: tail {claudeProjectFolder}/{sessionId}/subagents/agent-*.jsonl.
+                            try
+                            {
+                                string claudeFolder = MultiTerminal.Services.SessionLineageService.GetClaudeProjectFolder(
+                                    folder ?? _startingWorkingDirectory);
+                                if (!string.IsNullOrEmpty(claudeFolder))
+                                {
+                                    string subDir = Path.Combine(claudeFolder, tokenSessionId, "subagents");
+                                    if (Directory.Exists(subDir))
+                                    {
+                                        foreach (string af in Directory.GetFiles(subDir, "agent-*.jsonl"))
+                                        {
+                                            tokenMeter.ProcessTranscriptFile(tokenSessionId, af, true);
+                                        }
+                                    }
+                                }
+                            }
+                            catch { /* subagent dir best-effort */ }
+
+                            // If this terminal rolled to a DIFFERENT Claude session (a resume / new
+                            // chat in the same tab), evict the previous session's state now rather than
+                            // letting it linger until close. [codex-security MEDIUM — session rollover]
+                            if (!string.IsNullOrEmpty(_lastTokenSessionId)
+                                && !string.Equals(_lastTokenSessionId, tokenSessionId, StringComparison.Ordinal))
+                            {
+                                tokenMeter.Forget(_lastTokenSessionId);
+                            }
+
+                            // Remember for cleanup so the singleton meter can drop this session's
+                            // state (accumulator + all file offsets) when the terminal closes.
+                            _lastTokenSessionId = tokenSessionId;
+
+                            var snap = tokenMeter.GetSnapshot(tokenSessionId);
+                            if (snap != null)
+                            {
+                                tmTotal = snap.TotalTokens;
+                                tmSub = snap.SubagentTokens;
+                                tmCache = snap.CacheTokens;
+                                tmBurn = snap.TokensPerMinute;
+                                // Plan-aware cost: we have NO reliable signal that positively identifies a
+                                // metered API key (rate-limit data is optional, absent on older Claude Code
+                                // / some runs), and showing exact "$" for a subscription would be a false
+                                // billing claim. Default to an ESTIMATE ("~$"); exact pricing is gated on an
+                                // explicit plan setting (follow-up). [codex-adversary — don't guess exact]
+                                var cost = MultiTerminal.Services.PricingTable.Estimate(
+                                    snap.ByModel, MultiTerminal.Services.PricingPlan.Subscription);
+                                tmCost = cost.TotalUsd;
+                                tmEstimate = cost.IsEstimate;
+                                tmLowerBound = cost.HasUnpricedTokens;
+                            }
+                        }
+                        catch (Exception tmEx)
+                        {
+                            _debugLogService?.Trace("TerminalDocument", $"StatusLinePoll: token meter failed ({tmEx.Message})");
+                        }
+                    }
+
                     // Marshal to UI thread
                     string folderForUi = folder;
                     BeginInvoke(new Action(() =>
                     {
                         _statusBar?.UpdateStatusLine(model, folderForUi, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h);
+                        _statusBar?.UpdateTokenMeter(tmTotal, tmCost, tmEstimate, tmLowerBound, tmBurn, tmSub, tmCache);
 
                         // If Claude Code's real workspace drifts from what the HUD Dashboard
                         // is showing (e.g. because the launch dir came from the stale global
@@ -3080,6 +3169,14 @@ namespace MultiTerminal.Docking
         {
             _statusLineTimer?.Dispose();
             _statusLineTimer = null;
+
+            // Drop this terminal's session from the shared token meter so the singleton doesn't
+            // retain every session for the app's lifetime (task f2702f69 — bounded retention).
+            try
+            {
+                _messageBroker?.TokenMeter?.Forget(_lastTokenSessionId);
+            }
+            catch { /* best-effort */ }
 
             // Delete this terminal's scoped statusline file so %TEMP% doesn't
             // accumulate orphans. Best-effort — missing/locked file is fine.

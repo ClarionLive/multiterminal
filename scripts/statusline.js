@@ -75,6 +75,11 @@ process.stdin.on('end', () => {
             pace5h,
             pace7d,
             resetIn5h,
+            // sessionId + transcriptPath let the MT token meter (task f2702f69) locate
+            // this terminal's Claude transcript JSONL to tail for live token totals.
+            // Both come straight from Claude Code's statusLine stdin; null outside it.
+            sessionId: data.session_id ?? null,
+            transcriptPath: data.transcript_path ?? null,
             timestamp: Date.now()
         };
 

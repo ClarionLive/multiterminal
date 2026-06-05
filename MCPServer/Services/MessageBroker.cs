@@ -1091,6 +1091,13 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Initialize the message broker and load persisted tasks and projects.
         /// </summary>
+        /// <summary>
+        /// Shared per-session token accumulator for the terminal token meter (task f2702f69).
+        /// Singleton so both the terminal poll loop (which feeds it transcript lines) and the
+        /// REST stats controller (which reads snapshots) see the same totals.
+        /// </summary>
+        public MultiTerminal.Services.TokenMeterService TokenMeter { get; } = new MultiTerminal.Services.TokenMeterService();
+
         public MessageBroker()
         {
             System.Diagnostics.Trace.WriteLine("[MessageBroker] Constructor START");

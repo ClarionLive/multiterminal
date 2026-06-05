@@ -23,6 +23,7 @@ namespace MultiTerminal.Controls
         private bool _isDarkTheme = true;
         private string _pendingUpdateJson;
         private string _pendingStatusLineJson;
+        private string _pendingTokenMeterJson;
         private bool? _pendingRemoteMode;
         private DebugLogService _debugLogService;
 
@@ -195,6 +196,11 @@ namespace MultiTerminal.Controls
                             SendMessage($"statusline:{_pendingStatusLineJson}");
                             _pendingStatusLineJson = null;
                         }
+                        if (!string.IsNullOrEmpty(_pendingTokenMeterJson))
+                        {
+                            SendMessage($"tokenmeter:{_pendingTokenMeterJson}");
+                            _pendingTokenMeterJson = null;
+                        }
                         if (_pendingRemoteMode.HasValue)
                         {
                             SendMessage($"remoteMode:{(_pendingRemoteMode.Value ? "true" : "false")}");
@@ -307,6 +313,36 @@ namespace MultiTerminal.Controls
             else
             {
                 _pendingStatusLineJson = json;
+            }
+        }
+
+        /// <summary>
+        /// Updates the token meter on the status line (task f2702f69): cumulative session tokens,
+        /// estimated cost, and burn rate. Sent as a separate message so it never disturbs the
+        /// context%/quota push in <see cref="UpdateStatusLine"/>. Null fields render as empty.
+        /// </summary>
+        public void UpdateTokenMeter(long? tokensTotal, decimal? costUsd, bool costIsEstimate, bool costIsLowerBound, double? tokensPerMinute, long? subagentTokens, long? cacheTokens)
+        {
+            var data = new
+            {
+                tokensTotal,
+                costUsd,
+                costIsEstimate,
+                costIsLowerBound,
+                tokensPerMinute,
+                subagentTokens,
+                cacheTokens,
+            };
+
+            string json = JsonSerializer.Serialize(data);
+
+            if (_isInitialized)
+            {
+                SendMessage($"tokenmeter:{json}");
+            }
+            else
+            {
+                _pendingTokenMeterJson = json;
             }
         }
 
