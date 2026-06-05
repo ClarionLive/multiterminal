@@ -2512,10 +2512,6 @@ namespace MultiTerminal.Docking
                     ["pace5h"] = (int?)null,
                     ["pace7d"] = (int?)null,
                     ["resetIn5h"] = (string)null,
-                    ["isOffPeak"] = false,
-                    ["gitBranch"] = "",
-                    ["gitStatus"] = "",
-                    ["gitDirty"] = false,
                     ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     ["fallback"] = true
                 };
@@ -2531,6 +2527,78 @@ namespace MultiTerminal.Docking
             {
                 System.Diagnostics.Trace.WriteLine($"[TerminalDocument.WriteFallbackStatusline] Failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Resolves which statusline temp file to read for this terminal. Prefers the
+        /// docId-scoped file (<c>mt-statusline-{name}-{_docId}.json</c>) written for a
+        /// freshly spawned child. If that's missing — the restore/re-adopt case where the
+        /// child keeps writing under a prior instance's docId while this TerminalDocument
+        /// minted a new random <c>_docId</c> — returns the newest
+        /// <c>mt-statusline-{name}-*.json</c> by its embedded <c>timestamp</c> so the
+        /// restored terminal's banner picks up live data instead of staying blank. Returns
+        /// <c>null</c> when no candidate exists. Mirrors the name-based fallback the REST
+        /// stats endpoint already uses (StatusLineStatsReader.FindNewestPerTerminalFile),
+        /// including its skip of future-dated (clock-skewed/planted) files.
+        /// </summary>
+        private string ResolveStatusLineFilePath(string terminalName)
+        {
+            string exact = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
+            if (File.Exists(exact)) return exact;
+
+            // Only the fallback glob needs a safe segment; reject names that could widen
+            // the search beyond the intended mt-statusline-{name}-*.json shape.
+            if (!IsSafeStatusLineSegment(terminalName)) return null;
+
+            string[] candidates;
+            try
+            {
+                candidates = Directory.GetFiles(Path.GetTempPath(), $"mt-statusline-{terminalName}-*.json");
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                return null;
+            }
+
+            string newest = null;
+            long newestTs = long.MinValue;
+            long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            foreach (var path in candidates)
+            {
+                try
+                {
+                    string content = ReadAllTextShared(path);
+                    if (string.IsNullOrWhiteSpace(content)) continue;
+                    using var doc = JsonDocument.Parse(content);
+                    if (!doc.RootElement.TryGetProperty("timestamp", out var tsEl) ||
+                        tsEl.ValueKind != JsonValueKind.Number) continue;
+                    long ts = tsEl.GetInt64();
+                    if (ts > nowMs) continue;          // ignore future-dated (skewed/planted) files
+                    if (ts > newestTs) { newestTs = ts; newest = path; }
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is JsonException)
+                {
+                    // Torn/corrupt/locked sibling — skip it, keep scanning.
+                }
+            }
+            return newest;
+        }
+
+        /// <summary>
+        /// True when <paramref name="s"/> is a safe path segment for the statusline glob:
+        /// letters, digits, '-' or '_' only (no separators, ':' or '.'). Matches the shape
+        /// of MT terminal names / docIds and keeps the fallback glob confined.
+        /// </summary>
+        private static bool IsSafeStatusLineSegment(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char c in s)
+            {
+                bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '-' || c == '_';
+                if (!ok) return false;
+            }
+            return true;
         }
 
         /// <summary>
@@ -2688,8 +2756,13 @@ namespace MultiTerminal.Docking
                 {
                     // File path is scoped by both terminal name AND docId so sibling
                     // terminals with the same name can't read each other's statusline.
-                    string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
-                    if (!File.Exists(filePath)) return;
+                    // When the docId-scoped file is absent — a terminal restored/re-adopted
+                    // after an MT restart, whose child Claude process keeps writing under
+                    // the PRIOR instance's docId while this fresh TerminalDocument minted a
+                    // new random _docId — fall back to the newest mt-statusline-{name}-*.json
+                    // so the banner recovers live instead of staying blank until relaunch.
+                    string filePath = ResolveStatusLineFilePath(terminalName);
+                    if (filePath == null) return;
 
                     string content = ReadAllTextShared(filePath);
                     if (string.IsNullOrEmpty(content)) return;
@@ -2724,16 +2797,12 @@ namespace MultiTerminal.Docking
                     {
                         folder = _startingWorkingDirectory;
                     }
-                    string gitBranch = root.TryGetProperty("gitBranch", out var gb) ? gb.GetString() : null;
-                    string gitStatus = root.TryGetProperty("gitStatus", out var gs) ? gs.GetString() : null;
-                    bool gitDirty = root.TryGetProperty("gitDirty", out var gd) && gd.GetBoolean();
                     int? contextPct = root.TryGetProperty("contextPct", out var cp) && cp.ValueKind == JsonValueKind.Number
                         ? cp.GetInt32() : (int?)null;
                     // Read account-level quota from the shared file so all terminals
                     // show identical 5h/7d stats regardless of which one was updated last.
                     int? quota5h = null, quota7d = null, pace5h = null, pace7d = null;
                     string resetIn5h = null;
-                    bool? isOffPeak = null;
 
                     try
                     {
@@ -2752,8 +2821,6 @@ namespace MultiTerminal.Docking
                                 ? sp7.GetInt32() : (int?)null;
                             resetIn5h = sq.TryGetProperty("resetIn5h", out var sr5) && sr5.ValueKind == JsonValueKind.String
                                 ? sr5.GetString() : null;
-                            isOffPeak = sq.TryGetProperty("isOffPeak", out var sop) && sop.ValueKind != JsonValueKind.Null
-                                ? sop.GetBoolean() : (bool?)null;
                             _lastSharedQuotaContent = sharedContent;
                         }
                     }
@@ -2780,15 +2847,13 @@ namespace MultiTerminal.Docking
                             ? p7.GetInt32() : (int?)null;
                         resetIn5h = root.TryGetProperty("resetIn5h", out var r5) && r5.ValueKind == JsonValueKind.String
                             ? r5.GetString() : null;
-                        isOffPeak = root.TryGetProperty("isOffPeak", out var op) && op.ValueKind != JsonValueKind.Null
-                            ? op.GetBoolean() : (bool?)null;
                     }
 
                     // Marshal to UI thread
                     string folderForUi = folder;
                     BeginInvoke(new Action(() =>
                     {
-                        _statusBar?.UpdateStatusLine(model, folderForUi, gitBranch, gitStatus, gitDirty, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h, isOffPeak);
+                        _statusBar?.UpdateStatusLine(model, folderForUi, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h);
 
                         // If Claude Code's real workspace drifts from what the HUD Dashboard
                         // is showing (e.g. because the launch dir came from the stale global

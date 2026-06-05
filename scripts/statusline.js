@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 // Claude Code statusLine script for MultiTerminal
-// Reads JSON from stdin, enriches with git data, writes to temp file
-// for the MultiTerminal status bar to pick up.
+// Reads JSON from stdin (model, context-window fill, rate-limit/quota stats),
+// writes it to a temp file for the MultiTerminal status bar to pick up.
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execSync } = require('child_process');
 
 let input = '';
 process.stdin.setEncoding('utf8');
@@ -65,12 +64,6 @@ process.stdin.on('end', () => {
             }
         }
 
-        // Off-peak detection: peak = UTC 12:00-18:00 weekdays (5 AM-11 AM Pacific)
-        const isOffPeak = getIsOffPeak();
-
-        // Query git status from the working directory
-        const git = getGitInfo(cwd);
-
         const output = {
             terminalName,
             model,
@@ -82,10 +75,6 @@ process.stdin.on('end', () => {
             pace5h,
             pace7d,
             resetIn5h,
-            isOffPeak,
-            gitBranch: git.branch,
-            gitStatus: git.status,
-            gitDirty: git.dirty,
             timestamp: Date.now()
         };
 
@@ -103,7 +92,7 @@ process.stdin.on('end', () => {
         if (rateLimits) {
             const sharedPath = path.join(os.tmpdir(), 'mt-statusline-quota.json');
             const sharedData = {
-                quota5h, quota7d, pace5h, pace7d, resetIn5h, isOffPeak,
+                quota5h, quota7d, pace5h, pace7d, resetIn5h,
                 timestamp: Date.now(),
                 updatedBy: terminalName
             };
@@ -189,43 +178,3 @@ function normalizeModel(model) {
     return name;
 }
 
-function getIsOffPeak() {
-    const now = new Date();
-    const day = now.getUTCDay(); // 0=Sun, 6=Sat
-    if (day === 0 || day === 6) return true; // weekends are off-peak
-    const hour = now.getUTCHours();
-    return hour < 12 || hour >= 18; // peak = UTC 12:00-18:00
-}
-
-function getGitInfo(cwd) {
-    if (!cwd) return { branch: '', status: '', dirty: false };
-    try {
-        const branch = execSync('git branch --show-current', { cwd, encoding: 'utf8', timeout: 3000 }).trim()
-            || execSync('git rev-parse --short HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim();
-
-        const porcelain = execSync('git status --porcelain', { cwd, encoding: 'utf8', timeout: 3000 });
-        const lines = porcelain.split('\n').filter(l => l.length > 0);
-
-        let staged = 0, modified = 0;
-        for (const line of lines) {
-            if (/^[MADRC]/.test(line)) staged++;
-            if (/^.[MD]/.test(line)) modified++;
-        }
-
-        let ahead = 0, behind = 0;
-        try {
-            ahead = parseInt(execSync('git rev-list --count @{u}..HEAD', { cwd, encoding: 'utf8', timeout: 3000 }).trim()) || 0;
-            behind = parseInt(execSync('git rev-list --count HEAD..@{u}', { cwd, encoding: 'utf8', timeout: 3000 }).trim()) || 0;
-        } catch { /* no upstream */ }
-
-        let status = '';
-        if (ahead > 0) status += `\u21e1${ahead}`;
-        if (behind > 0) status += `\u21e3${behind}`;
-        if (staged > 0) status += `+${staged}`;
-        if (modified > 0) status += `!${modified}`;
-
-        return { branch, status, dirty: lines.length > 0 };
-    } catch {
-        return { branch: '', status: '', dirty: false };
-    }
-}
