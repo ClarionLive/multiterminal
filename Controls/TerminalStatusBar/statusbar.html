@@ -477,6 +477,24 @@
             margin-left: 2px;
         }
 
+        /* Token meter (task f2702f69) — tokens / cost / burn, between Context and quota */
+        .sl-tokens {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+            margin-left: 10px;
+            font-size: var(--font-size-xs);
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        .sl-tokens.hidden { display: none; }
+        .tok-cache { color: var(--text-muted); }
+        .tok-cache.hidden { display: none; }
+        .tok-cost { color: var(--ctx-green); }
+        .tok-burn { color: var(--text-muted); }
+
         /* Hidden state for rows 2-3 before data arrives */
         .row-folder.hidden,
         .row-statusline.hidden {
@@ -548,6 +566,12 @@
                 <span class="context-label">Context:</span>
                 <span class="context-bar" id="context-bar"></span>
                 <span class="context-pct" id="context-pct">--%</span>
+            </span>
+            <span class="sl-tokens hidden" id="sl-tokens">
+                <span class="tok-total" id="tok-total"></span>
+                <span class="tok-cache hidden" id="tok-cache"></span>
+                <span class="tok-cost" id="tok-cost"></span>
+                <span class="tok-burn" id="tok-burn"></span>
             </span>
             <span class="sl-quota hidden" id="sl-quota">
                 <span class="quota-window" id="quota-5h">
@@ -698,6 +722,67 @@
             updateQuotaPacing(data.quota5h, data.quota7d, data.pace5h, data.pace7d, data.resetIn5h);
         }
 
+        // Token meter (task f2702f69): cumulative tokens, est. cost, burn rate.
+        function updateTokenMeter(data) {
+            var el = document.getElementById('sl-tokens');
+            if (!el) return;
+
+            var total = data.tokensTotal;
+            if (total === null || total === undefined) {
+                el.classList.add('hidden');
+                return;
+            }
+            el.classList.remove('hidden');
+
+            var totalEl = document.getElementById('tok-total');
+            totalEl.textContent = formatTokens(total) + ' tok';
+            var sub = data.subagentTokens;
+            totalEl.title = (sub && sub > 0) ? (formatTokens(sub) + ' from subagents') : '';
+
+            // Split cache vs non-cache: on long sessions cache reads dominate the cumulative
+            // total (every turn re-reads the cached prefix), so surface the cache slice in a
+            // muted label. Non-cache (fresh input+output) = total - cache, shown in the tooltip.
+            var cacheEl = document.getElementById('tok-cache');
+            var cache = data.cacheTokens;
+            if (cache !== null && cache !== undefined && total > 0) {
+                var nonCache = Math.max(total - cache, 0);
+                cacheEl.textContent = formatTokens(cache) + ' cache';
+                cacheEl.title = formatTokens(nonCache) + ' non-cache (fresh input+output) · '
+                    + formatTokens(cache) + ' cache (read+write)';
+                cacheEl.classList.remove('hidden');
+            } else {
+                cacheEl.textContent = '';
+                cacheEl.classList.add('hidden');
+            }
+
+            var costEl = document.getElementById('tok-cost');
+            if (data.costUsd !== null && data.costUsd !== undefined) {
+                var prefix = data.costIsEstimate ? '~$' : '$';
+                var suffix = data.costIsLowerBound ? '+' : '';
+                costEl.textContent = prefix + Number(data.costUsd).toFixed(2) + suffix;
+                costEl.title = data.costIsLowerBound
+                    ? 'Lower bound — some tokens used a model with no known price'
+                    : (data.costIsEstimate ? 'Estimated equivalent API cost (subscription plan)' : 'Exact metered API cost');
+            } else {
+                costEl.textContent = '';
+                costEl.title = '';
+            }
+
+            var burnEl = document.getElementById('tok-burn');
+            var burn = data.tokensPerMinute;
+            if (burn && burn > 0) {
+                burnEl.textContent = formatTokens(Math.round(burn)) + '/min';
+            } else {
+                burnEl.textContent = '';
+            }
+        }
+
+        function formatTokens(n) {
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return Math.round(n / 1000) + 'k';
+            return String(n);
+        }
+
         function updateContextBar(pct) {
             var barEl = document.getElementById('context-bar');
             var pctEl = document.getElementById('context-pct');
@@ -815,6 +900,8 @@
                         updateStatus(JSON.parse(data.substring(7)));
                     } else if (data.startsWith('statusline:')) {
                         updateStatusLine(JSON.parse(data.substring(11)));
+                    } else if (data.startsWith('tokenmeter:')) {
+                        updateTokenMeter(JSON.parse(data.substring(11)));
                     } else if (data.startsWith('hudState:')) {
                         setHudToggleState(data.split(':')[1] === 'true');
                     } else if (data.startsWith('remoteMode:')) {

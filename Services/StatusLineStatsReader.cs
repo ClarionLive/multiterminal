@@ -99,6 +99,7 @@ namespace MultiTerminal.Services
 
             result.Available = true;
             result.Model = GetString(perTerminal, "model");
+            result.SessionId = GetString(perTerminal, "sessionId"); // token meter key (task f2702f69)
             // contextPct is read with the fractional-tolerant getter: statusline.js
             // writes Claude Code's used_percentage verbatim, WITHOUT the Math.floor it
             // applies to the quota fields, so a fractional percentage must still parse.
@@ -356,5 +357,28 @@ namespace MultiTerminal.Services
 
         /// <summary>True when <see cref="AgeSeconds"/> exceeds the reader's stale threshold.</summary>
         public bool Stale { get; set; }
+
+        // --- Token meter (task f2702f69) — null when no token data is available for this terminal. ---
+
+        /// <summary>Persistent Claude sessionId for this terminal (from the statusline file); keys the token meter.</summary>
+        public string SessionId { get; set; }
+
+        /// <summary>Cumulative session tokens (input + output + cache read + cache create), subagents included.</summary>
+        public long? TokensTotal { get; set; }
+
+        /// <summary>Subagent slice of <see cref="TokensTotal"/> (not an additional amount).</summary>
+        public long? SubagentTokens { get; set; }
+
+        /// <summary>Rolling burn rate in tokens/min.</summary>
+        public double? TokensPerMinute { get; set; }
+
+        /// <summary>Estimated session cost in USD (priced per-model).</summary>
+        public decimal? CostUsd { get; set; }
+
+        /// <summary>True when <see cref="CostUsd"/> is an estimate (subscription plan) rather than a metered charge.</summary>
+        public bool CostIsEstimate { get; set; }
+
+        /// <summary>True when some tokens used a model with no known price, so <see cref="CostUsd"/> is a lower bound.</summary>
+        public bool CostIsLowerBound { get; set; }
     }
 }
