@@ -30,8 +30,6 @@
             --ctx-red: #ef4444;
             --bar-empty: #3f3f50;
             --model-bg: #1a3a2a;
-            --model-bg-dirty: #3a3a1a;
-            --git-bg: #1a2a3a;
 
             /* Spacing */
             --spacing-xs: 4px;
@@ -53,8 +51,6 @@
             --border-color: #d4d4d8;
             --bar-empty: #d4d4d8;
             --model-bg: #dcfce7;
-            --model-bg-dirty: #fef9c3;
-            --git-bg: #dbeafe;
         }
 
         /* ============================================
@@ -376,27 +372,6 @@
             font-weight: 600;
         }
 
-        .sl-model.dirty {
-            background: var(--model-bg-dirty);
-            color: var(--ctx-yellow);
-        }
-
-        .sl-git {
-            background: var(--git-bg);
-            color: #60a5fa;
-        }
-
-        .git-branch-icon {
-            margin-right: 4px;
-            opacity: 0.8;
-            vertical-align: middle;
-        }
-
-        .sl-git-status {
-            margin-left: 6px;
-            color: var(--ctx-yellow);
-        }
-
         .context-label {
             color: var(--text-muted);
             font-size: var(--font-size-xs);
@@ -413,6 +388,9 @@
             font-size: 13px;
             font-family: 'Cascadia Code', 'Consolas', monospace;
             color: var(--text-secondary);
+            /* On a narrow terminal the quota (rightmost) yields/clips before Context does. */
+            min-width: 0;
+            overflow: hidden;
         }
 
         .sl-quota.hidden { display: none; }
@@ -452,6 +430,9 @@
             gap: 6px;
             font-size: var(--font-size-xs);
             font-family: 'Cascadia Code', 'Consolas', monospace;
+            /* Context sits left (after the model badge) and must never be clipped —
+               the quota block to its right yields first on narrow terminals. */
+            flex-shrink: 0;
         }
 
         .context-bar {
@@ -488,27 +469,6 @@
         @keyframes blink {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.3; }
-        }
-
-        .sl-offpeak {
-            display: inline-flex;
-            align-items: center;
-            padding: 2px 6px;
-            font-size: 12px;
-            font-family: 'Cascadia Code', 'Consolas', monospace;
-            font-weight: 600;
-            border-radius: 3px;
-            margin-right: 6px;
-        }
-
-        .sl-offpeak.off-peak {
-            background: rgba(34, 197, 94, 0.15);
-            color: var(--ctx-green);
-        }
-
-        .sl-offpeak.peak {
-            background: rgba(249, 115, 22, 0.15);
-            color: var(--ctx-orange);
         }
 
         .quota-reset {
@@ -581,15 +541,14 @@
             </button>
         </div>
 
-        <!-- Row 3: Status Line (model / git / context) -->
+        <!-- Row 3: Status Line (model / context / quota) -->
         <div class="row-statusline hidden" id="row-statusline">
             <span class="sl-segment sl-model" id="sl-model">claude</span>
-            <span class="sl-segment sl-git" id="sl-git" style="display:none">
-                <svg class="git-branch-icon" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Z"/></svg>
-                <span id="sl-git-branch"></span>
-                <span class="sl-git-status" id="sl-git-status"></span>
+            <span class="sl-context" id="sl-context">
+                <span class="context-label">Context:</span>
+                <span class="context-bar" id="context-bar"></span>
+                <span class="context-pct" id="context-pct">--%</span>
             </span>
-            <span class="sl-offpeak" id="sl-offpeak" style="display:none"></span>
             <span class="sl-quota hidden" id="sl-quota">
                 <span class="quota-window" id="quota-5h">
                     <span class="quota-label">5h</span>
@@ -603,11 +562,6 @@
                     <span class="quota-pct" id="quota-7d-pct"></span>
                     <span class="quota-pace" id="quota-7d-pace"></span>
                 </span>
-            </span>
-            <span class="sl-context" id="sl-context">
-                <span class="context-label">Context:</span>
-                <span class="context-bar" id="context-bar"></span>
-                <span class="context-pct" id="context-pct">--%</span>
             </span>
         </div>
     </div>
@@ -719,9 +673,6 @@
         function updateStatusLine(data) {
             var model = data.model;
             var folder = data.folder;
-            var gitBranch = data.gitBranch;
-            var gitStatus = data.gitStatus;
-            var gitDirty = data.gitDirty;
             var contextPct = data.contextPct;
 
             // Row 2: Folder path
@@ -739,27 +690,12 @@
             // Model badge
             var modelEl = document.getElementById('sl-model');
             modelEl.textContent = model || 'claude';
-            if (gitDirty) modelEl.classList.add('dirty');
-            else modelEl.classList.remove('dirty');
-
-            // Git branch & status
-            var gitSegment = document.getElementById('sl-git');
-            if (gitBranch) {
-                document.getElementById('sl-git-branch').textContent = gitBranch;
-                document.getElementById('sl-git-status').textContent = formatGitStatus(gitStatus);
-                gitSegment.style.display = '';
-            } else {
-                gitSegment.style.display = 'none';
-            }
 
             // Context usage bar
             updateContextBar(contextPct);
 
             // Quota pacing + reset timer
             updateQuotaPacing(data.quota5h, data.quota7d, data.pace5h, data.pace7d, data.resetIn5h);
-
-            // Off-peak indicator
-            updateOffPeak(data.isOffPeak);
         }
 
         function updateContextBar(pct) {
@@ -860,38 +796,6 @@
             if (pct > 75) return 'var(--ctx-orange)';
             if (pct > 50) return 'var(--ctx-yellow)';
             return 'var(--text-secondary)';
-        }
-
-        function updateOffPeak(isOffPeak) {
-            var el = document.getElementById('sl-offpeak');
-            if (isOffPeak === null || isOffPeak === undefined) {
-                el.style.display = 'none';
-                return;
-            }
-            el.style.display = '';
-            if (isOffPeak) {
-                el.className = 'sl-offpeak off-peak';
-                el.textContent = 'Off-peak';
-            } else {
-                el.className = 'sl-offpeak peak';
-                el.textContent = 'Peak';
-            }
-        }
-
-        function formatGitStatus(raw) {
-            if (!raw) return '';
-            // Parse statusline.js format: ↡N=behind, ⇡N=ahead, +N=staged, !N=modified
-            var parts = [];
-            var m;
-            m = raw.match(/\u21e1(\d+)/); // ⇡ ahead
-            if (m) parts.push(m[1] + ' ahead');
-            m = raw.match(/\u21e3(\d+)/); // ⇣ behind
-            if (m) parts.push(m[1] + ' behind');
-            m = raw.match(/\+(\d+)/);
-            if (m) parts.push(m[1] + ' staged');
-            m = raw.match(/!(\d+)/);
-            if (m) parts.push(m[1] + ' modified');
-            return parts.length > 0 ? parts.join(', ') : raw;
         }
 
         function escapeHtml(text) {
