@@ -335,6 +335,12 @@ body.light .column[data-status="done"]    .card  { background: #D1FAE5; }
     word-break: break-word;
 }
 
+.card-num {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
+
 .card-badges {
     display: flex;
     align-items: center;
@@ -641,8 +647,10 @@ function renderTask(task) {
     document.body.classList.remove('empty');
 
     // --- Header: title (clickable when task.id is present — opens Lifecycle Board) ---
+    // Prefix the short 8-char id so the task is identifiable from the HUD pane.
     const titleEl = document.getElementById('task-title');
-    titleEl.textContent = task.title || 'Untitled Task';
+    const shortId = task.id ? String(task.id).substring(0, 8) : '';
+    titleEl.textContent = (shortId ? '[' + shortId + '] ' : '') + (task.title || 'Untitled Task');
     if (task.id) {
         titleEl.setAttribute('data-task-id', task.id);
         titleEl.setAttribute('role', 'link');
@@ -690,10 +698,12 @@ function renderTask(task) {
     document.getElementById('progress-text').textContent = pct + '%';
 
     // --- Build column card lists ---
+    // Capture each item's TRUE index in the full checklist array (idx) so the card
+    // number matches what the PM/agent refers to, not its position within a column.
     const cols = { pending: [], coding: [], testing: [], done: [] };
-    checklist.forEach(item => {
+    checklist.forEach((item, idx) => {
         const st = (item.status || 'pending').toLowerCase();
-        if (cols[st]) cols[st].push(item);
+        if (cols[st]) cols[st].push({ item, idx });
         // unknown statuses fall through silently
     });
 
@@ -708,9 +718,13 @@ function renderColumn(status, items) {
     const count = document.getElementById('count-' + status);
     count.textContent = items.length;
 
-    // Build card HTML to set innerHTML in one shot (avoids repeated reflows)
+    // Build card HTML to set innerHTML in one shot (avoids repeated reflows).
+    // Each entry is { item, idx } where idx is the item's true index in the full
+    // checklist array, so the rendered number is stable across status columns.
     let html = '';
-    items.forEach(item => {
+    items.forEach(entry => {
+        const item = entry.item;
+        const num  = entry.idx + 1;
         const text = escapeHtml(item.item || '');
         const cycleCount = parseInt(item.cycleCount, 10) || 0;
         const assignedTo = (item.assignedTo || '').trim();
@@ -726,7 +740,7 @@ function renderColumn(status, items) {
             ? `<div class="card-badges">${badgesHtml}</div>`
             : '';
 
-        html += `<div class="card"><div class="card-text">${text}</div>${badgesRow}</div>`;
+        html += `<div class="card"><div class="card-text"><span class="card-num">${num}.</span> ${text}</div>${badgesRow}</div>`;
     });
 
     body.innerHTML = html;

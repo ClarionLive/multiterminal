@@ -756,6 +756,15 @@ body.light .chip-assignee {
 }
 
 /* Card Text */
+.card-num {
+    flex-shrink: 0;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    user-select: none;
+}
+
 .card-text {
     flex: 1;
     font-size: 12.5px;
@@ -2675,6 +2684,13 @@ body.light .helper-chip {
             handle.appendChild(row);
         }
         content.appendChild(handle);
+
+        // Item number — true position in the full checklist array (1-based), so it
+        // matches the number the PM/agent refers to regardless of which status column
+        // the card sits in.
+        var num = createEl("div", "card-num");
+        num.textContent = (originalIndex + 1) + ".";
+        content.appendChild(num);
 
         // Card Text
         var text = createEl("div", "card-text");
