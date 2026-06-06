@@ -37,6 +37,24 @@ namespace MultiTerminal.API.Controllers
             if (string.IsNullOrWhiteSpace(agentName))
                 return BadRequest(new { error = "agentName is required" });
 
+            // Read-or-create (task 4bcd1e24): backfill the worktree for an
+            // already-active eligible task whose worktree was never materialized
+            // (the resume gap — worktrees were historically created only inside
+            // SetTaskActive). Idempotent and best-effort: returns the existing path
+            // with no git work when present, and a no-op (no creation) when the task
+            // is ineligible or no longer in_progress. Making this the chokepoint
+            // means session-start §2.5's cwd reconciliation auto-heals the worktree.
+            //
+            // ACCEPTED DESIGN (owner-adjudicated, pipeline Run-1): yes, this gives a
+            // GET a write side-effect. That is intentional — read-or-create on this
+            // endpoint was the confirmed plan. MT's REST API is localhost-only and
+            // `agentName` is self-asserted on every tool/endpoint (there is no auth
+            // boundary to bind it to), so this isn't a privilege escalation; and the
+            // write is bounded + idempotent to the NAMED agent's own active eligible
+            // task (you cannot create arbitrary worktrees by varying agentName — only
+            // that agent's one legitimate worktree, once). Not split into a POST.
+            _broker.EnsureWorktreeForActiveTask(agentName);
+
             // Worktree-purpose resolution (helper-aware): a helper is never the
             // task assignee, so the strict GetMyActiveTask would miss and the tool
             // would wrongly report "no active worktree" for a helper that owns one
