@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
@@ -514,6 +515,37 @@ namespace MultiTerminal.Services
             return string.Equals(record.Status, "active", StringComparison.OrdinalIgnoreCase)
                 ? record.WorktreePath
                 : null;
+        }
+
+        /// <summary>
+        /// Repo-root-relative paths (forward-slash) of every uncommitted change —
+        /// tracked, staged, or untracked — in <paramref name="repoRoot"/>'s main
+        /// checkout, via <c>git status --porcelain</c>. Used by the backfill
+        /// migration guard (task 4bcd1e24, item [2]) to detect repo-root work that a
+        /// fresh worktree would split off.
+        ///
+        /// <para>Three-state contract so the guard can fail CLOSED on uncertainty
+        /// (pipeline Run-1 hardening — Codex security/adversary HIGH): an
+        /// <b>empty list</b> means the tree is verified clean; a <b>non-empty list</b>
+        /// is the verified dirty set; <b>null</b> means the state could NOT be
+        /// determined (missing repoRoot, non-zero git exit, or an exception). The
+        /// caller must treat null as "indeterminate → refuse to backfill", NOT as
+        /// "clean" — a guard that fails open defeats its own purpose.</para>
+        /// </summary>
+        public async Task<List<string>> GetDirtyRepoRelativePathsAsync(string repoRoot)
+        {
+            if (string.IsNullOrEmpty(repoRoot)) return null;
+            try
+            {
+                var (exitCode, stdout, _) = await RunGitAsync(repoRoot, "status", "--porcelain").ConfigureAwait(false);
+                if (exitCode != 0) return null;
+                return WorktreeMergeService.ParsePorcelainPaths(stdout);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WorktreeManager] GetDirtyRepoRelativePathsAsync('{repoRoot}') failed: {ex.Message}");
+                return null;
+            }
         }
 
         /// <summary>

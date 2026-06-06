@@ -1044,6 +1044,259 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Idempotent backfill — materialize the active task's worktree for
+        /// <paramref name="agentName"/> when the task is worktree-eligible but no
+        /// worktree exists yet (task 4bcd1e24). This closes the "resume gap":
+        /// before this, a worktree was created ONLY inside <see cref="SetTaskActive"/>,
+        /// so a task already active on resume (carried from a prior session, or
+        /// activated before <see cref="MultiTerminal.Services.WorktreeConfig.IsEnabled"/>
+        /// became true) never re-ran activation and silently ran at repo root.
+        /// Wiring this into the <c>get_active_worktree</c> read path (which
+        /// session-start §2.5 calls for cwd reconciliation) makes worktree presence
+        /// a function of ELIGIBILITY, not activation timing.
+        ///
+        /// <para>Safe to call on every <c>get_active_worktree</c>: when the worktree
+        /// already exists it returns that path with no git work
+        /// (<see cref="MultiTerminal.Services.WorktreeManager.CreateForTaskAsync(string, string, bool, string)"/>
+        /// is idempotent per <c>(task, agent)</c>). It is a no-op (returns null)
+        /// when the agent has no active task, the task is ineligible, the task is no
+        /// longer in_progress, or creation fails — callers fall through to the main
+        /// checkout exactly as before.</para>
+        ///
+        /// <para>Helper note: a helper is resolved by
+        /// <see cref="ResolveActiveTaskForAgent"/> ONLY via its existing per-agent
+        /// worktree row, so a helper always trips the "already exists" fast-path and
+        /// is never backfilled here — helper worktrees are still created on helper
+        /// activation. Only an assignee whose canonical worktree is missing reaches
+        /// the create path.</para>
+        /// </summary>
+        /// <returns>The worktree path after ensuring it, or null when nothing was
+        /// (or could be) materialized.</returns>
+        public string EnsureWorktreeForActiveTask(string agentName)
+        {
+            if (string.IsNullOrEmpty(agentName)) return null;
+            try
+            {
+                var activeTask = ResolveActiveTaskForAgent(agentName);
+                if (activeTask == null) return null;
+
+                // Fast-path: THIS agent already has a worktree on disk (canonical for
+                // the assignee, helper for a helper). No git work, no eligibility
+                // re-check needed — return it. Also the sole path a helper ever takes.
+                string existing = _worktrees?.GetWorktreePathForTask(activeTask.Id, agentName)
+                                  ?? _worktrees?.GetWorktreePathForTask(activeTask.Id);
+                if (!string.IsNullOrEmpty(existing) && System.IO.Directory.Exists(existing))
+                    return existing;
+
+                if (!TryResolveWorktreeEligibility(activeTask, out string projectPath, out _, out _))
+                    return null;
+
+                // In the backfill path the resolving agent is the assignee (helpers
+                // short-circuit on the fast-path above), but compute it from the task
+                // so a fresh helper worktree is never forged under the canonical branch.
+                bool isAssignee = string.IsNullOrEmpty(activeTask.Assignee)
+                                  || string.Equals(activeTask.Assignee, agentName, StringComparison.OrdinalIgnoreCase);
+
+                // Everything that decides whether to create — status, existence, and
+                // the migration guard — runs UNDER the per-task lock so the check and
+                // the create are atomic (Run-1 hardening: Codex security MED race; a
+                // dirty check before the lock could be invalidated by edits landing
+                // between the check and CreateForTaskAsync).
+                lock (TaskWorktreeLock(activeTask.Id))
+                {
+                    // Re-check status against the LIVE cached task (not the possibly
+                    // stale snapshot a helper resolves via the DB): don't materialize a
+                    // worktree for a task whose teardown may have started.
+                    var liveTask = _tasks.TryGetValue(activeTask.Id, out var lt) ? lt : activeTask;
+                    if (!string.Equals(liveTask.Status, "in_progress", StringComparison.OrdinalIgnoreCase))
+                        return null;
+
+                    // Re-check existence under the lock: a concurrent get_active_worktree
+                    // may have created it since the pre-lock fast-path. Returning here
+                    // (instead of re-creating) also means backfill_created fires exactly
+                    // once per real creation.
+                    string underLock = _worktrees?.GetWorktreePathForTask(activeTask.Id, agentName)
+                                       ?? _worktrees?.GetWorktreePathForTask(activeTask.Id);
+                    if (!string.IsNullOrEmpty(underLock) && System.IO.Directory.Exists(underLock))
+                        return underLock;
+
+                    // Migration guard (task 4bcd1e24, item [2]): three-state, fail-CLOSED.
+                    // null = indeterminate (couldn't verify the repo-root dirty state) →
+                    // refuse rather than risk splitting work. Non-empty = this task's own
+                    // LINKED files are dirty at the repo root → a fresh worktree would
+                    // split the work; block and tell the agent to commit first. Unrelated
+                    // dirty files (.claude/project.json, other tasks) aren't linked here
+                    // and never trip it. Empty = verified safe → create.
+                    var attributableDirty = GetAttributableDirtyFiles(activeTask.Id, projectPath);
+                    if (attributableDirty == null)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Worktree backfill indeterminate for task {activeTask.Id}: could not verify repo-root dirty state — failing closed.");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = activeTask.Assignee ?? agentName ?? "System",
+                            Type = "worktree",
+                            Action = "backfill_indeterminate",
+                            Content = $"Worktree backfill skipped for '{activeTask.Title}': could not verify the repo root is safe to relocate from (git/DB read failed) — refusing rather than risk splitting work. Retry once the repo is reachable.",
+                            RelatedId = activeTask.Id
+                        });
+                        return null;
+                    }
+                    if (attributableDirty.Count > 0)
+                    {
+                        string sample = string.Join(", ", attributableDirty.Take(5))
+                                        + (attributableDirty.Count > 5 ? ", ..." : "");
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[MessageBroker] Worktree backfill blocked for task {activeTask.Id}: {attributableDirty.Count} linked file(s) dirty at repo root ({sample}).");
+                        RecordActivity(new ActivityEvent
+                        {
+                            Terminal = activeTask.Assignee ?? agentName ?? "System",
+                            Type = "worktree",
+                            Action = "backfill_blocked",
+                            Content = $"Worktree backfill skipped for '{activeTask.Title}': {attributableDirty.Count} linked file(s) have uncommitted changes at the repo root ({sample}). Commit them, then retry — a fresh worktree would split this work.",
+                            RelatedId = activeTask.Id
+                        });
+                        return null;
+                    }
+
+                    _worktrees.CreateForTaskAsync(activeTask.Id, agentName, isAssignee, projectPath).GetAwaiter().GetResult();
+
+                    RecordActivity(new ActivityEvent
+                    {
+                        Terminal = activeTask.Assignee ?? agentName ?? "System",
+                        Type = "worktree",
+                        Action = "backfill_created",
+                        Content = $"Backfilled missing worktree for already-active task '{activeTask.Title}'.",
+                        RelatedId = activeTask.Id
+                    });
+                }
+
+                return _worktrees?.GetWorktreePathForTask(activeTask.Id, agentName)
+                       ?? _worktrees?.GetWorktreePathForTask(activeTask.Id);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] EnsureWorktreeForActiveTask('{agentName}') failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Migration-guard helper (task 4bcd1e24, item [2]): which of
+        /// <paramref name="taskId"/>'s linked files (<c>link_task_file</c>) currently
+        /// have uncommitted changes at the repo root (<paramref name="repoRoot"/>).
+        ///
+        /// <para><b>Three-state contract</b> (Run-1 hardening — Codex security/adversary
+        /// HIGH: a guard must not fail open). <b>null</b> = INDETERMINATE: the dirty
+        /// state could not be established (no git result, or a DB error reading links)
+        /// — the caller MUST refuse the backfill rather than assume clean. <b>Empty
+        /// list</b> = verified safe: tree clean, or no linked files are dirty. <b>Non-empty</b>
+        /// = the task's own linked files are dirty at the repo root, so a fresh
+        /// worktree would split in-progress work — the caller blocks and warns.</para>
+        ///
+        /// <para>Attribution is deliberately scoped to LINKED files so an unrelated
+        /// dirty file (bookkeeping like <c>.claude/project.json</c>, or another task's
+        /// edits) never trips the guard (explicit task requirement). ACCEPTED RESIDUAL
+        /// (owner-adjudicated, pipeline Run-1): repo-root edits the agent never linked
+        /// won't trip the guard either — but kanban rule 11 mandates link_task_file for
+        /// every changed file, so unlinked task edits are a workflow violation, and
+        /// broadening to "any non-bookkeeping dirty file" would breach the explicit
+        /// don't-trip-on-unrelated-files requirement. Linked-only is the chosen design.
+        /// Paths are matched
+        /// by canonical absolute form (<see cref="System.IO.Path.GetFullPath(string)"/>
+        /// round-trip) rather than raw prefix-stripping, so a link stored relative
+        /// (anchored to the repo root, NOT the server process cwd) or with <c>..</c>
+        /// segments still matches the porcelain output (mirrors <c>GitAttributionService</c>).
+        /// Either side that cannot be canonicalized — a git-quoted dirty path OR a
+        /// malformed non-empty linked path — yields null (indeterminate) rather than
+        /// being dropped, keeping the guard fully fail-closed: any non-clean OR
+        /// non-verifiable state refuses the backfill (Run-2/Run-3 hardening).</para>
+        /// </summary>
+        private List<string> GetAttributableDirtyFiles(string taskId, string repoRoot)
+        {
+            if (string.IsNullOrEmpty(taskId) || string.IsNullOrEmpty(repoRoot)) return null;
+
+            List<string> dirty;
+            try
+            {
+                dirty = _worktrees?.GetDirtyRepoRelativePathsAsync(repoRoot).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles dirty-probe for {taskId} threw: {ex.Message}");
+                return null; // indeterminate — fail closed
+            }
+            if (dirty == null) return null;          // git couldn't determine state — fail closed
+            if (dirty.Count == 0) return new List<string>(); // verified clean — proceed
+
+            List<MCPServer.Models.TaskFileLink> links;
+            try
+            {
+                links = _taskDb?.GetFileLinksForTask(taskId);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles link-read for {taskId} threw: {ex.Message}");
+                return null; // can't attribute → indeterminate → fail closed
+            }
+            if (links == null || links.Count == 0) return new List<string>(); // nothing to attribute → proceed
+
+            // Canonicalize the dirty (repo-relative) paths to absolute form, then
+            // compare against each linked file's canonical absolute path. GetFullPath
+            // collapses '..'/'.'/separator and short-name differences on both sides so
+            // attribution can't be defeated by an alternate spelling.
+            string fullRoot;
+            try { fullRoot = System.IO.Path.GetFullPath(repoRoot); }
+            catch { return null; } // can't anchor comparison → fail closed
+
+            var dirtyAbs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var d in dirty)
+            {
+                if (string.IsNullOrEmpty(d)) continue;
+                try { dirtyAbs.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(fullRoot, d))); }
+                catch (Exception ex)
+                {
+                    // A reported dirty path we cannot canonicalize (e.g. a git-quoted
+                    // name with special chars that ParsePorcelainPaths preserves verbatim)
+                    // means we cannot fully classify the repo's dirty set. Fail CLOSED —
+                    // return indeterminate rather than silently dropping it and possibly
+                    // reporting "clean" when an unclassified file is actually the task's.
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles: undecodable dirty path '{d}' for {taskId}: {ex.Message} — indeterminate (fail closed).");
+                    return null;
+                }
+            }
+            if (dirtyAbs.Count == 0) return new List<string>();
+
+            var hits = new List<string>();
+            foreach (var link in links)
+            {
+                if (string.IsNullOrEmpty(link?.FilePath)) continue; // nothing to attribute — not a parse failure
+                string abs;
+                try
+                {
+                    // Anchor a RELATIVE link path to the repo root — bare GetFullPath
+                    // would resolve it against the server process's cwd, which is not the
+                    // task repo and would silently miss the matching porcelain entry.
+                    abs = System.IO.Path.IsPathRooted(link.FilePath)
+                        ? System.IO.Path.GetFullPath(link.FilePath)
+                        : System.IO.Path.GetFullPath(System.IO.Path.Combine(fullRoot, link.FilePath));
+                }
+                catch (Exception ex)
+                {
+                    // Symmetric with the dirty-path side: a non-empty linked path we
+                    // cannot canonicalize means we cannot tell whether that linked file
+                    // is among the dirty set, so the attribution result is not fully
+                    // verifiable — fail CLOSED (indeterminate) rather than skip it and
+                    // risk reporting "clean".
+                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles: undecodable link path '{link.FilePath}' for {taskId}: {ex.Message} — indeterminate (fail closed).");
+                    return null;
+                }
+                if (dirtyAbs.Contains(abs)) hits.Add(link.FilePath);
+            }
+            return hits;
+        }
+
+        /// <summary>
         /// Resolve a task id to its project's filesystem path, going through
         /// the cached <c>_tasks</c> + <c>_projects</c> dictionaries. Returns
         /// null when the task is unknown, has no project, or the project has
@@ -3258,6 +3511,81 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Single source of truth for "does this task get a git worktree?" — task
+        /// 4bcd1e24. Both <see cref="SetTaskActive"/> (activation) and the
+        /// <see cref="UpdateTaskStatus"/> done-gate (completion) call this so the
+        /// two can never disagree about a task's worktree eligibility. Before this
+        /// consolidation each site inlined its own check and they had drifted:
+        /// activation normalized <see cref="KanbanTask.ProjectId"/> via
+        /// <see cref="NormalizeProjectId"/> before resolving the project, but the
+        /// done-gate resolved <c>_projects</c> with the raw id — so a legacy
+        /// truncated (8-char short) ProjectId materialized a worktree at activation
+        /// yet silently no-op'd at completion (no auto-commit/prune/merge).
+        ///
+        /// <para>Read-only: this resolves the canonical project id and filesystem
+        /// path WITHOUT mutating the task row. A caller that wants to self-heal a
+        /// truncated ProjectId (only <see cref="SetTaskActive"/> does) persists
+        /// <paramref name="canonicalProjectId"/> itself after calling this.</para>
+        /// </summary>
+        /// <param name="task">Task to evaluate (null → ineligible).</param>
+        /// <param name="projectPath">Resolved project filesystem path when eligible; null otherwise.</param>
+        /// <param name="canonicalProjectId">Normalized project id when one resolved; null/empty otherwise.</param>
+        /// <param name="skipReason">
+        /// Human-readable reason when ineligible; null when eligible. Reasons mirror
+        /// the strings the activation path historically surfaced so callers can keep
+        /// emitting identical user-facing notices.
+        /// </param>
+        /// <returns>
+        /// true only when worktree mode is on AND the task's project resolves to a
+        /// real filesystem path.
+        /// </returns>
+        private bool TryResolveWorktreeEligibility(
+            KanbanTask task,
+            out string projectPath,
+            out string canonicalProjectId,
+            out string skipReason)
+        {
+            projectPath = null;
+            canonicalProjectId = null;
+            skipReason = null;
+
+            if (!MultiTerminal.Services.WorktreeConfig.IsEnabled)
+            {
+                skipReason = "worktree mode is off";
+                return false;
+            }
+
+            if (task == null || string.IsNullOrEmpty(task.ProjectId))
+            {
+                skipReason = "task has no project association";
+                return false;
+            }
+
+            canonicalProjectId = NormalizeProjectId(task.ProjectId);
+
+            if (string.IsNullOrEmpty(canonicalProjectId))
+            {
+                skipReason = "id is ambiguous (matches multiple registered projects, or is a short prefix of one); pass the full project id";
+                return false;
+            }
+
+            if (!_projects.TryGetValue(canonicalProjectId, out var proj))
+            {
+                skipReason = "project not registered or registry not yet loaded";
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(proj.Path))
+            {
+                skipReason = "project is registered but has no filesystem path";
+                return false;
+            }
+
+            projectPath = proj.Path;
+            return true;
+        }
+
+        /// <summary>
         /// Create a new task on the Kanban board.
         /// </summary>
         public CreateTaskResult CreateTask(string title, string description, string createdBy, string status = "todo", string priority = "normal", string projectId = null)
@@ -3925,11 +4253,13 @@ namespace MultiTerminal.MCPServer.Services
             // (which doesn't use --force) doesn't refuse on dirty state. If the
             // commit fails, skip prune so the dev can resolve manually; the DB
             // record stays 'active' for the next attempt.
+            // Pre-declared (not inline-out) so it stays definitely-assigned for the
+            // ineligible-completion else-if below: with the short-circuit && the
+            // predicate isn't called when status != "done", so an inline out var
+            // wouldn't be assigned on every path into the else.
+            string doneSkipReason = null;
             if (status == "done"
-                && MultiTerminal.Services.WorktreeConfig.IsEnabled
-                && !string.IsNullOrEmpty(task.ProjectId)
-                && _projects.TryGetValue(task.ProjectId, out var doneProj)
-                && !string.IsNullOrEmpty(doneProj.Path))
+                && TryResolveWorktreeEligibility(task, out string doneProjPath, out _, out doneSkipReason))
             {
                 bool shouldPrune = false;
                 MultiTerminal.Services.AutoCommitResult commitResult = null;
@@ -3937,7 +4267,7 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     commitResult = _autoCommit.CommitForTaskAsync(
                         taskId,
-                        doneProj.Path,
+                        doneProjPath,
                         task.Title,
                         task.ImplementationSummary,
                         task.Assignee).GetAwaiter().GetResult();
@@ -4023,7 +4353,7 @@ namespace MultiTerminal.MCPServer.Services
                     bool proceedTeardown;
                     try
                     {
-                        proceedTeardown = CommitAndIntegrateHelpers(task, doneProj.Path, out integratedHelperBranches);
+                        proceedTeardown = CommitAndIntegrateHelpers(task, doneProjPath, out integratedHelperBranches);
                     }
                     catch (Exception ex)
                     {
@@ -4095,7 +4425,7 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         WorktreePruneCoordinator.MarkPruning(prunePath);
                         markedPaths.Add(prunePath);
-                        var fireArgs = FireWorktreePruning(taskId, prunePath, doneProj.Path, task.Assignee);
+                        var fireArgs = FireWorktreePruning(taskId, prunePath, doneProjPath, task.Assignee);
 
                         // Cycle-3 adversary HIGH fix: if the broadcast didn't
                         // complete in time, DEFER prune — leave the worktree
@@ -4130,7 +4460,7 @@ namespace MultiTerminal.MCPServer.Services
                         {
                             // Prune ALL agent worktrees for the task (canonical +
                             // helpers), not just the canonical one.
-                            _worktrees.PruneAllForTaskAsync(taskId, doneProj.Path).GetAwaiter().GetResult();
+                            _worktrees.PruneAllForTaskAsync(taskId, doneProjPath).GetAwaiter().GetResult();
                             prunedOK = true;
                         }
                         catch (Exception ex)
@@ -4185,7 +4515,7 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         try
                         {
-                            _merge.DeleteBranchAsync(doneProj.Path, helperBranch, force: true).GetAwaiter().GetResult();
+                            _merge.DeleteBranchAsync(doneProjPath, helperBranch, force: true).GetAwaiter().GetResult();
                         }
                         catch (Exception ex)
                         {
@@ -4193,8 +4523,30 @@ namespace MultiTerminal.MCPServer.Services
                         }
                     }
 
-                    PerformPostPruneMergeAndFireReady(taskId, task, doneProj.Path, worktreePathToPrune);
+                    PerformPostPruneMergeAndFireReady(taskId, task, doneProjPath, worktreePathToPrune);
                 }
+            }
+            else if (status == "done"
+                && MultiTerminal.Services.WorktreeConfig.IsEnabled)
+            {
+                // Worktree mode is ON but this task is ineligible (it resolved to no
+                // worktree — no project association, ambiguous/unregistered project,
+                // or a project with no filesystem path). The eligible path above runs
+                // auto-commit → prune → merge; this path historically did NOTHING and
+                // said nothing, so the user couldn't tell whether git automation had
+                // silently failed or simply never applied. Make it explicit and
+                // uniform (task 4bcd1e24, item [3]): one documented notice that the
+                // task completed WITHOUT git automation and the user owns any commit.
+                // (Mode-off completions are deliberately silent — there's no worktree
+                // expectation to violate, so that's the global default, not a divergence.)
+                RecordActivity(new ActivityEvent
+                {
+                    Terminal = task.Assignee ?? "System",
+                    Type = "worktree",
+                    Action = "no_worktree_done",
+                    Content = $"Task '{task.Title}' completed with no worktree ({doneSkipReason}) — no git automation ran (no auto-commit/prune/merge). Commit any changes on your current branch yourself.",
+                    RelatedId = taskId
+                });
             }
 
             // Generate changelog entry if task is marked as done and associated with a project
@@ -5128,18 +5480,17 @@ namespace MultiTerminal.MCPServer.Services
             // when one already exists. Failure is non-fatal — the task still goes
             // active so the user is not blocked by git issues.
             //
-            // Normalize ProjectId first: legacy tasks may have a truncated 8-char
-            // short id stored (silent footgun before the CreateTask fix). If we
-            // can resolve it to a full key, opportunistically self-heal the row
-            // so future lookups succeed without repeating the prefix scan.
-            if (MultiTerminal.Services.WorktreeConfig.IsEnabled
-                && !string.IsNullOrEmpty(task.ProjectId))
+            // Eligibility (mode-on + resolvable project path) is decided by the
+            // shared TryResolveWorktreeEligibility predicate so activation and the
+            // done-gate can never disagree (task 4bcd1e24). The predicate also
+            // hands back the canonical project id so we can opportunistically
+            // self-heal a legacy truncated 8-char ProjectId on the row — future
+            // lookups then succeed without repeating the prefix scan.
+            if (TryResolveWorktreeEligibility(task, out string activeProjPath, out string canonicalProjectId, out string worktreeSkipReason))
             {
-                string canonicalProjectId = NormalizeProjectId(task.ProjectId);
                 bool canCreateWorktree = true;
 
-                if (!string.IsNullOrEmpty(canonicalProjectId)
-                    && !string.Equals(canonicalProjectId, task.ProjectId, StringComparison.Ordinal))
+                if (!string.Equals(canonicalProjectId, task.ProjectId, StringComparison.Ordinal))
                 {
                     string originalProjectId = task.ProjectId;
                     task.ProjectId = canonicalProjectId;
@@ -5167,10 +5518,7 @@ namespace MultiTerminal.MCPServer.Services
                     }
                 }
 
-                if (canCreateWorktree
-                    && !string.IsNullOrEmpty(canonicalProjectId)
-                    && _projects.TryGetValue(canonicalProjectId, out var activeProj)
-                    && !string.IsNullOrEmpty(activeProj.Path))
+                if (canCreateWorktree)
                 {
                     try
                     {
@@ -5183,7 +5531,7 @@ namespace MultiTerminal.MCPServer.Services
                             // worktree the teardown would never see / prune.
                             if (string.Equals(task.Status, "in_progress", StringComparison.OrdinalIgnoreCase))
                             {
-                                _worktrees.CreateForTaskAsync(taskId, actingAgent, isActingAssignee, activeProj.Path).GetAwaiter().GetResult();
+                                _worktrees.CreateForTaskAsync(taskId, actingAgent, isActingAssignee, activeProjPath).GetAwaiter().GetResult();
                             }
                         }
                     }
@@ -5200,37 +5548,23 @@ namespace MultiTerminal.MCPServer.Services
                         });
                     }
                 }
-                else if (canCreateWorktree)
+            }
+            else if (MultiTerminal.Services.WorktreeConfig.IsEnabled
+                && !string.IsNullOrEmpty(task.ProjectId))
+            {
+                // Worktree mode is on AND the task claims a project, but the
+                // project couldn't be resolved. The predicate already classified
+                // the cause (ambiguous input, missing registration, or
+                // registered-without-path) — surface it so the user can act on
+                // the right one without reading debug logs.
+                RecordActivity(new ActivityEvent
                 {
-                    // Worktree mode is on AND the task claims a project, but the
-                    // project couldn't be resolved. Distinguish the three causes
-                    // so the user can act on the right one without reading debug
-                    // logs: ambiguous input (caller fix), cold cache or missing
-                    // registration (config fix), or registered-without-path
-                    // (project record fix).
-                    string skipReason;
-                    if (string.IsNullOrEmpty(canonicalProjectId))
-                    {
-                        skipReason = "id is ambiguous (matches multiple registered projects, or is a short prefix of one); pass the full project id";
-                    }
-                    else if (!_projects.ContainsKey(canonicalProjectId))
-                    {
-                        skipReason = "project not registered or registry not yet loaded";
-                    }
-                    else
-                    {
-                        skipReason = "project is registered but has no filesystem path";
-                    }
-
-                    RecordActivity(new ActivityEvent
-                    {
-                        Terminal = task.Assignee ?? "System",
-                        Type = "worktree",
-                        Action = "create_skipped",
-                        Content = $"Worktree creation skipped for '{task.Title}': project '{task.ProjectId}' could not be resolved ({skipReason}).",
-                        RelatedId = taskId
-                    });
-                }
+                    Terminal = task.Assignee ?? "System",
+                    Type = "worktree",
+                    Action = "create_skipped",
+                    Content = $"Worktree creation skipped for '{task.Title}': project '{task.ProjectId}' could not be resolved ({worktreeSkipReason}).",
+                    RelatedId = taskId
+                });
             }
 
             BroadcastTaskUpdate();
