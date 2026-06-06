@@ -285,6 +285,10 @@ namespace MultiTerminal.Services
             cmd += " --dangerously-skip-permissions";
             cmd += " --disallowedTools Edit,Write,Read,Glob,Grep,Bash,NotebookEdit,PowerShell";
 
+            // Force MT's statusline.js so Oracle's header context/token stats populate even
+            // when its working dir is a project that overrides statusLine (task 72444250).
+            cmd += LaunchCommandBuilder.BuildForcedStatuslineFlag();
+
             string safePromptPath = _systemPromptFile.Replace("'", "''");
             cmd += $" --system-prompt-file '{safePromptPath}'";
 

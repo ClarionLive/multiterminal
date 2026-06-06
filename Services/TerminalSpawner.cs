@@ -106,83 +106,6 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Builds a <c>--settings</c> flag that forces MultiTerminal's bundled
-        /// <c>scripts/statusline.js</c> as the Claude Code <c>statusLine</c> command for the
-        /// spawned terminal. The spawn flags use <c>--setting-sources project,local</c>
-        /// (skipping the user-level settings where MT's global statusLine lives), and a
-        /// project may override <c>statusLine</c> with its own script — either case leaves
-        /// MT's per-terminal context stats file unwritten, so the status-bar Context shows
-        /// "--%". A command-line <c>--settings</c> source outranks project/local/user, so
-        /// MT's script always runs and writes <c>mt-statusline-{name}-{docId}.json</c>.
-        /// Returns "" (no flag) if the bundled script can't be located or the settings file
-        /// can't be written; both fallbacks are logged so a silent "--%" regression is
-        /// traceable (pipeline finding: override failure was previously silent).
-        /// <para>The settings file lives in a per-user-private dir (LocalApplicationData)
-        /// rather than the world-shared temp root, and is swapped in atomically (write
-        /// temp + rename) so a concurrently-spawning terminal's <c>claude --settings</c>
-        /// read never sees a truncated file and a same-user process has a narrower tamper
-        /// window. Content is per-install-constant. Mirrors statusline.js's atomic-write
-        /// rationale (pipeline findings: CWE-377 predictable temp file + torn concurrent
-        /// write).</para>
-        /// </summary>
-        private static string BuildForcedStatuslineFlag()
-        {
-            try
-            {
-                string scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "statusline.js");
-                if (!File.Exists(scriptPath))
-                {
-                    Debug.WriteLine(
-                        $"[TerminalSpawner] Forced statusLine skipped: bundled script not found at '{scriptPath}'. " +
-                        "Context may stay '--%' for project terminals that override statusLine.");
-                    return string.Empty;
-                }
-
-                // Forward slashes are valid in JSON without escaping and are accepted by
-                // node on Windows; the path is quoted so spaces (e.g. "Program Files") work.
-                string scriptForJson = scriptPath.Replace("\\", "/");
-                string json = "{\"statusLine\":{\"type\":\"command\",\"command\":\"node \\\"" + scriptForJson + "\\\"\"}}";
-
-                // Per-user-private dir, not the shared temp root.
-                string dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "MultiTerminal");
-                Directory.CreateDirectory(dir);
-                string settingsPath = Path.Combine(dir, "forced-statusline.settings.json");
-
-                // Atomic swap: write a unique temp then rename over the target. A rename is a
-                // whole-file replace, so a concurrent reader never observes a torn file.
-                string tmpPath = settingsPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                try
-                {
-                    File.WriteAllText(tmpPath, json);
-                    for (int attempt = 0; ; attempt++)
-                    {
-                        try { File.Move(tmpPath, settingsPath, overwrite: true); break; }
-                        catch (IOException) when (attempt < 3) { System.Threading.Thread.Sleep(15); }
-                        catch (UnauthorizedAccessException) when (attempt < 3) { System.Threading.Thread.Sleep(15); }
-                    }
-                }
-                catch
-                {
-                    try { File.Delete(tmpPath); } catch { /* best-effort cleanup */ }
-                    throw;
-                }
-
-                return $" --settings '{SanitizeForPowerShell(settingsPath)}'";
-            }
-            catch (Exception ex)
-            {
-                // Best-effort: if the settings file can't be written, fall back to whatever
-                // statusLine the resolved sources provide (Context may stay "--%" there).
-                Debug.WriteLine(
-                    $"[TerminalSpawner] Forced statusLine skipped (settings write failed): {ex.Message}. " +
-                    "Context may stay '--%' for project terminals that override statusLine.");
-                return string.Empty;
-            }
-        }
-
-        /// <summary>
         /// Validates that an agent name contains only safe characters (alphanumeric, spaces, hyphens, underscores).
         /// </summary>
         private static void ValidateAgentName(string name)
@@ -529,7 +452,9 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
             // leave MT's per-terminal context stats unwritten ("--%" in the banner). A
             // CLI --settings source outranks project/local/user, so this guarantees MT's
             // script runs for every spawned terminal regardless of project overrides.
-            claudeFlags += BuildForcedStatuslineFlag();
+            // Canonical implementation lives in LaunchCommandBuilder (shared with the docked
+            // terminal path, task 72444250).
+            claudeFlags += LaunchCommandBuilder.BuildForcedStatuslineFlag();
 
             // Add MCP config if available
             string mcpConfig = LaunchCommandBuilder.GetMcpConfigPath();
