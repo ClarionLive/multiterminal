@@ -23,6 +23,10 @@ node_modules/
 .env.local
 .env.*.local
 .claude/settings.local.json
+# MT-managed project definition: changeLog is appended on every task-done,
+# so it's perpetually dirty. Untracked here (repo has no remote; MT regenerates
+# it via the add-project flow). History up to 3e9711e remains in past commits.
+.claude/project.json
 
 # Databases & sessions
 *.db
