@@ -294,10 +294,12 @@ namespace MultiTerminal.Services
             // preserved by the merge (normally none — keeps the LOCAL-drop safe regardless).
             string oracleWorkingDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal");
-            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag(oracleWorkingDir);
+            var (forcedStatusline, canDropLocal) = LaunchCommandBuilder.BuildForcedStatuslineFlag(oracleWorkingDir);
             if (!string.IsNullOrEmpty(forcedStatusline))
             {
-                cmd += " --setting-sources user,project";
+                // Only drop LOCAL when the merge re-supplied it (fail closed) — never strip a
+                // project's local hooks/deny without a replacement.
+                if (canDropLocal) cmd += " --setting-sources user,project";
                 cmd += forcedStatusline;
             }
 

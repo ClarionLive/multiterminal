@@ -272,10 +272,15 @@ namespace MultiTerminal.Services
             // statusLine then wins for every docked terminal regardless of project overrides.
             // Both-or-neither: only drop LOCAL when MT's statusLine is actually being forced
             // (never strip a project's local settings without supplying a replacement).
-            string forcedStatusline = BuildForcedStatuslineFlag(workingDirectory);
+            var (forcedStatusline, canDropLocal) = BuildForcedStatuslineFlag(workingDirectory);
             if (!string.IsNullOrEmpty(forcedStatusline))
             {
-                flags += " --setting-sources user,project";
+                // Only exclude the LOCAL source when the merge actually re-supplied it (fail closed,
+                // Run-2 security HIGH) — otherwise a project's local hooks/deny would be silently
+                // stripped under --dangerously-skip-permissions. When we can't drop LOCAL, the
+                // project's own statusLine wins and MT's header may stay "--%" for that project — a
+                // benign display loss, not a safety loss.
+                if (canDropLocal) flags += " --setting-sources user,project";
                 flags += forcedStatusline;
             }
 
@@ -295,9 +300,15 @@ namespace MultiTerminal.Services
         /// LOCAL source via <c>--setting-sources</c> (e.g. docked terminals pass
         /// <c>user,project</c>; spawned teammates pass <c>project</c>). The exact source set
         /// differs per launch path, so it lives at the call site, not here.</para>
-        /// Returns "" (no flag) if the bundled script can't be located or the settings file
-        /// can't be written; both fallbacks are logged so a silent "--%" regression stays
-        /// traceable.
+        /// <para><b>Returns <c>(Flag, CanDropLocal)</c>.</b> <c>Flag</c> is the <c>--settings</c>
+        /// string, or "" if the bundled script can't be located or the settings file can't be
+        /// written. <c>CanDropLocal</c> tells the caller whether it is SAFE to exclude the LOCAL
+        /// source: true when there is no local file (nothing to lose) or the merge re-supplied it;
+        /// FALSE when a local file exists but couldn't be read/parsed/merged. Callers MUST NOT
+        /// drop LOCAL when <c>CanDropLocal</c> is false — otherwise a transient read/parse failure
+        /// would silently strip the project's hooks/deny under --dangerously-skip-permissions
+        /// (Run-2 security HIGH, fail-closed). Both fallbacks are logged so a silent "--%"
+        /// regression stays traceable.</para>
         /// <para>When <paramref name="workingDirectory"/> is supplied, the project's
         /// <c>.claude/settings.local.json</c> is read and MERGED into the emitted settings
         /// (its keys preserved, only <c>statusLine</c> overridden) so that excluding the LOCAL
@@ -309,7 +320,7 @@ namespace MultiTerminal.Services
         /// by <c>TerminalSpawner.SpawnTerminal</c> (spawned teammates), <c>BuildFlags</c> (docked
         /// terminals), and <c>OracleService</c>.</para>
         /// </summary>
-        public static string BuildForcedStatuslineFlag(string workingDirectory = null)
+        public static (string Flag, bool CanDropLocal) BuildForcedStatuslineFlag(string workingDirectory = null)
         {
             try
             {
@@ -319,7 +330,7 @@ namespace MultiTerminal.Services
                     System.Diagnostics.Debug.WriteLine(
                         $"[LaunchCommandBuilder] Forced statusLine skipped: bundled script not found at '{scriptPath}'. " +
                         "Context may stay '--%' for project terminals that override statusLine.");
-                    return string.Empty;
+                    return (string.Empty, false);
                 }
 
                 // Forward slashes are valid in JSON without escaping and are accepted by
@@ -337,7 +348,17 @@ namespace MultiTerminal.Services
                 // would also drop a project's local HOOKS / deny rules — a real safety layer under
                 // --dangerously-skip-permissions. So we RE-SUPPLY the project's LOCAL settings here
                 // (at --settings precedence) and override ONLY statusLine, preserving everything else.
+                //
+                // FAIL CLOSED (Run-2 security HIGH): if a LOCAL file EXISTS but we cannot re-supply
+                // its keys (unreadable, unparseable, or not a JSON object), we must NOT tell the
+                // caller it's safe to drop LOCAL — doing so would silently strip the project's
+                // hooks/deny while --dangerously-skip-permissions is active. canDropLocal=false in
+                // that case keeps LOCAL active (the project's own statusLine then wins and MT's
+                // header may stay "--%" for that one project — a benign display loss, not a safety
+                // loss). canDropLocal stays true when there is NO local file (nothing to lose) or
+                // the merge succeeded (keys re-supplied).
                 System.Text.Json.Nodes.JsonObject merged = null;
+                bool canDropLocal = true;
                 if (!string.IsNullOrEmpty(workingDirectory))
                 {
                     string localPath = Path.Combine(workingDirectory, ".claude", "settings.local.json");
@@ -346,15 +367,22 @@ namespace MultiTerminal.Services
                         try
                         {
                             merged = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(localPath)) as System.Text.Json.Nodes.JsonObject;
+                            if (merged == null)
+                            {
+                                // Valid JSON but not an object (array/scalar) — can't preserve keys.
+                                canDropLocal = false;
+                                System.Diagnostics.Debug.WriteLine(
+                                    $"[LaunchCommandBuilder] '{localPath}' is not a JSON object; cannot preserve its local settings. Keeping LOCAL active (MT statusLine not forced for this project).");
+                            }
                         }
                         catch (Exception ex)
                         {
-                            // Unparseable local settings — we can't preserve its keys, so fall back to
-                            // statusLine-only for this one project. Logged because the LOCAL safety
-                            // layer is NOT re-supplied in this rare case (the dropped-LOCAL exposure
-                            // the merge exists to avoid re-appears only here, and visibly).
+                            // Unreadable/unparseable local settings — fail closed: keep LOCAL active so
+                            // a transient lock/ACL/parse error can't silently strip the project's
+                            // hooks/deny under --dangerously-skip-permissions.
+                            canDropLocal = false;
                             System.Diagnostics.Debug.WriteLine(
-                                $"[LaunchCommandBuilder] Could not parse '{localPath}' to preserve local settings while forcing statusLine: {ex.Message}. Forcing statusLine only.");
+                                $"[LaunchCommandBuilder] Could not read/parse '{localPath}' to preserve local settings: {ex.Message}. Keeping LOCAL active (MT statusLine not forced for this project).");
                         }
                     }
                 }
@@ -391,16 +419,17 @@ namespace MultiTerminal.Services
                     throw;
                 }
 
-                return $" --settings '{EscapeSingleQuotes(settingsPath)}'";
+                return ($" --settings '{EscapeSingleQuotes(settingsPath)}'", canDropLocal);
             }
             catch (Exception ex)
             {
                 // Best-effort: if the settings file can't be written, fall back to whatever
-                // statusLine the resolved sources provide (Context may stay "--%" there).
+                // statusLine the resolved sources provide (Context may stay "--%" there). Fail
+                // closed on CanDropLocal — no merged file means we can't have re-supplied LOCAL.
                 System.Diagnostics.Debug.WriteLine(
                     $"[LaunchCommandBuilder] Forced statusLine skipped (settings write failed): {ex.Message}. " +
                     "Context may stay '--%' for project terminals that override statusLine.");
-                return string.Empty;
+                return (string.Empty, false);
             }
         }
 
@@ -513,17 +542,22 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Stable 8-hex-char tag derived from a working directory, used to name the
-        /// per-project forced-statusline settings file so concurrent launches of
-        /// different projects don't clobber each other's merged settings. Returns
-        /// "default" when no working directory is supplied (statusLine-only content).
+        /// Stable collision-resistant tag derived from a working directory, used to name the
+        /// per-project forced-statusline settings file so concurrent launches of different
+        /// projects don't clobber each other's merged settings. Returns "default" when no
+        /// working directory is supplied (statusLine-only content).
+        /// <para>Uses the FULL SHA-256 (64 hex chars), not a truncation: this file is passed to
+        /// <c>claude --settings</c> at CLI precedence and carries the project's merged
+        /// hooks/deny/env, so a colliding filename would let one project's settings overwrite
+        /// another's. A short (e.g. 32-bit) tag left a feasible cross-project collision surface
+        /// (Run-2 security MEDIUM); the full digest removes it.</para>
         /// </summary>
         private static string HashForFileName(string value)
         {
             if (string.IsNullOrEmpty(value)) return "default";
             using var sha = System.Security.Cryptography.SHA256.Create();
             byte[] h = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(value.ToLowerInvariant()));
-            return Convert.ToHexString(h, 0, 4).ToLowerInvariant(); // 8 hex chars
+            return Convert.ToHexString(h).ToLowerInvariant(); // full 64 hex chars (collision-resistant)
         }
     }
 
