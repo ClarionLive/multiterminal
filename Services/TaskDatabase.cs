@@ -1899,14 +1899,25 @@ namespace MultiTerminal.Services
                     (task_id, agent_name, worktree_path, branch_name, created_at, status, is_canonical)
                 VALUES (@taskId, @agentName, @worktreePath, @branchName, @createdAt, 'active', @isCanonical)
             ";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
-            cmd.Parameters.AddWithValue("@worktreePath", worktreePath);
-            cmd.Parameters.AddWithValue("@branchName", branchName);
-            cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
-            cmd.Parameters.AddWithValue("@isCanonical", isCanonical ? 1 : 0);
-            cmd.ExecuteNonQuery();
+            // Serialize on the shared _dbLock: the janitor timer thread reads these
+            // task_worktrees rows concurrently with REST/MCP request threads writing
+            // them, all on one SQLiteConnection. Matches GetTasksLinkedToBranch (below)
+            // and the HUD-linkage readers (the existing lock(_dbLock) sites in this file).
+            // NOTE: _dbLock only serializes callers that take it. Other unlocked
+            // _connection users in this class (e.g. SaveTask/UpdateTask) are NOT yet
+            // covered, so the shared connection is not GLOBALLY serialized — closing
+            // that is tracked as a separate follow-up. Task 7bbaf13a.
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+                cmd.Parameters.AddWithValue("@worktreePath", worktreePath);
+                cmd.Parameters.AddWithValue("@branchName", branchName);
+                cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
+                cmd.Parameters.AddWithValue("@isCanonical", isCanonical ? 1 : 0);
+                cmd.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -1949,11 +1960,14 @@ namespace MultiTerminal.Services
                 ORDER BY is_canonical DESC, created_at DESC
                 LIMIT 1
             ";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            using var reader = cmd.ExecuteReader();
-            if (!reader.Read()) return null;
-            return MapWorktree(reader);
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read()) return null;
+                return MapWorktree(reader);
+            }
         }
 
         /// <summary>
@@ -1968,12 +1982,15 @@ namespace MultiTerminal.Services
                 FROM task_worktrees
                 WHERE task_id = @taskId AND agent_name = @agentName
             ";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
-            using var reader = cmd.ExecuteReader();
-            if (!reader.Read()) return null;
-            return MapWorktree(reader);
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read()) return null;
+                return MapWorktree(reader);
+            }
         }
 
         /// <summary>
@@ -1997,11 +2014,14 @@ namespace MultiTerminal.Services
                 ORDER BY created_at DESC
                 LIMIT 1
             ";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@agentName", agentName);
-            using var reader = cmd.ExecuteReader();
-            if (!reader.Read()) return null;
-            return MapWorktree(reader);
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@agentName", agentName);
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read()) return null;
+                return MapWorktree(reader);
+            }
         }
 
         /// <summary>
@@ -2019,12 +2039,15 @@ namespace MultiTerminal.Services
                 ORDER BY is_canonical DESC, created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            lock (_dbLock)
             {
-                results.Add(MapWorktree(reader));
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add(MapWorktree(reader));
+                }
             }
             return results;
         }
@@ -2042,9 +2065,12 @@ namespace MultiTerminal.Services
             // teardown. To prune a single agent's row, use the (taskId, agentName)
             // overload below.
             const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            cmd.ExecuteNonQuery();
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                cmd.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -2054,10 +2080,13 @@ namespace MultiTerminal.Services
         public void MarkWorktreePruned(string taskId, string agentName)
         {
             const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId AND agent_name = @agentName";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
-            cmd.ExecuteNonQuery();
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+                cmd.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -2068,10 +2097,13 @@ namespace MultiTerminal.Services
         public void UpdateWorktreePath(string taskId, string newWorktreePath)
         {
             const string sql = "UPDATE task_worktrees SET worktree_path = @path WHERE task_id = @taskId";
-            using var cmd = new SQLiteCommand(sql, _connection);
-            cmd.Parameters.AddWithValue("@taskId", taskId);
-            cmd.Parameters.AddWithValue("@path", newWorktreePath);
-            cmd.ExecuteNonQuery();
+            lock (_dbLock)
+            {
+                using var cmd = new SQLiteCommand(sql, _connection);
+                cmd.Parameters.AddWithValue("@taskId", taskId);
+                cmd.Parameters.AddWithValue("@path", newWorktreePath);
+                cmd.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -2087,11 +2119,14 @@ namespace MultiTerminal.Services
                 ORDER BY created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            using var cmd = new SQLiteCommand(sql, _connection);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            lock (_dbLock)
             {
-                results.Add(MapWorktree(reader));
+                using var cmd = new SQLiteCommand(sql, _connection);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add(MapWorktree(reader));
+                }
             }
             return results;
         }
@@ -2107,11 +2142,14 @@ namespace MultiTerminal.Services
         {
             const string sql = "SELECT worktree_path FROM task_worktrees WHERE worktree_path IS NOT NULL AND worktree_path <> ''";
             var results = new List<string>();
-            using var cmd = new SQLiteCommand(sql, _connection);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            lock (_dbLock)
             {
-                results.Add(reader.GetString(0));
+                using var cmd = new SQLiteCommand(sql, _connection);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add(reader.GetString(0));
+                }
             }
             return results;
         }
@@ -2134,11 +2172,14 @@ namespace MultiTerminal.Services
                 ORDER BY w.created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            using var cmd = new SQLiteCommand(sql, _connection);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            lock (_dbLock)
             {
-                results.Add(MapWorktree(reader));
+                using var cmd = new SQLiteCommand(sql, _connection);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add(MapWorktree(reader));
+                }
             }
             return results;
         }
@@ -2159,11 +2200,14 @@ namespace MultiTerminal.Services
                 ORDER BY w.created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            using var cmd = new SQLiteCommand(sql, _connection);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            lock (_dbLock)
             {
-                results.Add(MapWorktree(reader));
+                using var cmd = new SQLiteCommand(sql, _connection);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    results.Add(MapWorktree(reader));
+                }
             }
             return results;
         }
