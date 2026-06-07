@@ -299,7 +299,7 @@ namespace MultiTerminal.Services
             {
                 // Only drop LOCAL when the merge re-supplied it (fail closed) — never strip a
                 // project's local hooks/deny without a replacement.
-                if (canDropLocal) cmd += " --setting-sources user,project";
+                if (canDropLocal) cmd += LaunchCommandBuilder.BuildSettingSourcesFlags("user,project");
                 cmd += forcedStatusline;
             }
 

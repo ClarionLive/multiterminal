@@ -280,12 +280,30 @@ namespace MultiTerminal.Services
                 // stripped under --dangerously-skip-permissions. When we can't drop LOCAL, the
                 // project's own statusLine wins and MT's header may stay "--%" for that project — a
                 // benign display loss, not a safety loss.
-                if (canDropLocal) flags += " --setting-sources user,project";
+                if (canDropLocal) flags += BuildSettingSourcesFlags("user,project");
                 flags += forcedStatusline;
             }
 
             return flags;
         }
+
+        /// <summary>
+        /// Builds the <c>--setting-sources</c> flags from a comma-separated source list.
+        /// <para><b>Why not just pass the comma string?</b> Claude Code 2.1.168 has a regression:
+        /// although <c>--help</c> documents <c>--setting-sources</c> as a "comma-separated list",
+        /// the multi-value comma form is mis-parsed — the comma is collapsed to a space and the
+        /// whole token is validated as one source, so <c>--setting-sources user,project</c> fails
+        /// with <c>Invalid setting source: user project</c>. Single values still parse, and
+        /// REPEATING the flag once per source works. So we emit one <c>--setting-sources</c> per
+        /// source (e.g. <c>--setting-sources user --setting-sources project</c>) regardless of how
+        /// many sources are requested. Returns a leading-space-prefixed string ready to append.</para>
+        /// </summary>
+        public static string BuildSettingSourcesFlags(string commaSeparatedSources) =>
+            string.IsNullOrWhiteSpace(commaSeparatedSources)
+                ? string.Empty
+                : string.Concat(commaSeparatedSources
+                    .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => $" --setting-sources {s.Trim()}"));
 
         /// <summary>
         /// Builds the <c>--settings &lt;file&gt;</c> flag that points Claude Code at

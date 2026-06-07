@@ -458,7 +458,10 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
             // re-supplied LOCAL (fail closed, Run-2 security HIGH); otherwise keep "project,local" so
             // a merge failure can't silently strip the project's local hooks/deny.
             string settingSources = (!string.IsNullOrEmpty(forcedStatusline) && canDropLocal) ? "project" : "project,local";
-            string claudeFlags = $"--system-prompt-file '{safePromptFile}' --setting-sources {settingSources}{pluginFlag}{channelFlag}";
+            // Emit one --setting-sources per source: Claude Code 2.1.168 mis-parses the comma form
+            // ("project,local" -> "Invalid setting source: project local"). See BuildSettingSourcesFlags.
+            string settingSourceFlags = LaunchCommandBuilder.BuildSettingSourcesFlags(settingSources);
+            string claudeFlags = $"--system-prompt-file '{safePromptFile}'{settingSourceFlags}{pluginFlag}{channelFlag}";
             claudeFlags += forcedStatusline;
 
             // Add MCP config if available
