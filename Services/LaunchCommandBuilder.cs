@@ -364,25 +364,48 @@ namespace MultiTerminal.Services
                     string localPath = Path.Combine(workingDirectory, ".claude", "settings.local.json");
                     if (File.Exists(localPath))
                     {
-                        try
+                        // Read with a short retry on transient IO (Run-3 adversary MEDIUM): a lock /
+                        // sharing violation / mid-write at launch shouldn't concede CanDropLocal=false
+                        // (which keeps the project's statusLine override winning and the header stale)
+                        // when a retry would have read the file. Retry only TRANSIENT IOException;
+                        // durable failures (ACL) and parse/schema errors do not spin.
+                        string localText = null;
+                        for (int attempt = 0; attempt < 4 && localText == null; attempt++)
                         {
-                            merged = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(localPath)) as System.Text.Json.Nodes.JsonObject;
-                            if (merged == null)
-                            {
-                                // Valid JSON but not an object (array/scalar) — can't preserve keys.
-                                canDropLocal = false;
-                                System.Diagnostics.Debug.WriteLine(
-                                    $"[LaunchCommandBuilder] '{localPath}' is not a JSON object; cannot preserve its local settings. Keeping LOCAL active (MT statusLine not forced for this project).");
-                            }
+                            try { localText = File.ReadAllText(localPath); }
+                            catch (IOException) { if (attempt < 3) System.Threading.Thread.Sleep(15); }
+                            catch (Exception) { break; } // durable (e.g. UnauthorizedAccessException) — don't spin
                         }
-                        catch (Exception ex)
+
+                        if (localText == null)
                         {
-                            // Unreadable/unparseable local settings — fail closed: keep LOCAL active so
-                            // a transient lock/ACL/parse error can't silently strip the project's
-                            // hooks/deny under --dangerously-skip-permissions.
+                            // Couldn't read after retries — fail closed: keep LOCAL active so a
+                            // lock/ACL error can't silently strip the project's hooks/deny under
+                            // --dangerously-skip-permissions.
                             canDropLocal = false;
                             System.Diagnostics.Debug.WriteLine(
-                                $"[LaunchCommandBuilder] Could not read/parse '{localPath}' to preserve local settings: {ex.Message}. Keeping LOCAL active (MT statusLine not forced for this project).");
+                                $"[LaunchCommandBuilder] Could not read '{localPath}' (after retries) to preserve local settings. Keeping LOCAL active (MT statusLine not forced for this project).");
+                        }
+                        else
+                        {
+                            try
+                            {
+                                merged = System.Text.Json.Nodes.JsonNode.Parse(localText) as System.Text.Json.Nodes.JsonObject;
+                                if (merged == null)
+                                {
+                                    // Valid JSON but not an object (array/scalar) — can't preserve keys.
+                                    canDropLocal = false;
+                                    System.Diagnostics.Debug.WriteLine(
+                                        $"[LaunchCommandBuilder] '{localPath}' is not a JSON object; cannot preserve its local settings. Keeping LOCAL active (MT statusLine not forced for this project).");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                // Durable schema/parse error — fail closed.
+                                canDropLocal = false;
+                                System.Diagnostics.Debug.WriteLine(
+                                    $"[LaunchCommandBuilder] Could not parse '{localPath}' to preserve local settings: {ex.Message}. Keeping LOCAL active (MT statusLine not forced for this project).");
+                            }
                         }
                     }
                 }
