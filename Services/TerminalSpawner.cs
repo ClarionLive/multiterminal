@@ -434,7 +434,7 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
 
             // Build Claude CLI flags for spawned agents:
             //   --system-prompt-file: controlled rules (no global CLAUDE.md leakage)
-            //   --setting-sources project,local: skip user-level settings/hooks
+            //   --setting-sources: skip user-level settings/hooks (see below for LOCAL)
             //   --plugin-dir: loads the MT plugin (hooks, skills, agents, channels)
             string pluginDir = LaunchCommandBuilder.GetMtPluginPath();
             string pluginFlag = pluginDir != null ? $" --plugin-dir '{SanitizeForPowerShell(pluginDir)}'" : "";
@@ -444,17 +444,19 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
                 string pName = Path.GetFileName(pluginDir);
                 channelFlag = $" --dangerously-load-development-channels plugin:{pName}@inline";
             }
-            string claudeFlags = $"--system-prompt-file '{safePromptFile}' --setting-sources project,local{pluginFlag}{channelFlag}";
 
-            // Force MT's own statusline.js as the statusLine command. --setting-sources
-            // above deliberately skips user settings (where the user-global statusLine
-            // lives), and a project can override statusLine with its own script — both
-            // leave MT's per-terminal context stats unwritten ("--%" in the banner). A
-            // CLI --settings source outranks project/local/user, so this guarantees MT's
-            // script runs for every spawned terminal regardless of project overrides.
-            // Canonical implementation lives in LaunchCommandBuilder (shared with the docked
-            // terminal path, task 72444250).
-            claudeFlags += LaunchCommandBuilder.BuildForcedStatuslineFlag();
+            // Force MT's own statusline.js as the statusLine command. A CLI --settings file
+            // does NOT outrank a project's .claude/settings.local.json statusLine (Claude
+            // Code's LOCAL source wins — task 1ba59334), so when we force MT's statusLine we
+            // must ALSO drop the LOCAL source. Choose the source set accordingly (both-or-
+            // neither): with the forced flag, use "project" (skip USER for hook isolation AND
+            // LOCAL so a project's statusLine override can't hijack the banner); without it,
+            // keep the original "project,local" (skip only USER). Canonical --settings builder
+            // is shared with the docked-terminal path (task 72444250).
+            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag();
+            string settingSources = string.IsNullOrEmpty(forcedStatusline) ? "project,local" : "project";
+            string claudeFlags = $"--system-prompt-file '{safePromptFile}' --setting-sources {settingSources}{pluginFlag}{channelFlag}";
+            claudeFlags += forcedStatusline;
 
             // Add MCP config if available
             string mcpConfig = LaunchCommandBuilder.GetMcpConfigPath();

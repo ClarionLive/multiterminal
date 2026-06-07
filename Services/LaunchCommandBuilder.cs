@@ -263,25 +263,38 @@ namespace MultiTerminal.Services
                 flags += $" --dangerously-load-development-channels plugin:{pluginName}@inline";
             }
 
-            // Force MT's own statusline.js as the statusLine command. Docked terminals use
-            // the default setting-sources (user,project,local), so a project that overrides
-            // statusLine in its .claude/settings(.local).json (e.g. ClarionAssistant's
-            // ca-statusline.js) outranks MT's user-global statusLine and MT's per-terminal
-            // context stats file is never written ("--%" in the header, task 72444250). A CLI
-            // --settings source outranks project/local/user, so this guarantees MT's script
-            // runs for every docked terminal regardless of project overrides — mirroring what
-            // TerminalSpawner already does for spawned teammates.
-            flags += BuildForcedStatuslineFlag();
+            // Force MT's own statusline.js as the statusLine command. A project that
+            // overrides statusLine in its .claude/settings.local.json (e.g. ClarionAssistant's
+            // ca-statusline.js) would otherwise run instead of MT's, so MT's per-terminal
+            // context stats file is never written (stale/"--%" header — tasks 72444250,
+            // 1ba59334). Claude Code's LOCAL settings outrank the --settings flag, so we ALSO
+            // pass --setting-sources user,project to DROP the LOCAL source; MT's --settings
+            // statusLine then wins for every docked terminal regardless of project overrides.
+            // Both-or-neither: only drop LOCAL when MT's statusLine is actually being forced
+            // (never strip a project's local settings without supplying a replacement).
+            string forcedStatusline = BuildForcedStatuslineFlag();
+            if (!string.IsNullOrEmpty(forcedStatusline))
+            {
+                flags += " --setting-sources user,project";
+                flags += forcedStatusline;
+            }
 
             return flags;
         }
 
         /// <summary>
-        /// Builds a <c>--settings</c> flag that forces MultiTerminal's bundled
-        /// <c>scripts/statusline.js</c> as the Claude Code <c>statusLine</c> command. A
-        /// command-line <c>--settings</c> source outranks project/local/user settings, so
-        /// MT's script always runs and writes <c>mt-statusline-{name}-{docId}.json</c> even
-        /// when a project overrides <c>statusLine</c> with its own script (task 72444250).
+        /// Builds the <c>--settings &lt;file&gt;</c> flag that points Claude Code at
+        /// MultiTerminal's bundled <c>scripts/statusline.js</c> as the <c>statusLine</c>
+        /// command, so MT's script writes <c>mt-statusline-{name}-{docId}.json</c> (task 72444250).
+        /// <para><b>Caller responsibility (task 1ba59334).</b> This flag ALONE does not beat a
+        /// project that overrides <c>statusLine</c> in its <c>.claude/settings.local.json</c>:
+        /// Claude Code's LOCAL source outranks the <c>--settings</c> flag (confirmed against
+        /// the CLI docs — the earlier "--settings outranks local" assumption was wrong, which
+        /// is why ClarionAssistant's ca-statusline.js kept winning and the header stayed
+        /// stale). To make MT's statusLine actually win, the CALLER must also EXCLUDE the
+        /// LOCAL source via <c>--setting-sources</c> (e.g. docked terminals pass
+        /// <c>user,project</c>; spawned teammates pass <c>project</c>). The exact source set
+        /// differs per launch path, so it lives at the call site, not here.</para>
         /// Returns "" (no flag) if the bundled script can't be located or the settings file
         /// can't be written; both fallbacks are logged so a silent "--%" regression stays
         /// traceable.

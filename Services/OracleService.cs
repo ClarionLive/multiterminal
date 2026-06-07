@@ -287,7 +287,15 @@ namespace MultiTerminal.Services
 
             // Force MT's statusline.js so Oracle's header context/token stats populate even
             // when its working dir is a project that overrides statusLine (task 72444250).
-            cmd += LaunchCommandBuilder.BuildForcedStatuslineFlag();
+            // A CLI --settings file does NOT outrank a project's settings.local.json statusLine
+            // (LOCAL source wins — task 1ba59334), so also drop LOCAL via --setting-sources
+            // user,project. Both-or-neither: only strip LOCAL when MT's statusLine is forced.
+            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag();
+            if (!string.IsNullOrEmpty(forcedStatusline))
+            {
+                cmd += " --setting-sources user,project";
+                cmd += forcedStatusline;
+            }
 
             string safePromptPath = _systemPromptFile.Replace("'", "''");
             cmd += $" --system-prompt-file '{safePromptPath}'";
