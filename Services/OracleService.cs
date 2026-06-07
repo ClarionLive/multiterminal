@@ -290,7 +290,11 @@ namespace MultiTerminal.Services
             // A CLI --settings file does NOT outrank a project's settings.local.json statusLine
             // (LOCAL source wins — task 1ba59334), so also drop LOCAL via --setting-sources
             // user,project. Both-or-neither: only strip LOCAL when MT's statusLine is forced.
-            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag();
+            // Oracle launches in MT's own appdata dir; pass it so any local settings there are
+            // preserved by the merge (normally none — keeps the LOCAL-drop safe regardless).
+            string oracleWorkingDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal");
+            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag(oracleWorkingDir);
             if (!string.IsNullOrEmpty(forcedStatusline))
             {
                 cmd += " --setting-sources user,project";

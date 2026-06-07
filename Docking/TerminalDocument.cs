@@ -79,6 +79,12 @@ namespace MultiTerminal.Docking
         // placeholder instead of a frozen, misleading value. Constructed fresh per
         // instance (incl. on restore/re-adopt), so it tracks this terminal's own launch.
         private readonly long _launchedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Grace window (ms) for the statusline freshness floor: a fallback file timestamped up
+        // to this far BEFORE launch is still adopted, so a restored terminal whose child renders
+        // just before (or doesn't re-render right after) an MT restart keeps its last-known data
+        // rather than going permanently blank. Far smaller than a typical prior-run gap (hours),
+        // so genuinely stale files are still rejected (task 1ba59334).
+        private const long StatuslineFreshnessGraceMs = 5 * 60 * 1000;
 
         // Token meter (task f2702f69): last session this terminal fed, so the shared singleton meter
         // can drop the session's accumulated state (accumulator + all file-tail offsets) on close.
@@ -2597,7 +2603,13 @@ namespace MultiTerminal.Docking
                         tsEl.ValueKind != JsonValueKind.Number) continue;
                     long ts = tsEl.GetInt64();
                     if (ts > nowMs) continue;          // ignore future-dated (skewed/planted) files
-                    if (ts < _launchedAtMs) continue;  // reject stale prior-run / foreign files (task 1ba59334): never show a frozen value from before this terminal launched
+                    // Reject stale prior-run / foreign files (task 1ba59334): never show a frozen
+                    // value from before this terminal launched. A grace window admits a render that
+                    // landed just before an MT restart/re-adopt — so a RESTORED IDLE terminal (whose
+                    // child may not re-render after re-adopt, codex adversary MEDIUM) still shows its
+                    // last-known data instead of a permanent blank — while hours-old stale files are
+                    // still rejected.
+                    if (ts < _launchedAtMs - StatuslineFreshnessGraceMs) continue;
                     if (ts > newestTs) { newestTs = ts; newest = path; }
                 }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is JsonException)

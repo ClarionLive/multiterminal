@@ -26,7 +26,7 @@ namespace MultiTerminal.Services
             string workingDir = ResolveWorkingDirectory(project);
 
             // Build the claude CLI flags (just --mcp-config now — plugin handles hooks, CLAUDE.md, agents, skills)
-            string flags = BuildFlags();
+            string flags = BuildFlags(workingDir);
 
             string autoRunCommand = $"claude{flags} --dangerously-skip-permissions; exit";
 
@@ -233,7 +233,7 @@ namespace MultiTerminal.Services
         /// --plugin-dir loads the MultiTerminal plugin for this session.
         /// --mcp-config loads centralized MCP server registration.
         /// </summary>
-        private static string BuildFlags()
+        private static string BuildFlags(string workingDirectory)
         {
             var flags = string.Empty;
 
@@ -272,7 +272,7 @@ namespace MultiTerminal.Services
             // statusLine then wins for every docked terminal regardless of project overrides.
             // Both-or-neither: only drop LOCAL when MT's statusLine is actually being forced
             // (never strip a project's local settings without supplying a replacement).
-            string forcedStatusline = BuildForcedStatuslineFlag();
+            string forcedStatusline = BuildForcedStatuslineFlag(workingDirectory);
             if (!string.IsNullOrEmpty(forcedStatusline))
             {
                 flags += " --setting-sources user,project";
@@ -298,14 +298,18 @@ namespace MultiTerminal.Services
         /// Returns "" (no flag) if the bundled script can't be located or the settings file
         /// can't be written; both fallbacks are logged so a silent "--%" regression stays
         /// traceable.
-        /// <para>The settings file lives in a per-user-private dir (LocalApplicationData)
-        /// rather than the world-shared temp root, and is swapped in atomically (write
-        /// temp + rename) so a concurrently-spawning terminal's <c>claude --settings</c>
-        /// read never sees a truncated file. Content is per-install-constant. This is the
-        /// canonical implementation shared by <c>TerminalSpawner.SpawnTerminal</c> (spawned
-        /// teammates) and <c>BuildFlags</c> (docked terminals).</para>
+        /// <para>When <paramref name="workingDirectory"/> is supplied, the project's
+        /// <c>.claude/settings.local.json</c> is read and MERGED into the emitted settings
+        /// (its keys preserved, only <c>statusLine</c> overridden) so that excluding the LOCAL
+        /// source at the call site does not strip the project's local hooks/deny rules. The
+        /// merged content is therefore per-project; the file is keyed by a hash of the working
+        /// dir. Lives in a per-user-private dir (LocalApplicationData), not the world-shared
+        /// temp root, and is swapped in atomically (write temp + rename) so a concurrently
+        /// spawning terminal's <c>claude --settings</c> read never sees a truncated file. Shared
+        /// by <c>TerminalSpawner.SpawnTerminal</c> (spawned teammates), <c>BuildFlags</c> (docked
+        /// terminals), and <c>OracleService</c>.</para>
         /// </summary>
-        public static string BuildForcedStatuslineFlag()
+        public static string BuildForcedStatuslineFlag(string workingDirectory = null)
         {
             try
             {
@@ -321,14 +325,52 @@ namespace MultiTerminal.Services
                 // Forward slashes are valid in JSON without escaping and are accepted by
                 // node on Windows; the path is quoted so spaces (e.g. "Program Files") work.
                 string scriptForJson = scriptPath.Replace("\\", "/");
-                string json = "{\"statusLine\":{\"type\":\"command\",\"command\":\"node \\\"" + scriptForJson + "\\\"\"}}";
+                var statusLineNode = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["type"] = "command",
+                    ["command"] = $"node \"{scriptForJson}\""
+                };
+
+                // Merge, don't clobber (task 1ba59334, security gate). The caller pairs this
+                // --settings with --setting-sources that EXCLUDES the LOCAL source so a project's
+                // settings.local.json statusLine can't outrank us. But dropping LOCAL wholesale
+                // would also drop a project's local HOOKS / deny rules — a real safety layer under
+                // --dangerously-skip-permissions. So we RE-SUPPLY the project's LOCAL settings here
+                // (at --settings precedence) and override ONLY statusLine, preserving everything else.
+                System.Text.Json.Nodes.JsonObject merged = null;
+                if (!string.IsNullOrEmpty(workingDirectory))
+                {
+                    string localPath = Path.Combine(workingDirectory, ".claude", "settings.local.json");
+                    if (File.Exists(localPath))
+                    {
+                        try
+                        {
+                            merged = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(localPath)) as System.Text.Json.Nodes.JsonObject;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Unparseable local settings — we can't preserve its keys, so fall back to
+                            // statusLine-only for this one project. Logged because the LOCAL safety
+                            // layer is NOT re-supplied in this rare case (the dropped-LOCAL exposure
+                            // the merge exists to avoid re-appears only here, and visibly).
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[LaunchCommandBuilder] Could not parse '{localPath}' to preserve local settings while forcing statusLine: {ex.Message}. Forcing statusLine only.");
+                        }
+                    }
+                }
+                merged ??= new System.Text.Json.Nodes.JsonObject();
+                merged["statusLine"] = statusLineNode;
+                string json = merged.ToJsonString();
 
                 // Per-user-private dir, not the shared temp root.
                 string dir = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "MultiTerminal");
                 Directory.CreateDirectory(dir);
-                string settingsPath = Path.Combine(dir, "forced-statusline.settings.json");
+                // The merged content is now PER-PROJECT (it carries that project's local settings),
+                // so key the file by a stable hash of the working dir to avoid cross-project
+                // clobbering when several projects launch concurrently.
+                string settingsPath = Path.Combine(dir, $"forced-statusline-{HashForFileName(workingDirectory)}.settings.json");
 
                 // Atomic swap: write a unique temp then rename over the target. A rename is a
                 // whole-file replace, so a concurrent reader never observes a torn file.
@@ -468,6 +510,20 @@ namespace MultiTerminal.Services
         private static string EscapeSingleQuotes(string value)
         {
             return value?.Replace("'", "''") ?? string.Empty;
+        }
+
+        /// <summary>
+        /// Stable 8-hex-char tag derived from a working directory, used to name the
+        /// per-project forced-statusline settings file so concurrent launches of
+        /// different projects don't clobber each other's merged settings. Returns
+        /// "default" when no working directory is supplied (statusLine-only content).
+        /// </summary>
+        private static string HashForFileName(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "default";
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            byte[] h = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(value.ToLowerInvariant()));
+            return Convert.ToHexString(h, 0, 4).ToLowerInvariant(); // 8 hex chars
         }
     }
 

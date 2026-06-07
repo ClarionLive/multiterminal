@@ -453,7 +453,7 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
             // LOCAL so a project's statusLine override can't hijack the banner); without it,
             // keep the original "project,local" (skip only USER). Canonical --settings builder
             // is shared with the docked-terminal path (task 72444250).
-            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag();
+            string forcedStatusline = LaunchCommandBuilder.BuildForcedStatuslineFlag(workingDir);
             string settingSources = string.IsNullOrEmpty(forcedStatusline) ? "project,local" : "project";
             string claudeFlags = $"--system-prompt-file '{safePromptFile}' --setting-sources {settingSources}{pluginFlag}{channelFlag}";
             claudeFlags += forcedStatusline;
