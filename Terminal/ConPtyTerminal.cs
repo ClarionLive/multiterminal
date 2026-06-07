@@ -328,16 +328,20 @@ namespace MultiTerminal.Terminal
             // Escape single quotes in all values before interpolating into the PowerShell -Command string.
             // In PowerShell single-quoted strings, a literal single quote is represented as ''.
             // Without escaping, a value like abc'; Start-Process calc; $x=' would break out of the string.
-            if (!string.IsNullOrEmpty(docId))
+            // Never launch a terminal MCP-invisible: a missing docId means our
+            // statusline.js early-exits (it requires MULTITERMINAL_DOC_ID) and the HUD
+            // has no per-terminal file to read. Auto-generate a fallback docId rather than
+            // silently launching without one (task 1ba59334 defense-in-depth). All current
+            // interactive callers pass a populated docId, so this only guards future/edge
+            // callers — but it makes "unidentified terminal" structurally impossible.
+            if (string.IsNullOrEmpty(docId))
             {
-                string safeDocId = docId.Replace("'", "''");
-                envSetup += $"$env:MULTITERMINAL_DOC_ID = '{safeDocId}'; ";
-                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_DOC_ID = '{docId}'");
+                docId = Guid.NewGuid().ToString("N").Substring(0, 8);
+                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] NO docId supplied - generated fallback MULTITERMINAL_DOC_ID = '{docId}'");
             }
-            else
-            {
-                System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] NO docId - MULTITERMINAL_DOC_ID will not be set!");
-            }
+            string safeDocId = docId.Replace("'", "''");
+            envSetup += $"$env:MULTITERMINAL_DOC_ID = '{safeDocId}'; ";
+            System.Diagnostics.Trace.WriteLine($"[ConPtyTerminal.StartProcess] Setting MULTITERMINAL_DOC_ID = '{docId}'");
 
             if (!string.IsNullOrEmpty(terminalName))
             {

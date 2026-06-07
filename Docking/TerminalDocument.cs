@@ -70,6 +70,16 @@ namespace MultiTerminal.Docking
         private static int _instanceCount = 0;
         private readonly string _docId = Guid.NewGuid().ToString("N").Substring(0, 8);
 
+        // Wall-clock (Unix ms) this TerminalDocument instance was constructed. Used as
+        // the freshness floor for the statusline name-glob fallback (task 1ba59334): a
+        // terminal must never adopt a statusline file written by a PRIOR run / a foreign
+        // same-named terminal. A legitimately restored MT child keeps writing fresh files
+        // (timestamp > this floor) so it's still picked up; only stale prior-run files
+        // (timestamp < this floor) are rejected, so the banner shows a fresh blank
+        // placeholder instead of a frozen, misleading value. Constructed fresh per
+        // instance (incl. on restore/re-adopt), so it tracks this terminal's own launch.
+        private readonly long _launchedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         // Token meter (task f2702f69): last session this terminal fed, so the shared singleton meter
         // can drop the session's accumulated state (accumulator + all file-tail offsets) on close.
         private string _lastTokenSessionId;
@@ -2544,6 +2554,15 @@ namespace MultiTerminal.Docking
         /// <c>null</c> when no candidate exists. Mirrors the name-based fallback the REST
         /// stats endpoint already uses (StatusLineStatsReader.FindNewestPerTerminalFile),
         /// including its skip of future-dated (clock-skewed/planted) files.
+        ///
+        /// <para>Freshness floor (task 1ba59334): glob candidates older than this
+        /// terminal's launch (<see cref="_launchedAtMs"/>) are rejected, so a terminal can
+        /// never adopt a PRIOR run's or a foreign same-named terminal's frozen value (the
+        /// symptom: a restored terminal whose child uses a project statusLine override —
+        /// e.g. a Clarion-addin terminal — writes no fresh mt-statusline file, and the
+        /// banner stuck on a stale file). A legitimately restored MT child keeps writing
+        /// fresh files (timestamp &gt; floor) so it is still adopted; only stale files are
+        /// dropped, leaving the fresh blank placeholder rather than a misleading number.</para>
         /// </summary>
         private string ResolveStatusLineFilePath(string terminalName)
         {
@@ -2578,6 +2597,7 @@ namespace MultiTerminal.Docking
                         tsEl.ValueKind != JsonValueKind.Number) continue;
                     long ts = tsEl.GetInt64();
                     if (ts > nowMs) continue;          // ignore future-dated (skewed/planted) files
+                    if (ts < _launchedAtMs) continue;  // reject stale prior-run / foreign files (task 1ba59334): never show a frozen value from before this terminal launched
                     if (ts > newestTs) { newestTs = ts; newest = path; }
                 }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is JsonException)
