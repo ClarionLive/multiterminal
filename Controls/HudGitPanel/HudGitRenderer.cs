@@ -1489,7 +1489,7 @@ namespace MultiTerminal.Controls
                         try
                         {
                             using var perSvc = new GitRepoService(wt.Path);
-                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured, changelogSvc, brokerCaptured, wt.LinkedTaskId);
+                            workingChanges = BuildWorkingChanges(perSvc, wt.Path, attributionSvcCaptured, changelogSvc, brokerCaptured, wt.LinkedTaskId, wt.Branch);
                             recentCommits = BuildRecentCommits(perSvc);
                             // Remote tracking is per-worktree (each worktree has its
                             // own HEAD and tracking branch). The unified-tree header
@@ -1597,7 +1597,8 @@ namespace MultiTerminal.Controls
             GitAttributionService attributionSvc,
             ChangelogAttributionService changelogSvc,
             MessageBroker broker,
-            string linkedTaskId)
+            string linkedTaskId,
+            string branchName)
         {
             var status = svc.GetWorkingTreeStatus();
             var statusList = status ?? (System.Collections.Generic.IReadOnlyList<GitFileStatus>)Array.Empty<GitFileStatus>();
@@ -1907,10 +1908,14 @@ namespace MultiTerminal.Controls
             //     path's ResolveProjectIdForRepo + task.ProjectId gate.
             //   * Liveness guard: a task_worktrees row stays status='active'
             //     after the owning task is marked done, until the janitor
-            //     prunes it (the deferred-prune window). Requiring the task
-            //     itself to be in_progress stops a done task from painting its
-            //     lingering worktree's files with a false "active" claim.
-            // On any miss (task gone, cross-project, not in_progress) we skip —
+            //     prunes it (the deferred-prune window). Requiring a LIVE task
+            //     status (in_progress / testing / review — see IsLiveOwnerStatus)
+            //     stops a done task from painting its lingering worktree's files
+            //     with a false "active" claim, while still attributing files
+            //     under a task that has moved past coding into testing (it still
+            //     owns its uncommitted diff — task fb718102 follow-up relaxed
+            //     this from the original in_progress-only check).
+            // On any miss (task gone, cross-project, not a live status) we skip —
             // the file stays in the quick-task bucket, the honest "no proven
             // live owner" outcome.
             //
@@ -1965,7 +1970,7 @@ namespace MultiTerminal.Controls
                 string ownerAgent = worktreeOwnerTask.Assignee ?? string.Empty;
 
                 string repoProjectId = ResolveProjectIdForRepo(broker, svcRepoRoot);
-                if (string.Equals(ownerStatus, "in_progress", StringComparison.OrdinalIgnoreCase)
+                if (IsLiveOwnerStatus(ownerStatus)
                     && !string.IsNullOrEmpty(repoProjectId)
                     && string.Equals(ownerProjectId, repoProjectId, StringComparison.OrdinalIgnoreCase))
                 {
@@ -1990,6 +1995,88 @@ namespace MultiTerminal.Controls
                             LinkageState = "active",
                         };
                         autoLinkedPaths.Add(relPath);
+                    }
+                }
+            }
+
+            // Branch-name attribution (task fb718102 follow-up): the
+            // worktree-owner fallback above only fires when an ACTIVE
+            // task_worktrees row matches the worktree path. A file on a
+            // `task/<8hex>` branch whose worktree row is missing/stale (a plain
+            // `git worktree add`, a pruned-then-relisted row, or worktree mode
+            // OFF for the project) still belongs to that task — the branch name
+            // says so unambiguously. Parse the task id from the branch and,
+            // validated exactly like the worktree-owner fallback (task exists +
+            // belongs to this repo's project + live status), attribute the
+            // remaining orphans to it. Display-only (no task_file_links row) and
+            // scoped to `task/<id>` branches, so master/feature branches are
+            // untouched and keep the + Quick task affordance.
+            //
+            // NOT gated on WorktreeConfig.IsEnabled (unlike the worktree-owner
+            // fallback): the branch name is a fresh, self-evident signal
+            // confirmed by a live GetTask lookup, not a stale task_file_links
+            // row (the class the IsEnabled gate guards). The mode-OFF
+            // contamination concern that gate cites cannot apply here —
+            // branch-name attribution never fires on the main/master checkout
+            // (only `task/<id>` branches), so it can't silently repaint trunk
+            // edits onto a worktree owner. The synthesized paths join
+            // autoLinkedPaths to bypass the groupedByTask IsEnabled gate
+            // downstream, same carve-out as the changelog auto-link pass.
+            string branchTaskId = ParseTaskIdFromBranch(branchName);
+            if (branchTaskId != null && broker != null && statusList.Count > 0)
+            {
+                MultiTerminal.MCPServer.Models.KanbanTask branchTask = null;
+                try { branchTask = broker.GetTask(branchTaskId); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[HudGitRenderer.BuildWorkingChanges] branch-name task lookup failed for '{branchTaskId}' (branch '{branchName}'): {ex.Message}");
+                }
+
+                if (branchTask != null)
+                {
+                    // Snapshot the validated fields ONCE before the checks — same
+                    // TOCTOU-avoidance idiom as the worktree-owner fallback: GetTask
+                    // returns the live cached KanbanTask whose fields can mutate
+                    // in-place from another thread between the authorization read
+                    // and the render read.
+                    string bStatus = branchTask.Status;
+                    string bProjectId = branchTask.ProjectId;
+                    string bTitle = branchTask.Title ?? string.Empty;
+                    string bAgent = branchTask.Assignee ?? string.Empty;
+
+                    string repoProjectId = ResolveProjectIdForRepo(broker, svcRepoRoot);
+                    if (IsLiveOwnerStatus(bStatus)
+                        && !string.IsNullOrEmpty(repoProjectId)
+                        && string.Equals(bProjectId, repoProjectId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (var fileStatus in statusList)
+                        {
+                            var relPath = fileStatus?.Path ?? string.Empty;
+                            if (string.IsNullOrEmpty(relPath)) continue;
+                            if (attrByPath.TryGetValue(relPath, out var existing)
+                                && existing != null
+                                && !string.IsNullOrEmpty(existing.TaskId))
+                            {
+                                continue;
+                            }
+
+                            attrByPath[relPath] = new GitFileAttribution
+                            {
+                                FilePath = relPath,
+                                Agent = bAgent,
+                                TaskId = branchTaskId,
+                                TaskTitle = bTitle,
+                                PipelineStatus = string.Empty,
+                                LinkageState = "active",
+                            };
+                            autoLinkedPaths.Add(relPath);
+                        }
+                    }
+                    else
+                    {
+                        System.Diagnostics.Trace.WriteLine(
+                            $"[HudGitRenderer.BuildWorkingChanges] branch-name attribution skipped — task '{branchTaskId}' status '{bStatus ?? "<null>"}' / project '{bProjectId ?? "<null>"}' vs repo '{repoProjectId ?? "<unresolved>"}' (branch '{branchName}').");
                     }
                 }
             }
@@ -2110,6 +2197,57 @@ namespace MultiTerminal.Controls
         /// comparing — the same dialect <c>ProjectJsonChangelogParser</c>
         /// uses to compare paths.</para>
         /// </summary>
+        /// <summary>
+        /// Statuses for which a task still "owns" its uncommitted working diff.
+        /// A done/suggestion/todo task does NOT: a done task's worktree + branch
+        /// can linger after completion (deferred-prune window) and must not paint
+        /// files with a false "active" claim. Used by both the worktree-owner
+        /// fallback and the branch-name attribution pass so they agree on what
+        /// "live" means (task fb718102 follow-up — relaxed from in_progress-only).
+        /// </summary>
+        private static bool IsLiveOwnerStatus(string status)
+        {
+            return string.Equals(status, "in_progress", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "testing", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "review", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Extract the 8-hex task id that leads a <c>task/&lt;id&gt;</c> branch
+        /// name. The canonical assignee worktree (<c>task/&lt;id&gt;</c>) and
+        /// helper worktrees (<c>task/&lt;id&gt;--&lt;slug&gt;</c>, per-agent
+        /// isolation) both begin with it. Returns <c>null</c> for any
+        /// non-task branch (master, feature/*, detached HEAD, a longer
+        /// non-id token after <c>task/</c>), which is exactly what scopes
+        /// branch-name attribution — and the quick-task suppression it pairs
+        /// with — to task branches only. Match is case-insensitive on the
+        /// prefix; the id is normalised to lowercase to match how task ids are
+        /// stored/looked up.
+        /// </summary>
+        private static string ParseTaskIdFromBranch(string branchName)
+        {
+            if (string.IsNullOrEmpty(branchName)) return null;
+            const string prefix = "task/";
+            if (!branchName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
+
+            string rest = branchName.Substring(prefix.Length);
+            if (rest.Length < 8) return null;
+
+            // The id must be EXACTLY 8 hex, then either end-of-string (canonical
+            // worktree) or a `--<slug>` helper suffix. A longer bare hex run
+            // (`task/12345678ab`) is not a task id and must not false-match.
+            if (rest.Length > 8 && !rest.Substring(8).StartsWith("--", StringComparison.Ordinal)) return null;
+
+            for (int i = 0; i < 8; i++)
+            {
+                char c = rest[i];
+                bool isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!isHex) return null;
+            }
+
+            return rest.Substring(0, 8).ToLowerInvariant();
+        }
+
         private static string ResolveProjectIdForRepo(MessageBroker broker, string repoRoot)
         {
             if (broker == null || string.IsNullOrEmpty(repoRoot)) return null;
