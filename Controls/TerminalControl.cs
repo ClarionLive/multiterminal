@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using MultiTerminal.Terminal;
@@ -65,6 +66,35 @@ namespace MultiTerminal.Controls
             {
                 System.Diagnostics.Debug.WriteLine($"[TerminalControl] {message}");
             }
+        }
+
+        /// <summary>
+        /// Normalizes raw terminal output for robust phrase matching: strips ANSI escapes,
+        /// folds every non-alphanumeric character (box-drawing borders, punctuation, newlines
+        /// from TUI wrapping) to a single space, lowercases, and collapses runs of spaces.
+        /// This lets a plain substring match survive the colored, box-wrapped rendering of the
+        /// dev-channel warning, which previously broke literal Contains() checks.
+        /// </summary>
+        private static string NormalizeForMatch(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return string.Empty;
+            string noAnsi = AnsiEscapeRegex.Replace(s, string.Empty);
+            var sb = new StringBuilder(noAnsi.Length);
+            foreach (char c in noAnsi)
+            {
+                sb.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : ' ');
+            }
+            return Regex.Replace(sb.ToString(), " +", " ");
+        }
+
+        /// <summary>
+        /// Escapes control bytes so a raw buffer can be written to a single trace line.
+        /// Used for the one-time dev-channel ground-truth dump.
+        /// </summary>
+        private static string EscapeForLog(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return string.Empty;
+            return s.Replace("\x1B", "\\x1b").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
         }
 
         /// <summary>
@@ -223,6 +253,7 @@ namespace MultiTerminal.Controls
             // Reset Claude Code detection so the event fires again for this new session
             _claudeCodeDetectedThisSession = false;
             _devChannelWarningHandled = false;
+            _rawBufferDumped = false;
             _outputBuffer.Clear();
 
             // Use size from renderer. Trust xterm.js as the source of truth — the post-fit
@@ -599,7 +630,15 @@ namespace MultiTerminal.Controls
 
         private bool _claudeCodeDetectedThisSession = false;
         private bool _devChannelWarningHandled = false;
+        private bool _rawBufferDumped = false;
         private StringBuilder _outputBuffer = new StringBuilder();
+
+        // Matches ANSI/VT escape sequences (CSI, OSC, and single-char escapes) so detection
+        // works against the visible text, not the styled byte stream. Claude Code draws the
+        // dev-channel warning as a colored TUI box, so the raw buffer is full of escapes that
+        // split phrases like "Loading development channels" across non-printing bytes.
+        private static readonly Regex AnsiEscapeRegex =
+            new Regex(@"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))", RegexOptions.Compiled);
 
         // Slash command interception: buffer user input to detect commands like /clear
         private readonly StringBuilder _inputLineBuffer = new StringBuilder();
@@ -794,13 +833,21 @@ namespace MultiTerminal.Controls
 
             _renderer?.WriteToTerminal(data);
 
-            // Detect Claude Code startup (only once per session to avoid spam)
-            if (!_claudeCodeDetectedThisSession)
+            // Startup detection (Claude Code banner + dev-channel warning) scans the
+            // ACCUMULATED output buffer, NOT the current chunk. ConPTY delivers output in
+            // ~16ms batches (ConPtyTerminal.FlushOutputQueue), so the warning — drawn across a
+            // multi-line TUI box — routinely straddles two chunks. Matching a single chunk misses
+            // it intermittently; matching the buffer does not. The buffer is also NORMALIZED
+            // (ANSI escapes stripped, box-drawing/punctuation folded to spaces) before matching,
+            // because Claude Code 2.1.x renders the warning as a colored box and the literal
+            // bytes split phrases across escapes — the previous raw Contains() never matched, so
+            // detection silently never fired. The dev-channel check runs BEFORE the Claude Code
+            // check so the latter's buffer-clear can't wipe the warning text within one call.
+            if (!_claudeCodeDetectedThisSession || !_devChannelWarningHandled)
             {
                 try
                 {
-                    string text = System.Text.Encoding.UTF8.GetString(data);
-                    _outputBuffer.Append(text);
+                    _outputBuffer.Append(System.Text.Encoding.UTF8.GetString(data));
 
                     // Keep buffer from growing too large
                     if (_outputBuffer.Length > 2000)
@@ -808,40 +855,62 @@ namespace MultiTerminal.Controls
                         _outputBuffer.Remove(0, _outputBuffer.Length - 1000);
                     }
 
-                    // Check for Claude Code patterns
                     string buffer = _outputBuffer.ToString();
-                    if (buffer.Contains("Claude Code") ||
-                        buffer.Contains("claude-code") ||
-                        buffer.Contains("╭─") && buffer.Contains("Tips"))
+                    string normalized = NormalizeForMatch(buffer);
+
+                    // One-time ground-truth dump: the first time "development" appears in the
+                    // normalized stream, log the raw (escaped) and normalized buffer so the exact
+                    // warning wording can be recovered from the trace if the anchors below still
+                    // miss on a future Claude Code version — no more guessing at the prompt text.
+                    if (!_rawBufferDumped && normalized.Contains("development"))
+                    {
+                        _rawBufferDumped = true;
+                        LogTrace("Dev-channel RAW buffer (escaped): " + EscapeForLog(buffer));
+                        LogTrace("Dev-channel NORMALIZED buffer: " + normalized);
+                    }
+
+                    // Auto-accept the dev-channel warning dialog. The menu's option 1 is
+                    // "I am using this for local development"; the user confirmed pressing the
+                    // digit '1' selects-and-proceeds reliably (a bare Enter was dropped
+                    // intermittently before Claude's raw-mode prompt was ready). Anchors are
+                    // matched against the NORMALIZED buffer and ordered most- to least-specific;
+                    // the older "loading development channels" / "enter to confirm" strings are
+                    // kept as fallbacks.
+                    if (!_devChannelWarningHandled &&
+                        (normalized.Contains("for local development") ||
+                         normalized.Contains("loading development channels") ||
+                         normalized.Contains("development channels") ||
+                         normalized.Contains("enter to confirm")))
+                    {
+                        _devChannelWarningHandled = true;
+                        LogTrace("Dev-channel warning detected in normalized output buffer — auto-accepting by sending '1'");
+                        System.Threading.Tasks.Task.Run(async () =>
+                        {
+                            // Brief settle so the dialog box is rendered and raw mode is ready
+                            // before the keystroke lands.
+                            await System.Threading.Tasks.Task.Delay(400);
+                            if (!_isDisposed)
+                            {
+                                BeginInvoke(new Action(() =>
+                                {
+                                    // Send just the digit '1' (no line ending): on the select
+                                    // prompt this picks option 1 and proceeds.
+                                    TypeInput("1", "none");
+                                    LogTrace("Dev-channel auto-accept: sent '1'");
+                                }));
+                            }
+                        });
+                    }
+
+                    // Detect Claude Code startup (only once per session to avoid spam)
+                    if (!_claudeCodeDetectedThisSession &&
+                        (buffer.Contains("Claude Code") ||
+                         buffer.Contains("claude-code") ||
+                         (buffer.Contains("╭─") && buffer.Contains("Tips"))))
                     {
                         _claudeCodeDetectedThisSession = true;
                         _outputBuffer.Clear();
                         ClaudeCodeDetected?.Invoke(this, EventArgs.Empty);
-                    }
-                }
-                catch { }
-            }
-
-            // Auto-accept the dev channel warning dialog. The menu opens with '>' already
-            // pointing at option 1 ("I am using this for local development"), so we only
-            // need to send Enter to confirm.
-            if (!_devChannelWarningHandled)
-            {
-                try
-                {
-                    string text = System.Text.Encoding.UTF8.GetString(data);
-                    if (text.Contains("Loading development channels") || text.Contains("Enter to confirm"))
-                    {
-                        _devChannelWarningHandled = true;
-                        // Small delay to ensure the dialog is fully rendered before sending input.
-                        // Uses TypeInput via xterm.js — raw pipe Write("\r") doesn't work
-                        // with Claude Code's interactive prompts.
-                        System.Threading.Tasks.Task.Run(async () =>
-                        {
-                            await System.Threading.Tasks.Task.Delay(500);
-                            if (!_isDisposed)
-                                BeginInvoke(new Action(() => TypeInput("", "cr")));
-                        });
                     }
                 }
                 catch { }
