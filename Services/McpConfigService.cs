@@ -29,9 +29,6 @@ namespace MultiTerminal.Services
             MultiterminalMcpArgsJson = $"[\"{indexJs}\"]";
         }
 
-        // Hardcoded MCP Gateway server config.
-        private const string GatewayProjectPath = @"H:\DevLaptop\ClarionPowerShell\McpGateway";
-
         /// <summary>
         /// Optional gateway integration service. When set, gateway-aware methods use it
         /// to sync project profiles before writing .mcp.json.
