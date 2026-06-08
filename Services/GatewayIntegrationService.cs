@@ -52,9 +52,17 @@ namespace MultiTerminal.Services
         private bool _disposed;
 
         /// <summary>
-        /// Path to the McpGateway project directory (used for `dotnet run` registration).
+        /// Path to the McpGateway project directory (used to locate McpGateway.exe).
+        /// Configurable via the MT_MCP_GATEWAY_PATH env var; falls back to the historical
+        /// dev-box default. An unset OR blank env var is treated as "not configured" so an
+        /// empty-string override can't yield a degenerate relative path. When the path
+        /// doesn't exist, gateway features degrade gracefully via
+        /// <see cref="IsGatewayInstalled"/> (issue #5).
         /// </summary>
-        private const string GatewayProjectPath = @"H:\DevLaptop\ClarionPowerShell\McpGateway";
+        private static readonly string GatewayProjectPath =
+            Environment.GetEnvironmentVariable("MT_MCP_GATEWAY_PATH") is string p && !string.IsNullOrWhiteSpace(p)
+                ? p
+                : @"H:\DevLaptop\ClarionPowerShell\McpGateway";
 
         public GatewayIntegrationService(Action<string, string> log = null)
         {

@@ -11,8 +11,15 @@ namespace MultiTerminal.API.Controllers
     [Route("api/digest")]
     public class DigestController : ControllerBase
     {
-        private static readonly string DigestRoot = @"H:\DevLaptop\Projects\DailyDigest\digests";
-        private static readonly string ProjectRoot = @"H:\DevLaptop\Projects\DailyDigest";
+        // Configurable via MT_DAILY_DIGEST_PATH; falls back to the historical dev-box
+        // default. Treats an unset OR blank env var as "not configured" so an empty-string
+        // override can't produce a degenerate relative path. Endpoints already NotFound/skip
+        // when these dirs are absent (issue #5).
+        private static readonly string ProjectRoot =
+            Environment.GetEnvironmentVariable("MT_DAILY_DIGEST_PATH") is string p && !string.IsNullOrWhiteSpace(p)
+                ? p
+                : @"H:\DevLaptop\Projects\DailyDigest";
+        private static readonly string DigestRoot = System.IO.Path.Combine(ProjectRoot, "digests");
         private static int _regenerating = 0; // concurrency guard
 
         /// <summary>
