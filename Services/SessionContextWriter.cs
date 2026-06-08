@@ -20,12 +20,56 @@ namespace MultiTerminal.Services
             Timeout = TimeSpan.FromSeconds(3)
         };
 
+        // Claude stores per-project memory under ~/.claude/projects/<encoded-project-path>/memory,
+        // where the folder name is the project path with ':' '\' '/' replaced by '-'. Derive it
+        // from CLAUDE_PROJECT_DIR (falling back to the historical dev-box path) instead of
+        // hardcoding, so this works for any checkout/machine. Mirrors the canonical encoder in
+        // SessionSyncService.GetClaudeProjectFolderName (issue #5 follow-up).
         private static readonly string MemoryDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".claude", "projects",
-            "H--DevLaptop-ClarionPowerShell-MultiTerminal",
+            ClaudeProjectFolderName(ResolveProjectDir()),
             "memory"
         );
+
+        /// <summary>Project root used to derive the Claude memory folder. CLAUDE_PROJECT_DIR
+        /// when set/non-blank, else the historical dev-box default.</summary>
+        private static string ResolveProjectDir()
+        {
+            var env = Environment.GetEnvironmentVariable("CLAUDE_PROJECT_DIR");
+            return !string.IsNullOrWhiteSpace(env)
+                ? env
+                : @"H:\DevLaptop\ClarionPowerShell\MultiTerminal";
+        }
+
+        /// <summary>Encodes a project path to Claude's projects-folder name (':' '\' '/' → '-').
+        /// Matches SessionSyncService.GetClaudeProjectFolderName.</summary>
+        private static string ClaudeProjectFolderName(string projectPath)
+        {
+            if (string.IsNullOrEmpty(projectPath))
+                return projectPath;
+            string normalized = projectPath.Replace('/', '\\').TrimEnd('\\');
+            var sb = new System.Text.StringBuilder(normalized.Length + 2);
+            for (int i = 0; i < normalized.Length; i++)
+            {
+                char c = normalized[i];
+                if (c == ':')
+                {
+                    sb.Append("--");
+                    if (i + 1 < normalized.Length && normalized[i + 1] == '\\')
+                        i++; // ':\' → '--'
+                }
+                else if (c == '\\')
+                {
+                    sb.Append('-');
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
+        }
 
         private static readonly string ContextFile = Path.Combine(MemoryDir, "ACTIVE-CONTEXT.md");
 
