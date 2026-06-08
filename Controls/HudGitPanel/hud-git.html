@@ -1936,9 +1936,22 @@ body.light .qt-input {
     // persists against the branch identity rather than the filesystem
     // path of the worktree.
     // ------------------------------------------------------------------
+    // True when a branch name is a MultiTerminal task branch — the canonical
+    // assignee worktree `task/<8hex>` or a helper worktree
+    // `task/<8hex>--<slug>`. Mirrors HudGitRenderer.ParseTaskIdFromBranch on
+    // the C# side. Drives quick-task suppression (task fb718102 follow-up):
+    // never offer a "+ Quick task" / "+ Wrap all" affordance on a branch that
+    // already maps to a task — that would spin up a SECOND competing task for
+    // changes that already belong to this branch's task. master/feature
+    // branches return false and keep the affordance.
+    function isTaskBranchName(branch) {
+        return /^task\/[0-9a-fA-F]{8}(?:--|$)/.test(String(branch || ''));
+    }
+
     function renderWorktreeSubtree(container, folder, depth, idPrefix) {
         if (!container) return;
         const path = folder.path || '';
+        const isTaskBranch = isTaskBranchName(folder.branch);
         const wc = folder.workingChanges || {};
         const groupedByTask = Array.isArray(wc.groupedByTask) ? wc.groupedByTask : [];
         const unlinked = Array.isArray(wc.unlinked) ? wc.unlinked : [];
@@ -1986,7 +1999,7 @@ body.light .qt-input {
             // Fall back to flat file listing under the working-changes node
             // (no task-group nesting) so the user still sees the files.
             for (const file of workingTreeFlat) {
-                wcNode.children.appendChild(buildFileRow(file, depth + 1, path));
+                wcNode.children.appendChild(buildFileRow(file, depth + 1, path, /*isUnlinked*/ false, isTaskBranch));
             }
         } else {
             // Render task groups in payload order (HudGitRenderer sorts
@@ -1997,7 +2010,7 @@ body.light .qt-input {
                 wcNode.children.appendChild(buildTaskGroupNode(group, depth + 1, path, idPrefix));
             }
             if (unlinked.length > 0) {
-                wcNode.children.appendChild(buildUnlinkedGroupNode(unlinked, depth + 1, path, idPrefix, untrackedDirRoots));
+                wcNode.children.appendChild(buildUnlinkedGroupNode(unlinked, depth + 1, path, idPrefix, untrackedDirRoots, isTaskBranch));
             }
         }
 
@@ -2143,7 +2156,16 @@ body.light .qt-input {
     // single collapsible folder node. Top-level entry count then matches
     // `git status --porcelain` and the HUD badge instead of expanding to
     // every recursed file.
-    function buildUnlinkedGroupNode(unlinked, depth, worktreePath, idPrefix, untrackedDirRoots) {
+    // suppressQuickTask (task fb718102 follow-up): true when the parent branch
+    // is a task branch. On a task branch the quick-task affordance is wrong —
+    // these files already belong to the branch's task — so we drop the bulk
+    // "+ Wrap all" button, drop the per-file "+ Quick task" buttons, and
+    // relabel the group from the prompt-y "Needs a quick task" to the neutral
+    // "Unlinked changes". (In the common case FIX A on the C# side has already
+    // attributed these files to the branch's task and this group is empty; this
+    // is the belt-and-suspenders path for when the task isn't in a live status
+    // or the project/branch couldn't be resolved server-side.)
+    function buildUnlinkedGroupNode(unlinked, depth, worktreePath, idPrefix, untrackedDirRoots, suppressQuickTask) {
         const partition = partitionByUntrackedRoots(unlinked, untrackedDirRoots);
         const porcelainEntries = partition.topLevel.length + partition.dirGroups.length;
         const defaultExpanded = porcelainEntries <= 5;
@@ -2160,8 +2182,10 @@ body.light .qt-input {
 
         const title = document.createElement('span');
         title.className = 'tg-title';
-        title.textContent = 'Needs a quick task';
-        title.title = 'Files with no task attribution — each needs a quick-task to anchor commit history. Done tasks touched in the last 3 days appear in their own group above; older ones aren’t matched.';
+        title.textContent = suppressQuickTask ? 'Unlinked changes' : 'Needs a quick task';
+        title.title = suppressQuickTask
+            ? 'Working changes on this task branch that have no explicit task link. They belong to this branch’s task; commit them on the branch — no quick-task needed.'
+            : 'Files with no task attribution — each needs a quick-task to anchor commit history. Done tasks touched in the last 3 days appear in their own group above; older ones aren’t matched.';
         node.row.appendChild(title);
 
         // Phase 2c: group-level bulk wrap button. Passes the FLAT unlinked
@@ -2170,7 +2194,8 @@ body.light .qt-input {
         // task_file_links row, including the inner files of untracked-dir roots.
         // Appended BEFORE count so it sits in the left-clustered visible area
         // rather than past the right edge (see CSS .tree-row.unlinked-group).
-        attachBulkQuickTaskUI(node.row, unlinked);
+        // Suppressed on task branches (fb718102) — no competing quick-task.
+        if (!suppressQuickTask) attachBulkQuickTaskUI(node.row, unlinked);
 
         const count = document.createElement('span');
         count.className = 'tg-count';
@@ -2178,10 +2203,10 @@ body.light .qt-input {
         node.row.appendChild(count);
 
         for (const file of partition.topLevel) {
-            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath, /*isUnlinked*/ true));
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath, /*isUnlinked*/ true, suppressQuickTask));
         }
         for (const group of partition.dirGroups) {
-            node.children.appendChild(buildUntrackedDirNode(group, depth + 1, worktreePath, idPrefix));
+            node.children.appendChild(buildUntrackedDirNode(group, depth + 1, worktreePath, idPrefix, suppressQuickTask));
         }
 
         return node.wrap;
@@ -2191,7 +2216,7 @@ body.light .qt-input {
     // file list inside one of the `?? dirname/` porcelain entries. Collapsed
     // by default since these are by definition the directories git itself
     // would roll up at the top level.
-    function buildUntrackedDirNode(group, depth, worktreePath, idPrefix) {
+    function buildUntrackedDirNode(group, depth, worktreePath, idPrefix, suppressQuickTask) {
         const rootPath = String(group.rootPath || '');
         // Strip trailing slash for the nodeId so it round-trips with other
         // expand-state keys; display keeps the slash for "this is a folder".
@@ -2232,9 +2257,11 @@ body.light .qt-input {
 
         // Children of an untracked-dir node are themselves unlinked files
         // (their parent dir landed in the "Needs a quick task" group via
-        // partitionByUntrackedRoots), so propagate the unlinked flag here too.
+        // partitionByUntrackedRoots), so propagate the unlinked flag here too —
+        // along with suppressQuickTask so the per-file button is dropped on a
+        // task branch (fb718102), consistent with the parent group.
         for (const file of group.files) {
-            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath, /*isUnlinked*/ true));
+            node.children.appendChild(buildFileRow(file, depth + 1, worktreePath, /*isUnlinked*/ true, suppressQuickTask));
         }
 
         return node.wrap;
@@ -2245,7 +2272,10 @@ body.light .qt-input {
     // are wired in item 5 from the existing handlers.
     // isUnlinked (Phase 2b): when true, append the inline quick-task form
     // (collapsed "+ Quick task" button by default).
-    function buildFileRow(file, depth, worktreePath, isUnlinked) {
+    // suppressQuickTask (fb718102): when true, omit that button even for an
+    // unlinked file — the parent branch is a task branch, so the file already
+    // belongs to a task and a quick-task here would only fragment attribution.
+    function buildFileRow(file, depth, worktreePath, isUnlinked, suppressQuickTask) {
         const row = document.createElement('div');
         row.className = 'tree-row';
         row.setAttribute('role', 'treeitem');
@@ -2278,7 +2308,7 @@ body.light .qt-input {
         // `overflow-x: hidden` / scrollbar. Mirrors the bulk button on the
         // "Needs a quick task" group header. Visual order becomes:
         // [chevron] [marker] [+ Quick task] [path…] [stats]
-        if (isUnlinked) attachQuickTaskUI(row, file, pathSpan);
+        if (isUnlinked && !suppressQuickTask) attachQuickTaskUI(row, file, pathSpan);
 
         const added = (file && file.linesAdded) | 0;
         const deleted = (file && file.linesDeleted) | 0;
