@@ -47,7 +47,7 @@
     {
       "id": "rest-api",
       "name": "REST API",
-      "description": "HTTP server exposing ~161 endpoints across 26 controllers on port 5050. Bridges MCP tools and UI panels to MessageBroker and databases.",
+      "description": "HTTP server exposing the REST API on port 5050 across the API/Controllers/ set. Bridges MCP tools and UI panels to MessageBroker and databases.",
       "rootFiles": [
         "API/MultiTerminalRestServer.cs",
         "API/Controllers/TasksController.cs",
@@ -105,7 +105,7 @@
     {
       "id": "mcp-server",
       "name": "MCP Server",
-      "description": "Node.js MCP tool definitions (88 tools) that bridge Claude Code agents to MultiTerminal's REST API. Lives outside the repo at %APPDATA%/multiterminal/mcp but managed by McpConfigService.",
+      "description": "Node.js MCP tool definitions that bridge Claude Code agents to MultiTerminal's REST API. Lives outside the repo at %APPDATA%/multiterminal/mcp but managed by McpConfigService.",
       "rootFiles": [
         "Services/McpConfigService.cs",
         "Services/GatewayIntegrationService.cs",
