@@ -205,11 +205,8 @@ namespace MultiTerminal.Services
                 var purpose = digest?.Purpose;
                 if (!string.IsNullOrEmpty(digest?.Gotchas))
                 {
-                    foreach (var line in digest.Gotchas.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        var trimmed = line.TrimStart('-', ' ', '*').Trim();
-                        if (trimmed.Length > 0) gotchasSet.Add(trimmed);
-                    }
+                    foreach (var gotcha in ParseGotchas(digest.Gotchas))
+                        gotchasSet.Add(gotcha);
                 }
 
                 article.Files.Add(new WikiFileEntry
@@ -254,6 +251,41 @@ namespace MultiTerminal.Services
         {
             try { return _knowledgeDb?.GetCodeDigest(projectId, filePath); }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Normalizes a code_digest Gotchas field into discrete bullet strings. Some digests store
+        /// gotchas as a JSON array string (e.g. ["a","b"]) with no newlines; others store newline-
+        /// delimited text. Without this, a JSON-array digest renders as one raw "["...","..."]" bullet.
+        /// </summary>
+        private static IEnumerable<string> ParseGotchas(string raw)
+        {
+            var text = raw.Trim();
+
+            // JSON-array form: parse into individual entries, fall back to line-split on malformed JSON.
+            if (text.StartsWith('['))
+            {
+                List<string> parsed = null;
+                try { parsed = JsonSerializer.Deserialize<List<string>>(text); }
+                catch (JsonException) { parsed = null; }
+
+                if (parsed != null)
+                {
+                    foreach (var item in parsed)
+                    {
+                        var trimmed = item?.Trim();
+                        if (!string.IsNullOrEmpty(trimmed)) yield return trimmed;
+                    }
+                    yield break;
+                }
+            }
+
+            // Newline-delimited form (or JSON parse failed).
+            foreach (var line in text.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = line.TrimStart('-', ' ', '*').Trim();
+                if (trimmed.Length > 0) yield return trimmed;
+            }
         }
 
         private DataTable SafeGetFileSymbols(string filePath)
