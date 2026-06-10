@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace MultiTerminal.Services
 {
@@ -48,6 +49,149 @@ namespace MultiTerminal.Services
             = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object _lock = new object();
         private bool _disposed;
+
+        // ---------------------------------------------------------------------
+        // libgit2 owner-validation bypass (process-wide, one-time)
+        // ---------------------------------------------------------------------
+
+        /// <summary>
+        /// libgit2's <c>git_libgit2_opt_t</c> enum value for
+        /// <c>SET_OWNER_VALIDATION</c>. Stable at 36 since libgit2 1.5.0 (new
+        /// opts are appended, never reordered) — verified against the bundled
+        /// native (2.0.322) by an empirical round-trip: <c>opts(36, 0)</c> makes
+        /// <c>Repository.IsValid</c> succeed on an Administrators-owned repo that
+        /// otherwise throws "not owned by current user". Task 309adb48.
+        /// </summary>
+        private const int GIT_OPT_SET_OWNER_VALIDATION = 36;
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int GitLibgit2OptsInt(int option, int value);
+
+        // Runs once, in the type initializer, before any instance method
+        // (DetectLayout / GetOrCreate) can open a repository.
+        static GitRepoManager()
+        {
+            TryDisableLibGit2OwnerValidation();
+        }
+
+        /// <summary>
+        /// Disables libgit2's "dubious ownership" guard for this process so the
+        /// HUD Git tab can read repositories whose folder is owned by a different
+        /// principal than the MultiTerminal process user — most commonly a repo
+        /// created by an elevated process (owner <c>BUILTIN\Administrators</c>).
+        ///
+        /// <para>The git CLI opens such repos via a Windows-specific special case
+        /// (current user is an Administrator + dir owned by Administrators =
+        /// treated as owned), which is why the header strip (git CLI via
+        /// <c>WorktreeList</c>) shows a dirty count while the Git tab body
+        /// (LibGit2Sharp) renders "No git repository": <see cref="GitRepoService"/>'s
+        /// ctor calls <c>Repository.IsValid</c>, libgit2 throws
+        /// <c>repository path … is not owned by current user</c>, and
+        /// <see cref="GetOrCreate"/> swallows it to <c>null</c>. libgit2 does NOT
+        /// implement the CLI's admin-group special-case, so we relax the check.</para>
+        ///
+        /// <para>Security: libgit2 is used here strictly read-only (status / diff /
+        /// log / branches) and never runs hooks or fsmonitor, so the
+        /// code-execution risk owner-validation guards against (git CLI running a
+        /// planted repo's hooks/config) does not apply. The user already opens
+        /// these repos via the git CLI. Scope is the MT process only — no change
+        /// to the user's global gitconfig / <c>safe.directory</c>.</para>
+        ///
+        /// <para>LibGit2Sharp 0.30.0 doesn't wrap <c>GIT_OPT_SET_OWNER_VALIDATION</c>,
+        /// so we P/Invoke the bundled native <c>git_libgit2_opts</c> directly. The
+        /// native library is resolved dynamically (its name carries a per-build
+        /// hash, e.g. <c>git2-a418d9d.dll</c>) so a native-package bump doesn't
+        /// silently break the call. Best-effort: any failure is logged and
+        /// swallowed — MT degrades to the prior behavior (admin-owned repos show
+        /// the empty-state) rather than failing to construct the manager.</para>
+        /// </summary>
+        private static bool TryDisableLibGit2OwnerValidation()
+        {
+            try
+            {
+                // Force LibGit2Sharp to load its native library before we resolve
+                // the export. Touching GlobalSettings triggers the native load.
+                _ = LibGit2Sharp.GlobalSettings.Version;
+
+                IntPtr handle = ResolveLibGit2NativeHandle();
+                if (handle == IntPtr.Zero)
+                {
+                    Debug.WriteLine("[GitRepoManager] Could not locate the libgit2 native module; owner-validation left enabled.");
+                    return false;
+                }
+
+                if (!NativeLibrary.TryGetExport(handle, "git_libgit2_opts", out IntPtr fn) || fn == IntPtr.Zero)
+                {
+                    Debug.WriteLine("[GitRepoManager] git_libgit2_opts export not found; owner-validation left enabled.");
+                    return false;
+                }
+
+                var opts = Marshal.GetDelegateForFunctionPointer<GitLibgit2OptsInt>(fn);
+                int rc = opts(GIT_OPT_SET_OWNER_VALIDATION, 0);
+                if (rc != 0)
+                {
+                    Debug.WriteLine($"[GitRepoManager] git_libgit2_opts(SET_OWNER_VALIDATION, 0) returned {rc}; owner-validation may still be enabled.");
+                    return false;
+                }
+
+                Debug.WriteLine("[GitRepoManager] Disabled libgit2 owner validation for this process (admin-owned repos are now readable).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[GitRepoManager] Could not disable libgit2 owner validation: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Resolves a handle to the already-loaded libgit2 native module
+        /// (<c>git2-*.dll</c>). Prefers the module the CLR has already mapped (so
+        /// we operate on the exact instance LibGit2Sharp uses), falling back to a
+        /// scan of the app base directory. Returns <see cref="IntPtr.Zero"/> if no
+        /// candidate can be loaded.
+        /// </summary>
+        private static IntPtr ResolveLibGit2NativeHandle()
+        {
+            // 1) Already-mapped module — NativeLibrary.TryLoad on its full path
+            //    returns the existing handle (Windows LoadLibrary refcounts the
+            //    same module) rather than mapping a second copy.
+            try
+            {
+                foreach (ProcessModule m in Process.GetCurrentProcess().Modules)
+                {
+                    string name = m.ModuleName ?? string.Empty;
+                    if (name.StartsWith("git2-", StringComparison.OrdinalIgnoreCase)
+                        && name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                        && NativeLibrary.TryLoad(m.FileName, out IntPtr h))
+                    {
+                        return h;
+                    }
+                }
+            }
+            catch
+            {
+                // Module enumeration is best-effort; fall through to the dir scan.
+            }
+
+            // 2) Fallback: scan the app base dir (the native dll ships next to the
+            //    managed assemblies for the win-x64 RID).
+            try
+            {
+                foreach (string path in Directory.EnumerateFiles(
+                             AppContext.BaseDirectory, "git2-*.dll", SearchOption.AllDirectories))
+                {
+                    if (NativeLibrary.TryLoad(path, out IntPtr h))
+                        return h;
+                }
+            }
+            catch
+            {
+                // Fallback scan is best-effort.
+            }
+
+            return IntPtr.Zero;
+        }
 
         /// <summary>
         /// Classifies a project root by its on-disk git layout. Cheap (one or two
@@ -166,6 +310,74 @@ namespace MultiTerminal.Services
                 // empty-state UX as UnsupportedLink today, but signals that
                 // we couldn't read the metadata at all.
                 return GitRepoLayout.Submodule;
+            }
+        }
+
+        /// <summary>
+        /// True when <paramref name="gitFilePath"/> is a <c>.git</c> gitlink file
+        /// whose <c>gitdir:</c> target directory no longer exists on disk — a
+        /// worktree (or submodule) whose admin directory was pruned out from
+        /// under it, leaving a dangling pointer. <see cref="ResolveRepoRoot"/>
+        /// walks PAST such a gitlink to the enclosing common repo, because
+        /// LibGit2Sharp's <c>Repository.IsValid</c> rejects a dangling-gitlink
+        /// path and <see cref="GetOrCreate"/> would otherwise return <c>null</c>
+        /// (rendering the HUD Git tab's "No git repository" empty-state even
+        /// though a real repo sits just above the stranded worktree dir).
+        ///
+        /// <para>Conservative by design: returns <c>false</c> on any read error
+        /// or malformed metadata, so only a POSITIVELY-confirmed missing target
+        /// triggers the walk-past. Healthy gitlinks (target exists) and
+        /// unreadable ones preserve the prior "stop here" behavior.</para>
+        /// </summary>
+        private static bool IsDanglingGitlink(string gitFilePath)
+        {
+            try
+            {
+                string firstLine = null;
+                using (var stream = new FileStream(
+                    gitFilePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                using (var reader = new StreamReader(stream))
+                {
+                    char[] buf = new char[1024];
+                    int read = reader.Read(buf, 0, buf.Length);
+                    if (read <= 0) return false;
+                    string head = new string(buf, 0, read);
+                    foreach (var raw in head.Split('\n'))
+                    {
+                        string line = raw.TrimEnd('\r').Trim();
+                        if (line.Length == 0) continue;
+                        firstLine = line;
+                        break;
+                    }
+                }
+                if (firstLine == null) return false;
+
+                const string Prefix = "gitdir:";
+                int idx = firstLine.IndexOf(Prefix, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) return false;
+                string gitDir = firstLine.Substring(idx + Prefix.Length).Trim();
+                if (gitDir.Length == 0) return false;
+
+                // `gitdir:` is usually absolute on Windows but may be written
+                // relative to the worktree dir that holds the .git file. Resolve
+                // both shapes (forward-slash separators are fine for GetFullPath
+                // / Directory.Exists on Windows).
+                string baseDir = Path.GetDirectoryName(gitFilePath);
+                string resolved = Path.IsPathRooted(gitDir)
+                    ? Path.GetFullPath(gitDir)
+                    : Path.GetFullPath(Path.Combine(baseDir ?? string.Empty, gitDir));
+
+                return !Directory.Exists(resolved);
+            }
+            catch
+            {
+                // Can't read/parse the gitlink — don't claim it's dangling; let
+                // the caller keep its prior "this is a valid stopping point"
+                // behavior rather than over-eagerly walking up.
+                return false;
             }
         }
 
@@ -383,7 +595,19 @@ namespace MultiTerminal.Services
                 string gitPath = Path.Combine(cursor, ".git");
                 try
                 {
-                    if (Directory.Exists(gitPath) || File.Exists(gitPath))
+                    if (Directory.Exists(gitPath))
+                        return cursor;
+
+                    // A `.git` gitlink FILE normally marks a worktree/submodule
+                    // root and is a valid stopping point. But if its `gitdir:`
+                    // target has been pruned out from under it (the admin dir
+                    // `.git/worktrees/<id>` removed when the task completed),
+                    // the gitlink is DANGLING: Repository.IsValid rejects it and
+                    // GetOrCreate would return null, leaving the HUD Git tab
+                    // stuck on its "No git repository" empty-state even though an
+                    // enclosing common repo sits right above. Walk PAST a
+                    // dangling gitlink to that parent; stop on a healthy one.
+                    if (File.Exists(gitPath) && !IsDanglingGitlink(gitPath))
                         return cursor;
                 }
                 catch

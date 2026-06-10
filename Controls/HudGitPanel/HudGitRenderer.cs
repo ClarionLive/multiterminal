@@ -358,6 +358,48 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
+        /// Reverse of <see cref="ResolveProjectIdFromPath"/>: returns the
+        /// registered project root path for <paramref name="projectId"/>, or
+        /// <c>null</c> if the id is empty, unregistered, or the registry is
+        /// unavailable. Used by <see cref="ApplyProject"/> to self-heal a panel
+        /// still bound to a pruned worktree path.
+        /// </summary>
+        private string TryResolveRegisteredProjectPath(string projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return null;
+            var svc = _broker?.ProjectService;
+            if (svc == null) return null;
+
+            try
+            {
+                foreach (var entry in svc.GetAllRegisteredProjects())
+                {
+                    if (entry == null) continue;
+                    if (string.Equals(entry.Id, projectId, StringComparison.Ordinal))
+                        return string.IsNullOrEmpty(entry.Path) ? null : entry.Path;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine(
+                    $"[HudGitRenderer.TryResolveRegisteredProjectPath] {ex.GetType().Name}: {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// <see cref="Directory.Exists"/> that never throws — a malformed or
+        /// inaccessible path is treated as "does not exist" so the
+        /// <see cref="ApplyProject"/> self-heal check can't bubble an exception.
+        /// </summary>
+        private static bool DirectoryExistsSafe(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            try { return Directory.Exists(path); }
+            catch { return false; }
+        }
+
+        /// <summary>
         /// Bind this panel to a project root with an explicit project id.
         /// Preferred overload: callers that already resolved the project id
         /// (e.g. <c>TerminalDocument</c>) should pass it through so the path
@@ -1136,6 +1178,27 @@ namespace MultiTerminal.Controls
             {
                 Send(new { type = "empty_no_project" });
                 return;
+            }
+
+            // Self-heal a stranded binding. If this panel is still bound to a
+            // worktree that has since been pruned (the dir no longer exists on
+            // disk — e.g. the task it belonged to completed but the rebind via
+            // WorktreeReady didn't reach this terminal), rebind to the
+            // registered project's main repo path before detection. GitRepoManager
+            // already resolves a dead path UP to the enclosing repo, so the tab
+            // renders either way; rebinding _projectPath to a LIVE path also
+            // restores the worktree switcher + per-worktree tree (RefreshAsync
+            // keys those off _projectPath). Only rebinds to a path that exists.
+            if (!DirectoryExistsSafe(_projectPath))
+            {
+                string registered = TryResolveRegisteredProjectPath(_projectId);
+                if (!string.IsNullOrEmpty(registered)
+                    && !string.Equals(registered, _projectPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[HudGitRenderer.ApplyProject] Bound path '{_projectPath}' no longer exists; rebinding to registered project path '{registered}'.");
+                    _projectPath = registered;
+                }
             }
 
             var layout = manager.DetectLayout(_projectPath);
