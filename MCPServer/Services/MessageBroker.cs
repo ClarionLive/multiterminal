@@ -355,6 +355,16 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<WorktreeReadyEventArgs> WorktreeReady;
 
         /// <summary>
+        /// Fired when an external trigger asks MT to type text into a live terminal
+        /// (POST /api/terminals/inject). Used by the SessionStart <c>source=clear</c>
+        /// hook to inject "initializing..." after /clear so the cleared session gets a
+        /// turn and auto-runs <c>/multiterminal:session-start</c> (task be599e08).
+        /// Subscribed by MainForm, which resolves the agent name to its TerminalDocument
+        /// — the broker is HTTP/UI-free.
+        /// </summary>
+        public event EventHandler<TerminalInjectEventArgs> TerminalInjectRequested;
+
+        /// <summary>
         /// Janitor-callable retry for a prune that was deferred at task-done
         /// time. Cycle-4 contract:
         /// <list type="bullet">
@@ -7523,6 +7533,36 @@ namespace MultiTerminal.MCPServer.Services
 
         #endregion
 
+        #region Terminal Input Injection
+
+        /// <summary>
+        /// Request that MT type <paramref name="text"/> into the live terminal owned by
+        /// <paramref name="agentName"/>. Raises <see cref="TerminalInjectRequested"/>, which
+        /// MainForm handles by resolving the agent to its TerminalDocument and injecting on the
+        /// UI thread. Used by the SessionStart(<c>source=clear</c>) hook to type "initializing..."
+        /// after /clear so the cleared session gets a turn and runs /multiterminal:session-start
+        /// (task be599e08). Best-effort: the event is raised synchronously, but delivery/injection
+        /// is the subscriber's responsibility — a missing terminal is a no-op, not an error here.
+        /// </summary>
+        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text)
+        {
+            if (string.IsNullOrWhiteSpace(agentName))
+                return (false, "agentName is required");
+            if (string.IsNullOrEmpty(text))
+                return (false, "text is required");
+
+            TerminalInjectRequested?.Invoke(this, new TerminalInjectEventArgs
+            {
+                AgentName = agentName,
+                SessionId = sessionId,
+                Text = text
+            });
+
+            return (true, null);
+        }
+
+        #endregion
+
         #region Browser Tabs
 
         /// <summary>
@@ -8235,6 +8275,17 @@ namespace MultiTerminal.MCPServer.Services
 
         // For async results — the controller waits for the UI thread result
         public TaskCompletionSource<string> ResultTcs { get; set; }
+    }
+
+    /// <summary>
+    /// Event args for an external terminal input-injection request
+    /// (POST /api/terminals/inject → MessageBroker.RequestTerminalInject). Task be599e08.
+    /// </summary>
+    public class TerminalInjectEventArgs : EventArgs
+    {
+        public string AgentName { get; set; }
+        public string SessionId { get; set; }
+        public string Text { get; set; }
     }
 
     /// <summary>

@@ -717,13 +717,57 @@ namespace MultiTerminal.Controls
             }
         }
 
-        /// <summary>
-        /// Called when user types /clear. Flushes session memory, then re-injects session-start.
-        /// </summary>
-        private async void OnSlashClearDetected()
-        {
-            LogTrace("Detected /clear — flushing session memory and re-injecting startup");
+        // Dedupe window so the hook-driven path and the keystroke fallback can't both
+        // inject "initializing..." for a single /clear (task be599e08).
+        private const int ClearInjectDedupeWindowMs = 5000;
+        private DateTime _lastClearInjectUtc = DateTime.MinValue;
+        private readonly object _clearInjectLock = new object();
 
+        /// <summary>
+        /// Keystroke fallback: called when BufferInputForSlashDetection sees the user type
+        /// "/clear". The PRIMARY trigger is now the SessionStart(source=clear) hook →
+        /// POST /api/terminals/inject → TriggerClearSessionStart("hook") (task be599e08),
+        /// because sniffing the raw keystroke stream is fragile (slash-menu autocomplete,
+        /// mouse-mode CSI sequences, chunk/parser desync). Both routes funnel through the
+        /// same deduped trigger so they cannot double-inject.
+        /// </summary>
+        private void OnSlashClearDetected()
+        {
+            TriggerClearSessionStart("keystroke", "initializing...");
+        }
+
+        /// <summary>
+        /// Single entry point for the post-/clear injection that gives the cleared Claude
+        /// session a turn so it auto-runs /multiterminal:session-start. Called by BOTH the
+        /// hook-driven REST path (source "hook") and the keystroke fallback (source
+        /// "keystroke"); deduped within <see cref="ClearInjectDedupeWindowMs"/> so the two
+        /// can't double-fire for one /clear (task be599e08).
+        /// </summary>
+        public void TriggerClearSessionStart(string source, string text = "initializing...")
+        {
+            lock (_clearInjectLock)
+            {
+                var now = DateTime.UtcNow;
+                if ((now - _lastClearInjectUtc).TotalMilliseconds < ClearInjectDedupeWindowMs)
+                {
+                    LogTrace($"/clear session-start injection skipped (dedupe, source={source})");
+                    return;
+                }
+
+                _lastClearInjectUtc = now;
+            }
+
+            LogTrace($"/clear session-start injection triggered (source={source})");
+            _ = InjectInitializingAfterClearAsync(text);
+        }
+
+        /// <summary>
+        /// Flushes the now-frozen session's memory/lineage, waits for the renderer to settle
+        /// after the /clear transition, then injects <paramref name="text"/> to trigger the
+        /// session-start flow. Funneled through <see cref="TriggerClearSessionStart"/>.
+        /// </summary>
+        private async Task InjectInitializingAfterClearAsync(string text)
+        {
             // Flush session memory for this project (old session file is now frozen)
             FlushSessionMemoryAsync();
 
@@ -754,8 +798,8 @@ namespace MultiTerminal.Controls
                 return;
             }
 
-            LogTrace($"Injecting 'initializing...' after /clear to trigger session-start (renderer ready after {waitedMs}ms)");
-            TypeInput("initializing...", "cr", 20);
+            LogTrace($"Injecting '{text}' after /clear to trigger session-start (renderer ready after {waitedMs}ms)");
+            TypeInput(text, "cr", 20);
         }
 
         /// <summary>

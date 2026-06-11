@@ -632,6 +632,13 @@ namespace MultiTerminal
                 // worktree can cd out before Windows holds an open handle.
                 _mcpServer.Broker.WorktreePruning += OnBrokerWorktreePruning;
 
+                // Task be599e08: hook-driven /clear → session-start. The SessionStart(source=clear)
+                // hook POSTs to /api/terminals/inject; the broker raises TerminalInjectRequested and
+                // we resolve the agent to its terminal and inject "initializing..." so the cleared
+                // session gets a turn and runs /multiterminal:session-start. Replaces the unreliable
+                // keystroke-sniffing detection (which is kept as a deduped fallback).
+                _mcpServer.Broker.TerminalInjectRequested += OnBrokerTerminalInjectRequested;
+
                 // Wire up spawn callback for programmatic terminal spawning
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 17: Checking SpawnService");
                 if (_mcpServer.SpawnService == null)
@@ -851,6 +858,39 @@ namespace MultiTerminal
                     Log($"Stack: {ex.StackTrace}");
                 }
             });
+        }
+
+        /// <summary>
+        /// Handles a hook-driven terminal injection request (POST /api/terminals/inject, raised
+        /// via MessageBroker.TerminalInjectRequested). Resolves the agent name to its
+        /// TerminalDocument and routes through the shared, deduped post-/clear trigger on the UI
+        /// thread. This is the reliable replacement for keystroke-sniffing /clear detection
+        /// (task be599e08) — the SessionStart(source=clear) hook fires on every /clear.
+        /// </summary>
+        private void OnBrokerTerminalInjectRequested(object sender, TerminalInjectEventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(() => OnBrokerTerminalInjectRequested(sender, e)));
+                return;
+            }
+
+            TerminalDocument targetDoc = null;
+            lock (_terminalDocMapLock)
+            {
+                if (!string.IsNullOrWhiteSpace(e.AgentName))
+                    _agentNameToTerminalDoc.TryGetValue(e.AgentName, out targetDoc);
+            }
+
+            if (targetDoc?.Terminal == null)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] TerminalInjectRequested: no live terminal for agent '{e.AgentName}'");
+                return;
+            }
+
+            // Funnel through the deduped trigger so the hook path and the keystroke fallback
+            // can't double-inject for the same /clear.
+            targetDoc.Terminal.TriggerClearSessionStart("hook", e.Text);
         }
 
         private void OnBrowserTabRequested(object sender, BrowserTabEventArgs e)
