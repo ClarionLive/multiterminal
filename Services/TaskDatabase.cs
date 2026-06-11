@@ -104,6 +104,7 @@ namespace MultiTerminal.Services
             MigrateAddTaskFileLinks();
             MigrateAddChecklistItemIndexToFileLinks();
             MigrateAddOwnerProfile();
+            MigrateAddSourceControlAccounts();
             MigrateAddAgentInvocations();
             MigrateAddTaskReports();
             MigrateAddNotificationEvents();
@@ -5462,6 +5463,28 @@ namespace MultiTerminal.Services
                     email TEXT,
                     github_username TEXT,
                     has_github_token INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+                );
+            ";
+            using var createCmd = new SQLiteCommand(createSql, _connection);
+            createCmd.ExecuteNonQuery();
+        }
+
+        private void MigrateAddSourceControlAccounts()
+        {
+            const string checkSql = "SELECT name FROM sqlite_master WHERE type='table' AND name='source_control_accounts'";
+            using var checkCmd = new SQLiteCommand(checkSql, _connection);
+            var exists = checkCmd.ExecuteScalar();
+            if (exists != null) return;
+
+            const string createSql = @"
+                CREATE TABLE IF NOT EXISTS source_control_accounts (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'github',
+                    username TEXT NOT NULL,
+                    has_token INTEGER NOT NULL DEFAULT 0,
                     created_at DATETIME NOT NULL DEFAULT (datetime('now')),
                     updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
                 );

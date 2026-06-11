@@ -121,7 +121,8 @@ namespace MultiTerminal.Services
                 ("git_default_branch", "TEXT"),
                 ("git_auto_commit",    "INTEGER DEFAULT 0"),
                 ("team_lead",          "TEXT"),
-                ("default_terminal",   "TEXT NOT NULL DEFAULT 'claude-code'")
+                ("default_terminal",   "TEXT NOT NULL DEFAULT 'claude-code'"),
+                ("source_control_account_id", "TEXT")
             };
 
             foreach (var (colName, colDef) in newColumns)
