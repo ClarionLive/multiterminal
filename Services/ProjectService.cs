@@ -477,7 +477,11 @@ namespace MultiTerminal.Services
             sb.AppendLine($"  \"lastOpenedAt\": {JsonEscape(project.LastOpenedAt.ToString("o"))},");
             sb.AppendLine($"  \"isPinned\": {(project.IsPinned ? "true" : "false")},");
             sb.AppendLine($"  \"defaultTerminal\": {JsonEscape(TerminalKindHelper.Normalize(project.DefaultTerminal))},");
-            sb.AppendLine($"  \"sourceControlAccountId\": {JsonEscape(project.SourceControlAccountId)},");
+            // sourceControlAccountId is intentionally NOT serialized to project.json — SQLite is
+            // the single source of truth for the account binding (same convention as gitRepoUrl /
+            // gitDefaultBranch / gitAutoCommit). Serializing it here let a stale on-disk value
+            // re-assert itself through LoadProject -> SaveProject -> SaveRichProject (COALESCE),
+            // silently reverting account changes/clears made via the edit dialog.
             sb.AppendLine("  \"prompts\": [");
 
             for (int i = 0; i < project.Prompts.Count; i++)
@@ -610,7 +614,12 @@ namespace MultiTerminal.Services
                             project.DefaultTerminal = TerminalKindHelper.Normalize(ParseJsonString(json, ref pos));
                             break;
                         case "sourcecontrolaccountid":
-                            project.SourceControlAccountId = ParseJsonString(json, ref pos);
+                            // Consume-and-discard: SQLite is the source of truth for this field
+                            // (no longer serialized). Existing on-disk project.json files may still
+                            // carry the key, so we must still advance pos past its value, but we
+                            // deliberately do NOT assign it — leaving Project.SourceControlAccountId
+                            // null so the subsequent SaveRichProject COALESCE preserves the SQLite value.
+                            ParseJsonString(json, ref pos);
                             break;
                         case "prompts":
                             project.Prompts = ParsePromptsArray(json, ref pos);
