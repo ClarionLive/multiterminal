@@ -707,6 +707,25 @@
                     </Grid>
                 </GroupBox>
 
+                <!-- SECTION 6: Source Control Accounts -->
+                <GroupBox Header="Source Control Accounts"
+                          Style="{StaticResource DarkGroupBox}"
+                          Margin="0,0,0,10">
+                    <StackPanel Margin="4,8,4,4">
+                        <TextBlock Text="Manage GitHub and Bitbucket accounts for repo operations and commit attribution."
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,8"/>
+                        <Button x:Name="ManageSourceControlAccountsButton"
+                                Content="Manage Source Control Accounts"
+                                Style="{StaticResource SmallActionButton}"
+                                Height="28"
+                                HorizontalAlignment="Left"
+                                Padding="16,0,16,0"
+                                Click="ManageSourceControlAccountsButton_Click"/>
+                    </StackPanel>
+                </GroupBox>
+
             </StackPanel>
         </Grid>
             </TabItem>

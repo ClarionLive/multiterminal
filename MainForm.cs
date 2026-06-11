@@ -64,6 +64,7 @@ namespace MultiTerminal
         private SessionIndexingService _sessionIndexingService;
         private TaskDatabase _chatTaskDatabase; // Used for chat message persistence
         private OwnerProfileService _ownerProfileService;
+        private SourceControlAccountService _sourceControlAccountService;
         private readonly Dictionary<string, TerminalDocument> _terminalDocMap = new();
         private ToolStripButton _chatPanelButton;
         private ToolStripButton _chatHistoryButton;
@@ -292,6 +293,7 @@ namespace MultiTerminal
             System.Diagnostics.Trace.WriteLine("[MainForm] Creating TaskDatabase for chat persistence...");
             _chatTaskDatabase = new TaskDatabase();
             _ownerProfileService = new OwnerProfileService(_chatTaskDatabase.Connection);
+            _sourceControlAccountService = new SourceControlAccountService(_chatTaskDatabase.Connection);
             System.Diagnostics.Trace.WriteLine("[MainForm] TaskDatabase created successfully");
 
             // Shared project database for the start screen (one connection, shared across all terminals)
@@ -2183,8 +2185,7 @@ namespace MultiTerminal
             var existing = _ownerProfileService.GetProfile();
             if (existing != null)
             {
-                dialog.LoadExisting(existing.FullName, existing.Email,
-                    existing.GitHubUsername, existing.HasGitHubToken);
+                dialog.LoadExisting(existing.FullName, existing.Email);
             }
 
             if (dialog.ShowDialog() == true)
@@ -2192,23 +2193,14 @@ namespace MultiTerminal
                 var profile = existing ?? new Models.OwnerProfile();
                 profile.FullName = dialog.FullName;
                 profile.Email = dialog.Email;
-                profile.GitHubUsername = string.IsNullOrWhiteSpace(dialog.GitHubUsername)
-                    ? null : dialog.GitHubUsername;
 
                 _ownerProfileService.SaveProfile(profile);
-
-                // Save token if provided (and not the placeholder)
-                var token = dialog.GitHubToken;
-                if (!string.IsNullOrEmpty(token) && token != "placeholder-existing")
-                {
-                    _ownerProfileService.SaveGitHubToken(token);
-                }
             }
         }
 
         private void ShowSettingsDialog()
         {
-            var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark, _ownerProfileService);
+            var dialog = new SettingsWpfDialog(_settings, _currentTheme.IsDark, _ownerProfileService, _sourceControlAccountService);
             new WindowInteropHelper(dialog) { Owner = this.Handle };
             if (dialog.ShowDialog() == true)
             {

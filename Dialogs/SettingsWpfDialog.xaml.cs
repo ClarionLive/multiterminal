@@ -18,6 +18,7 @@ namespace MultiTerminal.Dialogs
     {
         private readonly SettingsService _settings;
         private readonly OwnerProfileService _ownerProfileService;
+        private readonly SourceControlAccountService _sourceControlAccountService;
         private List<ClaudeCommand> _commands;
 
         /// <summary>
@@ -51,10 +52,13 @@ namespace MultiTerminal.Dialogs
         public string AgentPanelCloseMode =>
             AutoCloseRadio.IsChecked == true ? "AutoClose" : "ManualClose";
 
-        public SettingsWpfDialog(SettingsService settings, bool isDark, OwnerProfileService ownerProfileService = null)
+        public SettingsWpfDialog(SettingsService settings, bool isDark,
+            OwnerProfileService ownerProfileService = null,
+            SourceControlAccountService sourceControlAccountService = null)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _ownerProfileService = ownerProfileService;
+            _sourceControlAccountService = sourceControlAccountService;
             _commands = new List<ClaudeCommand>();
 
             InitializeComponent();
@@ -62,6 +66,9 @@ namespace MultiTerminal.Dialogs
             PopulateComboBoxes();
             LoadSettings();
             LoadProfileSummary();
+
+            // Source control accounts manager is only available when its service is injected.
+            ManageSourceControlAccountsButton.IsEnabled = _sourceControlAccountService != null;
         }
 
         private void PopulateComboBoxes()
@@ -481,12 +488,7 @@ namespace MultiTerminal.Dialogs
             }
             else
             {
-                var summary = $"{profile.FullName} <{profile.Email}>";
-                if (!string.IsNullOrWhiteSpace(profile.GitHubUsername))
-                    summary += $"  |  GitHub: {profile.GitHubUsername}";
-                if (profile.HasGitHubToken)
-                    summary += "  |  Token: Set";
-                ProfileSummaryText.Text = summary;
+                ProfileSummaryText.Text = $"{profile.FullName} <{profile.Email}>";
             }
         }
 
@@ -500,8 +502,7 @@ namespace MultiTerminal.Dialogs
             var existing = _ownerProfileService.GetProfile();
             if (existing != null)
             {
-                dialog.LoadExisting(existing.FullName, existing.Email,
-                    existing.GitHubUsername, existing.HasGitHubToken);
+                dialog.LoadExisting(existing.FullName, existing.Email);
             }
 
             if (dialog.ShowDialog() == true)
@@ -509,20 +510,25 @@ namespace MultiTerminal.Dialogs
                 var profile = existing ?? new Models.OwnerProfile();
                 profile.FullName = dialog.FullName;
                 profile.Email = dialog.Email;
-                profile.GitHubUsername = string.IsNullOrWhiteSpace(dialog.GitHubUsername)
-                    ? null : dialog.GitHubUsername;
 
                 _ownerProfileService.SaveProfile(profile);
-
-                var token = dialog.GitHubToken;
-                if (!string.IsNullOrEmpty(token) && token != "placeholder-existing")
-                {
-                    _ownerProfileService.SaveGitHubToken(token);
-                }
 
                 OwnerProfileEdited = true;
                 LoadProfileSummary();
             }
+        }
+
+        // -----------------------------------------------------------------
+        // Source Control Accounts
+        // -----------------------------------------------------------------
+
+        private void ManageSourceControlAccountsButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_sourceControlAccountService == null) return;
+
+            var dialog = new SourceControlAccountsDialog(_sourceControlAccountService);
+            dialog.Owner = this;
+            dialog.ShowDialog();
         }
 
         // -----------------------------------------------------------------

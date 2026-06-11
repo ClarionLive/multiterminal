@@ -42,37 +42,6 @@
             </Setter>
         </Style>
 
-        <!-- Dark PasswordBox style -->
-        <Style x:Key="DarkPasswordBox" TargetType="PasswordBox">
-            <Setter Property="Background" Value="#2D2D30"/>
-            <Setter Property="Foreground" Value="#E0E0E0"/>
-            <Setter Property="BorderBrush" Value="#3E3E42"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="8,6"/>
-            <Setter Property="FontFamily" Value="Segoe UI"/>
-            <Setter Property="FontSize" Value="13"/>
-            <Setter Property="CaretBrush" Value="#E0E0E0"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="PasswordBox">
-                        <Border Background="{TemplateBinding Background}"
-                                BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="3"
-                                Padding="{TemplateBinding Padding}">
-                            <ScrollViewer x:Name="PART_ContentHost"
-                                          VerticalAlignment="Center"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsFocused" Value="True">
-                                <Setter Property="BorderBrush" Value="#007ACC"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
         <!-- Accent (Save) button style -->
         <Style x:Key="AccentButton" TargetType="Button">
             <Setter Property="Background" Value="#007ACC"/>
@@ -201,16 +170,9 @@
             <TextBlock Text="Used for git commit attribution" Style="{StaticResource HintText}"
                        Margin="0,0,0,20"/>
 
-            <!-- GitHub section -->
-            <TextBlock Text="GITHUB (OPTIONAL)" Style="{StaticResource SectionLabel}" Margin="0,0,0,10"/>
-
-            <TextBlock Text="GitHub Username" Style="{StaticResource FieldLabel}"/>
-            <TextBox x:Name="GitHubUsernameBox" Style="{StaticResource DarkTextBox}" Margin="0,0,0,12"/>
-
-            <TextBlock Text="GitHub Token" Style="{StaticResource FieldLabel}"/>
-            <PasswordBox x:Name="GitHubTokenBox" Style="{StaticResource DarkPasswordBox}" Margin="0,0,0,4"/>
-            <TextBlock Style="{StaticResource HintText}">
-                <Run Text="Personal access token — stored securely in Windows Credential Manager"/>
+            <!-- Source control accounts hint -->
+            <TextBlock Style="{StaticResource HintText}" Margin="0,0,0,0">
+                <Run Text="Manage GitHub/Bitbucket accounts under Source Control Accounts."/>
             </TextBlock>
 
         </StackPanel>

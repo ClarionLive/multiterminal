@@ -4,16 +4,15 @@ using System.Windows.Controls;
 namespace MultiTerminal.Dialogs
 {
     /// <summary>
-    /// Owner profile dialog for configuring git identity and GitHub integration.
+    /// Owner profile dialog for configuring the git identity (name + email).
     /// Shown on first run or when the user edits their profile from Settings.
+    /// GitHub/Bitbucket accounts are managed separately under Source Control Accounts.
     /// </summary>
     public partial class OwnerProfileDialog : Window
     {
         // Public properties for the caller to read after dialog closes
         public string FullName => FullNameBox.Text.Trim();
         public string Email => EmailBox.Text.Trim();
-        public string GitHubUsername => GitHubUsernameBox.Text.Trim();
-        public string GitHubToken => GitHubTokenBox.Password;
 
         public OwnerProfileDialog()
         {
@@ -24,17 +23,10 @@ namespace MultiTerminal.Dialogs
         /// <summary>
         /// Pre-populate fields when editing an existing profile.
         /// </summary>
-        public void LoadExisting(string fullName, string email, string gitHubUsername, bool hasToken)
+        public void LoadExisting(string fullName, string email)
         {
             FullNameBox.Text = fullName ?? "";
             EmailBox.Text = email ?? "";
-            GitHubUsernameBox.Text = gitHubUsername ?? "";
-
-            if (hasToken)
-            {
-                // Show placeholder so user knows a token is already set
-                GitHubTokenBox.Password = "placeholder-existing";
-            }
 
             // Change Skip to Cancel when editing existing profile
             SkipButton.Content = "Cancel";

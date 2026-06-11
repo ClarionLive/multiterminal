@@ -1,0 +1,221 @@
+<Window x:Class="MultiTerminal.Dialogs.SourceControlAccountsDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Source Control Accounts"
+        Width="640" Height="460"
+        MinWidth="640" MaxWidth="640"
+        MinHeight="460" MaxHeight="460"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Background="#1E1E1E">
+
+    <Window.Resources>
+        <!-- Accent button style -->
+        <Style x:Key="AccentButton" TargetType="Button">
+            <Setter Property="Background" Value="#007ACC"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#008CE0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="12,6"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#1C97EA"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#005A9E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Small action button style (Add/Edit/Delete) -->
+        <Style x:Key="SmallActionButton" TargetType="Button">
+            <Setter Property="Background" Value="#3E3E42"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#565656"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#505054"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#5A5A5E"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Background" Value="#2A2A2C"/>
+                                <Setter Property="Foreground" Value="#656565"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Dark DataGrid style (mirrors SettingsWpfDialog) -->
+        <Style x:Key="DarkDataGrid" TargetType="DataGrid">
+            <Setter Property="Background" Value="#252526"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="RowBackground" Value="#252526"/>
+            <Setter Property="AlternatingRowBackground" Value="#2D2D30"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#3E3E42"/>
+            <Setter Property="VerticalGridLinesBrush" Value="#3E3E42"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="SelectionMode" Value="Single"/>
+            <Setter Property="SelectionUnit" Value="FullRow"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/>
+            <Setter Property="CanUserResizeRows" Value="False"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="ColumnHeaderStyle">
+                <Setter.Value>
+                    <Style TargetType="DataGridColumnHeader">
+                        <Setter Property="Background" Value="#2D2D30"/>
+                        <Setter Property="Foreground" Value="#A0A0A0"/>
+                        <Setter Property="BorderBrush" Value="#3E3E42"/>
+                        <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                        <Setter Property="Padding" Value="8,5"/>
+                        <Setter Property="FontFamily" Value="Segoe UI"/>
+                        <Setter Property="FontSize" Value="12"/>
+                        <Setter Property="FontWeight" Value="SemiBold"/>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="CellStyle">
+                <Setter.Value>
+                    <Style TargetType="DataGridCell">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Setter Property="Foreground" Value="#E0E0E0"/>
+                        <Setter Property="BorderThickness" Value="0"/>
+                        <Setter Property="Padding" Value="4,2"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#007ACC"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="RowStyle">
+                <Setter.Value>
+                    <Style TargetType="DataGridRow">
+                        <Setter Property="Background" Value="#252526"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#2D2D30"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#1A3A5C"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0"
+                   Text="Manage GitHub and Bitbucket accounts. Tokens are stored securely in Windows Credential Manager."
+                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,12"/>
+
+        <!-- Accounts grid -->
+        <DataGrid x:Name="AccountsGrid"
+                  Grid.Row="1"
+                  Style="{StaticResource DarkDataGrid}"
+                  SelectionChanged="AccountsGrid_SelectionChanged"
+                  MouseDoubleClick="AccountsGrid_MouseDoubleClick">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Display Name"
+                                    Binding="{Binding DisplayName}"
+                                    Width="*"/>
+                <DataGridTextColumn Header="Provider"
+                                    Binding="{Binding ProviderLabel}"
+                                    Width="140"/>
+                <DataGridTextColumn Header="Username"
+                                    Binding="{Binding Username}"
+                                    Width="200"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- Action buttons -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,12,0,0">
+            <Button x:Name="AddButton"
+                    Content="Add"
+                    Style="{StaticResource SmallActionButton}"
+                    Width="70" Height="28"
+                    Margin="0,0,6,0"
+                    Click="AddButton_Click"/>
+            <Button x:Name="EditButton"
+                    Content="Edit"
+                    Style="{StaticResource SmallActionButton}"
+                    Width="70" Height="28"
+                    Margin="0,0,6,0"
+                    Click="EditButton_Click"/>
+            <Button x:Name="DeleteButton"
+                    Content="Delete"
+                    Style="{StaticResource SmallActionButton}"
+                    Width="70" Height="28"
+                    Click="DeleteButton_Click"/>
+        </StackPanel>
+
+        <!-- Bottom bar with Close -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button x:Name="CloseButton"
+                    Style="{StaticResource AccentButton}"
+                    Content="Close"
+                    Height="32" Width="90"
+                    IsDefault="True"
+                    IsCancel="True"
+                    Click="CloseButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
