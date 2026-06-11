@@ -45,7 +45,7 @@ namespace MultiTerminal.API.Controllers
                 new { method = "POST", path = "/api/spawn/agent", description = "Spawn a headless AgentProcess with conversation panel (agentName, workingDir, initialPrompt, spawnerName)" },
 
                 // Debug endpoints
-                new { method = "GET", path = "/api/debug/logs", description = "Get debug log entries (query: ?count=50&offset=0&source=InboxMonitor&level=Info&search=nudge)" },
+                new { method = "GET", path = "/api/debug/logs", description = "Get debug log entries (query: ?count=50&offset=0&source=MessageBroker&level=Info&search=delivery)" },
                 new { method = "DELETE", path = "/api/debug/logs", description = "Clear all debug log entries" },
                 new { method = "POST", path = "/api/debug/pause", description = "Pause debug logging (new entries silently discarded)" },
                 new { method = "POST", path = "/api/debug/resume", description = "Resume debug logging" },
