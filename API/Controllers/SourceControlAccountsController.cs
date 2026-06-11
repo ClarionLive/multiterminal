@@ -39,7 +39,7 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("{id}/token")]
         public IActionResult GetAccountToken(string id)
         {
-            if (!IsLoopback())
+            if (!IsLocalNonBrowserCaller())
                 return StatusCode(403, new { error = "Token access is restricted to local callers" });
 
             if (_accountService.Get(id) == null)
@@ -61,7 +61,7 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("/api/projects/{projectId}/source-account")]
         public IActionResult GetProjectSourceAccount(string projectId)
         {
-            if (!IsLoopback())
+            if (!IsLocalNonBrowserCaller())
                 return StatusCode(403, new { error = "Token access is restricted to local callers" });
 
             var project = _projectDb.GetRichProject(projectId);
@@ -94,6 +94,22 @@ namespace MultiTerminal.API.Controllers
         {
             var remote = HttpContext?.Connection?.RemoteIpAddress;
             return remote == null || IPAddress.IsLoopback(remote);
+        }
+
+        /// <summary>
+        /// True when the caller is a local, non-browser client (e.g. an agent using HttpClient).
+        /// Loopback alone is not enough: the global CORS policy is AllowAnyOrigin, so a malicious
+        /// web page could fetch a loopback token URL cross-origin and read the PAT. A cross-site
+        /// browser fetch always carries an <c>Origin</c> header (whose host is not loopback) and/or
+        /// <c>Sec-Fetch-Site: cross-site|same-site</c>; a local HttpClient sends neither — so we
+        /// reject the browser case here while still allowing legitimate local agents through.
+        /// </summary>
+        private bool IsLocalNonBrowserCaller()
+        {
+            if (!IsLoopback())
+                return false;
+
+            return CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request);
         }
     }
 }

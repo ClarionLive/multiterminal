@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.Services;
 
@@ -48,6 +49,12 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("github-token")]
         public IActionResult GetGitHubToken()
         {
+            // This hands back a raw PAT; gate it like the other token endpoints so a browser
+            // cross-origin fetch (which AllowAnyOrigin would otherwise let read) is refused
+            // while a local agent using HttpClient still passes.
+            if (!IsLocalNonBrowserCaller())
+                return StatusCode(403, new { error = "Token access is restricted to local callers" });
+
             var token = _ownerProfileService.GetGitHubToken();
             if (string.IsNullOrEmpty(token))
                 token = ResolveDefaultGitHubAccountToken();
@@ -59,23 +66,47 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// Returns the token of the first GitHub source control account that has one,
-        /// or null if none exist. Used as the back-compat fallback after migration.
+        /// Returns the token of the sole GitHub source control account, or null.
+        /// Used as the back-compat fallback after migration. To avoid a confused-deputy
+        /// (handing back an arbitrary account's PAT for a project that isn't bound to it),
+        /// this only resolves when EXACTLY ONE github-provider account exists — with zero
+        /// or multiple, there is no unambiguous default, so it returns null.
         /// </summary>
         private string ResolveDefaultGitHubAccountToken()
         {
+            MultiTerminal.Models.SourceControlAccount only = null;
             foreach (var account in _accountService.GetAll())
             {
-                if (!account.HasToken) continue;
                 if (account.Provider != null &&
                     !account.Provider.Equals("github", StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var token = _accountService.GetToken(account.Id);
-                if (!string.IsNullOrEmpty(token))
-                    return token;
+                if (only != null)
+                    return null; // more than one github account — ambiguous, don't pick.
+                only = account;
             }
-            return null;
+
+            if (only == null || !only.HasToken)
+                return null;
+
+            var token = _accountService.GetToken(only.Id);
+            return string.IsNullOrEmpty(token) ? null : token;
+        }
+
+        /// <summary>
+        /// True when the caller is a local, non-browser client (e.g. an agent using HttpClient).
+        /// Loopback alone is insufficient under the global AllowAnyOrigin CORS policy: a malicious
+        /// web page could fetch this token URL cross-origin and read the PAT. A null remote address
+        /// (in-process / test host) is treated as local; the cross-origin browser fetch is rejected
+        /// via the shared <see cref="CrossOriginBrowserGuard"/>.
+        /// </summary>
+        private bool IsLocalNonBrowserCaller()
+        {
+            var remote = HttpContext?.Connection?.RemoteIpAddress;
+            if (remote != null && !IPAddress.IsLoopback(remote))
+                return false;
+
+            return CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request);
         }
     }
 }

@@ -390,7 +390,11 @@ namespace MultiTerminal
                 {
                     DisplayName = displayName,
                     Provider = "github",
-                    Username = profile.GitHubUsername,
+                    // username is NOT NULL; GitHubUsername can be blank even when a token
+                    // exists, so reuse the guaranteed-non-empty displayName as the fallback.
+                    Username = string.IsNullOrWhiteSpace(profile.GitHubUsername)
+                        ? displayName
+                        : profile.GitHubUsername,
                 });
 
                 if (_sourceControlAccountService.SaveToken(account.Id, token))
@@ -401,6 +405,15 @@ namespace MultiTerminal
                     _ownerProfileService.ClearGitHubUsername();
                     _debugLogService?.Info("MainForm",
                         $"Migrated legacy GitHub account '{displayName}' to source_control_accounts ({account.Id}).");
+                }
+                else
+                {
+                    // Token re-store failed: roll back the orphan row (has_token=0) so the
+                    // GetAll().Count>0 idempotency guard doesn't permanently block retries.
+                    // Leave the legacy credential in place so the next boot can retry cleanly.
+                    _sourceControlAccountService.Delete(account.Id);
+                    _debugLogService?.Info("MainForm",
+                        $"Legacy GitHub account migration: SaveToken failed; rolled back account {account.Id} for retry.");
                 }
             }
             catch (Exception ex)

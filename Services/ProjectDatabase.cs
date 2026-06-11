@@ -533,6 +533,8 @@ namespace MultiTerminal.Services
             // COALESCE preserves existing non-null values when the incoming project has nulls.
             // This prevents code paths that load from project.json (which lacks SQLite-only
             // fields like team_lead, icon, project_type, etc.) from wiping those values.
+            // EXCEPTION: source_control_account_id is NOT COALESCE-ed — a null there is a
+            // deliberate clear ("(None)"), so the parameter always wins (see note inline).
             const string sql = @"
                 INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at,
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
@@ -567,7 +569,12 @@ namespace MultiTerminal.Services
                     git_auto_commit = @gitAutoCommit,
                     team_lead = COALESCE(@teamLead, projects.team_lead),
                     default_terminal = COALESCE(@defaultTerminal, projects.default_terminal),
-                    source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id)
+                    -- NOT COALESCE-ed: a null parameter is a deliberate None/clear intent
+                    -- (EditProjectDialog sets SourceControlAccountId=null), so the parameter
+                    -- (including DBNull) must always win. All callers either load the full
+                    -- Project via GetRichProject before saving (preserving the existing value)
+                    -- or are fresh INSERTs, so this can't wipe the field on unrelated saves.
+                    source_control_account_id = @sourceControlAccountId
             ";
 
             using var command = new SQLiteCommand(sql, _connection);

@@ -132,6 +132,13 @@ namespace MultiTerminal.Services
             // Best-effort cleanup of the stored token; the DB row is the source of truth.
             WindowsCredentialStore.Delete(CredentialTargetPrefix + id);
 
+            // Clear dangling references so projects don't point at a now-deleted account.
+            using var clearRefs = new SQLiteCommand(
+                "UPDATE projects SET source_control_account_id = NULL WHERE source_control_account_id = @id",
+                _connection);
+            clearRefs.Parameters.AddWithValue("@id", id);
+            clearRefs.ExecuteNonQuery();
+
             using var cmd = new SQLiteCommand(
                 "DELETE FROM source_control_accounts WHERE id = @id", _connection);
             cmd.Parameters.AddWithValue("@id", id);
@@ -202,8 +209,12 @@ namespace MultiTerminal.Services
                 Provider = reader.IsDBNull(2) ? "github" : reader.GetString(2),
                 Username = reader.IsDBNull(3) ? null : reader.GetString(3),
                 HasToken = reader.GetInt32(4) != 0,
-                CreatedAt = DateTime.Parse(reader.GetString(5)),
-                UpdatedAt = DateTime.Parse(reader.GetString(6))
+                CreatedAt = DateTime.Parse(reader.GetString(5),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind),
+                UpdatedAt = DateTime.Parse(reader.GetString(6),
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind)
             };
         }
     }
