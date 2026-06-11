@@ -55,6 +55,14 @@ namespace MultiTerminal.API.Controllers
             if (!IsLocalNonBrowserCaller())
                 return StatusCode(403, new { error = "Token access is restricted to local callers" });
 
+            // When more than one github-provider account exists there is no unambiguous global
+            // default, so refuse even if the legacy owner-profile secret is still populated —
+            // returning it would be a confused deputy (a project-unscoped PAT). The migration
+            // leaves the legacy secret in place when accounts already exist, so this state is
+            // reachable. Callers that need a specific account must use the per-project endpoint.
+            if (CountGitHubAccounts() > 1)
+                return NotFound(new { error = "No GitHub token configured" });
+
             var token = _ownerProfileService.GetGitHubToken();
             if (string.IsNullOrEmpty(token))
                 token = ResolveDefaultGitHubAccountToken();
@@ -77,8 +85,7 @@ namespace MultiTerminal.API.Controllers
             MultiTerminal.Models.SourceControlAccount only = null;
             foreach (var account in _accountService.GetAll())
             {
-                if (account.Provider != null &&
-                    !account.Provider.Equals("github", StringComparison.OrdinalIgnoreCase))
+                if (!IsGitHubAccount(account))
                     continue;
 
                 if (only != null)
@@ -91,6 +98,31 @@ namespace MultiTerminal.API.Controllers
 
             var token = _accountService.GetToken(only.Id);
             return string.IsNullOrEmpty(token) ? null : token;
+        }
+
+        /// <summary>
+        /// Counts github-provider source control accounts. Used to detect the ambiguous
+        /// multi-account state in which no global default token may be returned.
+        /// </summary>
+        private int CountGitHubAccounts()
+        {
+            int count = 0;
+            foreach (var account in _accountService.GetAll())
+            {
+                if (IsGitHubAccount(account))
+                    count++;
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// True when an account is a github-provider account. A null provider is treated as
+        /// github (the historical default for legacy/migrated accounts).
+        /// </summary>
+        private static bool IsGitHubAccount(MultiTerminal.Models.SourceControlAccount account)
+        {
+            return account.Provider == null ||
+                account.Provider.Equals("github", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>

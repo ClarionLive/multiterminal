@@ -533,8 +533,12 @@ namespace MultiTerminal.Services
             // COALESCE preserves existing non-null values when the incoming project has nulls.
             // This prevents code paths that load from project.json (which lacks SQLite-only
             // fields like team_lead, icon, project_type, etc.) from wiping those values.
-            // EXCEPTION: source_control_account_id is NOT COALESCE-ed — a null there is a
-            // deliberate clear ("(None)"), so the parameter always wins (see note inline).
+            // source_control_account_id is ALSO COALESCE-ed: several callers re-save via the
+            // SaveProject -> SaveRichProject wrapper from a project.json that doesn't carry the
+            // binding (ProjectManagerDialog edit, ChangelogService task-done, VersioningService
+            // bump), so a null here must NOT erase the SQLite binding. The deliberate
+            // "(None)"/clear is applied out-of-band by ProjectDatabase.SetSourceControlAccount
+            // (EditProjectDialog) and UpdateProjectField (ProjectPanel), never via this UPSERT.
             const string sql = @"
                 INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at,
                        source_path, deploy_path, build_output_path, build_command, deploy_command,
@@ -569,12 +573,7 @@ namespace MultiTerminal.Services
                     git_auto_commit = @gitAutoCommit,
                     team_lead = COALESCE(@teamLead, projects.team_lead),
                     default_terminal = COALESCE(@defaultTerminal, projects.default_terminal),
-                    -- NOT COALESCE-ed: a null parameter is a deliberate None/clear intent
-                    -- (EditProjectDialog sets SourceControlAccountId=null), so the parameter
-                    -- (including DBNull) must always win. All callers either load the full
-                    -- Project via GetRichProject before saving (preserving the existing value)
-                    -- or are fresh INSERTs, so this can't wipe the field on unrelated saves.
-                    source_control_account_id = @sourceControlAccountId
+                    source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id)
             ";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -609,6 +608,29 @@ namespace MultiTerminal.Services
             command.Parameters.AddWithValue("@sourceControlAccountId", (object)project.SourceControlAccountId ?? DBNull.Value);
 
             command.ExecuteNonQuery();
+        }
+
+        /// <summary>
+        /// Sets (or clears) a project's source control account binding directly, out-of-band
+        /// from the COALESCE-ing SaveRichProject UPSERT. A null/empty accountId CLEARS the
+        /// binding ("(None)"). This is the only SaveRichProject-independent path that can erase
+        /// the binding, so a stale project.json re-save can never wipe it accidentally.
+        /// </summary>
+        /// <returns>True if a row was updated, false if the project was not found.</returns>
+        public bool SetSourceControlAccount(string projectId, string accountId)
+        {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return false;
+
+            using var command = new SQLiteCommand(
+                "UPDATE projects SET source_control_account_id = @accountId, updated_at = @updatedAt WHERE id = @id",
+                _connection);
+            command.Parameters.AddWithValue("@accountId",
+                string.IsNullOrEmpty(accountId) ? (object)DBNull.Value : accountId);
+            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+            command.Parameters.AddWithValue("@id", projectId);
+
+            return command.ExecuteNonQuery() > 0;
         }
 
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)

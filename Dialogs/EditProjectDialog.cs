@@ -516,6 +516,11 @@ namespace MultiTerminal.Dialogs
             if (ResultProject == null) BuildResultProject();
             _projectDb.SaveRichProject(ResultProject);
             string pid = ResultProject.Id;
+            // SaveRichProject COALESCEs source_control_account_id (so stale project.json re-saves
+            // can't wipe it), which means a "(None)" clear here would otherwise be ignored. Apply
+            // the binding — set OR clear — out-of-band via the dedicated setter so this dialog is
+            // the authoritative writer of the project's account selection.
+            _projectDb.SetSourceControlAccount(pid, ResultProject.SourceControlAccountId);
             SaveAgentsFromGrid(pid);
             SaveSpecialistsFromGrid(pid);
             SaveMcpFromGrid(pid);
