@@ -338,8 +338,8 @@
                             break;
 
                         case 'typeInput':
-                            // Character-by-character injection — mimics real keyboard typing.
-                            // Used by NudgeTerminal to inject [cm] trigger into Claude Code.
+                            // Character-by-character injection — mimics real keyboard typing
+                            // (e.g. the "initializing..." banner and prompt auto-answers).
                             // Format: "typeInput:delayMs:base64data"
                             // Each character is sent individually through the xterm input path
                             // with a configurable delay between keystrokes.

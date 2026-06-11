@@ -574,7 +574,7 @@ namespace MultiTerminal.Terminal
         /// <summary>
         /// Types text into the terminal character-by-character via xterm.js input path.
         /// Mimics real keyboard typing to avoid Claude Code's paste detection.
-        /// Used by NudgeTerminal to inject the [cm] trigger reliably.
+        /// Used for injecting text like the "initializing..." banner and prompt auto-answers.
         /// </summary>
         /// <param name="text">Text to type (without line ending - it will be appended)</param>
         /// <param name="lineEnding">Line ending to append: "cr" (\r), "lf" (\n), "crlf" (\r\n), "none"</param>

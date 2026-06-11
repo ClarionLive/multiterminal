@@ -22,7 +22,7 @@ namespace MultiTerminal.API.Controllers
 
         /// <summary>
         /// Get debug log entries with filtering and pagination.
-        /// Query params: ?count=50&offset=0&source=InboxMonitor&level=Info&search=nudge
+        /// Query params: ?count=50&offset=0&source=MessageBroker&level=Info&search=delivery
         /// </summary>
         [HttpGet("logs")]
         public IActionResult GetLogs(

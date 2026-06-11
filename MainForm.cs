@@ -89,7 +89,6 @@ namespace MultiTerminal
         private readonly Dictionary<string, AgentProcess> _agentProcessMap = new();
         private readonly Dictionary<string, (AgentPanelControl Control, Panel Slot, TerminalDocument Terminal)> _embeddedAgentMap = new();
         private TeamWatcherService _teamWatcher;
-        private InboxMonitorService _inboxMonitor;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
 #pragma warning restore CA2213
@@ -108,10 +107,6 @@ namespace MultiTerminal
 
         // Oracle — always-on advisory agent (no project, no coding)
         private OracleService _oracleService;
-
-        // Anti-reentrance: throttle nudges per terminal (5-second cooldown)
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _lastNudgeTime = new();
-        private static readonly TimeSpan NudgeThrottle = TimeSpan.FromSeconds(5);
 
         // Message injection queue to prevent focus race conditions
         private readonly Queue<(string messageId, string recipientId, string sender, string message, TaskCompletionSource<bool> completion)> _messageQueue = new();
@@ -657,9 +652,6 @@ namespace MultiTerminal
                 // Start native agent team watcher
                 InitializeTeamWatcher();
 
-                // Start inbox file monitor for nudging idle terminals
-                InitializeInboxMonitor();
-
                 // Initialize and start Oracle advisory agent (always-on, dockable/floatable)
                 InitializeOracle();
 
@@ -894,25 +886,11 @@ namespace MultiTerminal
             switch (e.Action)
             {
                 case "open":
-                    var newTab = targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
-                    if (newTab != null)
-                    {
-                        // Wire browser page messages to the inbox nudge pipeline so
-                        // the agent gets a [cm] notification when the page posts a message.
-                        var termName = terminal.Name;
-                        var tabTitle = e.Title ?? e.TabId;
-                        newTab.WebMessageReceived += (_, msg) =>
-                        {
-                            var content = $"[Browser Tab \"{tabTitle}\"] Page message: {msg.Data}";
-                            InboxFileWriter.WriteMessage(
-                                termName,
-                                Guid.NewGuid().ToString("N").Substring(0, 8),
-                                $"Browser:{tabTitle}",
-                                content);
-                            _debugLogService?.Info("MainForm",
-                                $"Browser message from tab '{tabTitle}' written to {termName} inbox");
-                        };
-                    }
+                    // Page messages are buffered in BrowserTabPage._receivedMessages and retrieved
+                    // on demand via get_browser_messages — no push wiring needed. (Previously every
+                    // page postMessage was written to the agent's inbox, which the now-removed
+                    // InboxMonitor turned into a [cm] nudge typed into the host terminal.)
+                    targetDoc.AddBrowserTab(e.TabId, e.Title, e.Url, e.HtmlContent, _currentTheme.IsDark);
                     break;
                 case "update":
                     targetDoc.SetBrowserContent(e.TabId, e.Title, e.Url, e.HtmlContent);
@@ -1420,12 +1398,19 @@ namespace MultiTerminal
                 }
             }
 
-            // FALLBACK: File-based delivery (legacy) — write to inbox file.
-            // Used when the recipient doesn't have a channel port (not launched with --channels).
+            // FALLBACK: File-based delivery (legacy) — write to inbox file. Used when the
+            // recipient has no channel port (not launched with --channels).
+            // BEST-EFFORT, not confirmed delivery: the [cm] nudge that used to wake an idle
+            // non-channel terminal was removed (the Claude Code Channel is the supported live
+            // path now), so nothing surfaces this file until that terminal next runs an
+            // inbox-reading hook (PostToolUse/Stop/UserPromptSubmit) — which may be never for a
+            // truly idle agent. We still persist + dedup it (so it isn't lost outright or
+            // double-appended), but log it as BUFFERED rather than SUCCESS so a message that is
+            // never surfaced stays visible in the logs instead of masquerading as delivered.
             bool fileDelivery = InboxFileWriter.WriteMessage(recipientName, messageId, sender, message);
             if (fileDelivery)
             {
-                _debugLogService.Info("MainForm", $"Inbox file delivery SUCCESS for message {messageId} to {recipientName}");
+                _debugLogService.Warning("MainForm", $"Message {messageId} to {recipientName} BUFFERED to inbox file (no channel port) — best-effort, NOT confirmed surfaced; an idle non-channel terminal may not read it until its next hook fires.");
                 lock (_deduplicationLock)
                 {
                     _deliveredMessageCache[messageId] = DateTime.Now;
@@ -5206,53 +5191,6 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Initialize the InboxMonitorService to detect new inbox files and nudge idle terminals.
-        /// When Claude Code is idle (waiting for user input), hooks don't fire and messages go
-        /// unread. This service watches for inbox file creation and injects a minimal prompt
-        /// into the target terminal, triggering the UserPromptSubmit hook which reads the inbox.
-        /// </summary>
-        private void InitializeInboxMonitor()
-        {
-            try
-            {
-                _inboxMonitor = new InboxMonitorService();
-                _inboxMonitor.DebugLogService = _debugLogService;
-
-                _inboxMonitor.InboxFileDetected += (s, terminalName) =>
-                {
-                    // Anti-reentrance: don't nudge if we nudged this terminal recently
-                    var now = DateTime.UtcNow;
-                    if (_lastNudgeTime.TryGetValue(terminalName, out var lastNudge))
-                    {
-                        if (now - lastNudge < NudgeThrottle)
-                        {
-                            _debugLogService?.Trace("MainForm",
-                                $"Inbox nudge throttled for {terminalName} (last nudge {(now - lastNudge).TotalSeconds:F1}s ago)");
-                            return;
-                        }
-                    }
-
-                    // Marshal to UI thread for dock panel access
-                    if (InvokeRequired)
-                    {
-                        BeginInvoke(new Action(() => NudgeTerminal(terminalName)));
-                    }
-                    else
-                    {
-                        NudgeTerminal(terminalName);
-                    }
-                };
-
-                _inboxMonitor.StartWatching();
-                _debugLogService?.Info("MainForm", "InboxMonitorService started");
-            }
-            catch (Exception ex)
-            {
-                _debugLogService?.Error("MainForm", $"Error initializing InboxMonitor: {ex.Message}");
-            }
-        }
-
-        /// <summary>
         /// Initialize and start the Oracle advisory agent.
         /// Oracle is always-on: launches with MultiTerminal in a dockable/floatable terminal,
         /// auto-restarts on crash, only shuts down when MT closes. Her dock/float position is
@@ -5319,58 +5257,6 @@ namespace MultiTerminal
 
         // Oracle terminal management removed — OracleService now owns the terminal
         // via OracleTerminalForm (always-on, hidden popup, auto-restart)
-
-        /// <summary>
-        /// Inject a nudge prompt into a terminal's ConPTY input to wake it up.
-        /// This triggers the UserPromptSubmit hook which runs inbox-check-hook.js.
-        /// </summary>
-        private void NudgeTerminal(string terminalName)
-        {
-            try
-            {
-                // Find the terminal document by name using _terminalDocMap (more reliable than
-                // _dockPanel.Documents which can miss terminals that are mid-turn/busy)
-                TerminalDocument targetTerminal = null;
-                lock (_terminalDocMapLock)
-                {
-                    targetTerminal = _terminalDocMap.Values.FirstOrDefault(t =>
-                        (t.CustomTitle?.Equals(terminalName, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        t.TabText.Equals(terminalName, StringComparison.OrdinalIgnoreCase));
-                }
-
-                if (targetTerminal == null)
-                {
-                    _debugLogService?.Warning("MainForm", $"No terminal found for inbox nudge: {terminalName}");
-                    return;
-                }
-
-                if (!targetTerminal.IsRendererReady)
-                {
-                    _debugLogService?.Warning("MainForm", $"Terminal renderer not ready for nudge: {terminalName}");
-                    return;
-                }
-
-                // Record nudge time for anti-reentrance
-                _lastNudgeTime[terminalName] = DateTime.UtcNow;
-
-                // Char-by-char injection via xterm.js input path.
-                // Sends [cm] + CR as individual characters with 15ms delay to mimic typing.
-                // Claude sees this as user input and the UserPromptSubmit hook fires.
-                // This is more reliable than the old InjectInputAsync approach which used
-                // separate pipe write (text) + xterm.js Enter (submission) — the two-channel
-                // approach had timing issues where Enter could fail to fire.
-                _debugLogService?.Info("MainForm", $"Nudging terminal {terminalName} (char-by-char, 15ms)");
-
-                targetTerminal.TypeInput("[cm]", "cr", 20);
-
-                _debugLogService?.Info("MainForm", $"Nudge fired on {terminalName}");
-            }
-            catch (Exception ex)
-            {
-                _debugLogService?.Error("MainForm", $"Error nudging terminal {terminalName}: {ex.Message}");
-            }
-        }
-
 
         private void CleanupTeamPanels(string teamName, List<string> memberNames = null, List<string> transcriptPaths = null)
         {
@@ -6004,7 +5890,6 @@ namespace MultiTerminal
                 _sessionSyncTimer?.Stop();
                 _sessionSyncTimer?.Dispose();
                 _teamWatcher?.Dispose();
-                _inboxMonitor?.Dispose();
                 _sessionIndexingService?.Dispose();
                 _chatTaskDatabase?.Dispose();
                 _sharedProjectDatabase?.Dispose();
