@@ -263,6 +263,9 @@ namespace MultiTerminal.Docking
             // Fetch team lead options once and send to dropdown (reused after stats re-render)
             var teamLeadProfiles = SendTeamLeadOptions();
 
+            // Fetch source control account options once and send to Git-section dropdown
+            var sourceAccountOptions = SendSourceAccountOptions();
+
             // Send available agents for picker popup (reused after stats re-render)
             var availableAgents = SendAvailableAgents();
 
@@ -292,6 +295,10 @@ namespace MultiTerminal.Docking
             // Re-send cached team lead options (stats re-render clears the dropdown options)
             if (teamLeadProfiles != null)
                 _renderer?.SendTeamLeadOptions(teamLeadProfiles);
+
+            // Re-send cached source control account options (stats re-render clears the dropdown)
+            if (sourceAccountOptions != null)
+                _renderer?.SendSourceAccountOptions(sourceAccountOptions);
 
             // Re-send available agents (stats re-render clears the cached data)
             if (availableAgents != null)
@@ -402,6 +409,32 @@ namespace MultiTerminal.Docking
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendTeamLeadOptions error: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Fetches the configured source control accounts and sends them to the panel's
+        /// Git-section dropdown. Returns the fetched options so the caller can re-send them
+        /// after a stats re-render without re-querying. Returns null if unavailable.
+        /// Reuses the ProjectDatabase connection (same multiterminal.db file as
+        /// source_control_accounts) rather than opening a second connection.
+        /// </summary>
+        private List<(string Id, string DisplayName)> SendSourceAccountOptions()
+        {
+            if (_renderer == null || _projectDatabase?.Connection == null) return null;
+            try
+            {
+                var service = new SourceControlAccountService(_projectDatabase.Connection);
+                var options = new List<(string Id, string DisplayName)>();
+                foreach (var account in service.GetAll())
+                    options.Add((account.Id, account.DisplayName));
+                _renderer.SendSourceAccountOptions(options);
+                return options;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendSourceAccountOptions error: {ex.Message}");
                 return null;
             }
         }
@@ -596,6 +629,7 @@ namespace MultiTerminal.Docking
                 case "gitRepoUrl": _currentProject.GitRepoUrl = value; break;
                 case "gitDefaultBranch": _currentProject.GitDefaultBranch = value; break;
                 case "gitAutoCommit": _currentProject.GitAutoCommit = value == "true" || value == "1"; break;
+                case "sourceControlAccountId": _currentProject.SourceControlAccountId = value; break;
                 case "changeLog": _currentProject.ChangeLog = value; break;
                 case "teamLead": _currentProject.TeamLead = value; break;
                 case "createdBy": _currentProject.CreatedBy = value; break;

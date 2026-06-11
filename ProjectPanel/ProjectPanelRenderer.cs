@@ -388,6 +388,7 @@ namespace MultiTerminal.ProjectPanel
             sb.Append($"\"gitRepoUrl\":\"{EscapeJson(project.GitRepoUrl ?? "")}\",");
             sb.Append($"\"gitDefaultBranch\":\"{EscapeJson(project.GitDefaultBranch ?? "")}\",");
             sb.Append($"\"gitAutoCommit\":{(project.GitAutoCommit ? "true" : "false")},");
+            sb.Append($"\"sourceControlAccountId\":\"{EscapeJson(project.SourceControlAccountId ?? "")}\",");
 
             // Team lead
             sb.Append($"\"teamLead\":\"{EscapeJson(project.TeamLead ?? "")}\",");
@@ -716,6 +717,27 @@ namespace MultiTerminal.ProjectPanel
             }
             sb.Append("]");
             SendMessage($"teamLeadOptions:{sb}");
+        }
+
+        /// <summary>
+        /// Send source control account options to the WebView2 Git-section dropdown.
+        /// Sends "sourceAccountOptions:[{\"id\":\"a1b2c3d4\",\"displayName\":\"GitHub\"},...]"
+        /// </summary>
+        public void SendSourceAccountOptions(List<(string Id, string DisplayName)> options)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[");
+            for (int i = 0; i < options.Count; i++)
+            {
+                var o = options[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"id\":\"{EscapeJson(o.Id ?? "")}\",");
+                sb.Append($"\"displayName\":\"{EscapeJson(o.DisplayName ?? "")}\"");
+                sb.Append("}");
+            }
+            sb.Append("]");
+            SendMessage($"sourceAccountOptions:{sb}");
         }
 
         /// <summary>

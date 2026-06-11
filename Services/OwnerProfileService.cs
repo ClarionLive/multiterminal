@@ -81,6 +81,20 @@ namespace MultiTerminal.Services
                 && !string.IsNullOrWhiteSpace(profile.Email);
         }
 
+        /// <summary>
+        /// Clears the legacy github_username field on the owner profile.
+        /// Used by the one-time migration to the multi-account source control store;
+        /// the GitHub identity now lives in source_control_accounts instead.
+        /// </summary>
+        public void ClearGitHubUsername()
+        {
+            using var cmd = new SQLiteCommand(
+                "UPDATE owner_profile SET github_username = NULL, updated_at = @now WHERE id = 'owner'",
+                _connection);
+            cmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("o"));
+            cmd.ExecuteNonQuery();
+        }
+
         #region GitHub Token — Windows Credential Manager
 
         /// <summary>

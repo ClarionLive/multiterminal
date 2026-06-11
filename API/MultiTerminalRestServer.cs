@@ -150,6 +150,9 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(sp =>
                     new MultiTerminal.Services.OwnerProfileService(
                         sp.GetRequiredService<TaskDatabase>().Connection));
+                builder.Services.AddSingleton(sp =>
+                    new MultiTerminal.Services.SourceControlAccountService(
+                        sp.GetRequiredService<TaskDatabase>().Connection));
                 // Pipeline Run 5 finding (Codex security HIGH): the DI factory
                 // previously constructed a SECOND BranchMetadataService instance
                 // separate from the one MainForm wires onto broker.BranchMetadata

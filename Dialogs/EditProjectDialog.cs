@@ -60,6 +60,7 @@ namespace MultiTerminal.Dialogs
         private TextBox gitRepoUrlTextBox;
         private TextBox gitDefaultBranchTextBox;
         private CheckBox gitAutoCommitCheckBox;
+        private ComboBox sourceControlAccountComboBox;
 
         // Tab 4 - Agents
         private DataGridView agentsGridView;
@@ -235,8 +236,26 @@ namespace MultiTerminal.Dialogs
             gitRepoUrlTextBox.Text = project.GitRepoUrl ?? string.Empty;
             gitDefaultBranchTextBox.Text = project.GitDefaultBranch ?? string.Empty;
             gitAutoCommitCheckBox.Checked = project.GitAutoCommit;
+            SelectSourceControlAccount(project.SourceControlAccountId);
             int typeIdx = projectTypeComboBox.FindStringExact(project.ProjectType ?? string.Empty);
             projectTypeComboBox.SelectedIndex = typeIdx >= 0 ? typeIdx : 0;
+        }
+
+        /// <summary>
+        /// Selects the combo item whose account id matches, falling back to "(None)".
+        /// </summary>
+        private void SelectSourceControlAccount(string accountId)
+        {
+            for (int i = 0; i < sourceControlAccountComboBox.Items.Count; i++)
+            {
+                if (sourceControlAccountComboBox.Items[i] is SourceAccountItem item &&
+                    string.Equals(item.Id, accountId, StringComparison.OrdinalIgnoreCase))
+                {
+                    sourceControlAccountComboBox.SelectedIndex = i;
+                    return;
+                }
+            }
+            sourceControlAccountComboBox.SelectedIndex = 0; // (None)
         }
 
         private void PopulateAgentsGrid(List<ProjectAgent> agents)
@@ -479,6 +498,8 @@ namespace MultiTerminal.Dialogs
                 _workingProject.GitRepoUrl = NullIfEmpty(gitRepoUrlTextBox.Text.Trim());
                 _workingProject.GitDefaultBranch = NullIfEmpty(gitDefaultBranchTextBox.Text.Trim());
                 _workingProject.GitAutoCommit = gitAutoCommitCheckBox.Checked;
+                _workingProject.SourceControlAccountId =
+                    (sourceControlAccountComboBox.SelectedItem as SourceAccountItem)?.Id;
             }
 
             // Tabs 3-5 (Agents, MCP & Skills, Prompts) use DataGridViews which
@@ -931,12 +952,71 @@ namespace MultiTerminal.Dialogs
                 Text = "Auto-commit after milestones",
                 Name = "gitAutoCommitCheckBox"
             };
+            y += rh + 4;
+
+            var l3 = MkLbl("Source Account:", lx, y);
+            this.sourceControlAccountComboBox = new ComboBox
+            {
+                Location = new Point(fx, y),
+                Size = new Size(300, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Name = "sourceControlAccountComboBox"
+            };
+            PopulateSourceControlAccounts();
 
             tab.Controls.AddRange(new Control[] {
                 l1, this.gitRepoUrlTextBox,
                 l2, this.gitDefaultBranchTextBox,
-                this.gitAutoCommitCheckBox
+                this.gitAutoCommitCheckBox,
+                l3, this.sourceControlAccountComboBox
             });
+        }
+
+        /// <summary>
+        /// Fills the Source Account combo with a leading "(None)" sentinel followed by all
+        /// configured source control accounts. Reuses the ProjectDatabase connection (same
+        /// multiterminal.db file) so no second connection is opened. In legacy mode
+        /// (_projectDb == null) only the "(None)" option is shown.
+        /// </summary>
+        private void PopulateSourceControlAccounts()
+        {
+            this.sourceControlAccountComboBox.Items.Clear();
+            this.sourceControlAccountComboBox.Items.Add(SourceAccountItem.None);
+
+            if (_projectDb?.Connection == null) return;
+
+            try
+            {
+                var service = new SourceControlAccountService(_projectDb.Connection);
+                foreach (var account in service.GetAll())
+                    this.sourceControlAccountComboBox.Items.Add(new SourceAccountItem(account.Id, account.DisplayName));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[EditProjectDialog] Failed to load source control accounts: {ex.Message}");
+            }
+
+            this.sourceControlAccountComboBox.SelectedIndex = 0;
+        }
+
+        /// <summary>
+        /// Combo item wrapping a source control account id + label. ToString() drives the
+        /// display text; the "(None)" sentinel carries a null id meaning "no account assigned".
+        /// </summary>
+        private sealed class SourceAccountItem
+        {
+            public static readonly SourceAccountItem None = new SourceAccountItem(null, "(None)");
+
+            public string Id { get; }
+            private readonly string _label;
+
+            public SourceAccountItem(string id, string label)
+            {
+                Id = id;
+                _label = string.IsNullOrWhiteSpace(label) ? id : label;
+            }
+
+            public override string ToString() => _label;
         }
 
         private void BuildAgentsTab(TabPage tab)

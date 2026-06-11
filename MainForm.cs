@@ -296,6 +296,10 @@ namespace MultiTerminal
             _sourceControlAccountService = new SourceControlAccountService(_chatTaskDatabase.Connection);
             System.Diagnostics.Trace.WriteLine("[MainForm] TaskDatabase created successfully");
 
+            // One-time migration: seed the legacy single GitHub account into the new
+            // multi-account store. Idempotent + wrapped in try/catch so it never blocks startup.
+            MigrateLegacyGitHubAccount();
+
             // Shared project database for the start screen (one connection, shared across all terminals)
             _sharedProjectDatabase = new Services.ProjectDatabase();
 
@@ -353,6 +357,57 @@ namespace MultiTerminal
             _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
             _filePreviewPanel.DebugLogService = _debugLogService;
 
+        }
+
+        /// <summary>
+        /// One-time, idempotent migration of the legacy single GitHub credential
+        /// (owner_profile.github_username + the MultiTerminal:GitHubToken secret) into the
+        /// new multi-account source_control_accounts store. Runs on every startup but is a
+        /// no-op once any account exists. Wrapped in try/catch so a hiccup never blocks startup.
+        /// </summary>
+        private void MigrateLegacyGitHubAccount()
+        {
+            try
+            {
+                // Idempotency: if any account already exists, the migration has run (or the
+                // user is already managing accounts) — never touch the legacy fields again.
+                if (_sourceControlAccountService.GetAll().Count > 0)
+                    return;
+
+                var profile = _ownerProfileService.GetProfile();
+                if (profile == null || !profile.HasGitHubToken)
+                    return;
+
+                string token = _ownerProfileService.GetGitHubToken();
+                if (string.IsNullOrEmpty(token))
+                    return; // has_github_token flag set but secret missing — nothing to migrate.
+
+                string displayName = string.IsNullOrWhiteSpace(profile.GitHubUsername)
+                    ? "GitHub"
+                    : profile.GitHubUsername;
+
+                var account = _sourceControlAccountService.Add(new SourceControlAccount
+                {
+                    DisplayName = displayName,
+                    Provider = "github",
+                    Username = profile.GitHubUsername,
+                });
+
+                if (_sourceControlAccountService.SaveToken(account.Id, token))
+                {
+                    // Only clear the legacy credential once the token is safely re-stored
+                    // under MultiTerminal:SourceAccount:<id>, so a failure can't lose the token.
+                    _ownerProfileService.RemoveGitHubToken();
+                    _ownerProfileService.ClearGitHubUsername();
+                    _debugLogService?.Info("MainForm",
+                        $"Migrated legacy GitHub account '{displayName}' to source_control_accounts ({account.Id}).");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[MainForm] Legacy GitHub account migration failed: {ex.Message}");
+                _debugLogService?.Info("MainForm", $"Legacy GitHub account migration failed: {ex.Message}");
+            }
         }
 
         private void InitializeMcpServerAndChatPanel()

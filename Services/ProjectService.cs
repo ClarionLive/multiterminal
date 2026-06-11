@@ -477,6 +477,7 @@ namespace MultiTerminal.Services
             sb.AppendLine($"  \"lastOpenedAt\": {JsonEscape(project.LastOpenedAt.ToString("o"))},");
             sb.AppendLine($"  \"isPinned\": {(project.IsPinned ? "true" : "false")},");
             sb.AppendLine($"  \"defaultTerminal\": {JsonEscape(TerminalKindHelper.Normalize(project.DefaultTerminal))},");
+            sb.AppendLine($"  \"sourceControlAccountId\": {JsonEscape(project.SourceControlAccountId)},");
             sb.AppendLine("  \"prompts\": [");
 
             for (int i = 0; i < project.Prompts.Count; i++)
@@ -607,6 +608,9 @@ namespace MultiTerminal.Services
                             break;
                         case "defaultterminal":
                             project.DefaultTerminal = TerminalKindHelper.Normalize(ParseJsonString(json, ref pos));
+                            break;
+                        case "sourcecontrolaccountid":
+                            project.SourceControlAccountId = ParseJsonString(json, ref pos);
                             break;
                         case "prompts":
                             project.Prompts = ParsePromptsArray(json, ref pos);

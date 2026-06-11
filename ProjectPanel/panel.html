@@ -1497,6 +1497,7 @@
     <script>
         let currentData = null;
         let cachedTeamLeadOptions = [];
+        let cachedSourceAccountOptions = [];
 
         // Send message to C# host
         function sendToHost(message) {
@@ -1766,6 +1767,12 @@
                                 <span class="toggle-track"></span>
                                 <span class="toggle-label">${project.gitAutoCommit ? 'On' : 'Off'}</span>
                             </label>
+                        </div>
+                        <div class="git-row">
+                            <span class="git-label">Source Account</span>
+                            <select class="edit-select" data-field="sourceControlAccountId" onchange="saveSelectField(this)">
+                                <option value="">-- None --</option>
+                            </select>
                         </div>
                     </div></div>
             `;
@@ -2644,6 +2651,22 @@
             }
         }
 
+        // Re-apply cached source control account options to the dropdown (survives re-renders)
+        function applySourceAccountOptions() {
+            const select = document.querySelector('[data-field="sourceControlAccountId"]');
+            if (!select) return;
+            while (select.options.length > 1) select.remove(1);
+            cachedSourceAccountOptions.forEach(opt => {
+                const o = document.createElement('option');
+                o.value = opt.id;
+                o.textContent = opt.displayName;
+                select.add(o);
+            });
+            if (currentData && currentData.sourceControlAccountId) {
+                select.value = currentData.sourceControlAccountId;
+            }
+        }
+
         // ============================================================
         // ASSOCIATION PICKER POPUP
         // ============================================================
@@ -3427,6 +3450,11 @@
                         case 'teamLeadOptions': {
                             cachedTeamLeadOptions = JSON.parse(data);
                             applyTeamLeadOptions();
+                            break;
+                        }
+                        case 'sourceAccountOptions': {
+                            cachedSourceAccountOptions = JSON.parse(data);
+                            applySourceAccountOptions();
                             break;
                         }
                         case 'availableAgents': {

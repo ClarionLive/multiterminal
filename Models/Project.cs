@@ -146,6 +146,12 @@ namespace MultiTerminal.Models
         /// </summary>
         public bool GitAutoCommit { get; set; }
 
+        /// <summary>
+        /// Id of the assigned source control account (source_control_accounts.id) used to
+        /// resolve credentials + identity for push/publish operations. Null = no account assigned.
+        /// </summary>
+        public string SourceControlAccountId { get; set; }
+
         // ── Legacy collections (loaded from .claude/project.json) ─────────────
 
         /// <summary>
