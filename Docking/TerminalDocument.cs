@@ -421,30 +421,28 @@ namespace MultiTerminal.Docking
                     _statusBar.SetRemoteMode(_messageBroker.IsRemoteMode);
                 }
 
-                // Force the statusline (folder + model/git/context rows) to be
-                // re-delivered now that the WebView is confirmed ready. Rows 2-3
-                // start hidden and only un-hide when a `statusline:` message is
-                // processed. Unlike Row 1 above, they have no direct re-push on
-                // ready — they depend on the poll timer hitting the renderer's
-                // single-shot _pendingStatusLineJson slot at the right moment
-                // relative to the WebView's async ready. When ready fires before
-                // the first poll tick, the pending slot is empty and the cached
-                // content then suppresses redelivery of the unchanged fallback,
-                // so rows 2-3 never arrive (~50% of launches). Clearing the
-                // change-detection cache makes the next poll tick re-deliver to
-                // the ready WebView.
+                // Re-deliver the statusline (folder + model/git/context rows) now that the WebView is
+                // confirmed ready. Rows 2-3 start hidden and only un-hide when a `statusline:` message
+                // is processed. The renderer now REPLAYS its last-known statusline on ready and the
+                // poll re-delivers until JS acks the render (task d14048ef), so this is belt-and-
+                // suspenders: clear the change-detection cache so the next tick re-delivers, then make
+                // sure a tick actually happens.
                 _lastStatusLineContent = null;
                 _lastSharedQuotaContent = null;
 
-                // Don't wait up to ~2s for the next scheduled poll tick: fire one
-                // immediately so the just-ready WebView gets the statusline right
-                // away. Reuses the timer's existing read+parse+deliver path (no
-                // duplication) and is idempotent. If polling hasn't started yet
-                // (_statusLineTimer null) or is being torn down, this no-ops and
-                // the cache-clear above still makes the first/next real tick
-                // deliver. Guarded because Change() throws if the timer raced a
-                // Dispose during teardown.
-                try { _statusLineTimer?.Change(0, 2000); } catch { /* timer disposed during teardown */ }
+                // Fire a poll immediately rather than waiting up to ~2s. If the timer was never
+                // started — Ready beat the CustomTitle setter that starts polling, a real ordering on
+                // fresh launches that left the old code's Change() a no-op (the timer-null gap behind
+                // the random missing bands) — start it now. Guarded because Change() throws if the
+                // timer raced a Dispose during teardown.
+                if (_statusLineTimer != null)
+                {
+                    try { _statusLineTimer.Change(0, 2000); } catch { /* timer disposed during teardown */ }
+                }
+                else if (!string.IsNullOrEmpty(CustomTitle))
+                {
+                    StartStatusLinePolling();
+                }
             };
             _statusBar.HomeRequested += (s, e) => ReturnToStartScreen();
             _statusBar.OpenFolderRequested += OnOpenFolderRequested;
@@ -2811,7 +2809,15 @@ namespace MultiTerminal.Docking
                     bool perTerminalChanged = content != _lastStatusLineContent;
                     bool sharedQuotaChanged = sharedContent != null && sharedContent != _lastSharedQuotaContent;
 
-                    if (!perTerminalChanged && !sharedQuotaChanged) return;
+                    // Keep delivering even when content is unchanged until the renderer confirms it
+                    // actually un-hid rows 2-3 (task d14048ef). A delivery that raced the WebView's
+                    // async ready would otherwise be suppressed by change-detection forever, leaving
+                    // the folder + stats bands hidden. Once JS acks (IsStatusLineRendered flips true),
+                    // normal change-detection resumes.
+                    bool awaitingRender = _statusBar != null && _statusBar.IsInitialized && !_statusBar.IsStatusLineRendered;
+                    if (!perTerminalChanged && !sharedQuotaChanged && !awaitingRender) return;
+
+                    _debugLogService?.Trace("TerminalDocument", $"statusline poll delivering (changed={perTerminalChanged}, quotaChanged={sharedQuotaChanged}, awaitingRender={awaitingRender})");
 
                     // Only cache content AFTER successfully delivering to UI thread.
                     // Otherwise, if IsHandleCreated is false on first read, the content
@@ -2826,13 +2832,24 @@ namespace MultiTerminal.Docking
 
                     // If statusline reports the home directory but we have a real project path, use that instead.
                     // Claude Code's first statusline event can report the shell's cwd before navigating to the project.
-                    string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                    if (!string.IsNullOrEmpty(_startingWorkingDirectory) &&
-                        !string.IsNullOrEmpty(folder) &&
-                        string.Equals(folder.TrimEnd('\\', '/'), homeDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                    // (Outer guard: only worth the home-dir env lookup when both folder and the starting dir exist.)
+                    if (!string.IsNullOrEmpty(folder) && !string.IsNullOrEmpty(_startingWorkingDirectory))
+                    {
+                        string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                        if (string.Equals(folder.TrimEnd('\\', '/'), homeDir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                        {
+                            folder = _startingWorkingDirectory;
+                        }
+                    }
+
+                    // Folder fallback (task d14048ef, gap #4): the JS leaves row-folder hidden when
+                    // `folder` is empty. If the statusline carries no folder yet, use the known
+                    // starting working directory so the path band still renders instead of vanishing.
+                    if (string.IsNullOrWhiteSpace(folder) && !string.IsNullOrEmpty(_startingWorkingDirectory))
                     {
                         folder = _startingWorkingDirectory;
                     }
+
                     int? contextPct = root.TryGetProperty("contextPct", out var cp) && cp.ValueKind == JsonValueKind.Number
                         ? cp.GetInt32() : (int?)null;
                     // Token meter (task f2702f69): sessionId + transcriptPath locate this terminal's
@@ -3039,7 +3056,12 @@ namespace MultiTerminal.Docking
                         }
                     }));
 
-                    _lastStatusLineContent = content;
+                    // Advance the change-detection cache ONLY on a genuine content change — never as a
+                    // side effect of an awaitingRender-only re-delivery. Caching unconfirmed content here
+                    // (set on the timer thread right after the queue-only BeginInvoke) is what let a
+                    // raced/stale ack leave change-detection satisfied while the rows were still hidden,
+                    // suppressing recovery (pipeline Run-1 debugger HIGH-2).
+                    if (perTerminalChanged) _lastStatusLineContent = content;
                 }
                 catch
                 {

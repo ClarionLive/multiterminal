@@ -693,19 +693,22 @@
             else indicatorEl.style.background = '#6b7280';
         }
 
-        // Update status line (Rows 2 & 3)
-        function updateStatusLine(data) {
+        // Update status line (Rows 2 & 3). `seq` is the C# send id, echoed back in the ack so C# only
+        // honors the ack for the latest delivery (task d14048ef).
+        function updateStatusLine(data, seq) {
             var model = data.model;
             var folder = data.folder;
             var contextPct = data.contextPct;
 
             // Row 2: Folder path
+            var folderShown = false;
             if (folder) {
                 var folderPathEl = document.getElementById('folder-path');
                 folderPathEl.textContent = folder;
                 folderPathEl.title = folder;
                 folderPathEl.setAttribute('data-path', folder);
                 document.getElementById('row-folder').classList.remove('hidden');
+                folderShown = true;
             }
 
             // Row 3: Status line
@@ -720,6 +723,12 @@
 
             // Quota pacing + reset timer
             updateQuotaPacing(data.quota5h, data.quota7d, data.pace5h, data.pace7d, data.resetIn5h);
+
+            // Per-band ack back to C#: report whether the FOLDER row actually un-hid (the stats row
+            // always does) and echo the send `seq` so C# only honors this ack for the latest delivery.
+            // C# keeps re-pushing while a folder it sent isn't shown yet, so an empty-folder delivery
+            // can't falsely satisfy the loop and leave the folder band hidden (task d14048ef).
+            postMessage('statuslineRendered', { folderShown: folderShown, seq: seq });
         }
 
         // Token meter (task f2702f69): cumulative tokens, est. cost, burn rate.
@@ -899,7 +908,12 @@
                     } else if (data.startsWith('update:')) {
                         updateStatus(JSON.parse(data.substring(7)));
                     } else if (data.startsWith('statusline:')) {
-                        updateStatusLine(JSON.parse(data.substring(11)));
+                        // Wire format: "statusline:{seq}:{json}". Split on the first ':' after the prefix
+                        // (the seq is digits, the payload is a JSON object starting with '{').
+                        var slRest = data.substring(11);
+                        var slColon = slRest.indexOf(':');
+                        var slSeq = parseInt(slRest.substring(0, slColon), 10);
+                        updateStatusLine(JSON.parse(slRest.substring(slColon + 1)), slSeq);
                     } else if (data.startsWith('tokenmeter:')) {
                         updateTokenMeter(JSON.parse(data.substring(11)));
                     } else if (data.startsWith('hudState:')) {
