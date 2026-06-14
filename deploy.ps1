@@ -119,10 +119,15 @@ if ($mtRunning) {
     exit 1
 }
 
-# Remove old deployment (preserve .claude folder)
+# Remove old deployment (preserve .claude folder + the gitignored local config
+# override). appsettings.Local.json holds the phone-gateway secrets (auth creds,
+# NotificationSecret, PermissionRelay ApiKey) and is NOT a build artifact, so it
+# never exists in the staged folder. Wiping it here without re-copying would
+# silently revert login to the committed changeme/changeme defaults and lock the
+# gateway out (task ca6c5344 item [11]). Preserve it across the wipe.
 if (Test-Path $dest) {
-    Write-Host "Removing old deployment (preserving .claude folder)..." -ForegroundColor Yellow
-    Get-ChildItem $dest -Exclude ".claude" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Removing old deployment (preserving .claude folder + appsettings.Local.json)..." -ForegroundColor Yellow
+    Get-ChildItem $dest -Exclude ".claude", "appsettings.Local.json" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Copy new files
