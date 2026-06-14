@@ -3965,9 +3965,55 @@ namespace MultiTerminal
         }
 
         private bool _sessionSaveCompleted;
+        private bool _exitConfirmDialogOpen;
 
         private async void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            // Confirm a genuine user-initiated close (title-bar X, Alt+F4, or the window's
+            // system-menu Close \u2014 all reported as CloseReason.UserClosing) so an accidental
+            // click doesn't quit the app. UserClosing also keeps OS shutdown / Task Manager
+            // (which we can't reliably block) from getting a confirmation dialog.
+            //
+            // Two guards:
+            //  - _sessionSaveCompleted: the session-save path below cancels and re-triggers
+            //    Close() internally; that second pass must not prompt again.
+            //  - _exitConfirmDialogOpen: the modal MessageBox runs a nested message pump, so
+            //    a second close gesture (double-click the X, taskbar Close, Alt+F4) can
+            //    re-enter this handler while the dialog is still up. Swallow that re-entrant
+            //    close so we don't stack a second dialog or race the teardown.
+            if (e.CloseReason == CloseReason.UserClosing && !_sessionSaveCompleted)
+            {
+                if (_exitConfirmDialogOpen)
+                {
+                    // A confirmation is already showing \u2014 ignore this duplicate close request.
+                    e.Cancel = true;
+                    return;
+                }
+
+                DialogResult confirm;
+                _exitConfirmDialogOpen = true;
+                try
+                {
+                    confirm = MessageBox.Show(
+                        this,
+                        "Are you sure you want to exit MultiTerminal?",
+                        "Exit MultiTerminal",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question,
+                        MessageBoxDefaultButton.Button2); // default to No \u2014 accidental Enter won't exit
+                }
+                finally
+                {
+                    _exitConfirmDialogOpen = false;
+                }
+
+                if (confirm != DialogResult.Yes)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+            }
+
             // Stop the worktree janitor before any other shutdown work \u2014 its
             // timer thread should not fire mid-shutdown.
             try { _worktreeJanitorTimer?.Dispose(); _worktreeJanitorTimer = null; }
