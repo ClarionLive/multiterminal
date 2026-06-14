@@ -420,7 +420,9 @@
             <TabItem Header="General" Style="{StaticResource DarkTabItem}">
 
         <!-- Two-column form content (scrollable so all sections are reachable at any window height) -->
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,4,0">
+        <!-- Padding right=18 reserves the vertical scrollbar's width so it doesn't clip the right column.
+             Pipeline/Codex tabs don't need this: their inner StackPanel's Margin=16 already provides the gutter. -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,18,0">
         <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -638,10 +640,13 @@
                           Margin="0,0,0,10">
                     <StackPanel Margin="4,8,4,4">
 
+                        <!-- PreviewMouseWheel forwards the wheel to the outer ScrollViewer so the
+                                  inner DataGrid doesn't trap it and block scrolling to the sections below. -->
                         <DataGrid x:Name="CommandsGrid"
                                   Style="{StaticResource DarkDataGrid}"
                                   Height="150"
-                                  Margin="0,0,0,8">
+                                  Margin="0,0,0,8"
+                                  PreviewMouseWheel="CommandsGrid_PreviewMouseWheel">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Command"
                                                     Binding="{Binding Command}"
