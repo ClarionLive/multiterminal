@@ -21,10 +21,29 @@ namespace MultiTerminal.Controls
         private bool _isInitialized;
         private bool _isInitializing;
         private bool _isDarkTheme = true;
-        private string _pendingUpdateJson;
-        private string _pendingStatusLineJson;
-        private string _pendingTokenMeterJson;
-        private bool? _pendingRemoteMode;
+        // Last-known payloads — NOT single-shot. Stored on every Update* call and REPLAYED on every
+        // WebView 'ready'. A renderer that becomes ready after the data was pushed (or re-navigates)
+        // still gets the latest state, instead of losing it from a one-shot pending slot. This is the
+        // core fix for rows 2-3 (folder + stats) randomly failing to render (task d14048ef).
+        private string _lastUpdateJson;
+        private string _lastStatusLineJson;
+        private string _lastTokenMeterJson;
+        private bool? _lastRemoteMode;
+        // Set true when JS confirms (acks) it actually rendered the statusline rows. Lets the poll keep
+        // re-pushing until confirmed, so a raced/dropped delivery self-heals. NOT a bounded retry — it
+        // converges on the ack; absent an ack it costs one idempotent 2s re-push (cheap). The ack is
+        // per-band (see _lastStatusLineFolderNonEmpty): a delivery that carried a folder is only
+        // considered rendered once JS reports the folder row actually un-hid, so an empty-folder
+        // delivery can't falsely satisfy the loop while the folder band stays hidden (pipeline Run-1
+        // HIGH, debugger + cross-model adversary).
+        private volatile bool _statusLineRendered;
+        // Whether the last statusline we sent carried a non-empty folder — gates the per-band ack.
+        private volatile bool _lastStatusLineFolderNonEmpty;
+        // Monotonic id stamped on each statusline send; the ack must echo the LATEST id to be honored,
+        // so a delayed ack from an older (or failed/raced) send can't satisfy a newer one and strand it
+        // (pipeline Run-3 cross-model HIGH). Written + read on the UI thread (send + ack handler).
+        private int _statusLineSeq;
+        private int _expectedAckSeq = -1;
         private DebugLogService _debugLogService;
 
         /// <summary>
@@ -52,6 +71,14 @@ namespace MultiTerminal.Controls
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
+
+        /// <summary>
+        /// True once JS has acknowledged it un-hid the statusline rows (2-3). The status-line poll
+        /// uses this to keep re-delivering until the render is confirmed (task d14048ef), so a
+        /// delivery that raced the WebView's async ready doesn't leave the bands permanently hidden.
+        /// Reset on each WebView 'ready' (a fresh page starts with the rows hidden again).
+        /// </summary>
+        public bool IsStatusLineRendered => _statusLineRendered;
 
         /// <summary>
         /// Sets the debug log service for logging.
@@ -105,6 +132,7 @@ namespace MultiTerminal.Controls
 
                 _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
                 _webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
+                _webView.CoreWebView2.NavigationStarting += OnNavigationStarting;
 
                 string htmlPath = GetStatusBarHtmlPath();
                 if (File.Exists(htmlPath))
@@ -155,6 +183,46 @@ namespace MultiTerminal.Controls
             Controls.Add(errorLabel);
         }
 
+        private void OnNavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
+        {
+            // Any (re)navigation invalidates the rendered page. Drop to not-initialized so the new page
+            // re-enters the replay-on-ready path, and clear the rendered ack so the poll re-delivers once
+            // the new page is ready. Without this, a mid-session reload/nav-failure that never posts a
+            // fresh 'ready' would leave stale _isInitialized/_statusLineRendered == true and change-
+            // detection would suppress recovery (pipeline Run-1: debugger HIGH-2 + adversary MEDIUM).
+            _isInitialized = false;
+            _statusLineRendered = false;
+        }
+
+        /// <summary>
+        /// True only when the WebView's current document is EXACTLY our packaged statusbar.html. Used to
+        /// gate initialization + replay of cached (potentially sensitive) payloads so a 'ready' from an
+        /// unexpected document can't unlock delivery (pipeline Run-2 security MEDIUM). Uses a normalized
+        /// local-path comparison — NOT a substring — so a URL that merely contains "statusbar.html" in a
+        /// path/query/fragment does not pass. Fails closed on any error.
+        /// </summary>
+        private bool IsTrustedSource()
+        {
+            try
+            {
+                string src = _webView?.CoreWebView2?.Source;
+                if (string.IsNullOrEmpty(src)) return false;
+                if (!Uri.TryCreate(src, UriKind.Absolute, out var srcUri) || !srcUri.IsFile) return false;
+
+                string expected = GetStatusBarHtmlPath();
+                if (string.IsNullOrEmpty(expected)) return false;
+
+                return string.Equals(
+                    Path.GetFullPath(srcUri.LocalPath).TrimEnd('\\', '/'),
+                    Path.GetFullPath(expected).TrimEnd('\\', '/'),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
         {
             if (!e.IsSuccess)
@@ -176,38 +244,62 @@ namespace MultiTerminal.Controls
                 {
                     string type = typeEl.GetString();
 
+                    // Trust-gate EVERY inbound message: this WebView only ever loads the packaged
+                    // statusbar.html. Ignore all commands (ready/home/hudToggle/openFolder/ack) from any
+                    // other document — so an unexpected page can't unlock delivery, re-disclose cached
+                    // data, or reach the openFolder → explorer.exe sink (pipeline Run-2/Run-3 security).
+                    if (!IsTrustedSource())
+                    {
+                        _debugLogService?.Error("TerminalStatusBar", $"Ignoring '{type}' web message from untrusted source '{_webView?.CoreWebView2?.Source}'");
+                        return;
+                    }
+
                     if (type == "ready")
                     {
-                        _debugLogService?.Trace("TerminalStatusBar", "JS 'ready' received!");
+                        _debugLogService?.Trace("TerminalStatusBar", $"JS 'ready' received — replaying last-known state (statusline={(string.IsNullOrEmpty(_lastStatusLineJson) ? "none" : "present")}, tokenmeter={(string.IsNullOrEmpty(_lastTokenMeterJson) ? "none" : "present")})");
                         _isInitialized = true;
                         _isInitializing = false;
+                        // Fresh page → folder/stats rows are hidden again until JS re-confirms render.
+                        _statusLineRendered = false;
 
                         // Send theme
                         SendMessage($"theme:{(_isDarkTheme ? "dark" : "light")}");
 
-                        // Send pending updates if any
-                        if (!string.IsNullOrEmpty(_pendingUpdateJson))
-                        {
-                            SendMessage($"update:{_pendingUpdateJson}");
-                            _pendingUpdateJson = null;
-                        }
-                        if (!string.IsNullOrEmpty(_pendingStatusLineJson))
-                        {
-                            SendMessage($"statusline:{_pendingStatusLineJson}");
-                            _pendingStatusLineJson = null;
-                        }
-                        if (!string.IsNullOrEmpty(_pendingTokenMeterJson))
-                        {
-                            SendMessage($"tokenmeter:{_pendingTokenMeterJson}");
-                            _pendingTokenMeterJson = null;
-                        }
-                        if (_pendingRemoteMode.HasValue)
-                        {
-                            SendMessage($"remoteMode:{(_pendingRemoteMode.Value ? "true" : "false")}");
-                            _pendingRemoteMode = null;
-                        }
+                        // Replay the latest known payloads. Do NOT clear them — a later re-navigation
+                        // (WebView reload) fires 'ready' again and must re-render from the last state.
+                        if (!string.IsNullOrEmpty(_lastUpdateJson))
+                            SendMessage($"update:{_lastUpdateJson}");
+                        if (!string.IsNullOrEmpty(_lastStatusLineJson))
+                            SendStatusLine(_lastStatusLineJson);
+                        if (!string.IsNullOrEmpty(_lastTokenMeterJson))
+                            SendMessage($"tokenmeter:{_lastTokenMeterJson}");
+                        if (_lastRemoteMode.HasValue)
+                            SendMessage($"remoteMode:{(_lastRemoteMode.Value ? "true" : "false")}");
 
                         Ready?.Invoke(this, EventArgs.Empty);
+                    }
+                    else if (type == "statuslineRendered")
+                    {
+                        // Honor the ack ONLY if it echoes the latest send's seq — a delayed ack from an
+                        // older (or failed/raced) delivery must not satisfy a newer send and strand it
+                        // (pipeline Run-3 cross-model HIGH).
+                        int ackSeq = root.TryGetProperty("seq", out var sqEl) && sqEl.ValueKind == JsonValueKind.Number && sqEl.TryGetInt32(out var sv) ? sv : -1;
+                        if (ackSeq != _expectedAckSeq)
+                        {
+                            _debugLogService?.Trace("TerminalStatusBar", $"Ignoring stale statusline ack (seq={ackSeq}, expected={_expectedAckSeq})");
+                        }
+                        else
+                        {
+                            // Per-band ack: JS reports whether the FOLDER row actually un-hid. The stats row
+                            // always renders; the folder row only un-hides when a folder was supplied. So a
+                            // delivery that carried a folder is only "rendered" once JS confirms folderShown —
+                            // otherwise keep re-pushing (pipeline Run-1 HIGH). A delivery with no folder is
+                            // rendered on the stats row alone (nothing to show; the C# fallback supplies a
+                            // folder whenever the working dir is known).
+                            bool folderShown = root.TryGetProperty("folderShown", out var fsEl) && fsEl.ValueKind == JsonValueKind.True;
+                            _statusLineRendered = folderShown || !_lastStatusLineFolderNonEmpty;
+                            _debugLogService?.Trace("TerminalStatusBar", $"JS statusline ack seq={ackSeq} (folderShown={folderShown}, sentFolder={_lastStatusLineFolderNonEmpty}) → rendered={_statusLineRendered}");
+                        }
                     }
                     else if (type == "home")
                     {
@@ -274,6 +366,7 @@ namespace MultiTerminal.Controls
             string json = JsonSerializer.Serialize(data);
             _debugLogService?.Trace("TerminalStatusBar", $"Serialized JSON: {json}");
 
+            _lastUpdateJson = json;
             if (_isInitialized)
             {
                 _debugLogService?.Trace("TerminalStatusBar", "Sending update to JS (initialized)");
@@ -281,9 +374,7 @@ namespace MultiTerminal.Controls
             }
             else
             {
-                _debugLogService?.Trace("TerminalStatusBar", "Queuing update (not initialized yet)");
-                // Queue for when ready
-                _pendingUpdateJson = json;
+                _debugLogService?.Trace("TerminalStatusBar", "Stored update; will replay on ready (not initialized yet)");
             }
         }
 
@@ -306,14 +397,32 @@ namespace MultiTerminal.Controls
 
             string json = JsonSerializer.Serialize(data);
 
+            _lastStatusLineJson = json;
+            _lastStatusLineFolderNonEmpty = !string.IsNullOrEmpty(folder);
             if (_isInitialized)
             {
-                SendMessage($"statusline:{json}");
+                _debugLogService?.Trace("TerminalStatusBar", $"Sending statusline to JS (folder='{folder ?? ""}', model='{model ?? ""}')");
+                SendStatusLine(json);
             }
             else
             {
-                _pendingStatusLineJson = json;
+                _debugLogService?.Trace("TerminalStatusBar", "Stored statusline; will replay on ready (not initialized yet)");
             }
+        }
+
+        /// <summary>
+        /// Posts a statusline payload with a fresh monotonic seq id and re-arms the render confirmation
+        /// (_statusLineRendered = false). Used by both <see cref="UpdateStatusLine"/> (live) and the
+        /// 'ready' replay so every delivery is seq-correlated: only the ack echoing this seq will mark it
+        /// rendered, and each send re-arms the poll's awaitingRender retry until that ack arrives. A send
+        /// whose post silently fails (SendMessage swallows) is simply never acked → the retry re-delivers.
+        /// </summary>
+        private void SendStatusLine(string json)
+        {
+            int seq = ++_statusLineSeq;
+            _expectedAckSeq = seq;
+            _statusLineRendered = false;
+            SendMessage($"statusline:{seq}:{json}");
         }
 
         /// <summary>
@@ -336,13 +445,11 @@ namespace MultiTerminal.Controls
 
             string json = JsonSerializer.Serialize(data);
 
+            _lastTokenMeterJson = json;
             if (_isInitialized)
             {
+                _debugLogService?.Trace("TerminalStatusBar", $"Sending tokenmeter to JS (tokens={tokensTotal?.ToString() ?? "null"})");
                 SendMessage($"tokenmeter:{json}");
-            }
-            else
-            {
-                _pendingTokenMeterJson = json;
             }
         }
 
@@ -358,18 +465,15 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Updates the "Input: Local/Remote" pill in the status bar.
-        /// Buffered if called before the WebView2 renderer is ready.
+        /// Updates the "Input: Local/Remote" pill in the status bar. Stored as last-known and replayed
+        /// on the next WebView 'ready' if called before the renderer is initialized (or after a re-navigation).
         /// </summary>
         public void SetRemoteMode(bool enabled)
         {
+            _lastRemoteMode = enabled;
             if (_isInitialized)
             {
                 SendMessage($"remoteMode:{(enabled ? "true" : "false")}");
-            }
-            else
-            {
-                _pendingRemoteMode = enabled;
             }
         }
 
@@ -409,6 +513,7 @@ namespace MultiTerminal.Controls
                     {
                         _webView.CoreWebView2.WebMessageReceived -= OnWebMessageReceived;
                         _webView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
+                        _webView.CoreWebView2.NavigationStarting -= OnNavigationStarting;
                     }
                     _webView.Dispose();
                     _webView = null;
