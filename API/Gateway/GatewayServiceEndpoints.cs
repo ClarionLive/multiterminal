@@ -203,9 +203,20 @@ namespace MultiTerminal.API.Gateway
         }
 
         // ----------------------------- helpers -----------------------------
+        // Settings keys owned by PermissionRelayService (the POSTING side). Kept in sync here
+        // deliberately — see TryGetApiKey.
+        private const string SettingRelayApiKey = "permissionRelay.apiKey";
+
         private static bool TryGetApiKey(IConfiguration config, out string apiKey, out string error)
         {
-            var configured = config["MultiRemote:PermissionRelay:ApiKey"];
+            // fa1101db R3 — single source of truth for the relay secret. PermissionRelayService
+            // (the POSTING side) reads SettingsService "permissionRelay.apiKey"; read the SAME key
+            // here on the phone-READING side so the two can't drift (they were split across
+            // SettingsService vs appsettings MultiRemote:PermissionRelay:ApiKey, which happened to
+            // match — a latent fragility). appsettings remains a backward-compat fallback only.
+            var configured = SettingsService.Default.Get(SettingRelayApiKey);
+            if (string.IsNullOrWhiteSpace(configured))
+                configured = config["MultiRemote:PermissionRelay:ApiKey"];
             if (string.IsNullOrWhiteSpace(configured))
             {
                 apiKey = string.Empty;

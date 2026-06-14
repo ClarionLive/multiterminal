@@ -227,8 +227,14 @@ namespace MultiTerminal.API.Gateway
 
                     // HttpClient for the off-box Cloudflare permission relay (item [5]) — the
                     // one remaining outbound hop (everything else is a direct service call).
-                    var relayUrl = gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl")
-                        ?? "https://mt-mcp-server.clarionlive.workers.dev";
+                    // fa1101db R3 — read the relay base URL from the SAME source PermissionRelayService
+                    // (the posting side) uses (SettingsService "permissionRelay.baseUrl") so the two
+                    // can't drift; appsettings MultiRemote:PermissionRelay:BaseUrl stays a fallback.
+                    var relayUrl = SettingsService.Default.Get("permissionRelay.baseUrl");
+                    if (string.IsNullOrWhiteSpace(relayUrl))
+                        relayUrl = gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl");
+                    if (string.IsNullOrWhiteSpace(relayUrl))
+                        relayUrl = "https://mt-mcp-server.clarionlive.workers.dev";
                     builder.Services.AddHttpClient("PermissionRelay", c =>
                     {
                         c.BaseAddress = new Uri(relayUrl);

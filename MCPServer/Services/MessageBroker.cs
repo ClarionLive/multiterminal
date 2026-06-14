@@ -2134,11 +2134,59 @@ namespace MultiTerminal.MCPServer.Services
 
         public void SetRemoteMode(bool enabled)
         {
+            // fa1101db R2a — "remote off" IS the desktop-presence signal (user is at the desk,
+            // per the X-Source / desktop-hook contract). Stamp desktop activity on every off
+            // signal — INCLUDING the idempotent no-op below — so the idle watcher's clock stays
+            // fresh while the user keeps working at the desk with remote already off.
+            if (!enabled) RecordDesktopActivity();
+
             // Idempotent — skip the write if the value isn't changing. Avoids rewriting
             // settings.txt on every UserPromptSubmit hook fire + every phone X-Source ping.
             if (IsRemoteMode == enabled) return;
             SettingsService.Default.Set(SettingRemoteMode, enabled ? "1" : "0");
             RemoteModeChanged?.Invoke(this, enabled);
+        }
+
+        // fa1101db R2 — idle auto-on for remote mode. The relay (PermissionRelayService.Bridge*/
+        // Notify) and the push paths are gated on IsRemoteMode, so when the user walks away the
+        // phone must be able to receive prompts. We approximate "away" as "no desktop activity for
+        // N minutes" (John's model: desktop typing → off, phone message → on, 30-min idle → on).
+        private DateTime _lastDesktopActivityUtc = DateTime.UtcNow; // assume present at startup
+        private const string SettingIdleRemoteOnMinutes = "idleRemoteOnMinutes";
+        private const int DefaultIdleRemoteOnMinutes = 30;
+
+        /// <summary>UTC of the last observed desktop-presence signal (remote-off / X-Source desktop).</summary>
+        public DateTime LastDesktopActivityUtc => _lastDesktopActivityUtc;
+
+        /// <summary>
+        /// Record a desktop-presence signal (user is at the desk). Resets the idle clock. Called
+        /// from SetRemoteMode(false) and directly from the X-Source desktop branch (which can
+        /// short-circuit before SetRemoteMode when remote is already off).
+        /// </summary>
+        public void RecordDesktopActivity() => _lastDesktopActivityUtc = DateTime.UtcNow;
+
+        /// <summary>
+        /// fa1101db R2b — if the desk has been quiet for the configured threshold (settings key
+        /// "idleRemoteOnMinutes", default 30) AND remote mode is currently OFF, turn it ON so
+        /// notifications/permission prompts relay to the phone. Auto-ON only — never auto-off
+        /// (a desktop signal flips it back instantly). Safe to call from a background timer thread;
+        /// SetRemoteMode is already invoked off the UI thread by the X-Source infer path.
+        /// </summary>
+        public void CheckIdleRemoteAutoOn()
+        {
+            if (IsRemoteMode) return; // already on — nothing to do
+
+            int thresholdMin = DefaultIdleRemoteOnMinutes;
+            var raw = SettingsService.Default.Get(SettingIdleRemoteOnMinutes);
+            if (!string.IsNullOrWhiteSpace(raw) && int.TryParse(raw, out var parsed) && parsed > 0)
+                thresholdMin = parsed;
+
+            var idle = DateTime.UtcNow - _lastDesktopActivityUtc;
+            if (idle.TotalMinutes < thresholdMin) return;
+
+            DebugLogService?.Info("RemoteMode",
+                $"idle {idle.TotalMinutes:F0}m ≥ {thresholdMin}m with no desktop activity → auto-enabling remote mode");
+            SetRemoteMode(true);
         }
 
         /// <summary>
