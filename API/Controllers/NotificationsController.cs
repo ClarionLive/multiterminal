@@ -16,7 +16,14 @@ namespace MultiTerminal.API.Controllers
     {
         private readonly MessageBroker _broker;
         private readonly TaskDatabase _taskDb;
-        private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(3) };
+        // 30s (was 3s): the forward to the in-process gateway awaits the REAL synchronous Web Push
+        // — GatewayNotificationEndpoints awaits PushNotificationService.SendToAllWithResult, which
+        // does sequential outbound VAPID round-trips per subscription. A live delivery routinely
+        // exceeds 3s, so the old budget cancelled mid-flight and the forcePush MCP path reported
+        // "gateway-unreachable" / successCount=0 even though the phone actually received the push
+        // (task ca6c5344 item [11] testing). The per-send 10s timeout in PushNotificationService
+        // caps any single stale subscription so this overall budget stays meaningful.
+        private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
 
         // Rate limiting: sliding window of timestamps per minute
         private static readonly ConcurrentQueue<DateTime> _rateLimitWindow = new();

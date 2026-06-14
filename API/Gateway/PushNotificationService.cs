@@ -242,9 +242,14 @@ namespace MultiTerminal.API.Gateway
             var expired = new List<SubscriptionData>();
             foreach (var sub in snapshot)
             {
+                // Per-send timeout: a single stale/slow subscription must not stall the whole
+                // sequential send loop up to WebPushClient's ~100s HttpClient default and blow the
+                // caller's forward budget (task ca6c5344 item [11]). Cancel the in-flight request at
+                // 10s and record it as a delivery error so success/error accounting stays accurate.
+                using var sendCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(10));
                 try
                 {
-                    await client.SendNotificationAsync(new PushSubscription(sub.Endpoint, sub.P256dh, sub.Auth), payload, _vapidDetails);
+                    await client.SendNotificationAsync(new PushSubscription(sub.Endpoint, sub.P256dh, sub.Auth), payload, _vapidDetails, sendCts.Token);
                     successCount++;
                     results.Add(new { endpoint = sub.Endpoint.Substring(0, Math.Min(60, sub.Endpoint.Length)), status = "sent" });
                 }
@@ -254,6 +259,13 @@ namespace MultiTerminal.API.Gateway
                     results.Add(new { endpoint = sub.Endpoint.Substring(0, Math.Min(60, sub.Endpoint.Length)), status = "error", code = ex.StatusCode.ToString(), message = ex.Message });
                     if (ex.StatusCode == System.Net.HttpStatusCode.Gone)
                         expired.Add(sub.Ref);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Hit the 10s per-send cap — treat as a (recoverable) delivery failure, not a
+                    // 410 Gone, so the subscription is kept for the next attempt rather than pruned.
+                    errorCount++;
+                    results.Add(new { endpoint = sub.Endpoint.Substring(0, Math.Min(60, sub.Endpoint.Length)), status = "error", code = "timeout", message = "send exceeded 10s" });
                 }
                 catch (Exception ex)
                 {
