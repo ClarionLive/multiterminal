@@ -1,0 +1,17 @@
+{
+  "//": "MultiRemote phone-gateway local override (task ca6c5344). Copy this file to",
+  "//1": "'appsettings.Local.json' next to the MultiTerminal exe and fill in real values.",
+  "//2": "appsettings.Local.json is gitignored and overrides appsettings.json — keep ALL",
+  "//3": "secrets here, never in the committed appsettings.json. Only override what you need;",
+  "//4": "omitted keys fall back to appsettings.json defaults.",
+  "MultiRemote": {
+    "Auth": {
+      "Username": "your-phone-login-user",
+      "Password": "your-strong-password"
+    },
+    "NotificationSecret": "shared-secret-matching-MTs-X-MT-Secret-forward",
+    "PermissionRelay": {
+      "ApiKey": "cloudflare-worker-api-key"
+    }
+  }
+}

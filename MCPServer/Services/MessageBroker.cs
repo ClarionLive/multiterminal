@@ -2111,7 +2111,7 @@ namespace MultiTerminal.MCPServer.Services
         /// Gate sites (keep in sync when adding new push paths):
         ///   MT:
         ///     - PermissionRelayService.Bridge / BridgeChoiceAsync / BridgePlanApprovalAsync / Notify
-        ///     - NotificationsController.ForwardToClaudeRemoteAsync
+        ///     - NotificationsController.ForwardToGatewayAsync (forcePush bypasses this gate)
         ///     - MessageBroker.ForwardMessagePushAsync
         ///   ClaudeRemote (consults this flag via GET /api/remote-mode):
         ///     - InboxMonitorService.CheckInbox (GetRemoteModeAsync helper)

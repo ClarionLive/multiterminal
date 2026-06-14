@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="192" height="192" rx="38" fill="url(#bg)"/>
+
+  <!-- Subtle border -->
+  <rect width="188" height="188" x="2" y="2" rx="36" fill="none" stroke="#2a2a4a" stroke-width="2"/>
+
+  <!-- Phone outline -->
+  <rect x="62" y="28" width="68" height="120" rx="12" fill="none" stroke="#53a8f5" stroke-width="4"/>
+
+  <!-- Phone screen -->
+  <rect x="68" y="40" width="56" height="90" rx="4" fill="#0d1b2a"/>
+
+  <!-- Terminal prompt on screen -->
+  <text x="76" y="68" font-family="monospace" font-size="18" font-weight="bold" fill="#e94560">&gt;_</text>
+
+  <!-- Code lines on screen -->
+  <rect x="76" y="78" width="32" height="3" rx="1.5" fill="#53a8f5" opacity="0.7"/>
+  <rect x="76" y="86" width="24" height="3" rx="1.5" fill="#53a8f5" opacity="0.5"/>
+  <rect x="76" y="94" width="38" height="3" rx="1.5" fill="#53a8f5" opacity="0.3"/>
+  <rect x="76" y="102" width="20" height="3" rx="1.5" fill="#e94560" opacity="0.5"/>
+  <rect x="76" y="110" width="30" height="3" rx="1.5" fill="#53a8f5" opacity="0.4"/>
+
+  <!-- Phone home indicator -->
+  <rect x="84" y="136" width="24" height="4" rx="2" fill="#53a8f5" opacity="0.4"/>
+
+  <!-- Signal waves (right side) -->
+  <path d="M142 60 A18 18 0 0 1 142 88" fill="none" stroke="#e94560" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+  <path d="M150 52 A28 28 0 0 1 150 96" fill="none" stroke="#e94560" stroke-width="3" stroke-linecap="round" opacity="0.6"/>
+  <path d="M158 44 A38 38 0 0 1 158 104" fill="none" stroke="#e94560" stroke-width="3" stroke-linecap="round" opacity="0.3"/>
+
+  <!-- Small dot at signal origin -->
+  <circle cx="140" cy="74" r="4" fill="#e94560"/>
+
+  <!-- "CR" text at bottom -->
+  <text x="96" y="176" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="700" fill="#53a8f5" letter-spacing="3" opacity="0.6">CR</text>
+</svg>

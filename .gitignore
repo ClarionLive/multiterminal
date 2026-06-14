@@ -23,6 +23,10 @@ node_modules/
 .env.local
 .env.*.local
 .claude/settings.local.json
+# MultiRemote gateway credential override (task ca6c5344). appsettings.json ships
+# changeme defaults; the real Auth:Username/Password live here, dropped next to the
+# exe per install and never committed.
+appsettings.Local.json
 # MT-managed project definition: changeLog is appended on every task-done,
 # so it's perpetually dirty. Untracked here (repo has no remote; MT regenerates
 # it via the add-project flow). History up to 3e9711e remains in past commits.

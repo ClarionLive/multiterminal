@@ -59,6 +59,9 @@ namespace MultiTerminal
 
         // REST API Server for inter-terminal communication
         private MultiTerminalRestServer _mcpServer;
+        // MultiRemote phone-gateway in-process host (Phase 2, task ca6c5344) — second,
+        // independent Kestrel on :5100 serving the PWA. Started alongside the REST server.
+        private MultiTerminal.API.Gateway.MultiRemoteGatewayHost _remoteGateway;
         private MCPServer.Services.HttpWebhookService _webhookService;
         private ChatPanelDocument _chatPanel;
         private SessionIndexingService _sessionIndexingService;
@@ -775,6 +778,32 @@ namespace MultiTerminal
                             }
                             return null;
                         });
+
+                        // Start the MultiRemote phone gateway (Phase 2, task ca6c5344) as a
+                        // second in-process host on :5100. Independent of the :5050 REST host;
+                        // a failure here must not break the MCP/chat path, so it's isolated.
+                        try
+                        {
+                            // Hand the gateway MT's live, fully-wired service singletons so its
+                            // in-process controllers/handlers call them directly (no :5050 hop).
+                            // Constructed here — after _mcpServer.StartAsync() and all broker/
+                            // spawn/stream UI wiring — so every instance below is live. Port is
+                            // the fallback only; MultiRemote:Port in appsettings.json wins.
+                            _remoteGateway = new MultiTerminal.API.Gateway.MultiRemoteGatewayHost(
+                                5100,
+                                _mcpServer.Broker,
+                                _mcpServer.SpawnService,
+                                _mcpServer.TerminalStreamService,
+                                _sharedProjectDatabase);
+                            await _remoteGateway.StartAsync();
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[MainForm] MultiRemote gateway started on {_remoteGateway.Url}");
+                        }
+                        catch (Exception gwEx)
+                        {
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[MainForm] MultiRemote gateway failed to start: {gwEx.Message}");
+                        }
 
                         Invoke(new Action(() =>
                         {
@@ -4152,6 +4181,15 @@ namespace MultiTerminal
                 });
             }
 
+            // Stop the MultiRemote gateway — fire-and-forget, same pattern as the REST host
+            if (_remoteGateway != null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try { await _remoteGateway.StopAsync(); } catch { }
+                });
+            }
+
             // Close all terminals (sends kill signal, doesn't wait for process exit)
             foreach (var doc in _gridManager.GetTerminalDocuments())
             {
@@ -6000,6 +6038,9 @@ namespace MultiTerminal
                 // Calling Dispose here would invoke StopAsync().GetAwaiter().GetResult()
                 // a second time, risking a UI-thread deadlock. Skip it — the process is exiting.
                 _mcpServer = null;
+                // Gateway likewise already StopAsync'd in OnFormClosing; null it rather than
+                // block the UI thread on DisposeAsync (same rationale as _mcpServer above).
+                _remoteGateway = null;
                 _dockPanel?.Dispose();
                 _dashboardHeader?.Dispose();
                 _toolStrip?.Dispose();

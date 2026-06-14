@@ -1,0 +1,19 @@
+{
+  "name": "multiterminal-mcp",
+  "version": "1.0.0",
+  "description": "MCP server wrapper for MultiTerminal REST API",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "multiterminal-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["mcp", "multiterminal", "claude"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  }
+}

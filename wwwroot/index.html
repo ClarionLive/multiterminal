@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#0f172a">
+    <title>MultiRemote</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/img/icon-192.png">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" integrity="sha384-XGjxtQfXaH2tnPFa9x+ruJTuLE3Aa6LhHSWRr1XeTyhezb4abCG4ccI5AkVDxqC+" crossorigin="anonymous">
+    <link href="/css/app.css?v=32" rel="stylesheet">
+    <!-- xterm.js for interactive terminal -->
+    <link href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" rel="stylesheet" integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co" crossorigin="anonymous">
+</head>
+<body>
+    <!-- Top navbar -->
+    <div class="cr-navbar">
+        <div class="d-flex align-items-center">
+            <span class="status-dot online" id="status-dot"></span>
+            <h1>MultiRemote</h1>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+            <div class="remote-toggle" id="remote-toggle" onclick="toggleRemoteMode()" title="Remote mode: route questions to phone">
+                <div class="remote-toggle-track">
+                    <div class="remote-toggle-thumb"></div>
+                </div>
+                <span class="remote-toggle-label" id="remote-toggle-label">Off</span>
+            </div>
+            <span class="commentary-indicator idle" id="commentary-indicator" onclick="toggleCommentaryBar()" title="Commentary"></span>
+            <button class="btn btn-sm btn-outline-light" onclick="refreshCurrentView()" title="Refresh">
+                <i class="bi bi-arrow-clockwise"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-light ms-1" onclick="logout()" title="Logout">
+                <i class="bi bi-box-arrow-right"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Commentary controls bar (hidden by default, toggled via indicator) -->
+    <div id="commentary-bar" class="commentary-bar d-none">
+        <div class="commentary-bar-controls">
+            <button class="btn btn-sm btn-outline-light" id="commentary-enable-btn" onclick="toggleCommentary()" title="Toggle commentary">
+                <i class="bi bi-volume-up-fill"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-light" id="commentary-pause-btn" onclick="toggleCommentaryPause()" title="Pause/Resume">
+                <i class="bi bi-pause-fill"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-light" onclick="skipCommentary()" title="Skip">
+                <i class="bi bi-skip-forward-fill"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-success" onclick="unlockAudio(); handleCommentary('Testing one two three — the commentary system is live!', 'Test')" title="Test Speech">
+                <i class="bi bi-megaphone-fill"></i>
+            </button>
+            <select class="commentary-voice-select" id="commentary-voice-select" onchange="setCommentaryVoice(this.value)">
+                <option>Loading voices...</option>
+            </select>
+            <input type="range" class="commentary-speed" min="0.5" max="2.0" step="0.1" value="1.0"
+                   oninput="setCommentaryRate(this.value)" title="Speed">
+        </div>
+        <div id="commentary-feed" class="commentary-feed"></div>
+    </div>
+
+    <!-- Home view (launcher grid) -->
+    <div id="view-home" class="cr-view active">
+        <div class="cr-content">
+            <div class="home-grid">
+                <div class="home-tile" onclick="switchView('inbox')">
+                    <i class="bi bi-inbox-fill"></i>
+                    <span>Inbox</span>
+                    <span class="home-tile-badge d-none" id="inbox-badge">0</span>
+                </div>
+                <div class="home-tile" onclick="switchView('tasks')">
+                    <i class="bi bi-kanban"></i>
+                    <span>Tasks</span>
+                </div>
+                <div class="home-tile" onclick="switchView('messages')">
+                    <i class="bi bi-chat-dots-fill"></i>
+                    <span>Messages</span>
+                </div>
+                <div class="home-tile" onclick="switchView('notifications')">
+                    <i class="bi bi-bell-fill"></i>
+                    <span>Alerts</span>
+                </div>
+                <div class="home-tile" onclick="switchView('permissions')">
+                    <i class="bi bi-shield-lock-fill"></i>
+                    <span>Permissions</span>
+                    <span class="home-tile-badge d-none" id="permissions-badge">0</span>
+                </div>
+                <div class="home-tile" onclick="switchView('console')">
+                    <i class="bi bi-terminal-fill"></i>
+                    <span>Console</span>
+                </div>
+                <div class="home-tile" onclick="switchView('terminals')">
+                    <i class="bi bi-display"></i>
+                    <span>Terminals</span>
+                </div>
+                <div class="home-tile" onclick="switchView('news')">
+                    <i class="bi bi-newspaper"></i>
+                    <span>News</span>
+                </div>
+                <div class="home-tile" onclick="switchView('settings')">
+                    <i class="bi bi-gear-fill"></i>
+                    <span>Settings</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tasks view -->
+    <div id="view-tasks" class="cr-view">
+        <div class="cr-content">
+            <div class="task-filters" id="task-filters"></div>
+            <div id="tasks-list">
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Terminals view -->
+    <div id="view-terminals" class="cr-view">
+        <div class="cr-content">
+            <!-- Launch section -->
+            <div class="cr-section-header">Launch Terminal</div>
+            <div id="launch-section">
+                <div id="launch-projects" class="launch-projects">
+                    <div class="cr-skeleton"></div>
+                </div>
+                <div class="launch-actions">
+                    <button class="btn btn-outline-primary w-100" onclick="showLaunchSheet(null, 'Just Claude')">
+                        <i class="bi bi-terminal"></i> Just Claude (no project)
+                    </button>
+                </div>
+                <div id="launch-status" class="launch-status d-none"></div>
+            </div>
+
+            <!-- Launch confirmation sheet -->
+            <div id="launch-sheet" class="position-fixed top-0 start-0 w-100 h-100 d-none" style="z-index:200; background:rgba(0,0,0,0.6);" onclick="if(event.target===this)closeLaunchSheet()">
+                <div class="launch-sheet-modal">
+                    <div class="task-sheet-handle" onclick="closeLaunchSheet()"><div class="task-sheet-bar"></div></div>
+                    <h5 class="fw-bold mb-1" id="launch-sheet-title">Launch Terminal</h5>
+                    <p class="small text-muted mb-2" id="launch-sheet-project"></p>
+                    <div id="launch-sheet-agent-list" class="mb-2"></div>
+                    <div class="mb-3 d-none" id="launch-sheet-custom-row">
+                        <input type="text" class="form-control bg-dark text-light border-secondary" id="launch-sheet-name"
+                               autocomplete="off" autocorrect="off" spellcheck="false" autocapitalize="words"
+                               placeholder="Enter agent name">
+                        <button class="btn btn-success w-100 py-2 mt-2" id="launch-sheet-btn" onclick="confirmCustomLaunch()">
+                            <i class="bi bi-play-fill"></i> Launch
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active terminals -->
+            <div class="cr-section-header" style="margin-top:20px">Active Terminals</div>
+            <div id="terminals-list">
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Messages view -->
+    <div id="view-messages" class="cr-view">
+        <div class="cr-content">
+            <div class="cr-section-header">Send Message</div>
+            <div id="message-form-container"></div>
+        </div>
+    </div>
+
+    <!-- Inbox view -->
+    <div id="view-inbox" class="cr-view">
+        <div class="cr-content">
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="cr-section-header" style="margin-top:0">Inbox</div>
+                <div class="d-flex gap-1">
+                    <button class="btn btn-sm btn-outline-secondary" id="inbox-filter-btn" onclick="toggleInboxFilter()" title="Unread only">
+                        <i class="bi bi-envelope"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-success" onclick="markAllInboxRead()" title="Mark all read">
+                        <i class="bi bi-check2-all"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="loadInbox()" title="Refresh">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+            </div>
+            <div id="inbox-list">
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notifications view -->
+    <div id="view-notifications" class="cr-view">
+        <div class="cr-content">
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="cr-section-header" style="margin-top:0">Notifications</div>
+                <div>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="toggleNotificationSettings()" title="Settings">
+                        <i class="bi bi-gear"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger ms-1" onclick="clearNotificationHistory()" title="Clear">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <!-- Push permission banner (shown when not granted) -->
+            <div id="push-permission-banner" class="cr-card d-none" style="margin-bottom:12px; background:var(--cr-primary); color:#fff; cursor:pointer" onclick="enableNotifications()">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-bell-fill" style="font-size:1.2rem"></i>
+                    <div>
+                        <div class="fw-bold">Enable Push Notifications</div>
+                        <div style="font-size:0.8rem; opacity:0.9">Tap to receive alerts when agents need your attention</div>
+                    </div>
+                </div>
+            </div>
+            <!-- Per-type toggle settings (hidden by default) -->
+            <div id="notification-settings-panel" class="d-none" style="margin-bottom:12px">
+                <div class="cr-card">
+                    <div class="fw-bold mb-2" style="font-size:0.85rem">Push Notification Types</div>
+                    <div id="notification-settings"></div>
+                </div>
+            </div>
+            <div id="notifications-list">
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Permissions view -->
+    <div id="view-permissions" class="cr-view">
+        <div class="cr-content">
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="cr-section-header" style="margin-top:0">Pending Permissions</div>
+                <div>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="loadPermissions()" title="Refresh">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+            </div>
+            <div id="permissions-list">
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Console view (interactive terminal) -->
+    <div id="view-console" class="cr-view">
+        <!-- Terminal picker header -->
+        <div class="console-header">
+            <select id="console-terminal-select" class="form-select form-select-sm">
+                <option value="">Select terminal...</option>
+            </select>
+            <button class="btn btn-sm btn-outline-success" id="console-connect-btn" onclick="connectTerminal()" disabled>
+                <i class="bi bi-plug"></i> Connect
+            </button>
+            <button class="btn btn-sm btn-outline-danger d-none" id="console-disconnect-btn" onclick="disconnectTerminal()">
+                <i class="bi bi-x-circle"></i>
+            </button>
+        </div>
+        <!-- Connection status -->
+        <div id="console-status" class="console-status">
+            <span class="status-dot offline"></span> Not connected
+        </div>
+        <!-- Hotkey bar — special keystrokes for remote terminal control -->
+        <div id="console-hotkeys" class="console-hotkeys d-none">
+            <button class="hotkey-btn hotkey-primary" onclick="sendHotkey('\x1b[Z')" title="Shift+Tab — cycle permission mode">
+                <i class="bi bi-arrow-left-right"></i> Mode
+            </button>
+            <button class="hotkey-btn" onclick="sendHotkey('\x1b')" title="Escape">
+                Esc
+            </button>
+            <button class="hotkey-btn hotkey-danger" onclick="sendHotkey('\x03')" title="Ctrl+C — interrupt">
+                <i class="bi bi-stop-fill"></i> C-c
+            </button>
+            <button class="hotkey-btn" onclick="sendHotkey('/')" title="/ — slash commands">
+                <i class="bi bi-slash-lg"></i> /
+            </button>
+            <button class="hotkey-btn" onclick="sendHotkey('\t')" title="Tab">
+                Tab
+            </button>
+            <button class="hotkey-btn" onclick="sendHotkey('\r')" title="Enter">
+                <i class="bi bi-arrow-return-left"></i>
+            </button>
+        </div>
+        <!-- xterm container -->
+        <div id="console-terminal" class="console-terminal"></div>
+        <!-- Hidden input for mobile keyboard -->
+        <textarea id="console-mobile-input" class="console-mobile-input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+    </div>
+
+    <!-- News view -->
+    <div id="view-news" class="cr-view">
+        <div class="cr-content">
+            <div id="news-content">
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+                <div class="cr-skeleton"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings view -->
+    <div id="view-settings" class="cr-view">
+        <div class="cr-content">
+            <div class="settings-section">
+                <div class="settings-heading">Display</div>
+                <div class="cr-card">
+                    <div class="settings-row">
+                        <div class="settings-label">
+                            <i class="bi bi-fonts"></i> Font Size
+                        </div>
+                        <div class="settings-control">
+                            <span class="settings-value" id="font-size-label">Medium</span>
+                        </div>
+                    </div>
+                    <input type="range" class="settings-slider" id="font-size-slider"
+                           min="0" max="4" step="1" value="2"
+                           oninput="applyFontSize(this.value)">
+                    <div class="settings-range-labels">
+                        <span>Tiny</span><span>Small</span><span>Medium</span><span>Large</span><span>X-Large</span>
+                    </div>
+                </div>
+            </div>
+            <div class="settings-section">
+                <div class="settings-heading">About</div>
+                <div class="cr-card">
+                    <div class="settings-row">
+                        <span style="color:var(--cr-text-muted); font-size:0.8rem">MultiRemote for MultiTerminal</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom navigation -->
+    <nav class="cr-bottomnav">
+        <a href="#" class="active" data-view="home">
+            <i class="bi bi-house-fill"></i>
+            Home
+        </a>
+        <a href="#" data-view="tasks">
+            <i class="bi bi-kanban"></i>
+            Tasks
+        </a>
+        <a href="#" data-view="messages">
+            <i class="bi bi-chat-dots"></i>
+            Msgs
+        </a>
+        <a href="#" data-view="console">
+            <i class="bi bi-terminal-fill"></i>
+            Shell
+        </a>
+    </nav>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js" integrity="sha384-J4qzUjBl1FxyLsl/kQPQIOeINsmp17OHYXDOMpMxlKX53ZfYsL+aWHpgArvOuof9" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js" integrity="sha384-XGqKrV8Jrukp1NITJbOEHwg01tNkuXr6uB6YEj69ebpYU3v7FvoGgEg23C1Gcehk" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js" integrity="sha384-S1biLeI8L/bFduIVvCxbn/l4EtaG4nTqQjGF7qCYTbsGXGFe8KgIKXtw4+UWxprv" crossorigin="anonymous"></script>
+    <script src="/js/app.js?v=25"></script>
+    <script src="/js/tasks.js?v=21"></script>
+    <script src="/js/terminals.js?v=21"></script>
+    <script src="/js/messages.js?v=22"></script>
+    <script src="/js/notifications.js?v=22"></script>
+    <script src="/js/console.js?v=36"></script>
+    <script src="/js/commentary.js?v=22"></script>
+    <script src="/js/inbox.js?v=3"></script>
+    <script src="/js/news.js?v=2"></script>
+    <script src="/js/permissions.js?v=5"></script>
+</body>
+</html>

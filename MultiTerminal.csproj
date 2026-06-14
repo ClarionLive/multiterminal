@@ -55,6 +55,10 @@
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
     <PackageReference Include="LibGit2Sharp" Version="0.30.0" />
+    <!-- MultiRemote phone-gateway Web Push (Phase 2, task ca6c5344, item [7]).
+         VAPID key gen + RFC8291 payload encryption for Apple/Web Push. Same version
+         the standalone MultiRemote shipped, so existing push-config.json keys load as-is. -->
+    <PackageReference Include="WebPush" Version="1.0.12" />
   </ItemGroup>
 
   <!-- Analyzers: build-time only, not a runtime dependency. -->
@@ -149,6 +153,38 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="tools\rg-UNLICENSE.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    MultiRemote gateway config (Phase 2, task ca6c5344, item [2]). Ships the
+    changeme/changeme Auth defaults to output so MultiRemoteGatewayHost can read
+    them on :5100; the real credentials go in a gitignored appsettings.Local.json
+    dropped next to the exe per install (loaded as an optional override). Item [8]
+    formalizes the full key set (VapidSubject, AllowedHosts, etc.).
+  -->
+  <ItemGroup>
+    <Content Include="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Secrets-override template; ships next to the exe so the Dev can copy it to
+         appsettings.Local.json (gitignored) and fill in real credentials. -->
+    <Content Include="appsettings.Local.json.example">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    MultiRemote phone-gateway PWA (Phase 2, task ca6c5344). The whole wwwroot tree
+    is copied to build output (preserving its folder structure) so MultiRemoteGatewayHost
+    can serve it on :5100; from there the CopyToStaged target mirrors it to the shared
+    staged/Deploy folder for John. The None Remove strips the SDK's default None glob for
+    these files first so the Content Include can't collide with it (NETSDK1022).
+  -->
+  <ItemGroup>
+    <None Remove="wwwroot\**\*" />
+    <Content Include="wwwroot\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
