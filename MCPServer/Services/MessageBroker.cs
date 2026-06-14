@@ -2147,6 +2147,35 @@ namespace MultiTerminal.MCPServer.Services
             RemoteModeChanged?.Invoke(this, enabled);
         }
 
+        /// <summary>
+        /// fa1101db R4 — fires after a permission-relay request is confirmed stored by the Cloudflare
+        /// Worker. The gateway host subscribes PushNotificationService to wake the phone with a VAPID
+        /// web-push (the broker is a process-wide shared singleton, so an event raised from the :5050
+        /// PermissionRelayService instance still reaches the gateway-host subscriber that owns the
+        /// push subscriptions — no MCPServer→API.Gateway layer dependency).
+        /// </summary>
+        public event EventHandler<PermissionRelayPushEventArgs> PermissionRelayPushRequested;
+
+        /// <summary>
+        /// fa1101db R4 — raise <see cref="PermissionRelayPushRequested"/>. Called by
+        /// PermissionRelayService right after PostCreateAsync confirms the Worker stored the request.
+        /// Fire-and-forget: never throws into the caller's relay path (a push failure must not block
+        /// the round-trip), so subscriber exceptions are swallowed here.
+        /// </summary>
+        public void NotifyPermissionRelayPush(string requestType, string agentName, string title, string body)
+        {
+            var handler = PermissionRelayPushRequested;
+            if (handler == null) return;
+            try
+            {
+                handler.Invoke(this, new PermissionRelayPushEventArgs(requestType, agentName, title, body));
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("PermissionRelayPush", $"NotifyPermissionRelayPush subscriber threw: {ex.Message}");
+            }
+        }
+
         // fa1101db R2 — idle auto-on for remote mode. The relay (PermissionRelayService.Bridge*/
         // Notify) and the push paths are gated on IsRemoteMode, so when the user walks away the
         // phone must be able to receive prompts. We approximate "away" as "no desktop activity for
@@ -8490,6 +8519,34 @@ namespace MultiTerminal.MCPServer.Services
         public string RepoRoot { get; }
 
         public string AgentName { get; }
+    }
+
+    /// <summary>
+    /// fa1101db R4 — args for a permission-relay push request. Fired by PermissionRelayService
+    /// AFTER the Cloudflare Worker confirms a relay request was stored (PostCreateAsync returned a
+    /// non-empty workerId), so the gateway host can wake the phone with a VAPID web-push instead of
+    /// the user having to open the Permissions tab to discover the card. Immutable (constructor-set,
+    /// get-only) so an earlier in-proc subscriber can't rewrite the push title/body before later
+    /// subscribers run — mirrors the WorktreeReadyEventArgs / TaskActiveChangedEventArgs hardening.
+    /// </summary>
+    public class PermissionRelayPushEventArgs : EventArgs
+    {
+        public PermissionRelayPushEventArgs(string requestType, string agentName, string title, string body)
+        {
+            RequestType = requestType;
+            AgentName = agentName;
+            Title = title;
+            Body = body;
+        }
+
+        /// <summary>One of: choice, elicitation, plan_approval, notification. Maps to the PWA's notification_type.</summary>
+        public string RequestType { get; }
+
+        public string AgentName { get; }
+
+        public string Title { get; }
+
+        public string Body { get; }
     }
 
     /// <summary>

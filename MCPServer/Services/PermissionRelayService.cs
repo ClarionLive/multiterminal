@@ -174,6 +174,10 @@ namespace MultiTerminal.MCPServer.Services
                         return;
                     }
 
+                    // fa1101db R4 — Worker confirmed the card; wake the phone (after the cancel check
+                    // so a request cancelled mid-post doesn't buzz for a row we just DELETE'd).
+                    FirePush("elicitation", elicitation.AgentName, elicitation.Message);
+
                     var (outcome, row) = await PollUntilDecidedAsync(workerId, baseUrl, apiKey,
                         shouldSkip: () =>
                             _broker.GetElicitation(elicitation.ElicitationId) == null ||
@@ -261,6 +265,9 @@ namespace MultiTerminal.MCPServer.Services
             {
                 var workerId = await PostCreateAsync(body, baseUrl, apiKey, ct).ConfigureAwait(false);
                 if (string.IsNullOrEmpty(workerId)) return null;
+
+                // fa1101db R4 — Worker confirmed the card; wake the phone.
+                FirePush("choice", agentName, prompt);
 
                 var (outcome, row) = await PollUntilDecidedAsync(workerId, baseUrl, apiKey, shouldSkip: null, ct).ConfigureAwait(false);
                 if (outcome != PollOutcome.Decided || row == null || row.Status != "answered")
@@ -362,6 +369,10 @@ namespace MultiTerminal.MCPServer.Services
                 var workerId = await PostCreateAsync(body, baseUrl, apiKey, ct).ConfigureAwait(false);
                 if (string.IsNullOrEmpty(workerId)) return null;
 
+                // fa1101db R4 — Worker confirmed the plan card; wake the phone. The plan markdown is
+                // large, so push the short description (not the full plan, which is on the card).
+                FirePush("plan_approval", agentName, string.IsNullOrWhiteSpace(description) ? "Plan approval requested" : description);
+
                 var (outcome, row) = await PollUntilDecidedAsync(workerId, baseUrl, apiKey, shouldSkip: null, ct).ConfigureAwait(false);
                 if (outcome != PollOutcome.Decided || row == null || row.Status != "answered")
                     return null;
@@ -405,7 +416,11 @@ namespace MultiTerminal.MCPServer.Services
             {
                 try
                 {
-                    await PostCreateAsync(body, baseUrl, apiKey, CancellationToken.None).ConfigureAwait(false);
+                    var workerId = await PostCreateAsync(body, baseUrl, apiKey, CancellationToken.None).ConfigureAwait(false);
+
+                    // fa1101db R4 — only wake the phone once the Worker confirms the row was stored.
+                    if (!string.IsNullOrEmpty(workerId))
+                        FirePush("notification", agentName, description);
                 }
                 catch (Exception ex)
                 {
@@ -413,6 +428,38 @@ namespace MultiTerminal.MCPServer.Services
                         $"Notify failed: {ScrubForLog(ex.Message)}");
                 }
             });
+        }
+
+        // ===================================================================
+        // fa1101db R4 — phone push after Worker confirms the relay request
+        // ===================================================================
+
+        /// <summary>
+        /// fa1101db R4 — wake the phone with a VAPID web-push once the Cloudflare Worker confirms a
+        /// relay request was stored (PostCreateAsync returned a non-empty workerId). Without this the
+        /// card lands silently and the user only finds it by opening the Permissions tab. Routed
+        /// through the shared <see cref="MessageBroker"/> event so the gateway host's
+        /// PushNotificationService (which owns the subscriptions) fires it — no MCPServer→API.Gateway
+        /// layer dependency. Fire-and-forget: a push failure must never break the relay round-trip,
+        /// and the remote_mode + relay-enabled gates were already passed by every caller.
+        /// </summary>
+        private void FirePush(string requestType, string agentName, string promptOrDescription)
+        {
+            try
+            {
+                var who = string.IsNullOrWhiteSpace(agentName) ? "MultiTerminal" : agentName.Trim();
+                var title = requestType == "notification" ? "🔔 Notification" : "🔔 Permission needed";
+                var detail = (promptOrDescription ?? string.Empty).Trim();
+                // Keep the body short — phones truncate, and the full prompt is already on the card.
+                if (detail.Length > 140)
+                    detail = detail.Substring(0, 137) + "…";
+                var body = detail.Length == 0 ? who : who + ": " + detail;
+                _broker.NotifyPermissionRelayPush(requestType, who, title, body);
+            }
+            catch (Exception ex)
+            {
+                _broker.DebugLogService?.Error("PermissionRelay", $"FirePush failed: {ScrubForLog(ex.Message)}");
+            }
         }
 
         // ===================================================================
