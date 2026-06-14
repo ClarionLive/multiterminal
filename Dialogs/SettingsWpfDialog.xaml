@@ -2,10 +2,10 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Settings"
-        Width="880" Height="680"
+        Width="880" Height="820"
         MinWidth="880" MaxWidth="880"
-        MinHeight="680" MaxHeight="680"
-        ResizeMode="NoResize"
+        MinHeight="520"
+        ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
         Background="#1E1E1E">
@@ -419,7 +419,8 @@
         <TabControl Grid.Row="0" Margin="16,16,16,8" Style="{StaticResource DarkTabControl}">
             <TabItem Header="General" Style="{StaticResource DarkTabItem}">
 
-        <!-- Two-column form content -->
+        <!-- Two-column form content (scrollable so all sections are reachable at any window height) -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,4,0">
         <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -728,9 +729,11 @@
 
             </StackPanel>
         </Grid>
+        </ScrollViewer>
             </TabItem>
 
             <TabItem Header="Pipeline" Style="{StaticResource DarkTabItem}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel Margin="16,16,16,16">
                     <TextBlock Text="Assign each /pipeline role to a provider, or turn it off entirely. Changes take effect on the next /pipeline run."
                                Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
@@ -790,9 +793,11 @@
                                TextWrapping="Wrap"
                                Text="Defaults: Verifier / Code Reviewer / Security Auditor / Debugger run on Claude. Cross-Model Adversary is off. Selecting Codex requires the Codex plugin to be installed and authenticated."/>
                 </StackPanel>
+                </ScrollViewer>
             </TabItem>
 
             <TabItem Header="Codex" Style="{StaticResource DarkTabItem}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel Margin="16,16,16,16">
                     <TextBlock Text="Configure the Codex CLI used for Codex terminal launches. These values are picked up on the next Codex terminal start."
                                Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
@@ -868,6 +873,7 @@
                                TextWrapping="Wrap"
                                Text="Phase 1: the binary path and default agent name are applied on launch. Model / effort are persisted here and can be wired into ~/.codex/config.toml in a follow-up."/>
                 </StackPanel>
+                </ScrollViewer>
             </TabItem>
         </TabControl>
 
