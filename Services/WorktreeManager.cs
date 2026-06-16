@@ -123,7 +123,17 @@ namespace MultiTerminal.Services
                 return existing;
             }
 
-            string trimmed = repoRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            // Normalize to the MAIN checkout root before building any path or running
+            // any git op. The caller passes the registered Project.Path as repoRoot; if
+            // that has drifted to (or is) a linked worktree, building
+            // {repoRoot}/.claude/worktrees/<id> would NEST the new worktree inside it
+            // (task 25020dfa — observed live as .../worktrees/0a2ac0cb/.claude/worktrees/<id>).
+            // rev-parse --git-common-dir collapses both the main checkout and any linked
+            // worktree to the same <mainRoot>/.git, so this is always the true main root.
+            // Secondary win: routing the git ops below through mainRoot makes trunk
+            // resolution read the main checkout's branch, not a linked worktree's task/ HEAD.
+            string mainRoot = await ResolveMainCheckoutRootAsync(repoRoot).ConfigureAwait(false);
+            string trimmed = mainRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
             // Worktrees live under .claude/worktrees/ (was <repoRoot>/worktrees/).
             // Required by Claude Code's EnterWorktree(path=...) enter-existing form:
@@ -152,17 +162,17 @@ namespace MultiTerminal.Services
                 // to) and fail loudly on a detached/task-branch HEAD — bab81a92
                 // pipeline fix. Behaviour is unchanged in the normal case (HEAD on
                 // trunk), since `-b <name> <path> <trunk>` == `-b <name> <path>` there.
-                bool canonicalExists = await BranchExistsAsync(repoRoot, canonicalBranch).ConfigureAwait(false);
-                string startPoint = canonicalExists ? null : await ResolveTrunkAsync(repoRoot).ConfigureAwait(false);
-                await AddWorktreeAsync(repoRoot, worktreePath, branchName, createNewBranch: !canonicalExists, startPoint: startPoint)
+                bool canonicalExists = await BranchExistsAsync(mainRoot, canonicalBranch).ConfigureAwait(false);
+                string startPoint = canonicalExists ? null : await ResolveTrunkAsync(mainRoot).ConfigureAwait(false);
+                await AddWorktreeAsync(mainRoot, worktreePath, branchName, createNewBranch: !canonicalExists, startPoint: startPoint)
                     .ConfigureAwait(false);
             }
             else
             {
                 // Helper worktree: ensure the canonical branch exists, then fork the
                 // helper branch from its tip.
-                await EnsureCanonicalBranchAsync(repoRoot, canonicalBranch).ConfigureAwait(false);
-                await AddWorktreeAsync(repoRoot, worktreePath, branchName, createNewBranch: true, startPoint: canonicalBranch)
+                await EnsureCanonicalBranchAsync(mainRoot, canonicalBranch).ConfigureAwait(false);
+                await AddWorktreeAsync(mainRoot, worktreePath, branchName, createNewBranch: true, startPoint: canonicalBranch)
                     .ConfigureAwait(false);
             }
 
@@ -173,7 +183,7 @@ namespace MultiTerminal.Services
             // step. Seed the known vendored directories from the main checkout.
             // Phase 2 should generalize this into a per-project post-create hook
             // (e.g. a script in .claude/ that runs after worktree add).
-            SeedVendoredArtifacts(repoRoot, worktreePath);
+            SeedVendoredArtifacts(mainRoot, worktreePath);
 
             _db.SaveWorktreeRecord(taskId, ownerAgent, worktreePath, branchName, isAssignee);
             return _db.GetWorktreeForTask(taskId, ownerAgent);
@@ -219,6 +229,73 @@ namespace MultiTerminal.Services
                     $"Main checkout is on a task branch ({trunk}), not trunk; refusing to root the canonical task branch there. Check out trunk first.");
             }
             return trunk;
+        }
+
+        /// <summary>
+        /// Resolve the MAIN checkout root for a repo path that may itself be a linked
+        /// worktree. The caller passes the registered <c>Project.Path</c> as
+        /// <paramref name="repoRoot"/>; if that path has drifted to (or is) a linked
+        /// worktree, building <c>{repoRoot}/.claude/worktrees/&lt;id&gt;</c> would NEST
+        /// the new worktree inside it (task 25020dfa — observed live as
+        /// <c>.../worktrees/0a2ac0cb/.claude/worktrees/&lt;id&gt;</c>).
+        /// <para><c>git rev-parse --git-common-dir</c> returns the SHARED <c>.git</c>
+        /// directory (<c>&lt;mainRoot&gt;/.git</c>) for the main checkout AND every
+        /// linked worktree, so its parent is always the true main root.
+        /// <c>--path-format=absolute</c> (git ≥ 2.31) forces an absolute path so the
+        /// parent walk is reliable regardless of the subprocess cwd.</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">Thrown when
+        /// <paramref name="repoRoot"/> is not inside a git repo / the common dir can't
+        /// be resolved (fail loud — never silently fall through to a nesting path), or
+        /// when the resolved root still sits under a <c>.claude/worktrees/</c> segment
+        /// (defensive regression guard).</exception>
+        // No CA3003 pragma needed (unlike the path-touching helpers below): this method
+        // runs a git subprocess and string-manipulates its stdout — it performs no
+        // filesystem path operation on caller-supplied input.
+        private static async Task<string> ResolveMainCheckoutRootAsync(string repoRoot)
+        {
+            var (exitCode, stdout, stderr) = await RunGitAsync(
+                repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false);
+            if (exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"git rev-parse --git-common-dir failed for '{repoRoot}' (exit {exitCode}); cannot resolve the main checkout root. stderr: {stderr.Trim()}");
+            }
+
+            string commonDir = stdout.Trim();
+            if (string.IsNullOrEmpty(commonDir))
+            {
+                throw new InvalidOperationException(
+                    $"git rev-parse --git-common-dir returned empty for '{repoRoot}'; cannot resolve the main checkout root.");
+            }
+
+            // commonDir is <mainRoot>/.git (a real dir for the main checkout; the shared
+            // gitdir that every linked worktree points at). The main checkout root is its
+            // parent — trim any trailing separator first so the parent walk is reliable.
+            string mainRoot = Path.GetDirectoryName(
+                commonDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrEmpty(mainRoot))
+            {
+                throw new InvalidOperationException(
+                    $"Could not derive the main checkout root from git common dir '{commonDir}' (repoRoot '{repoRoot}').");
+            }
+
+            // Defensive: --git-common-dir already guarantees the main root, but if a
+            // future change ever regressed this we fail loud rather than nest. A real
+            // main checkout is never itself under a .claude/worktrees/ path segment.
+            // (This can theoretically false-positive on a repo absurdly checked out at a
+            // path literally containing .claude/worktrees/<name>; acceptable, since the
+            // guard is pure belt-and-suspenders behind the --git-common-dir resolution.)
+            string sep = Path.DirectorySeparatorChar.ToString();
+            string needle = sep + ".claude" + sep + "worktrees" + sep;
+            string probe = mainRoot.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar) + sep;
+            if (probe.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                throw new InvalidOperationException(
+                    $"Resolved main checkout root '{mainRoot}' is itself under a .claude/worktrees/ path; refusing to create a nested worktree (task 25020dfa).");
+            }
+
+            return mainRoot;
         }
 
         /// <summary>
