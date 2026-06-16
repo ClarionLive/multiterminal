@@ -382,6 +382,40 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// True when <paramref name="gitDirPath"/> is a real git directory rather
+        /// than a stray/empty <c>.git</c> dir (e.g. a bare <c>mkdir .git</c> or an
+        /// aborted <c>git init</c>). <see cref="ResolveRepoRoot"/> stops on a valid
+        /// one and walks PAST an invalid one to the enclosing repo, mirroring the
+        /// dangling-gitlink-file handling in <see cref="IsDanglingGitlink"/>.
+        ///
+        /// <para>Probes for the two universal markers present in every git layout
+        /// (standard, bare, and reftable): a <c>HEAD</c> file and an
+        /// <c>objects/</c> directory. Deliberately LOOSER than LibGit2Sharp's
+        /// <c>Repository.IsValid</c> (it omits the <c>refs/</c> check, which the
+        /// experimental reftable backend may not materialize) so we never walk
+        /// PAST a directory that <see cref="GetOrCreate"/> could actually open —
+        /// the failure direction we must avoid. An empty stray <c>.git</c> dir has
+        /// neither marker and is correctly classified invalid.</para>
+        ///
+        /// <para>Conservative on error: returns <c>true</c> (a valid stop) on any
+        /// read failure so a momentarily-unreadable real repo is never walked out
+        /// of — same conservative polarity as <see cref="IsDanglingGitlink"/>.</para>
+        /// </summary>
+        private static bool IsValidGitDir(string gitDirPath)
+        {
+            try
+            {
+                bool head = File.Exists(Path.Combine(gitDirPath, "HEAD"));
+                bool objects = Directory.Exists(Path.Combine(gitDirPath, "objects"));
+                return head && objects;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        /// <summary>
         /// Returns a cached or freshly-opened <see cref="GitRepoService"/> for the
         /// given project root, or <c>null</c> if the path is not a valid git repo.
         /// </summary>
@@ -595,8 +629,20 @@ namespace MultiTerminal.Services
                 string gitPath = Path.Combine(cursor, ".git");
                 try
                 {
+                    // A `.git` DIRECTORY is normally the actual git dir and a
+                    // valid stopping point. But a stray/garbage `.git` dir (an
+                    // empty `mkdir .git`, an aborted `git init`) passes
+                    // Directory.Exists yet is NOT a valid repo: Repository.IsValid
+                    // rejects it and GetOrCreate returns null, leaving the HUD Git
+                    // tab stuck on its "No git repository" empty-state even though
+                    // a real repo sits above. Walk PAST an invalid `.git` dir to
+                    // the enclosing repo; stop on a healthy one. Symmetric with
+                    // the dangling-gitlink-FILE handling below.
                     if (Directory.Exists(gitPath))
-                        return cursor;
+                    {
+                        if (IsValidGitDir(gitPath))
+                            return cursor;
+                    }
 
                     // A `.git` gitlink FILE normally marks a worktree/submodule
                     // root and is a valid stopping point. But if its `gitdir:`
