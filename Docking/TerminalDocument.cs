@@ -406,6 +406,9 @@ namespace MultiTerminal.Docking
 
             // Create status bar (shows above terminal)
             _statusBar = new TerminalStatusBarRenderer();
+            // DIAGNOSTIC (task d14048ef): tag this renderer with its owning doc identity so statusline
+            // traces can be matched to the visible instance vs a duplicate/ghost one.
+            _statusBar.SetOwnerTag($"Inst{InstanceId}/Doc{_docId}");
             _statusBar.Ready += (s, e) =>
             {
                 // Only update status bar if we have a name and broker set
@@ -2796,10 +2799,21 @@ namespace MultiTerminal.Docking
                     // new random _docId — fall back to the newest mt-statusline-{name}-*.json
                     // so the banner recovers live instead of staying blank until relaunch.
                     string filePath = ResolveStatusLineFilePath(terminalName);
-                    if (filePath == null) return;
+                    if (filePath == null)
+                    {
+                        // DIAGNOSTIC (task d14048ef): a doc whose poll can't resolve a file delivers
+                        // nothing → rows 2-3 stay hidden. Logging Inst/Doc reveals if the VISIBLE doc
+                        // is the silent one.
+                        _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll EARLY-RETURN: ResolveStatusLineFilePath(name='{terminalName}') returned null");
+                        return;
+                    }
 
                     string content = ReadAllTextShared(filePath);
-                    if (string.IsNullOrEmpty(content)) return;
+                    if (string.IsNullOrEmpty(content))
+                    {
+                        _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll EARLY-RETURN: file '{System.IO.Path.GetFileName(filePath)}' empty");
+                        return;
+                    }
 
                     // Check if either the per-terminal file or shared quota file changed
                     string sharedQuotaPath = Path.Combine(Path.GetTempPath(), "mt-statusline-quota.json");
@@ -2817,7 +2831,7 @@ namespace MultiTerminal.Docking
                     bool awaitingRender = _statusBar != null && _statusBar.IsInitialized && !_statusBar.IsStatusLineRendered;
                     if (!perTerminalChanged && !sharedQuotaChanged && !awaitingRender) return;
 
-                    _debugLogService?.Trace("TerminalDocument", $"statusline poll delivering (changed={perTerminalChanged}, quotaChanged={sharedQuotaChanged}, awaitingRender={awaitingRender})");
+                    _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll delivering (file='{System.IO.Path.GetFileName(filePath)}', changed={perTerminalChanged}, quotaChanged={sharedQuotaChanged}, awaitingRender={awaitingRender})");
 
                     // Only cache content AFTER successfully delivering to UI thread.
                     // Otherwise, if IsHandleCreated is false on first read, the content
@@ -2990,6 +3004,17 @@ namespace MultiTerminal.Docking
                     string folderForUi = folder;
                     BeginInvoke(new Action(() =>
                     {
+                        // DIAGNOSTIC (task d14048ef): on the UI thread, record whether THIS doc is the
+                        // active/visible document and the live size of its status bar at delivery time.
+                        // If the ACTIVE doc delivers + acks but shows blank, it's a WebView2 paint bug;
+                        // if a NON-active (ghost) doc is the only one delivering, it's orphaned-instance.
+                        try
+                        {
+                            bool isActive = DockPanel != null && ReferenceEquals(DockPanel.ActiveDocument, this);
+                            _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] deliver→UI active={isActive} sbVisible={_statusBar?.Visible} sbHeight={_statusBar?.Height} folder='{folderForUi}'");
+                        }
+                        catch { /* diagnostic only */ }
+
                         _statusBar?.UpdateStatusLine(model, folderForUi, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h);
                         _statusBar?.UpdateTokenMeter(tmTotal, tmCost, tmEstimate, tmLowerBound, tmBurn, tmSub, tmCache);
 

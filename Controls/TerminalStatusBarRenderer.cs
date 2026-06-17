@@ -46,6 +46,16 @@ namespace MultiTerminal.Controls
         private int _expectedAckSeq = -1;
         private DebugLogService _debugLogService;
 
+        // DIAGNOSTIC (task d14048ef, dup-renderer hunt): identifies WHICH TerminalDocument owns this
+        // renderer (Inst#/Doc#) and whether the owning doc is the on-screen/active document, so the
+        // statusline traces can be correlated to the visible instance vs a ghost/orphan one.
+        private string _ownerTag = "?";
+        public void SetOwnerTag(string tag) => _ownerTag = tag ?? "?";
+        // Compact paint-state snapshot: is this renderer + its WebView actually visible and sized when
+        // it sends/acks? An occluded or zero-height control that still reports rendered=True is the
+        // paint-bug signature.
+        private string VisTag() => $"[{_ownerTag} vis={Visible}/{(_webView?.Visible.ToString() ?? "n")} h={Height}/{(_webView?.Height.ToString() ?? "n")}]";
+
         /// <summary>
         /// Event fired when WebView2 is ready.
         /// </summary>
@@ -256,7 +266,7 @@ namespace MultiTerminal.Controls
 
                     if (type == "ready")
                     {
-                        _debugLogService?.Trace("TerminalStatusBar", $"JS 'ready' received — replaying last-known state (statusline={(string.IsNullOrEmpty(_lastStatusLineJson) ? "none" : "present")}, tokenmeter={(string.IsNullOrEmpty(_lastTokenMeterJson) ? "none" : "present")})");
+                        _debugLogService?.Trace("TerminalStatusBar", $"{VisTag()} JS 'ready' received — replaying last-known state (statusline={(string.IsNullOrEmpty(_lastStatusLineJson) ? "none" : "present")}, tokenmeter={(string.IsNullOrEmpty(_lastTokenMeterJson) ? "none" : "present")})");
                         _isInitialized = true;
                         _isInitializing = false;
                         // Fresh page → folder/stats rows are hidden again until JS re-confirms render.
@@ -298,7 +308,7 @@ namespace MultiTerminal.Controls
                             // folder whenever the working dir is known).
                             bool folderShown = root.TryGetProperty("folderShown", out var fsEl) && fsEl.ValueKind == JsonValueKind.True;
                             _statusLineRendered = folderShown || !_lastStatusLineFolderNonEmpty;
-                            _debugLogService?.Trace("TerminalStatusBar", $"JS statusline ack seq={ackSeq} (folderShown={folderShown}, sentFolder={_lastStatusLineFolderNonEmpty}) → rendered={_statusLineRendered}");
+                            _debugLogService?.Trace("TerminalStatusBar", $"{VisTag()} JS statusline ack seq={ackSeq} (folderShown={folderShown}, sentFolder={_lastStatusLineFolderNonEmpty}) → rendered={_statusLineRendered}");
                         }
                     }
                     else if (type == "home")
@@ -401,12 +411,12 @@ namespace MultiTerminal.Controls
             _lastStatusLineFolderNonEmpty = !string.IsNullOrEmpty(folder);
             if (_isInitialized)
             {
-                _debugLogService?.Trace("TerminalStatusBar", $"Sending statusline to JS (folder='{folder ?? ""}', model='{model ?? ""}')");
+                _debugLogService?.Trace("TerminalStatusBar", $"{VisTag()} Sending statusline to JS (folder='{folder ?? ""}', model='{model ?? ""}')");
                 SendStatusLine(json);
             }
             else
             {
-                _debugLogService?.Trace("TerminalStatusBar", "Stored statusline; will replay on ready (not initialized yet)");
+                _debugLogService?.Trace("TerminalStatusBar", $"{VisTag()} Stored statusline; will replay on ready (not initialized yet)");
             }
         }
 
