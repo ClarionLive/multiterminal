@@ -2573,8 +2573,18 @@ namespace MultiTerminal.Docking
         /// </summary>
         private string ResolveStatusLineFilePath(string terminalName)
         {
+            // Strict per-instance binding (task d14048ef, item C): the docId-scoped file is
+            // unique to THIS TerminalDocument (each instance mints its own random _docId), so a
+            // live terminal always reads its own banner data and never a same-named sibling's.
+            // The glob fallback below is reached ONLY when this instance has no own file yet —
+            // the re-adopt-after-restart path — and is bounded by the freshness floor so it can't
+            // latch a prior run's / a removed duplicate's frozen file.
             string exact = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
-            if (File.Exists(exact)) return exact;
+            if (File.Exists(exact))
+            {
+                NoteResolvedStatusLinePath(exact, viaFallback: false);
+                return exact;
+            }
 
             // Only the fallback glob needs a safe segment; reject names that could widen
             // the search beyond the intended mt-statusline-{name}-*.json shape.
@@ -2618,7 +2628,59 @@ namespace MultiTerminal.Docking
                     // Torn/corrupt/locked sibling — skip it, keep scanning.
                 }
             }
+            NoteResolvedStatusLinePath(newest, viaFallback: true);
             return newest;
+        }
+
+        // Last statusline file this instance resolved to — used purely to log the re-adopt
+        // transition ONCE (not every 2s poll), keeping the cross-latch path observable without
+        // reintroducing per-tick spam (task d14048ef, items C + D).
+        private string _lastResolvedStatusLinePath;
+
+        /// <summary>
+        /// Records the statusline file this poll resolved to and, on a TRANSITION into the
+        /// glob fallback, emits a single tagged trace. Strict per-instance binding means a live
+        /// terminal resolves to its own <c>mt-statusline-{name}-{_docId}.json</c>; falling back to
+        /// a foreign same-named file is the re-adopt path and is worth a one-line breadcrumb so any
+        /// same-name cross-latch is visible. Logs only when the resolved path changes, so a steadily
+        /// re-adopted terminal does not spam the log every 2s.
+        /// </summary>
+        private void NoteResolvedStatusLinePath(string resolved, bool viaFallback)
+        {
+            if (string.Equals(resolved, _lastResolvedStatusLinePath, StringComparison.OrdinalIgnoreCase))
+                return;
+            _lastResolvedStatusLinePath = resolved;
+            if (viaFallback && resolved != null)
+            {
+                _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline re-adopt: bound to foreign file '{System.IO.Path.GetFileName(resolved)}' (own docId file absent)");
+            }
+        }
+
+        // Last EARLY-RETURN reason this poll logged — lets the silent-doc diagnostics fire once on
+        // transition into a skip state (and once on recovery) rather than every 2s tick. Keeps the
+        // dup-hunt signal that confirmed this bug while removing the per-tick spam (task d14048ef, item D).
+        private string _lastPollSkipReason;
+
+        /// <summary>
+        /// Logs a statusline-poll EARLY-RETURN reason, but only when it differs from the last one —
+        /// so a doc stuck unable to resolve/read its file logs a single line, not one every 2s.
+        /// </summary>
+        private void TracePollSkip(string reason)
+        {
+            if (string.Equals(reason, _lastPollSkipReason, StringComparison.Ordinal)) return;
+            _lastPollSkipReason = reason;
+            _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll EARLY-RETURN: {reason}");
+        }
+
+        /// <summary>
+        /// Clears the skip state once the poll can read content again, emitting a one-time
+        /// "recovered" breadcrumb if this doc had previously been logging a skip reason.
+        /// </summary>
+        private void NotePollProgress()
+        {
+            if (_lastPollSkipReason == null) return;
+            _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll RECOVERED (was: {_lastPollSkipReason})");
+            _lastPollSkipReason = null;
         }
 
         /// <summary>
@@ -2803,17 +2865,22 @@ namespace MultiTerminal.Docking
                     {
                         // DIAGNOSTIC (task d14048ef): a doc whose poll can't resolve a file delivers
                         // nothing → rows 2-3 stay hidden. Logging Inst/Doc reveals if the VISIBLE doc
-                        // is the silent one.
-                        _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll EARLY-RETURN: ResolveStatusLineFilePath(name='{terminalName}') returned null");
+                        // is the silent one. Throttled to log once per transition (item D) so a
+                        // permanently-silent orphan doesn't spam the log every 2s.
+                        TracePollSkip($"ResolveStatusLineFilePath(name='{terminalName}') returned null");
                         return;
                     }
 
                     string content = ReadAllTextShared(filePath);
                     if (string.IsNullOrEmpty(content))
                     {
-                        _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll EARLY-RETURN: file '{System.IO.Path.GetFileName(filePath)}' empty");
+                        TracePollSkip($"file '{System.IO.Path.GetFileName(filePath)}' empty");
                         return;
                     }
+
+                    // Got readable content — clear any prior skip state and log a one-time recovery
+                    // breadcrumb if this doc had been silent (item D).
+                    NotePollProgress();
 
                     // Check if either the per-terminal file or shared quota file changed
                     string sharedQuotaPath = Path.Combine(Path.GetTempPath(), "mt-statusline-quota.json");

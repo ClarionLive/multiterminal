@@ -127,6 +127,12 @@ namespace MultiTerminal
         private int _terminalRestoreIndex = 0;
         private List<TerminalSessionInfo> _pendingTerminalSessions;
 
+        // Tracks agent names (CustomTitle) already materialized during the current restore so a
+        // drifted layout.xml can't spawn a second same-named TerminalDocument — the durable half
+        // of the duplicate-identity-restore status-bar fix (task d14048ef). Reset per RestoreSession.
+        private readonly HashSet<string> _restoredTerminalTitles =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // Timer for polling pending message queue (retry delivery)
         private System.Windows.Forms.Timer _messageQueueTimer;
         private int _messageQueueCleanupCounter = 0;
@@ -4333,6 +4339,7 @@ namespace MultiTerminal
         {
             System.Diagnostics.Trace.WriteLine("[RestoreSession] Starting...");
 
+            _restoredTerminalTitles.Clear();
             _pendingTerminalSessions = _settings.GetSessionTerminals();
             int terminalCount = _pendingTerminalSessions?.Count ?? 0;
             System.Diagnostics.Trace.WriteLine($"[RestoreSession] Session terminals: {terminalCount}");
@@ -4583,11 +4590,33 @@ namespace MultiTerminal
 
             if (persistString == typeof(TerminalDocument).FullName)
             {
-                // Get session info for this terminal (by index)
-                TerminalSessionInfo sessionInfo = null;
-                if (_pendingTerminalSessions != null && _terminalRestoreIndex < _pendingTerminalSessions.Count)
+                // Pair each restored TerminalDocument pane with its saved session by index.
+                // Reconciliation (task d14048ef): returning null skips the saved entry —
+                // DockPanelSuite's documented contract, the same one the Oracle re-bind above
+                // relies on — so a drifted layout.xml can't spawn an extra TerminalDocument.
+                //
+                // (1) Index past the (deduped) session list ⇒ a phantom blank pane. The pre-fix
+                //     code created CreateTerminalForRestore(null) here, which is exactly the
+                //     orphan/blank renderer that defeated the statusline. Skip it.
+                if (_pendingTerminalSessions == null || _terminalRestoreIndex >= _pendingTerminalSessions.Count)
                 {
-                    sessionInfo = _pendingTerminalSessions[_terminalRestoreIndex++];
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[RestoreSession] Skipping extra TerminalDocument pane (index {_terminalRestoreIndex} >= session count {_pendingTerminalSessions?.Count ?? 0}) — drifted layout would spawn a phantom blank terminal");
+                    return null;
+                }
+
+                TerminalSessionInfo sessionInfo = _pendingTerminalSessions[_terminalRestoreIndex++];
+
+                // (2) Agent name already materialized this restore ⇒ duplicate identity. Belt to
+                //     the SettingsService read-dedup suspenders: if a dup somehow survived into the
+                //     session list, skip the second same-named pane (and let the next pane consume
+                //     the next session, preserving pairing for the remaining terminals).
+                string title = sessionInfo?.CustomTitle;
+                if (!string.IsNullOrEmpty(title) && !_restoredTerminalTitles.Add(title))
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[RestoreSession] Skipping duplicate TerminalDocument for agent '{title}' (one-name-one-terminal invariant)");
+                    return null;
                 }
 
                 return CreateTerminalForRestore(sessionInfo);

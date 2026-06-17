@@ -899,7 +899,42 @@ namespace MultiTerminal.Services
                 return null;
             }
 
+            // Enforce MT's one-name-one-terminal invariant on READ: a corrupted store that
+            // accumulated two same-named terminals (the duplicate-identity-restore bug, task
+            // d14048ef) self-heals here, so a stale dup can't be re-materialized into a second
+            // TerminalDocument / statusline renderer on restore. Empty/null titles are left
+            // untouched — distinct unnamed terminals are legitimately distinct.
+            result = DedupByCustomTitle(result, "GetSessionTerminals");
+
             return result.Count > 0 ? result : null;
+        }
+
+        /// <summary>
+        /// Drops later terminals that share a non-empty <see cref="TerminalSessionInfo.CustomTitle"/>
+        /// (case-insensitive) with an earlier one — keeping the FIRST occurrence — so the persisted
+        /// session list holds at most one terminal per agent name. Terminals with an empty/null
+        /// CustomTitle are never collapsed (they are legitimately distinct unnamed terminals).
+        /// Part of the durable fix for the duplicate-identity-restore status-bar bug (task d14048ef).
+        /// </summary>
+        private static List<TerminalSessionInfo> DedupByCustomTitle(List<TerminalSessionInfo> terminals, string context)
+        {
+            if (terminals == null || terminals.Count < 2)
+                return terminals;
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var deduped = new List<TerminalSessionInfo>(terminals.Count);
+            foreach (var t in terminals)
+            {
+                string title = t?.CustomTitle;
+                if (!string.IsNullOrEmpty(title) && !seen.Add(title))
+                {
+                    System.Diagnostics.Trace.WriteLine(
+                        $"[SettingsService.{context}] Dropped duplicate terminal for agent '{title}' (one-name-one-terminal invariant)");
+                    continue;
+                }
+                deduped.Add(t);
+            }
+            return deduped;
         }
 
         /// <summary>
@@ -913,6 +948,11 @@ namespace MultiTerminal.Services
                 Remove(SessionTerminalsKey);
                 return;
             }
+
+            // Enforce the one-name-one-terminal invariant on WRITE too: even if two live
+            // same-named TerminalDocuments somehow exist at save time, the store never grows a
+            // duplicate that a later restore could re-materialize (task d14048ef).
+            terminals = DedupByCustomTitle(terminals, "SetSessionTerminals");
 
             var entries = new List<string>();
             foreach (var t in terminals)
