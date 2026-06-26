@@ -1223,6 +1223,45 @@ namespace MultiTerminal
                 System.Diagnostics.Debug.WriteLine($"[MainForm] Terminal '{e.Name}' (id={e.Id}, docId={e.DocId}) could not be mapped to any TerminalDocument — channel/inbox delivery still works.");
             }
 
+            // SWAPDIAG (task ab32897c): header-swap diagnostic. Captures, per registration,
+            // the broker-received (name,docId) and which TerminalDocument it bound to, plus a
+            // snapshot of every live doc's (docId,instance,customTitle,contentDir). Comparing
+            // the matched docId against each doc's own launch dir reveals the cross. Remove
+            // after root cause is confirmed.
+            try
+            {
+                var allDocs = _dockPanel.Documents.OfType<TerminalDocument>()
+                    .Select(d => $"[inst={d.InstanceId} docId={d.DocId} title='{d.CustomTitle}' dir='{d.GetWorkingDirectory()}']");
+                _debugLogService?.Info("SWAPDIAG",
+                    $"REGISTER name='{e.Name}' e.DocId='{e.DocId}' e.Id='{e.Id}' => BOUND " +
+                    (targetDoc == null
+                        ? "(none)"
+                        : $"inst={targetDoc.InstanceId} docId={targetDoc.DocId} title='{targetDoc.CustomTitle}' dir='{targetDoc.GetWorkingDirectory()}'") +
+                    " | ALL_DOCS: " + string.Join(" ", allDocs));
+
+                // SWAPDIAG cross detector (task ab32897c): the swap is rare/unreproducible,
+                // so flag it LOUDLY the moment it happens. _originalAgentName is the doc's
+                // launch-time identity (first-wins promotion); it is read here BEFORE this
+                // registration's own promotion (below, lines ~1266/1273) overwrites it, so
+                // a mismatch means this registration is binding a name onto a document that
+                // launched as a DIFFERENT agent — i.e. the header cross. WARNING-level so a
+                // recurrence is grep-able as "SWAPDIAG CROSS" across all persisted logs.
+                if (targetDoc != null && !string.IsNullOrEmpty(e.Name))
+                {
+                    var launchIdentity = targetDoc.OriginalAgentName;
+                    if (!string.IsNullOrEmpty(launchIdentity) &&
+                        !launchIdentity.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _debugLogService?.Warning("SWAPDIAG",
+                            $"CROSS DETECTED: registration name='{e.Name}' (e.DocId='{e.DocId}') bound to " +
+                            $"inst={targetDoc.InstanceId} docId={targetDoc.DocId} which LAUNCHED as " +
+                            $"'{launchIdentity}' dir='{targetDoc.GetWorkingDirectory()}'. Header will show " +
+                            $"'{e.Name}' over '{launchIdentity}' content. task ab32897c");
+                    }
+                }
+            }
+            catch { /* diagnostic only */ }
+
             if (targetDoc != null)
             {
                 lock (_terminalDocMapLock)

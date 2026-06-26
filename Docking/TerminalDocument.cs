@@ -322,6 +322,16 @@ namespace MultiTerminal.Docking
                 $"[TerminalDocument.PromoteOriginalAgentName] DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
         }
 
+        /// <summary>
+        /// The launch-time / first-broker-confirmed agent identity for this
+        /// document (see <see cref="PromoteOriginalAgentName"/>). Read-only —
+        /// exposes <c>_originalAgentName</c> for the SWAPDIAG cross detector in
+        /// MainForm.OnMcpTerminalRegistered, which compares this against the
+        /// incoming registration name to flag a doc↔identity cross. Returns
+        /// null/empty until the first authoritative promotion. (task ab32897c)
+        /// </summary>
+        public string OriginalAgentName => _originalAgentName;
+
         private void UpdateTabTitle()
         {
             if (!string.IsNullOrEmpty(_customTitle))
@@ -1088,6 +1098,11 @@ namespace MultiTerminal.Docking
             WriteFallbackStatusline(terminalName, workingDirectory);
 
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
+            // SWAPDIAG (task ab32897c): records which TerminalDocument (_docId/instance) sent
+            // which docId to its own child shell, plus the launch name/dir. Cross-reference with
+            // the SWAPDIAG REGISTER lines to detect a doc↔docId cross. Remove after root cause.
+            _debugLogService?.Info("SWAPDIAG",
+                $"LAUNCH inst={InstanceId} docId={_docId} name='{terminalName}' projectId='{projectId}' dir='{workingDirectory}'");
             _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
             System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _terminal.Start returned");
 
