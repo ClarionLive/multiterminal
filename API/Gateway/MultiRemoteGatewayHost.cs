@@ -133,16 +133,20 @@ namespace MultiTerminal.API.Gateway
                 // Gateway config section (port, auth credentials, cookie/session settings).
                 var gatewayConfig = builder.Configuration.GetSection("MultiRemote");
 
-                // Resolve the listen port from config (MultiRemote:Port) so a Dev can change
-                // it without recompiling; the constructor value is only the fallback. Keep
-                // tailscale serve + companion-processes.json aligned to this port (item [9]).
-                _port = gatewayConfig.GetValue<int>("Port", _port);
+                // Resolve the listen port: Multi-Connect settings.txt wins, else MultiRemote:Port
+                // config (lets a Dev change it without recompiling), else the constructor fallback.
+                // Keep tailscale serve + companion-processes.json aligned to this port (item [9]).
+                _port = SettingsService.Default.GetMultiConnectGatewayPort()
+                    ?? gatewayConfig.GetValue<int>("Port", _port);
 
                 // Publish runtime config so MT's own NotificationsController can forward to the
                 // right port AND attach X-MT-Secret (pipeline Run-1 cross-model HIGH: setting the
                 // secret must not silently break MT→phone push). See GatewayRuntimeConfig.
+                // NotificationSecret resolves settings-first → appsettings fallback (task 642c14e3).
                 GatewayRuntimeConfig.Port = _port;
-                GatewayRuntimeConfig.NotificationSecret = gatewayConfig.GetValue<string>("NotificationSecret") ?? "";
+                GatewayRuntimeConfig.NotificationSecret = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectNotificationSecret(),
+                    gatewayConfig.GetValue<string>("NotificationSecret")) ?? "";
 
                 // Own listener — independent of MT's :5050 Kestrel.
                 builder.WebHost.ConfigureKestrel(options =>
@@ -227,7 +231,9 @@ namespace MultiTerminal.API.Gateway
 
                     // HttpClient for the off-box Cloudflare permission relay (item [5]) — the
                     // one remaining outbound hop (everything else is a direct service call).
-                    var relayUrl = gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl")
+                    var relayUrl = MultiConnectConfig.Resolve(
+                            SettingsService.Default.GetMultiConnectRelayBaseUrl(),
+                            gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl"))
                         ?? "https://mt-mcp-server.clarionlive.workers.dev";
                     builder.Services.AddHttpClient("PermissionRelay", c =>
                     {

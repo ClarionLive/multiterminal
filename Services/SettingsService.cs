@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Forms;
 using MultiTerminal.Models;
@@ -1102,6 +1103,189 @@ namespace MultiTerminal.Services
                 case PipelineProviderCodex: return PipelineProviderCodex;
                 case PipelineProviderOff: return PipelineProviderOff;
                 default: return null;
+            }
+        }
+
+        // ----------------------------------------------------------------------------
+        // Multi-Connect (self-service phone connectivity) — task 642c14e3.
+        //
+        // Per-install gateway/Tailscale/phone-auth/relay config stored settings-first; a
+        // config resolver (MultiConnectConfig) falls back to appsettings(.Local).json when a
+        // key is unset. CRITICAL: cleared fields must DELETE their line, never store "" — an
+        // empty value would shadow a real appsettings fallback (Devils-Advocate HIGH). All
+        // setters below route through SetOrRemove so clearing a field removes the key.
+        //
+        // The three secrets (phone password, relay ApiKey, push NotificationSecret) are
+        // DPAPI-protected at rest (ProtectedData, CurrentUser) and stored as base64 of the
+        // protected blob. settings.txt Load() splits on the FIRST '=', and the key prefixes
+        // here contain no '=', so a base64 value's trailing '=' padding is preserved intact.
+        // ----------------------------------------------------------------------------
+        private const string MultiConnectGatewayPortKey = "MultiConnect.GatewayPort";
+        private const string MultiConnectTailscaleEnabledKey = "MultiConnect.TailscaleEnabled";
+        private const string MultiConnectTailscaleHostnameKey = "MultiConnect.TailscaleHostname";
+        private const string MultiConnectTailscaleServePortKey = "MultiConnect.TailscaleServePort";
+        private const string MultiConnectPhoneAuthUsernameKey = "MultiConnect.PhoneAuthUsername";
+        private const string MultiConnectPhoneAuthPasswordKey = "MultiConnect.PhoneAuthPassword"; // DPAPI
+        private const string MultiConnectNotificationSecretKey = "MultiConnect.NotificationSecret"; // DPAPI
+        private const string MultiConnectVapidSubjectKey = "MultiConnect.VapidSubject";
+        private const string MultiConnectRelayBaseUrlKey = "MultiConnect.RelayBaseUrl";
+        private const string MultiConnectRelayApiKeyKey = "MultiConnect.RelayApiKey"; // DPAPI
+
+        public const int DefaultMultiConnectGatewayPort = 5100;
+        public const int DefaultMultiConnectTailscaleServePort = 443;
+
+        /// <summary>
+        /// Stores <paramref name="value"/> under <paramref name="key"/>, or REMOVES the key
+        /// when the value is null-or-whitespace. This is the anti-shadow guard: a blank field
+        /// must delete its settings line so the config resolver falls through to appsettings,
+        /// never persist "" which would override a real fallback value.
+        /// </summary>
+        private void SetOrRemove(string key, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                Remove(key);
+            else
+                Set(key, value);
+        }
+
+        // --- Validated TCP port accessors (1-65535; null when unset → resolver falls back) ---
+
+        /// <summary>Returns the configured gateway port, or null when unset/invalid (resolver falls back).</summary>
+        public int? GetMultiConnectGatewayPort() => GetPort(MultiConnectGatewayPortKey);
+
+        /// <summary>Sets (clamped 1-65535) or, when null, clears the gateway port.</summary>
+        public void SetMultiConnectGatewayPort(int? port) => SetPort(MultiConnectGatewayPortKey, port);
+
+        /// <summary>Returns the configured Tailscale serve port, or null when unset/invalid.</summary>
+        public int? GetMultiConnectTailscaleServePort() => GetPort(MultiConnectTailscaleServePortKey);
+
+        /// <summary>Sets (clamped 1-65535) or, when null, clears the Tailscale serve port.</summary>
+        public void SetMultiConnectTailscaleServePort(int? port) => SetPort(MultiConnectTailscaleServePortKey, port);
+
+        /// <summary>Reads a stored TCP port, returning null when unset or out of the 1-65535 range.</summary>
+        private int? GetPort(string key)
+        {
+            string raw = Get(key);
+            if (!string.IsNullOrWhiteSpace(raw) &&
+                int.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int port) &&
+                port >= 1 && port <= 65535)
+            {
+                return port;
+            }
+            return null;
+        }
+
+        /// <summary>Stores a TCP port (clamped 1-65535) or removes the key when null.</summary>
+        private void SetPort(string key, int? port)
+        {
+            if (port == null)
+            {
+                Remove(key);
+                return;
+            }
+            int clamped = Math.Max(1, Math.Min(65535, port.Value));
+            Set(key, clamped.ToString(CultureInfo.InvariantCulture));
+        }
+
+        // --- Tailscale enabled (true/false; null when unset) ---
+
+        /// <summary>Returns whether Tailscale integration is enabled, or null when unset.</summary>
+        public bool? GetMultiConnectTailscaleEnabled()
+        {
+            string raw = Get(MultiConnectTailscaleEnabledKey);
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            if (bool.TryParse(raw.Trim(), out bool b)) return b;
+            string t = raw.Trim();
+            return string.Equals(t, "1", StringComparison.Ordinal) ||
+                   string.Equals(t, "on", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(t, "yes", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Sets or, when null, clears the Tailscale-enabled flag.</summary>
+        public void SetMultiConnectTailscaleEnabled(bool? enabled)
+        {
+            if (enabled == null)
+                Remove(MultiConnectTailscaleEnabledKey);
+            else
+                Set(MultiConnectTailscaleEnabledKey, enabled.Value ? "true" : "false");
+        }
+
+        // --- Plaintext string fields (null when unset; setters clear on blank) ---
+
+        public string GetMultiConnectTailscaleHostname() => Get(MultiConnectTailscaleHostnameKey);
+        public void SetMultiConnectTailscaleHostname(string value) => SetOrRemove(MultiConnectTailscaleHostnameKey, value);
+
+        public string GetMultiConnectPhoneAuthUsername() => Get(MultiConnectPhoneAuthUsernameKey);
+        public void SetMultiConnectPhoneAuthUsername(string value) => SetOrRemove(MultiConnectPhoneAuthUsernameKey, value);
+
+        public string GetMultiConnectVapidSubject() => Get(MultiConnectVapidSubjectKey);
+        public void SetMultiConnectVapidSubject(string value) => SetOrRemove(MultiConnectVapidSubjectKey, value);
+
+        public string GetMultiConnectRelayBaseUrl() => Get(MultiConnectRelayBaseUrlKey);
+        public void SetMultiConnectRelayBaseUrl(string value) => SetOrRemove(MultiConnectRelayBaseUrlKey, value);
+
+        // --- DPAPI-protected secrets (decrypted on read; null when unset/undecryptable) ---
+
+        public string GetMultiConnectPhoneAuthPassword() => GetProtected(MultiConnectPhoneAuthPasswordKey);
+        public void SetMultiConnectPhoneAuthPassword(string value) => SetProtected(MultiConnectPhoneAuthPasswordKey, value);
+
+        public string GetMultiConnectNotificationSecret() => GetProtected(MultiConnectNotificationSecretKey);
+        public void SetMultiConnectNotificationSecret(string value) => SetProtected(MultiConnectNotificationSecretKey, value);
+
+        public string GetMultiConnectRelayApiKey() => GetProtected(MultiConnectRelayApiKeyKey);
+        public void SetMultiConnectRelayApiKey(string value) => SetProtected(MultiConnectRelayApiKeyKey, value);
+
+        /// <summary>True when the phone-auth password secret has a stored value (without decrypting it).</summary>
+        public bool HasMultiConnectPhoneAuthPassword() => !string.IsNullOrWhiteSpace(Get(MultiConnectPhoneAuthPasswordKey));
+
+        /// <summary>True when the push notification secret has a stored value (without decrypting it).</summary>
+        public bool HasMultiConnectNotificationSecret() => !string.IsNullOrWhiteSpace(Get(MultiConnectNotificationSecretKey));
+
+        /// <summary>True when the relay ApiKey secret has a stored value (without decrypting it).</summary>
+        public bool HasMultiConnectRelayApiKey() => !string.IsNullOrWhiteSpace(Get(MultiConnectRelayApiKeyKey));
+
+        /// <summary>
+        /// Reads a DPAPI-protected secret: base64-decode → ProtectedData.Unprotect (CurrentUser)
+        /// → UTF-8. Returns null when unset or the blob can't be decrypted (corrupt, or written by
+        /// a different Windows user), so a bad blob degrades to "unset" rather than throwing.
+        /// </summary>
+        private string GetProtected(string key)
+        {
+            string stored = Get(key);
+            if (string.IsNullOrWhiteSpace(stored)) return null;
+            try
+            {
+                byte[] blob = Convert.FromBase64String(stored.Trim());
+                byte[] clear = ProtectedData.Unprotect(blob, null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(clear);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to unprotect secret '{key}': {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Stores a secret DPAPI-protected (CurrentUser scope) as base64, or removes the key when
+        /// the value is null-or-whitespace. The plaintext never touches settings.txt.
+        /// </summary>
+        private void SetProtected(string key, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                Remove(key);
+                return;
+            }
+            try
+            {
+                byte[] clear = Encoding.UTF8.GetBytes(value);
+                byte[] blob = ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser);
+                Set(key, Convert.ToBase64String(blob));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to protect secret '{key}': {ex.Message}");
             }
         }
 

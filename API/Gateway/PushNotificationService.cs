@@ -35,7 +35,11 @@ namespace MultiTerminal.API.Gateway
         {
             _logger = logger;
             _configPath = Path.Combine(GatewayPaths.DataDir(config), "push-config.json");
-            _vapidSubject = config.GetValue<string>("MultiRemote:VapidSubject") ?? "mailto:admin@localhost";
+            // VapidSubject resolves Multi-Connect settings-first → appsettings fallback (task 642c14e3).
+            // VAPID KEY generation stays automatic (LoadOrGenerateVapid) — only the subject is configurable.
+            _vapidSubject = MultiConnectConfig.Resolve(
+                MultiTerminal.Services.SettingsService.Default.GetMultiConnectVapidSubject(),
+                config.GetValue<string>("MultiRemote:VapidSubject")) ?? "mailto:admin@localhost";
             LoadOrGenerateVapid();
             LoadSubscriptions();
         }
