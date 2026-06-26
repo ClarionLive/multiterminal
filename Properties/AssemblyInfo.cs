@@ -1,5 +1,10 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+
+// Expose internal test seams (PresenceAdapter.InitializeForTest/EvaluateAt/HandleMessage, etc.)
+// to the test assembly so integration tests can drive the parse→state-machine pipeline offline.
+[assembly: InternalsVisibleTo("MultiTerminal.Tests")]
 
 [assembly: AssemblyTitle("MultiTerminal")]
 [assembly: AssemblyDescription("Multi-terminal application with grid layout support")]

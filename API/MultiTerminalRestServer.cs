@@ -29,6 +29,7 @@ namespace MultiTerminal.API
         private SpawnService _spawnService;
         private TerminalStreamService _terminalStreamService;
         private CompanionProcessManager _companionProcessManager;
+        private MultiTerminal.Services.Presence.PresenceAdapter _presenceAdapter;
         private bool _isDisposed;
 
         /// <summary>
@@ -316,6 +317,38 @@ namespace MultiTerminal.API
                 _host = app;
 
                 await _host.StartAsync(cancellationToken);
+
+                // Presence-aware notification routing (task 9f9c3141): ingest MSR-2 mmWave + phone
+                // BLE signals over MQTT and drive the binary desk/away gate (broker.SetRemoteMode)
+                // automatically. No-ops entirely unless presence.enabled == "1", so the manual
+                // remoteMode pill is untouched until the Owner opts in + calibrates.
+                try
+                {
+                    _presenceAdapter = new MultiTerminal.Services.Presence.PresenceAdapter(
+                        _broker,
+                        SettingsService.Default,
+                        (level, message) =>
+                        {
+                            var dbg = _broker?.DebugLogService;
+                            if (dbg == null)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"[Presence:{level}] {message}");
+                                return;
+                            }
+                            switch (level)
+                            {
+                                case "error": dbg.Error("Presence", message); break;
+                                case "warn": dbg.Warning("Presence", message); break;
+                                default: dbg.Info("Presence", message); break;
+                            }
+                        });
+                    _presenceAdapter.Start();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[API] Presence adapter failed to start: {ex.Message}");
+                }
+
                 ServerStarted?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)
@@ -471,6 +504,8 @@ namespace MultiTerminal.API
                 _staleTaskTimer = null;
                 _staleAgentTimer?.Dispose();
                 _staleAgentTimer = null;
+                _presenceAdapter?.Dispose();
+                _presenceAdapter = null;
                 StopAsync().GetAwaiter().GetResult();
                 _broker?.Dispose();
                 _poolCoordinator?.Dispose();

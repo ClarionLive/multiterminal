@@ -55,6 +55,10 @@
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
     <PackageReference Include="LibGit2Sharp" Version="0.30.0" />
+    <!-- Presence-aware notification routing (task 9f9c3141): MQTT client for the MT Presence
+         Adapter that ingests MSR-2 mmWave + phone BLE signals and drives MessageBroker.SetRemoteMode.
+         Pinned to the 4.3.x line (MqttFactory API; v5 renamed it to MqttClientFactory). -->
+    <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
     <!-- MultiRemote phone-gateway Web Push (Phase 2, task ca6c5344, item [7]).
          VAPID key gen + RFC8291 payload encryption for Apple/Web Push. Same version
          the standalone MultiRemote shipped, so existing push-config.json keys load as-is. -->
