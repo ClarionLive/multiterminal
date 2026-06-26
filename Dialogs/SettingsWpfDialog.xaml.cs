@@ -588,7 +588,12 @@ namespace MultiTerminal.Dialogs
                 var restarter = MultiConnectConfig.GatewayRestarter;
                 if (restarter != null)
                 {
+                    // Disable BOTH buttons for the duration of the awaited restart. The modal pump
+                    // keeps running during the ~1-3s await; if the user could click Cancel (or the
+                    // window X) mid-await, the continuation below would assign DialogResult on a
+                    // closed window → InvalidOperationException from an async-void handler → crash.
                     OkButton.IsEnabled = false;
+                    CancelBtn.IsEnabled = false;
                     try
                     {
                         MC_TailscaleStatusText.Text = "Restarting gateway…";
@@ -604,11 +609,16 @@ namespace MultiTerminal.Dialogs
                     finally
                     {
                         OkButton.IsEnabled = true;
+                        CancelBtn.IsEnabled = true;
                     }
                 }
             }
 
-            DialogResult = true;
+            // Belt-and-suspenders: even with the buttons disabled above, the window could have been
+            // force-closed during the await (e.g. app shutdown). Assigning DialogResult on a closed
+            // window throws, so only set it while the dialog is still loaded and visible.
+            if (IsLoaded && IsVisible)
+                DialogResult = true;
         }
 
         private void CancelBtn_Click(object sender, RoutedEventArgs e)

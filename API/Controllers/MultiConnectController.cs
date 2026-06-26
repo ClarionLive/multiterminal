@@ -42,6 +42,13 @@ namespace MultiTerminal.API.Controllers
             if (!IsLoopbackRequest())
                 return StatusCode(403, new { error = "Loopback only" });
 
+            // CSRF/exfil defense: the :5050 host serves AllowAnyOrigin CORS, so a malicious page in
+            // the victim's loopback browser could otherwise fetch this and read hostname/username/
+            // phoneUrl/port/secret-is-set. The shared guard refuses a browser cross-origin fetch
+            // while local tooling / the setup skill (HttpClient, no Origin) passes.
+            if (!CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request))
+                return StatusCode(403, new { error = "Origin not allowed" });
+
             // Gateway port: settings int → appsettings MultiRemote:Port → default 5100.
             int? settingsPort = _settings.GetMultiConnectGatewayPort();
             string cfgPort = MultiConnectConfig.Appsettings[MultiConnectConfig.CfgPort];
@@ -97,7 +104,7 @@ namespace MultiTerminal.API.Controllers
 
         /// <summary>POST /api/multi-connect/config — validate, then persist (Remove on cleared fields).</summary>
         [HttpPost("config")]
-        public IActionResult PostConfig([FromBody] MultiConnectConfigRequest request)
+        public async Task<IActionResult> PostConfig([FromBody] MultiConnectConfigRequest request)
         {
             if (!IsLoopbackRequest())
                 return StatusCode(403, new { error = "Loopback only" });
@@ -134,6 +141,12 @@ namespace MultiTerminal.API.Controllers
             if (IsSetValue(request.RelayBaseUrl) && !IsAbsoluteHttpUrl(request.RelayBaseUrl))
                 return BadRequest(new { error = "relayBaseUrl must be an absolute http(s) URL" });
 
+            // Snapshot the effective restart-required fields (gateway port, NotificationSecret,
+            // VapidSubject, relay BaseUrl) BEFORE persisting so we can tell whether one actually
+            // changed and the running gateway needs re-applying. Non-restart fields (hostname,
+            // serve port, enabled — the setup skill's normal POST) never enter this signature.
+            var beforeRestart = RestartRelevantEffective();
+
             // --- Persist (single batched save). Cleared fields delete their key via the setters. --
             _settings.BeginBatch();
             try
@@ -167,8 +180,69 @@ namespace MultiTerminal.API.Controllers
                 _settings.EndBatch();
             }
 
+            // If a restart-required field's effective value actually changed, the running gateway is
+            // still on the OLD port/secret/subject/relay — persisting alone would return a success
+            // view that doesn't match runtime. Re-apply via the same hook the Settings dialog uses so
+            // the echoed config reflects APPLIED state, not just persisted state.
+            var afterRestart = RestartRelevantEffective();
+            if (!beforeRestart.Equals(afterRestart))
+            {
+                var restarter = MultiConnectConfig.GatewayRestarter;
+                if (restarter == null)
+                {
+                    // Hook not wired in this host: settings are saved but the live gateway can't be
+                    // re-applied in-process. Report applied=false rather than implying success.
+                    return Ok(new
+                    {
+                        applied = false,
+                        restartRequired = true,
+                        error = "Settings persisted, but no gateway restart hook is wired in this host; restart MultiTerminal to apply gatewayPort/notificationSecret/vapidSubject/relayBaseUrl.",
+                    });
+                }
+
+                try
+                {
+                    await restarter().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // Settings are already persisted — a failed restart must NOT roll them back.
+                    // Surface applied=false so the caller knows runtime is stale until a manual restart.
+                    return Ok(new
+                    {
+                        applied = false,
+                        restartRequired = true,
+                        error = "Settings persisted, but the gateway restart failed: " + ex.Message + ". Restart MultiTerminal to apply.",
+                    });
+                }
+                // Restart re-read settings and republished GatewayRuntimeConfig — GetConfig now
+                // reflects the applied state.
+            }
+
             // Echo back the new effective view so the caller can refresh without a second GET.
             return GetConfig();
+        }
+
+        /// <summary>
+        /// Effective values of the four restart-required fields (gateway port, NotificationSecret,
+        /// VapidSubject, relay BaseUrl), resolved settings-first → appsettings. Used to detect whether
+        /// a POST actually changed one and the running gateway must be re-applied.
+        /// </summary>
+        private (int port, string secret, string vapid, string relayBase) RestartRelevantEffective()
+        {
+            int port;
+            int? settingsPort = _settings.GetMultiConnectGatewayPort();
+            if (settingsPort.HasValue)
+                port = settingsPort.Value;
+            else if (int.TryParse(MultiConnectConfig.Appsettings[MultiConnectConfig.CfgPort], NumberStyles.Integer, CultureInfo.InvariantCulture, out int cp))
+                port = cp;
+            else
+                port = SettingsService.DefaultMultiConnectGatewayPort;
+
+            string secret = MultiConnectConfig.Resolve(_settings.GetMultiConnectNotificationSecret(), MultiConnectConfig.Appsettings[MultiConnectConfig.CfgNotificationSecret]) ?? "";
+            string vapid = MultiConnectConfig.Resolve(_settings.GetMultiConnectVapidSubject(), MultiConnectConfig.Appsettings[MultiConnectConfig.CfgVapidSubject]) ?? "";
+            string relayBase = MultiConnectConfig.Resolve(_settings.GetMultiConnectRelayBaseUrl(), MultiConnectConfig.Appsettings[MultiConnectConfig.CfgRelayBaseUrl]) ?? "";
+            return (port, secret, vapid, relayBase);
         }
 
         /// <summary>GET /api/multi-connect/tailscale-status — typed Tailscale probe (never throws).</summary>
@@ -177,6 +251,11 @@ namespace MultiTerminal.API.Controllers
         {
             if (!IsLoopbackRequest())
                 return StatusCode(403, new { error = "Loopback only" });
+
+            // Same cross-origin browser guard as GET /config — this leaks the tailscale hostname
+            // and backend state, which a malicious loopback-origin page must not be able to read.
+            if (!CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request))
+                return StatusCode(403, new { error = "Origin not allowed" });
 
             var status = await TailscaleService.GetStatusAsync().ConfigureAwait(false);
             return Ok(new

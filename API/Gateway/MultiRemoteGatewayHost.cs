@@ -139,14 +139,10 @@ namespace MultiTerminal.API.Gateway
                 _port = SettingsService.Default.GetMultiConnectGatewayPort()
                     ?? gatewayConfig.GetValue<int>("Port", _port);
 
-                // Publish runtime config so MT's own NotificationsController can forward to the
-                // right port AND attach X-MT-Secret (pipeline Run-1 cross-model HIGH: setting the
-                // secret must not silently break MT→phone push). See GatewayRuntimeConfig.
-                // NotificationSecret resolves settings-first → appsettings fallback (task 642c14e3).
-                GatewayRuntimeConfig.Port = _port;
-                GatewayRuntimeConfig.NotificationSecret = MultiConnectConfig.Resolve(
-                    SettingsService.Default.GetMultiConnectNotificationSecret(),
-                    gatewayConfig.GetValue<string>("NotificationSecret")) ?? "";
+                // NOTE: GatewayRuntimeConfig.Port / .NotificationSecret are published AFTER
+                // _app.StartAsync succeeds (below), not here — a failed (re)start must not leave the
+                // sender (NotificationsController + the in-process receiver) pointing at a port that
+                // never bound or a secret for a gateway that isn't actually listening.
 
                 // Own listener — independent of MT's :5050 Kestrel.
                 builder.WebHost.ConfigureKestrel(options =>
@@ -350,6 +346,17 @@ namespace MultiTerminal.API.Gateway
                 _app.MapFallbackToFile("index.html");
 
                 await _app.StartAsync(cancellationToken).ConfigureAwait(false);
+
+                // Publish runtime config now that the listener is actually bound, so MT's own
+                // NotificationsController can forward to the right port AND attach X-MT-Secret
+                // (pipeline Run-1 cross-model HIGH: setting the secret must not silently break
+                // MT→phone push). The in-process receiver (GatewayNotificationEndpoints) reads the
+                // SAME GatewayRuntimeConfig.NotificationSecret per request, so sender == receiver.
+                // NotificationSecret resolves settings-first → appsettings fallback (task 642c14e3).
+                GatewayRuntimeConfig.Port = _port;
+                GatewayRuntimeConfig.NotificationSecret = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectNotificationSecret(),
+                    gatewayConfig.GetValue<string>("NotificationSecret")) ?? "";
             }
             catch (Exception ex)
             {
