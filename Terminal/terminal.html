@@ -149,7 +149,10 @@
                 if (event.ctrlKey && event.key === 'c' && event.type === 'keydown') {
                     const selection = term.getSelection();
                     if (selection && selection.length > 0) {
-                        navigator.clipboard.writeText(selection);
+                        // Route copy through the C# host. The page is hosted from a
+                        // file:// URL where navigator.clipboard.writeText silently fails,
+                        // so the host writes the Windows clipboard (mirrors the paste path).
+                        sendToHost({ type: 'copy', selectedText: selection });
                         return false; // Prevent default (don't send to terminal)
                     }
                     // No selection - let CTRL+C pass through as interrupt
@@ -259,10 +262,24 @@
                 }
             }, { passive: false });
 
+            // Capture the selection on right mousedown in the CAPTURE phase, before
+            // xterm.js (whose listeners are on descendant elements, target/bubble phase)
+            // clears the selection. Without this, the contextmenu handler below sees an
+            // empty selection and right-click -> Copy has nothing to copy.
+            let lastMenuSelection = '';
+            container.addEventListener('mousedown', (e) => {
+                if (e.button === 2 && term && term.hasSelection()) {
+                    lastMenuSelection = term.getSelection();
+                }
+            }, true);
+
             // Handle right-click for context menu
             container.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
-                const selectedText = (term && term.hasSelection()) ? term.getSelection() : '';
+                const selectedText = (term && term.hasSelection())
+                    ? term.getSelection()
+                    : lastMenuSelection;
+                lastMenuSelection = '';
                 sendToHost({
                     type: 'contextmenu',
                     x: e.clientX,
