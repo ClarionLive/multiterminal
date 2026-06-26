@@ -332,6 +332,10 @@ namespace MultiTerminal.Terminal
                         OnPasteRequested();
                         break;
 
+                    case "copy":
+                        OnCopyRequested(message.SelectedText);
+                        break;
+
                     case "enterAck":
                         // Complete the TaskCompletionSource to signal Enter was processed
                         _enterAckTcs?.TrySetResult(true);
@@ -451,6 +455,18 @@ namespace MultiTerminal.Terminal
                     byte[] data = System.Text.Encoding.UTF8.GetBytes(text);
                     DataReceived?.Invoke(data);
                 }
+            }
+        }
+
+        private void OnCopyRequested(string text)
+        {
+            // Write the selection to the Windows clipboard on the UI thread.
+            // Mirrors OnPasteRequested: the WebView2 page is hosted from a file://
+            // URL where navigator.clipboard.writeText silently fails, so Ctrl-C
+            // (and right-click Copy) must route the copy through the host instead.
+            if (!string.IsNullOrEmpty(text))
+            {
+                System.Windows.Forms.Clipboard.SetText(text);
             }
         }
 
