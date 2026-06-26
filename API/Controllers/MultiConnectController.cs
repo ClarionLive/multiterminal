@@ -220,7 +220,20 @@ namespace MultiTerminal.API.Controllers
             }
 
             // Echo back the new effective view so the caller can refresh without a second GET.
-            return GetConfig();
+            // Uniform POST envelope: include applied/restartRequired alongside the config fields so a
+            // successful POST has the SAME shape as the restart-failed path above (which returns
+            // applied:false/restartRequired:true). We merge the markers into the GET /config payload's
+            // JSON rather than reshaping GetConfig(), so the GET response itself is unchanged.
+            var echo = GetConfig();
+            if (echo is OkObjectResult ok && ok.Value != null &&
+                System.Text.Json.JsonSerializer.SerializeToNode(ok.Value) is System.Text.Json.Nodes.JsonObject node)
+            {
+                node["applied"] = true;
+                node["restartRequired"] = false;
+                return Ok(node);
+            }
+
+            return echo;
         }
 
         /// <summary>

@@ -52,7 +52,7 @@ namespace MultiTerminal.API.Gateway
             var startupSecret = ResolveNotificationSecret(app.Configuration);
             if (string.IsNullOrEmpty(startupSecret))
             {
-                app.Logger.LogWarning("MultiRemote:NotificationSecret is not configured — /api/notifications/runtime is unauthenticated. Set a secret in the Multi-Connect tab or appsettings.Local.json to secure this endpoint.");
+                app.Logger.LogWarning("MultiRemote:NotificationSecret is not configured — /api/notifications/runtime is restricted to LOOPBACK callers only (remote/tailnet POSTs are rejected). Set a secret in the Multi-Connect tab or appsettings.Local.json to allow authenticated remote callers.");
             }
 
             app.MapPost("/api/notifications/runtime", async (HttpContext context, PushNotificationService push, ILogger<PushNotificationService> logger) =>
@@ -70,6 +70,19 @@ namespace MultiTerminal.API.Gateway
                     if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
                             System.Text.Encoding.UTF8.GetBytes(providedSecret),
                             System.Text.Encoding.UTF8.GetBytes(notificationSecret)))
+                        return Results.Json(new { error = "Unauthorized" }, statusCode: 403);
+                }
+                else
+                {
+                    // No secret configured → this route would otherwise be fully unauthenticated, yet
+                    // it sits on the no-session PublicPaths allowlist AND is reachable on the
+                    // Tailscale-exposed :5100 gateway — so any tailnet peer could inject runtime
+                    // notifications / spam push (pipeline Run-2 HIGH). The ONLY legitimate no-secret
+                    // caller is MT's own NotificationsController forwarding to localhost:<port>
+                    // (loopback). Restrict the unauthenticated path to loopback; a null remote means
+                    // an in-process call and is allowed.
+                    var remoteIp = context.Connection.RemoteIpAddress;
+                    if (remoteIp != null && !System.Net.IPAddress.IsLoopback(remoteIp))
                         return Results.Json(new { error = "Unauthorized" }, statusCode: 403);
                 }
 
