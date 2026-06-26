@@ -1663,6 +1663,7 @@ namespace MultiTerminal.MCPServer.Services
                 if (!existingByDocId.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
                 {
                     System.Diagnostics.Debug.WriteLine($"[MessageBroker] DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
+                    LogInfo($"SWAPDIAG REGISTER-OUTCOME=hijack-reject incoming name='{name}' docId='{docId}' wasOwnedBy='{existingByDocId.Name}' => docId cleared, fresh registration"); // task ab32897c diag; remove after root cause
                     docId = null; // Clear the stolen docId so it falls through to fresh registration below
                     existingByDocId = null;
                 }
@@ -1673,6 +1674,7 @@ namespace MultiTerminal.MCPServer.Services
                 string newName = name;
 
                 System.Diagnostics.Debug.WriteLine($"[MessageBroker] Terminal renaming: {oldName} → {newName} (DocId: {docId})");
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=rename '{oldName}'→'{newName}' on DocId='{docId}' (placeholder adopted incoming name). This is the prime swap suspect if DocId belongs to the OTHER doc. task ab32897c"); // remove after root cause
 
                 // Update terminal name and channel port
                 existingByDocId.Name = newName;
@@ -1769,6 +1771,7 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     existingByName.DocId = docId;
                 }
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // Always re-raise event so MainForm updates its mapping
                 TerminalRegistered?.Invoke(this, existingByName);
 
