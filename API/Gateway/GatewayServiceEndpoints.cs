@@ -205,7 +205,10 @@ namespace MultiTerminal.API.Gateway
         // ----------------------------- helpers -----------------------------
         private static bool TryGetApiKey(IConfiguration config, out string apiKey, out string error)
         {
-            var configured = config["MultiRemote:PermissionRelay:ApiKey"];
+            // Relay ApiKey resolves Multi-Connect settings-first → appsettings fallback (task 642c14e3).
+            var configured = MultiConnectConfig.Resolve(
+                SettingsService.Default.GetMultiConnectRelayApiKey(),
+                config["MultiRemote:PermissionRelay:ApiKey"]);
             if (string.IsNullOrWhiteSpace(configured))
             {
                 apiKey = string.Empty;

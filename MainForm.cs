@@ -789,15 +789,16 @@ namespace MultiTerminal
                             // Constructed here — after _mcpServer.StartAsync() and all broker/
                             // spawn/stream UI wiring — so every instance below is live. Port is
                             // the fallback only; MultiRemote:Port in appsettings.json wins.
-                            _remoteGateway = new MultiTerminal.API.Gateway.MultiRemoteGatewayHost(
-                                5100,
-                                _mcpServer.Broker,
-                                _mcpServer.SpawnService,
-                                _mcpServer.TerminalStreamService,
-                                _sharedProjectDatabase);
+                            _remoteGateway = CreateGatewayHost();
                             await _remoteGateway.StartAsync();
                             System.Diagnostics.Debug.WriteLine(
                                 $"[MainForm] MultiRemote gateway started on {_remoteGateway.Url}");
+
+                            // Wire the Multi-Connect restart hook (task 642c14e3, item 2) so the
+                            // Settings tab / config endpoints can re-apply restart-required fields
+                            // (port, VapidSubject, NotificationSecret, relay BaseUrl) without a full
+                            // app relaunch.
+                            MultiTerminal.API.Gateway.MultiConnectConfig.GatewayRestarter = RestartGatewayAsync;
                         }
                         catch (Exception gwEx)
                         {
@@ -867,6 +868,70 @@ namespace MultiTerminal
                 System.Diagnostics.Debug.WriteLine(errorMsg);
                 MessageBox.Show(errorMsg + $"\n\nLog file: {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal", "startup-error.log")}\n\nThe Chat feature will not be available.",
                     "MCP Server Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Serializes Multi-Connect gateway restarts so two rapid Save/Restart clicks can't
+        // race a half-disposed host against a fresh StartAsync (task 642c14e3, item 2).
+        private readonly System.Threading.SemaphoreSlim _gatewayRestartLock = new System.Threading.SemaphoreSlim(1, 1);
+
+        /// <summary>
+        /// Builds a MultiRemote gateway host from MT's live service singletons. Single source of the
+        /// ctor arg list + port fallback so the startup and restart paths can't drift (task 642c14e3).
+        /// Port 5100 is only the fallback — the host resolves the effective port from settings/appsettings.
+        /// </summary>
+        private MultiTerminal.API.Gateway.MultiRemoteGatewayHost CreateGatewayHost()
+            => new MultiTerminal.API.Gateway.MultiRemoteGatewayHost(
+                5100,
+                _mcpServer?.Broker,
+                _mcpServer?.SpawnService,
+                _mcpServer?.TerminalStreamService,
+                _sharedProjectDatabase);
+
+        /// <summary>
+        /// Restarts the MultiRemote phone gateway in-process (StopAsync → Dispose → reconstruct →
+        /// StartAsync) so restart-required Multi-Connect fields — gateway port, VapidSubject,
+        /// NotificationSecret, relay BaseUrl — re-apply WITHOUT a full app relaunch (task 642c14e3,
+        /// item 2). The new host re-reads the resolver, so settings.txt changes take effect here.
+        /// Wired to <see cref="MultiTerminal.API.Gateway.MultiConnectConfig.GatewayRestarter"/> at
+        /// startup; the Settings tab / config endpoints invoke it. Throws on failure so callers can
+        /// surface a clear pass/fail to the user.
+        /// </summary>
+        public async Task RestartGatewayAsync()
+        {
+            await _gatewayRestartLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var old = _remoteGateway;
+                _remoteGateway = null;
+                if (old != null)
+                {
+                    try { await old.StopAsync().ConfigureAwait(false); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Gateway stop during restart failed: {ex.Message}"); }
+                    try { old.Dispose(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Gateway dispose during restart failed: {ex.Message}"); }
+                }
+
+                // Reconstruct with the same live service singletons the original used. Port is the
+                // fallback only — the new host resolves the effective port from settings/appsettings.
+                // Dedicated local + finally dispose so a failed StartAsync can't leak the host (CA2000);
+                // null it after ownership transfers to the field on success.
+                MultiTerminal.API.Gateway.MultiRemoteGatewayHost fresh = null;
+                try
+                {
+                    fresh = CreateGatewayHost();
+                    await fresh.StartAsync().ConfigureAwait(false);
+                    _remoteGateway = fresh;
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MainForm] MultiRemote gateway restarted on {fresh.Url}");
+                    fresh = null;
+                }
+                finally
+                {
+                    fresh?.Dispose();
+                }
+            }
+            finally
+            {
+                _gatewayRestartLock.Release();
             }
         }
 
@@ -6041,6 +6106,7 @@ namespace MultiTerminal
                 // Gateway likewise already StopAsync'd in OnFormClosing; null it rather than
                 // block the UI thread on DisposeAsync (same rationale as _mcpServer above).
                 _remoteGateway = null;
+                _gatewayRestartLock?.Dispose();
                 _dockPanel?.Dispose();
                 _dashboardHeader?.Dispose();
                 _toolStrip?.Dispose();

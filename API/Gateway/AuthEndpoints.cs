@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Gateway
 {
@@ -52,8 +53,17 @@ namespace MultiTerminal.API.Gateway
                     return Results.BadRequest(new { error = "Invalid request" });
                 }
 
-                var expectedUser = config.GetValue<string>("Auth:Username");
-                var expectedPass = config.GetValue<string>("Auth:Password");
+                // Credentials resolve Multi-Connect settings-first → appsettings fallback (task
+                // 642c14e3). Setting creds in the Multi-Connect tab takes effect on the NEXT login
+                // (read per-request, not restart-required); an empty tab field falls through to
+                // appsettings.Local.json. BOTH this positive check and the fail-closed gate below
+                // run on the RESOLVED values so "set password in tab → still can't log in" can't happen.
+                var expectedUser = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectPhoneAuthUsername(),
+                    config.GetValue<string>("Auth:Username"));
+                var expectedPass = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectPhoneAuthPassword(),
+                    config.GetValue<string>("Auth:Password"));
 
                 // Fail closed on missing/default credentials (pipeline Run-2 security HIGH). The
                 // committed appsettings.json ships changeme/changeme and appsettings.Local.json is
