@@ -20,22 +20,45 @@ Source: `API/Gateway/` (host: `MultiRemoteGatewayHost.cs`).
   inbox directly instead of HTTP-polling. The only remaining outbound hop is the off-box
   Cloudflare permission relay.
 
-## Configuration keys
+## Setup (recommended: the Multi-Connect tab + skill)
 
-Non-secret defaults live in committed `appsettings.json` (copied next to the exe). **Secrets
-and per-install overrides go in `appsettings.Local.json`** (gitignored; see
-`appsettings.Local.json.example`). `appsettings.Local.json` overrides `appsettings.json`.
+The **primary, self-service way** to configure phone connectivity is in-app — no hand-editing
+JSON:
 
-| Key | Default | Purpose |
+1. **Settings → Multi-Connect tab.** Set the gateway port, Tailscale hostname/serve port,
+   phone-login username/password, and the relay/push fields. Each field shows its **effective
+   value and source** (settings / appsettings / default) so you never edit into a shadow.
+   `Detect` fills the Tailscale hostname, `Test connection` probes the gateway `/health`, and
+   `Copy` grabs the phone URL. Per-install values are stored settings-first (in `settings.txt`;
+   the three secrets — phone password, relay ApiKey, push NotificationSecret — are
+   DPAPI-protected at rest). Clicking **OK** restarts the gateway in-process so restart-required
+   fields (port, VapidSubject, NotificationSecret, relay BaseUrl) take effect without relaunching
+   MT.
+2. **`/multi-connect-setup` skill.** Installs/configures Tailscale (only the browser login is
+   manual), runs `tailscale serve`, detects the hostname, writes the values back via the
+   loopback `POST /api/multi-connect/config`, verifies `/health`, and prints the phone URL.
+
+Hand-editing `appsettings.Local.json` (below) is the **fallback/advanced route** for headless or
+scripted installs.
+
+## Configuration keys (resolution order)
+
+Each per-install value resolves **settings.txt (Multi-Connect tab) → `appsettings.Local.json` →
+committed `appsettings.json` → built-in default**. Secrets and per-install overrides belong in
+the tab (settings.txt) or in gitignored `appsettings.Local.json` (see
+`appsettings.Local.json.example`) — never in the committed `appsettings.json`, which now ships
+with **neutral placeholders** (no per-owner host/identity/relay baked in).
+
+| Key | Committed default | Purpose |
 |-----|---------|---------|
 | `MultiRemote:Port` | `5100` | Gateway listen port (loopback). **Keep `tailscale serve` aligned to this.** |
 | `MultiRemote:DataPath` | `%APPDATA%\MultiTerminal` | Dir for `push-config.json` + `notification-toggles.json`. |
-| `MultiRemote:VapidSubject` | `https://desktop.tail51f56.ts.net` | VAPID `sub` claim (the PWA origin). |
-| `MultiRemote:InboxUserId` | `John` | Whose inbox the push monitor watches. |
-| `MultiRemote:NotificationSecret` | `""` (unauth) | Shared secret for `/api/notifications/runtime`. When set, MT's in-process forwarder automatically attaches the matching `X-MT-Secret` (via `GatewayRuntimeConfig`), so setting it secures the endpoint end-to-end without breaking push. Empty = unauthenticated (loopback/tailnet-only). **Set in Local to secure.** |
-| `MultiRemote:PermissionRelay:BaseUrl` | workers.dev URL | Cloudflare permission relay base. |
-| `MultiRemote:PermissionRelay:ApiKey` | `""` | Relay `X-API-Key`. **Set in Local.** |
-| `MultiRemote:Auth:Username` / `:Password` | `changeme` / `changeme` | Phone login. **Set in Local.** |
+| `MultiRemote:VapidSubject` | *(unset → code fallback `mailto:admin@localhost`)* | VAPID `sub` claim (the PWA origin). Set per-install in the tab or Local. |
+| `MultiRemote:InboxUserId` | `Owner` | Whose inbox the push monitor watches (the inbox is keyed by this id). Set to **your MT identity name** in the tab/Local if your inbox key differs (e.g. an existing install keyed under a personal name). |
+| `MultiRemote:NotificationSecret` | `""` (unauth) | Shared secret for `/api/notifications/runtime`. When set, MT's in-process forwarder automatically attaches the matching `X-MT-Secret` (via `GatewayRuntimeConfig`), so setting it secures the endpoint end-to-end without breaking push. Empty = unauthenticated (loopback/tailnet-only). **Set in the tab/Local to secure.** |
+| `MultiRemote:PermissionRelay:BaseUrl` | *(unset → code fallback to the shared relay)* | Cloudflare permission relay base. Set your own in the tab/Local. |
+| `MultiRemote:PermissionRelay:ApiKey` | `""` | Relay `X-API-Key`. **Set in the tab/Local.** |
+| `MultiRemote:Auth:Username` / `:Password` | `changeme` / `changeme` | Phone login. **Set in the tab/Local** (login is disabled until both are non-default). |
 | `MultiRemote:Auth:SessionTimeoutMinutes` | `1440` | Session cookie idle timeout. |
 | `MultiRemote:Auth:CookieName` | `MultiRemoteSession` | Session cookie name. |
 | `AllowedHosts` | `*.ts.net;localhost;127.0.0.1;[::1]` | Trimmed per DECISION D2 (Caddy/DDNS dropped). |
@@ -45,11 +68,13 @@ and per-install overrides go in `appsettings.Local.json`** (gitignored; see
 1. **Preserve push identity:** copy the standalone's `push-config.json` (VAPID keys + Apple
    subscriptions) into `MultiRemote:DataPath` (default `%APPDATA%\MultiTerminal`). If you
    skip this the gateway generates fresh VAPID keys and every phone must re-subscribe.
-2. **Secrets (REQUIRED for login):** copy `appsettings.Local.json.example` →
-   `appsettings.Local.json` next to the exe and fill in `Auth`, `NotificationSecret`,
-   `PermissionRelay:ApiKey`. **Login is disabled (503) until both `Auth:Username` and
-   `Auth:Password` are set to non-default values** — the gateway fails closed rather than
-   accept the committed `changeme/changeme` placeholders behind Tailscale.
+2. **Secrets (REQUIRED for login):** set `Auth`, `NotificationSecret`, and the relay/push
+   fields in the **Settings → Multi-Connect tab** (preferred — stored settings-first, secrets
+   DPAPI-protected) or, for headless/scripted installs, copy `appsettings.Local.json.example` →
+   `appsettings.Local.json` next to the exe and fill them in there. **Login is disabled (503)
+   until both `Auth:Username` and `Auth:Password` are set to non-default values** — the gateway
+   fails closed rather than accept the committed `changeme/changeme` placeholders behind
+   Tailscale.
 3. **Tailscale:** `tailscale serve` must terminate TLS and forward to `http://localhost:5100`
    (the gateway trusts `X-Forwarded-Proto=https` from loopback → issues Secure cookies).
    Verify it persists across reboot (`tailscale serve --bg`) and that
