@@ -96,6 +96,8 @@
       <li><a href="#browser-tabs">Browser Tabs</a></li>
       <li><a href="#terminal-stream">Terminal Streaming</a></li>
       <li><a href="#xaml">XAML Preview</a></li>
+      <li><a href="#code-graph">Code Graph</a></li>
+      <li><a href="#branch-metadata">Branch Metadata</a></li>
     </ul>
   </nav>
 
@@ -1770,12 +1772,12 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <!-- ================================================================== -->
   <h2 id="notifications">Notifications</h2>
   <!-- ================================================================== -->
-  <p>Runtime notifications from Claude Code hooks. Stores events in DB and optionally forwards to ClaudeRemote for phone push notifications. Rate limited to 100/minute. Endpoints are under <code>/api/notifications</code>.</p>
+  <p>Runtime notifications from Claude Code hooks. Stores events in the DB and forwards them to the in-process Multi-Connect gateway, which delivers Web Push (VAPID) notifications to your phone. Rate limited to 100/minute. Endpoints are under <code>/api/notifications</code>.</p>
 
   <div class="endpoint-block">
     <span class="method post">POST</span> <code>/api/notifications</code>
   </div>
-  <p>Receive a Claude Code runtime notification. Stores in DB, fires broker event, and forwards to ClaudeRemote for phone push.</p>
+  <p>Receive a Claude Code runtime notification. Stores in the DB, fires a broker event, and forwards to the in-process Multi-Connect gateway for Web Push delivery to the phone.</p>
   <h4>Request Body</h4>
   <pre><code>{
   "notification_type": "task_complete",
@@ -2184,6 +2186,165 @@ ws.onmessage = (e) => { /* handle terminal output */ };</code></pre>
   <pre><code>curl -X POST http://localhost:5050/api/xaml/render \
   -H "Content-Type: application/json" \
   -d '{"xaml":"&lt;Border xmlns=...&gt;...&lt;/Border&gt;","width":520,"height":400}'</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="code-graph">Code Graph</h2>
+  <!-- ================================================================== -->
+  <p>Query the Roslyn-built C# code graph (symbols and their relationships). Endpoints are under <code>/api/code-graph</code>. The graph is built on demand, not at startup &mdash; every endpoint returns <code>503 {"error":"CodeGraph not available"}</code> until the project is indexed. Index it once with <code>POST /api/code-graph/index</code> (or the <code>index_code_graph</code> MCP tool). The <code>callers</code>, <code>callees</code>, <code>impact</code>, and <code>inheritance</code> endpoints accept either <code>symbolId</code> (preferred, from a search result) or <code>symbolName</code>.</p>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/search</code>
+  </div>
+  <p>Search symbols by name, with an optional type filter.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>query</code></td><td>string</td><td>Yes</td><td>Symbol name to search for</td></tr>
+      <tr><td><code>type</code></td><td>string</td><td>No</td><td>Filter by symbol type: <code>class</code>, <code>method</code>, <code>interface</code>, etc.</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "count": 1,
+  "results": [
+    { "id": 42, "name": "MessageBroker", "type": "class", "filePath": "MCPServer/Services/MessageBroker.cs", "line": 35 }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/code-graph/search?query=MessageBroker&type=class"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/callers</code>
+  </div>
+  <p>Get the direct callers of a symbol.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>symbolId</code></td><td>integer</td><td>No*</td><td>Symbol ID (from a search result)</td></tr>
+      <tr><td><code>symbolName</code></td><td>string</td><td>No*</td><td>Symbol name (resolved to an ID server-side)</td></tr>
+    </tbody>
+  </table>
+  <p>* Supply <code>symbolId</code> or <code>symbolName</code>. Returns <code>404</code> if the symbol is not found.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "success": true,
+  "symbolId": 42,
+  "count": 2,
+  "results": [
+    { "id": 88, "name": "SendMessage", "type": "method", "filePath": "...", "line": 410 }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/code-graph/callers?symbolId=42"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/callees</code>
+  </div>
+  <p>Get the direct callees of a symbol (what it calls). Same parameters and response shape as <code>callers</code>.</p>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/code-graph/callees?symbolName=SendMessage"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/impact</code>
+  </div>
+  <p>Transitive impact analysis (blast radius) &mdash; everything that transitively depends on the symbol.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>symbolId</code></td><td>integer</td><td>No*</td><td>Symbol ID</td></tr>
+      <tr><td><code>symbolName</code></td><td>string</td><td>No*</td><td>Symbol name</td></tr>
+      <tr><td><code>maxDepth</code></td><td>integer</td><td>No</td><td>Maximum traversal depth. Default: <code>10</code></td></tr>
+    </tbody>
+  </table>
+  <p>* Supply <code>symbolId</code> or <code>symbolName</code>.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "symbolId": 42, "count": 7, "results": [ ... ] }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/code-graph/impact?symbolId=42&maxDepth=5"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/code-graph/inheritance</code>
+  </div>
+  <p>Inheritance / implementation tree for a type. Same <code>symbolId</code>/<code>symbolName</code> parameters as <code>callers</code>.</p>
+  <h4>Response</h4>
+  <pre><code>{ "success": true, "symbolId": 42, "count": 3, "results": [ ... ] }</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/code-graph/inheritance?symbolId=42"</code></pre>
+
+  <!-- ================================================================== -->
+  <h2 id="branch-metadata">Branch Metadata</h2>
+  <!-- ================================================================== -->
+  <p>Per-branch outcome labels (the one-line "what this branch delivers" shown on branch rows) and the task context an agent uses to draft them. Endpoints are under <code>/api/branch-metadata/{projectId}</code>. The project must be registered &mdash; unknown project IDs return <code>404 {"error":"unknown project"}</code>. The branch name travels in the body (POST) or the <code>branch</code> query string (GET) rather than the URL path, so names containing <code>/</code> (the <code>task/&lt;id&gt;</code> convention) round-trip without route-escaping issues.</p>
+
+  <div class="endpoint-block">
+    <span class="method post">POST</span> <code>/api/branch-metadata/{projectId}/outcome</code>
+  </div>
+  <p>Upsert the outcome label for a branch.</p>
+  <h4>Request Body</h4>
+  <pre><code>{
+  "branchName": "task/9f9c3141",
+  "outcome": "Allow agents to search past sessions by meaning",
+  "draftedBy": "Alice"
+}</code></pre>
+  <h4>Response</h4>
+  <pre><code>{
+  "projectId": "proj-123",
+  "branchName": "task/9f9c3141",
+  "outcome": "Allow agents to search past sessions by meaning",
+  "draftedBy": "Alice",
+  "updatedAt": "2026-06-27T10:00:00Z"
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl -X POST http://localhost:5050/api/branch-metadata/proj-123/outcome \
+  -H "Content-Type: application/json" \
+  -d '{"branchName":"task/9f9c3141","outcome":"Allow agents to search past sessions by meaning","draftedBy":"Alice"}'</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/branch-metadata/{projectId}/draft-context</code>
+  </div>
+  <p>Get the task context an agent needs to draft an outcome for a branch (the agent does the rewrite; this only fetches context). Resolves the source task from <code>originatingTaskId</code> if supplied (must belong to the same project), otherwise from the most recent task linked to the branch.</p>
+  <h4>Query Parameters</h4>
+  <table>
+    <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>branch</code></td><td>string</td><td>Yes</td><td>Branch name</td></tr>
+      <tr><td><code>originatingTaskId</code></td><td>string</td><td>No</td><td>Explicit source task ID (must belong to this project)</td></tr>
+    </tbody>
+  </table>
+  <h4>Response</h4>
+  <pre><code>{
+  "projectId": "proj-123",
+  "branchName": "task/9f9c3141",
+  "sourceTaskId": "9f9c3141",
+  "sourceTaskTitle": "Add semantic session search",
+  "sourceTaskDescription": "...",
+  "promptHint": "Rewrite the supplied task title + description as a one-sentence user-facing capability..."
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl "http://localhost:5050/api/branch-metadata/proj-123/draft-context?branch=task/9f9c3141"</code></pre>
+
+  <div class="endpoint-block">
+    <span class="method get">GET</span> <code>/api/branch-metadata/{projectId}/outcomes</code>
+  </div>
+  <p>Get all branch outcomes for a project.</p>
+  <h4>Response</h4>
+  <pre><code>{
+  "projectId": "proj-123",
+  "outcomes": [
+    {
+      "branchName": "task/9f9c3141",
+      "outcome": "Allow agents to search past sessions by meaning",
+      "draftedBy": "Alice",
+      "updatedAt": "2026-06-27T10:00:00Z"
+    }
+  ]
+}</code></pre>
+  <h4>curl</h4>
+  <pre><code>curl http://localhost:5050/api/branch-metadata/proj-123/outcomes</code></pre>
 
 </div>
 </main>

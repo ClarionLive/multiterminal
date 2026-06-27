@@ -172,7 +172,7 @@
         <div class="arch-row"><span class="arch-key">SessionLineageService</span><span class="arch-val">Imports JSONL transcripts; lineage chains and session search.</span></div>
         <div class="arch-row"><span class="arch-key">MessageQueueDatabase</span><span class="arch-val">Reliable message-delivery queue with retry and de-duplication.</span></div>
       </div>
-      <div class="arch-note"><code>multiterminal.db</code> holds the bulk &mdash; tasks, sessions, knowledge, projects, and the code graph. <code>message_queue.db</code> is a separate store so at-least-once message delivery survives restarts independently. Both live under <code>%APPDATA%\multiterminal</code>.</div>
+      <div class="arch-note"><code>multiterminal.db</code> holds the bulk &mdash; tasks, sessions, knowledge, projects, and the code graph. <code>messages.db</code> is a separate store so at-least-once message delivery survives restarts independently. Both live under <code>%APPDATA%\multiterminal</code>.</div>
     </div>
 
     <div class="arch-conn"><span>stdio (JSON-RPC) &darr;</span></div>
@@ -223,7 +223,7 @@
       </tr>
       <tr>
         <td><code>MCPServer/Models/KanbanTask.cs</code></td>
-        <td>~403</td>
+        <td>~500</td>
         <td><strong>Core model.</strong> All task properties: status, assignee, checklists, plan, helpers, stale tracking, continuation notes, plus all result types.</td>
       </tr>
       <tr>
@@ -738,7 +738,7 @@
 
   <div class="schema-group">
     <h4>notification_events</h4>
-    <p>Runtime notifications from Claude Code hooks (push to phone via ClaudeRemote).</p>
+    <p>Runtime notifications from Claude Code hooks &mdash; forwarded to the in-process gateway and pushed to your phone via Web Push (Multi-Connect).</p>
     <table class="schema-table">
       <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
       <tbody>
@@ -1158,9 +1158,9 @@
     <tbody>
       <tr><td><code>Services/</code></td><td>Business logic &amp; SQLite persistence</td><td>TaskDatabase, ProjectService, ProjectDatabase, ProjectContextService, ProjectJsonMigrationService, TerminalSpawner, SettingsService, KnowledgeDatabase, DebugLogService, TeamWatcherService, CompanionProcessManager, GatewayIntegrationService, OwnerProfileService, RipgrepService, TerminalStreamService</td></tr>
       <tr><td><code>MCPServer/Services/</code></td><td>MCP server services</td><td><strong>MessageBroker</strong>, PoolCoordinator, ActivityService, StaleTaskService, SpawnService, HttpWebhookService, SessionDiscovery, ComplexityDetector, SummaryService</td></tr>
-      <tr><td><code>MCPServer/Models/</code></td><td>Data models (14+ files)</td><td>KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, HelperSession, CodeDigest, KnowledgeEntry, ActivityEvent, TerminalInfo, TaskAttachment, ComplexityStats</td></tr>
+      <tr><td><code>MCPServer/Models/</code></td><td>Data models (19 files)</td><td>KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, HelperSession, CodeDigest, KnowledgeEntry, ActivityEvent, TerminalInfo, TaskAttachment, ComplexityStats</td></tr>
       <tr><td><code>Models/</code></td><td>App-level models (8+ files)</td><td>TerminalSessionInfo, SpawnedTeammate, Project, ProjectAgent, ProjectMcpServer, ProjectSpecialistAgent, ProjectPath, ProjectPromptEntry, ProjectSkill, DebugLogEntry</td></tr>
-      <tr><td><code>API/Controllers/</code></td><td>REST endpoints (21 controllers)</td><td>TasksController, MessagingController, OfficeController, SpawnController, KnowledgeController, SessionLineageController, ProjectContextController, TeamController, DebugController, ToolsController, AgentPanelsController, AgentStatsController, BrowserTabsController, CompanionController, GatewayController, NotificationsController, OwnerProfileController, TaskReportsController, TerminalStreamController, XamlPreviewController, RipgrepController</td></tr>
+      <tr><td><code>API/Controllers/</code></td><td>REST endpoints (~25 controllers)</td><td>TasksController, MessagingController, OfficeController, SpawnController, KnowledgeController, SessionLineageController, ProjectContextController, TeamController, DebugController, ToolsController, AgentPanelsController, AgentStatsController, BrowserTabsController, CompanionController, GatewayController, NotificationsController, OwnerProfileController, TaskReportsController, TerminalStreamController, XamlPreviewController, RipgrepController, CodeGraphController, SettingsController, WorktreesController, MultiConnectController, BranchMetadataController, WikiController, SessionMemoryController, RemoteModeController</td></tr>
       <tr><td><code>TasksPanel/</code></td><td>Kanban board UI</td><td>TasksPanelDocument + TasksPanelControl (WebView2)</td></tr>
       <tr><td><code>ChatPanel/</code></td><td>Messaging UI</td><td>ChatPanelDocument + ChatPanelControl (WebView2)</td></tr>
       <tr><td><code>ActivityPanel/</code></td><td>Activity feed UI</td><td>ActivityPanelDocument (WebView2)</td></tr>
@@ -1180,7 +1180,7 @@
   <ul>
     <li><strong>~150 C# production files</strong>, ~30K+ lines of code</li>
     <li><strong>1 primary SQLite database</strong> (multiterminal.db) with 30+ tables</li>
-    <li><strong>14+ data models</strong>, <strong>80 MCP tools</strong>, <strong>21 REST controllers</strong></li>
+    <li><strong>19 data models</strong>, <strong>~90 MCP tools</strong>, <strong>~25 REST controllers</strong></li>
     <li><strong>11 UI panels</strong> (WebView2-based), <strong>11 dialog windows</strong></li>
     <li>REST API on port 5050, MCP server via Node.js (stdio transport)</li>
   </ul>

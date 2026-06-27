@@ -115,7 +115,8 @@
 "channels": [
   { "server": "multiterminal-channel" }
 ]</code></pre>
-        <p>It runs as an MCP server (stdio) for the session, and in parallel opens a small HTTP listener that the broker delivers messages to. If its preferred port is busy it falls back to another and re-registers the actual port, so multiple terminals on one machine don't collide.</p>
+        <p>It runs as an MCP server (stdio) for the session, and in parallel opens a small HTTP listener that the broker delivers messages to. If its preferred port is busy it walks forward through the allowed range (<code>8800</code>&ndash;<code>8899</code>) until it finds a free one, then re-registers the actual port with the broker, so multiple terminals on one machine don't collide.</p>
+        <p>The same channel also carries tool-permission prompts to the phone: when Claude needs approval to run a tool, the server forwards the request to <strong>ClaudeRemote</strong> so you can answer remotely &mdash; reply <code>yes</code>, <code>no</code>, or <code>always</code> with the short request id to approve, deny, or auto-approve that tool for the session.</p>
 
         <h2 id="setting">Enabling channels (the required setting)</h2>
         <p>The channel server ships <em>inside</em> the plugin rather than from a published marketplace, so Claude Code treats it as a <strong>development (inline) channel</strong>. Development channels must be explicitly authorized &mdash; otherwise Claude Code will not load the channel server. MultiTerminal launches every terminal with two flags:</p>
@@ -132,16 +133,17 @@ claude \
         </div>
 
         <h2 id="env">Environment variables</h2>
-        <p>MultiTerminal sets these when it spawns a terminal so the channel server knows who it is and where to register:</p>
+        <p>When MultiTerminal spawns a terminal it injects <strong>two</strong> of these — <code>MULTITERMINAL_NAME</code> and <code>CHANNEL_PORT</code> — so the channel server knows who it is and which port to listen on. The other two are <em>not</em> set by MultiTerminal; the channel server falls back to its own defaults:</p>
         <table>
-          <thead><tr><th>Variable</th><th>Purpose</th><th>Default</th></tr></thead>
+          <thead><tr><th>Variable</th><th>Purpose</th><th>Set by MT?</th><th>Default</th></tr></thead>
           <tbody>
-            <tr><td><code>CHANNEL_PORT</code></td><td>HTTP port the channel server listens on for incoming messages (MultiTerminal assigns a unique one per terminal)</td><td><code>8800</code></td></tr>
-            <tr><td><code>MULTITERMINAL_NAME</code></td><td>This terminal's agent name (e.g. <code>Alice</code>)</td><td><code>unknown</code></td></tr>
-            <tr><td><code>MT_API_URL</code></td><td>MultiTerminal REST API base URL used for registration/routing</td><td><code>http://localhost:5050</code></td></tr>
-            <tr><td><code>MULTITERMINAL_ID</code></td><td>This terminal's ID, used for <code>send_message</code> routing</td><td><em>(empty)</em></td></tr>
+            <tr><td><code>MULTITERMINAL_NAME</code></td><td>This terminal's agent name (e.g. <code>Alice</code>)</td><td>Yes</td><td><code>unknown</code></td></tr>
+            <tr><td><code>CHANNEL_PORT</code></td><td>HTTP port the channel server listens on for incoming messages (MultiTerminal assigns a unique one per terminal, within <code>8800</code>&ndash;<code>8899</code>)</td><td>Yes</td><td><code>8800</code></td></tr>
+            <tr><td><code>MT_API_URL</code></td><td>MultiTerminal REST API base URL used for registration/routing</td><td>No — uses default</td><td><code>http://localhost:5050</code></td></tr>
+            <tr><td><code>MULTITERMINAL_ID</code></td><td>Intended for <code>send_message</code> routing, but effectively unused — the broker resolves terminals by agent name, so the server sends under <code>MULTITERMINAL_NAME</code> instead</td><td>No — uses default</td><td><em>(empty)</em></td></tr>
           </tbody>
         </table>
+        <p>So in practice only the agent name and the channel port come from the launcher. <code>MT_API_URL</code> defaults to the local REST API, and the empty <code>MULTITERMINAL_ID</code> is harmless because routing is name-based.</p>
 
         <h2 id="using">Sending &amp; replying</h2>
         <p>From an agent's point of view, channel messaging is just tools and events:</p>

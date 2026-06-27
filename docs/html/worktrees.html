@@ -74,6 +74,16 @@
         <p class="lead">Per-task git worktree isolation gives every active task its own checkout on its own branch, so parallel agents never trample each other's working tree. Claiming a task materializes a worktree; finishing it auto-commits, merges back to trunk, and prunes the directory.</p>
 
         <div class="card">
+          <h3>Typical flow</h3>
+          <ol>
+            <li>Set <code>MULTITERMINAL_WORKTREE_MODE=on</code> (a startup env var &mdash; see below) and launch MultiTerminal.</li>
+            <li><strong>Claim / activate a task</strong> &rarr; you get an isolated checkout on branch <code>task/&lt;id&gt;</code> under <code>.claude/worktrees/</code>.</li>
+            <li>Do the work there &mdash; your edits never touch the main checkout or any other task's tree.</li>
+            <li><strong>Mark the task done</strong> &rarr; MultiTerminal auto-commits, merges the branch back to trunk, and prunes the worktree directory.</li>
+          </ol>
+        </div>
+
+        <div class="card">
           <h3>On This Page</h3>
           <ol>
             <li><a href="#why">Why worktrees</a></li>
@@ -101,6 +111,7 @@
         <p>Worktree isolation is <strong>opt-in</strong>, gated by an environment variable. With it unset, MultiTerminal behaves exactly as before — everyone works directly in the main checkout.</p>
         <pre><code># Enable per-task worktree isolation
 MULTITERMINAL_WORKTREE_MODE=on</code></pre>
+        <p><code>MULTITERMINAL_WORKTREE_MODE</code> is a <strong>process environment variable read once at startup</strong> (<code>WorktreeConfig</code> resolves it on first access and caches the result). Set it <strong>before launching MultiTerminal</strong> &mdash; e.g. as a Windows user/system environment variable, or in the shell that starts the app &mdash; and <strong>restart</strong> the app for a change to take effect. Only the literal value <code>on</code> (case-insensitive) enables it; unset, blank, <code>1</code>, <code>true</code>, and <code>yes</code> all leave it off.</p>
         <p>When the gate is on, the worktree lifecycle hooks fire automatically at task-activate and task-done time. When it is off, no worktrees are created and the teardown steps are skipped.</p>
 
         <h2 id="create">Auto-create on claim</h2>
@@ -135,6 +146,15 @@ MULTITERMINAL_WORKTREE_MODE=on</code></pre>
           </tbody>
         </table>
         <p>Records are persisted in the <code>task_worktrees</code> table, keyed by the composite <code>(task_id, agent_name)</code>. A record is <code>active</code> while the directory exists on disk and <code>pruned</code> after removal; pruned rows are retained for audit/history.</p>
+        <div class="card">
+          <h3>Two agents on one task</h3>
+          <p>Say task <code>c0ce8037</code> is assigned to <strong>Alice</strong> and <strong>Bob</strong> joins as a helper with slug <code>tests</code>:</p>
+          <ul>
+            <li><strong>Alice (assignee)</strong> works in <code>.claude/worktrees/c0ce8037/</code> on branch <code>task/c0ce8037</code> &mdash; the canonical branch, forked from trunk.</li>
+            <li><strong>Bob (helper)</strong> works in <code>.claude/worktrees/c0ce8037--tests/</code> on branch <code>task/c0ce8037--tests</code> &mdash; forked from the canonical branch tip.</li>
+          </ul>
+          <p>Each has its own checkout, so neither sees the other's uncommitted edits. On done, Bob's branch is merged into Alice's canonical branch first, then the canonical branch lands on trunk.</p>
+        </div>
 
         <h2 id="done">Teardown on done (commit &rarr; merge &rarr; prune)</h2>
         <p>Moving a task to <code>done</code> runs a multi-phase teardown so nothing the agents wrote is lost and trunk ends up carrying every agent's work:</p>

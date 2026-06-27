@@ -85,7 +85,7 @@
         </div>
 
         <h2 id="what">What skills are</h2>
-        <p>A <em>skill</em> is a packaged instruction set Claude Code loads on demand when you type <code>/&lt;name&gt;</code> (or when the model recognizes a matching intent). Each lives in <code>skills/&lt;name&gt;/SKILL.md</code> inside the plugin, with a frontmatter <code>name</code>/<code>description</code> the model uses to decide when to invoke it. Skills are <em>instructions for the agent to execute</em> — they drive the Bash, PowerShell, MCP, and Task tools — not standalone scripts. The 15 skills fall into three groups: the <strong>workflow</strong> skills that run the kanban lifecycle, the <strong>setup/onboarding</strong> skills that bootstrap projects and connectivity, and the <strong>utility/intel</strong> skills that handle profiles, briefings, and verification.</p>
+        <p>A <em>skill</em> is a packaged instruction set Claude Code loads on demand when you type <code>/&lt;name&gt;</code> (or when the model recognizes a matching intent). Each lives in <code>skills/&lt;name&gt;/SKILL.md</code> inside the plugin, with a frontmatter <code>name</code>/<code>description</code> the model uses to decide when to invoke it. Intent matching means you don't have to type the slash command at all — saying "act as PM" or "dispatch these tickets" pulls in <code>/program-management</code>, and "verify the build" pulls in <code>/verifier-multiterminal</code>, because those phrases match the skill's description. Skills are <em>instructions for the agent to execute</em> — they drive the Bash, PowerShell, MCP, and Task tools — not standalone scripts. The 15 skills fall into three groups: the <strong>workflow</strong> skills that run the kanban lifecycle, the <strong>setup/onboarding</strong> skills that bootstrap projects and connectivity, and the <strong>utility/intel</strong> skills that handle profiles, briefings, and verification.</p>
 
         <h2 id="workflow">Workflow skills</h2>
         <p>These five drive the day-to-day task lifecycle — from picking work, through single- and multi-ticket coordination, to the post-coding review gates.</p>
@@ -142,7 +142,7 @@
             </tr>
             <tr>
               <td><code>/start-servers</code></td>
-              <td>Starts the ClaudeRemote server stack — ClaudeRemote (HTTP), Caddy (HTTPS), and optionally the TTS server — checking which ports are already listening and only starting what's missing.</td>
+              <td>Starts the ClaudeRemote server stack — ClaudeRemote (the HTTP bridge that relays prompts, questions, and permission requests to your phone; see <a href="multi-connect.html">Multi-Connect</a>), Caddy (HTTPS), and optionally the TTS server — checking which ports are already listening and only starting what's missing.</td>
               <td>Beginning a ClaudeRemote session when the user needs phone access.</td>
             </tr>
             <tr>
@@ -165,7 +165,7 @@
             </tr>
             <tr>
               <td><code>/daily-digest</code></td>
-              <td>Runs the DailyDigest fetch script to gather raw AI/Claude-ecosystem data from GitHub, Reddit, HN, and the web, then summarizes it into an actionable morning briefing.</td>
+              <td>Runs the bundled DailyDigest fetch script — a data-collection helper that gathers raw AI/Claude-ecosystem data from GitHub, Reddit, HN, and the web — then summarizes the results into an actionable morning briefing.</td>
               <td>"Daily digest" / "morning briefing" / "what happened today in AI".</td>
             </tr>
             <tr>

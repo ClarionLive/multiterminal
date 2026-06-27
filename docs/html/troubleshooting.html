@@ -83,6 +83,8 @@
             <li><a href="#layout">Resetting the docking layout</a></li>
             <li><a href="#terminal">Frozen terminal / respawn</a></li>
             <li><a href="#webview2">WebView2 runtime</a></li>
+            <li><a href="#phone">Phone / Multi-Connect won't connect</a></li>
+            <li><a href="#code-graph">Code-graph search returns 503</a></li>
             <li><a href="#logs">Where to see logs</a></li>
           </ol>
         </div>
@@ -160,6 +162,18 @@ Copy-Item "$src\messages.db" $dst</code></pre>
         <p>Most of MultiTerminal's panels (Tasks, Chat, Activity, Office, and others) render in embedded WebView2 controls, which require the <strong>Microsoft Edge WebView2 Runtime</strong>.</p>
         <p><strong>Symptoms of a missing/broken runtime:</strong> panels are blank or white, or the app errors on startup referencing WebView2.</p>
         <p><strong>Fix:</strong> install the Evergreen WebView2 Runtime from Microsoft (it ships with current Windows 11 but can be absent or outdated on older images), then relaunch. WebView2's own user-data cache lives under your local app data; a corrupt cache is rare but clears by reinstalling the runtime.</p>
+
+        <h2 id="phone">Phone / Multi-Connect won't connect</h2>
+        <p>Multi-Connect publishes MultiTerminal to your phone over your private <strong>Tailscale</strong> network (see <a href="multi-connect.html">Multi-Connect</a>). Most connection failures fall into one of three buckets:</p>
+        <ul>
+          <li><strong>Phone can't reach <code>https://&lt;host&gt;.ts.net</code> at all.</strong> Confirm both the PC and the phone are signed in to the <em>same</em> tailnet and that Tailscale is up on each. Then confirm <strong>MagicDNS</strong> is enabled (Tailscale admin console &rarr; DNS) &mdash; without it there is no <code>.ts.net</code> hostname for the phone to open. Verify <code>tailscale serve</code> is running on the PC and the hostname matches what the settings tab's <strong>Detect</strong> button reports.</li>
+          <li><strong>Login returns <code>503</code>.</strong> The phone gateway <em>fails closed</em>: login is disabled until both the phone username and password are changed away from their default <code>changeme</code> placeholders. Set them in the Multi-Connect settings tab, then retry. This is deliberate &mdash; it stops the app from ever sitting open on your tailnet with default credentials.</li>
+          <li><strong>Connected, but push notifications don't arrive.</strong> Web Push needs a <strong>VAPID</strong> keypair configured (the settings tab / setup skill manage the keys; you normally only set the VAPID subject).</li>
+        </ul>
+
+        <h2 id="code-graph">Code-graph search returns 503 "CodeGraph not available"</h2>
+        <p>The code-graph endpoints (<code>/api/code-graph/search</code>, <code>/callers</code>, <code>/callees</code>, <code>/impact</code>, <code>/inheritance</code>) and the matching MCP tools return <code>503 {"error":"CodeGraph not available"}</code> when the project has not been indexed yet &mdash; the Roslyn symbol/relationship graph is built on demand, not at startup.</p>
+        <p><strong>Fix:</strong> index the project once with the <code>index_code_graph</code> MCP tool (or <code>POST /api/code-graph/index</code> with the project directory). After indexing, searches resolve normally; re-run it after large refactors to refresh the graph.</p>
 
         <h2 id="logs">Where to see logs</h2>
         <ul>

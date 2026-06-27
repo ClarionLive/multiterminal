@@ -258,23 +258,13 @@
           <tbody>
             <tr>
               <td><code>multiterminal.db</code></td>
-              <td><code>%APPDATA%\MultiTerminal\multiterminal.db</code></td>
-              <td>Main database: kanban tasks, team profiles, activity feed, inbox, terminal registrations, helper sessions, projects, agents, MCP config</td>
+              <td><code>%APPDATA%\multiterminal\multiterminal.db</code></td>
+              <td>Main database (all in one file): kanban tasks, team profiles, activity feed, inbox, terminal registrations, helper sessions, projects, agents, MCP config, knowledge entries (6 categories) + code digests + FTS5 index, session lineage/messages, and the code graph</td>
             </tr>
             <tr>
-              <td><code>sessions.db</code></td>
-              <td><code>%APPDATA%\MultiTerminal\sessions.db</code></td>
-              <td>Session persistence: terminal identities, Claude Code session IDs, session metadata</td>
-            </tr>
-            <tr>
-              <td><code>knowledge.db</code></td>
-              <td><code>%APPDATA%\MultiTerminal\knowledge.db</code></td>
-              <td>Institutional memory: knowledge entries (6 categories), code digests, full-text search index</td>
-            </tr>
-            <tr>
-              <td><code>message_queue.db</code></td>
-              <td><code>%APPDATA%\MultiTerminal\message_queue.db</code></td>
-              <td>Reliable message delivery: queued messages with retry tracking and expiry</td>
+              <td><code>messages.db</code></td>
+              <td><code>%APPDATA%\multiterminal\messages.db</code></td>
+              <td>Inter-terminal message delivery queue: queued messages with retry tracking and expiry</td>
             </tr>
           </tbody>
         </table>
@@ -285,7 +275,7 @@
             <li>All databases are SQLite and created automatically on first run</li>
             <li>Schema migrations run automatically when new columns or tables are needed</li>
             <li>To start fresh, delete the database files; the application will recreate them</li>
-            <li>To migrate to a new machine, copy the <code>%APPDATA%\MultiTerminal\</code> folder</li>
+            <li>To migrate to a new machine, copy the <code>%APPDATA%\multiterminal\</code> folder</li>
           </ul>
         </div>
 

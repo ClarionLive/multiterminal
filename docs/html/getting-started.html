@@ -86,6 +86,16 @@
           </ol>
         </div>
 
+        <div class="card">
+          <h3>Install in a Few Steps</h3>
+          <ol>
+            <li><strong>Download and run the installer</strong> &mdash; the signed Windows installer (<code>MultiTerminalSetup</code>, x64).</li>
+            <li><strong>Have the prerequisites in place</strong> &mdash; MultiTerminal needs the <strong>.NET&nbsp;8 Desktop Runtime</strong> and the <strong>WebView2 runtime</strong> (WebView2 is already present on Windows&nbsp;11; on Windows&nbsp;10 you may need to install it). The installer also offers to set up Node.js&nbsp;18+ and the Claude&nbsp;Code CLI, which the agent integration relies on. If the .NET runtime is missing, the installer bundles a self-contained copy, so it works either way.</li>
+            <li><strong>Launch it</strong> &mdash; on first run MultiTerminal opens the Start Screen (described below) with an empty project list.</li>
+          </ol>
+          <p>For the full requirements table, building from source, and MCP server registration, see the <a href="deployment.html#prerequisites">Deployment</a> guide.</p>
+        </div>
+
         <h2 id="what-it-is">What MultiTerminal Is</h2>
         <p>MultiTerminal is a desktop application (.NET&nbsp;8, WinForms, WebView2) that hosts many terminal sessions in one window. Each terminal can run a Claude&nbsp;Code session that registers a named identity (for example, &ldquo;Alice&rdquo;), so agents can message one another, claim tasks, and hand work off. Behind the window runs an embedded REST API (port&nbsp;5050) and an MCP server that give those agents structured access to the Kanban board, knowledge base, and session history.</p>
         <p>You do not have to use multiple agents to get value from it &mdash; a single terminal plus the Kanban board is a perfectly good way to start. The multi-agent features are there when you want them.</p>
@@ -110,15 +120,15 @@
 
         <h2 id="open-terminal">Open a Terminal with an Identity</h2>
         <p>Open a terminal by choosing a project on the Start Screen, or with the <strong>New Terminal</strong> toolbar button. Each terminal tab is a full ConPTY-based shell rendered in WebView2, so you can run Claude&nbsp;Code or any normal command.</p>
-        <p>When a Claude&nbsp;Code session starts inside a terminal, it registers a <strong>named identity</strong> (such as &ldquo;Alice&rdquo;) with MultiTerminal. That name is how the agent appears in the team roster, how it sends and receives messages, and how it claims tasks. A registered terminal is a teammate; an unregistered shell is just a shell.</p>
+        <p>At terminal startup the <strong>Identity Picker</strong> dialog asks you to pick an existing name or create a new one. That choice registers the terminal's <strong>named identity</strong> (such as &ldquo;Alice&rdquo;) with MultiTerminal and lets it resume the right session. The name is how the agent appears in the team roster, how it sends and receives messages, and how it claims tasks. A registered terminal is a teammate; an unregistered shell is just a shell. The dialog is one of several covered in <a href="features.html#dialogs">Features</a>.</p>
 
         <h2 id="first-task">Run Your First Task</h2>
-        <p>The shared Kanban board is the heart of the workflow. Open it with the <strong>Tasks</strong> toolbar button. A task moves through three top-level states &mdash; <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>done</code> &mdash; and carries a checklist, a plan, and continuation notes. A minimal first run looks like this:</p>
+        <p>The shared Kanban board is the heart of the workflow. Open it with the <strong>Tasks</strong> toolbar button; for the full board tour see <a href="features.html#kanban-board">Features &mdash; Kanban Board</a>. A task moves through three top-level states &mdash; <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>done</code> &mdash; and carries a checklist, a plan, and continuation notes. A minimal first run looks like this:</p>
         <ol>
-          <li><strong>Create a task</strong> on the board with a clear title and description.</li>
-          <li><strong>Claim it</strong> so it is assigned to your identity. Claiming is required before you work &mdash; it records who owns the task.</li>
-          <li><strong>Make it active.</strong> Each assignee has only one active task at a time; activating this one automatically pauses any other active task you hold.</li>
-          <li><strong>Plan</strong> the approach (a short markdown plan on the task) and break it into <strong>checklist</strong> items.</li>
+          <li><strong>Create a task</strong> &mdash; click the <strong>+</strong> (Add task) button at the top of the <strong>To&nbsp;Do</strong> column and give it a clear title and description.</li>
+          <li><strong>Claim it</strong> &mdash; click the <strong>Claim</strong> button on the task's card so it is assigned to your identity. Claiming is required before you work &mdash; it records who owns the task.</li>
+          <li><strong>Make it active.</strong> Each assignee has only one active task at a time; setting this one active (via the <code>set_task_active</code> tool, which an agent calls as it starts work) automatically pauses any other active task you hold &mdash; the card then shows an <code>active</code> badge.</li>
+          <li><strong>Plan and break it down</strong> &mdash; click the card title to open its <strong>lifecycle board</strong>, write a short markdown plan, and add <strong>checklist</strong> items.</li>
           <li><strong>Work</strong> each item: move it from <code>pending</code> to <code>coding</code>, then to <code>testing</code> with a note describing what you did.</li>
         </ol>
         <p>That is the whole loop in miniature. The full lifecycle &mdash; checklist state machine, who is allowed to mark an item done, helpers, and session handoff &mdash; is documented in the <a href="kanban-workflow.html">Kanban Workflow</a> guide.</p>
@@ -144,7 +154,7 @@
             <tr><td>Recent</td><td>Drop-down of recently opened folders.</td></tr>
             <tr><td>Grid layout</td><td>Drop-down of tiling presets (2/3 horizontal or vertical, reset to tabs).</td></tr>
             <tr><td>Theme</td><td>Toggles dark / light theme.</td></tr>
-            <tr><td>Help</td><td>Opens this documentation site (book icon &mdash; new).</td></tr>
+            <tr><td>Help</td><td>Opens this documentation site (book icon).</td></tr>
             <tr><td>Settings</td><td>Opens the Settings dialog (gear icon).</td></tr>
             <tr><td>About</td><td>Shows the About dialog (info icon).</td></tr>
           </tbody>

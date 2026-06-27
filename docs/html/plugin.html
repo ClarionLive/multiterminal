@@ -169,7 +169,7 @@ claude plugin install multiterminal@multiterminal-marketplace
 
 # Later, to pull updates
 claude plugin marketplace update multiterminal-marketplace</code></pre>
-        <p>Or use the interactive <code>/plugin</code> menu inside Claude Code and pick <strong>multiterminal</strong> from the <code>multiterminal-marketplace</code> source. Requirements: Claude Code <strong>v2.1.139+</strong> (the hooks use the <code>args: string[]</code> exec form), <strong>Node.js 18+</strong> on <code>PATH</code> (hooks and the channel server run under Node), and for the bundled DB binary, a <strong>win32-x64</strong> runtime (other platforms work after a one-line <code>npm rebuild</code>).</p>
+        <p>Or use the interactive <code>/plugin</code> menu inside Claude Code and pick <strong>multiterminal</strong> from the <code>multiterminal-marketplace</code> source. Requirements: a <strong>recent Claude Code version</strong> — one that supports the args-array hook form (<code>args: string[]</code>) and plugin channels, <strong>Node.js 18+</strong> on <code>PATH</code> (hooks and the channel server run under Node), and for the bundled DB binary, a <strong>win32-x64</strong> runtime (other platforms work after a one-line <code>npm rebuild</code>).</p>
 
         <h2 id="relationship">Plugin vs. the desktop app</h2>
         <p>MultiTerminal has two halves that work together:</p>

@@ -86,7 +86,10 @@
         </div>
 
         <h2 id="what">1. What the index captures</h2>
-        <p>The indexer (<code>CSharpCodeGraphIndexer</code>) parses <code>.cs</code> files with Roslyn using a <strong>two-pass</strong> strategy &mdash; symbols first, then the relationships between them:</p>
+        <p>The indexer (<code>CSharpCodeGraphIndexer</code>) parses <code>.cs</code> files with <strong>Roslyn</strong> (Microsoft's official C# compiler API &mdash; it resolves real types and bindings, so call, override, and inheritance edges reflect what the compiler sees rather than what the text looks like) using a <strong>two-pass</strong> strategy &mdash; symbols first, then the relationships between them:</p>
+        <div class="card">
+          <p><strong>Why it beats grep:</strong> a text search for a method name matches every string that happens to share it &mdash; comments, unrelated overloads, same-named members on other types. Because the graph resolves invocations through the semantic model, an edge like <code>calls</code> points at the <em>actual</em> method that runs, correctly distinguishing overloads and following overrides and inheritance &mdash; not a string match.</p>
+        </div>
 
         <h3>Pass 1 &mdash; Symbols</h3>
         <p>Each declaration becomes a symbol row capturing its accessibility, <code>static</code>/<code>async</code>/<code>abstract</code> modifiers, generic parameters, return type, parameter list, the type it belongs to, line number, and a one-line source preview. Symbol kinds:</p>
@@ -115,8 +118,38 @@
         <h2 id="building">2. Building the index</h2>
         <p>Indexing is triggered per directory. The indexer registers (or clears and rebuilds) a project, parses every non-excluded <code>.cs</code> file into a Roslyn compilation, runs the two passes inside a transaction, and records statistics (file count, symbol count, relationship count, duration). Re-running re-indexes that project in place.</p>
         <p>Use the MCP tool <code>index_code_graph</code> or <code>POST /api/code-graph/index</code> (see below). After indexing, <code>GET /api/code-graph/stats</code> reports per-kind counts and the last-indexed timestamp.</p>
+        <div class="card">
+          <h3>Indexing is manual &mdash; re-index after edits</h3>
+          <p>Indexing only runs when you trigger it (the <code>index_code_graph</code> tool or the <code>POST</code> endpoint). There is <strong>no file watcher and no automatic re-index</strong> on save. Every query therefore answers from the <strong>last index</strong>: after you edit code, the graph is stale until you re-run indexing for that directory (re-running clears and rebuilds the project in place). The key gotcha &mdash; if callers/callees look wrong after a refactor, re-index before trusting the result. <code>GET /api/code-graph/stats</code> shows the last-indexed time so you can tell how fresh it is.</p>
+        </div>
 
         <h2 id="workflows">3. Practical workflows</h2>
+        <div class="card">
+          <h3>Worked example: who creates the MessageBroker?</h3>
+          <p>Index the repo, find a symbol, then trace its callers. The MCP calls and representative (elided) results:</p>
+          <pre><code>// 1. Index the repository
+index_code_graph(directory: "H:\\DevLaptop\\...\\MultiTerminal",
+                 projectName: "MultiTerminal")
+   &rarr; { "success": true, "projectName": "MultiTerminal",
+        "fileCount": 156, "symbolCount": 7841,
+        "relationshipCount": 24193, "durationMs": 9120 }
+
+// 2. Find the symbol (exact matches first, then substring)
+search_code_graph(query: "MessageBroker", type: "class")
+   &rarr; results: [
+        { "id": 1422, "name": "MessageBroker", "type": "class",
+          "file_path": "MCPServer/Services/MessageBroker.cs",
+          "line_number": 19, "accessibility": "public" }
+      ]
+
+// 3. Trace its callers ("who creates / depends on this?")
+get_symbol_callers(symbolName: "MessageBroker")   // or symbolId: 1422
+   &rarr; results: [
+        { "name": "MessageBroker", "member_of": "MultiTerminalRestServer",
+          "call_file": "API/MultiTerminalRestServer.cs", "call_line": 94 }
+      ]</code></pre>
+          <p>The caller row points at the exact construction site &mdash; <code>API/MultiTerminalRestServer.cs:94</code>, where the REST host does <code>_broker = new MessageBroker();</code> &mdash; so you can jump straight to where the dependency lives (object creation is a <code>calls</code> edge). Resolve callees the same way with <code>get_symbol_callees</code>, or widen to the full transitive set with <code>get_impact_analysis</code>. (The numeric ids and counts above are representative &mdash; your exact values depend on the current index.)</p>
+        </div>
         <div class="card">
           <h3>Find a symbol</h3>
           <p>Search by name (exact matches first, then substring), optionally filtered by kind. This returns the symbol's id, file, line, accessibility, signature, and source preview &mdash; the starting point for every other query.</p>

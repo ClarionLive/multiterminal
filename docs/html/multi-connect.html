@@ -76,18 +76,29 @@
         <div class="card">
           <h3>On This Page</h3>
           <ol>
+            <li><a href="#prereqs">Prerequisites</a></li>
             <li><a href="#how-it-works">How it works</a></li>
-            <li><a href="#quickstart">Quickstart (the skill)</a></li>
+            <li><a href="#quickstart">Quickstart (the setup skill)</a></li>
+            <li><a href="#phone">On your phone</a></li>
             <li><a href="#settings-tab">The Multi-Connect settings tab</a></li>
             <li><a href="#config">Configuration surface</a></li>
             <li><a href="#security">Security model</a></li>
             <li><a href="#rest">REST endpoints</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
             <li><a href="#legacy">Relationship to ClaudeRemote (legacy)</a></li>
           </ol>
         </div>
 
-        <h2 id="how-it-works">1. How it works</h2>
-        <p>MultiTerminal hosts the phone experience itself. A second, independent ASP.NET Kestrel listener &mdash; the <code>MultiRemoteGatewayHost</code> &mdash; runs <strong>in-process</strong> on a loopback port (default <code>5100</code>) and serves a Progressive Web App (PWA) plus the API the phone needs. It is completely separate from MultiTerminal's unauthenticated <code>:5050</code> REST API, so it can carry its own session-auth pipeline without contaminating the desktop API.</p>
+        <h2 id="prereqs">1. Prerequisites</h2>
+        <p>Multi-Connect publishes MultiTerminal over your private Tailscale network rather than the public internet, so before you start you need:</p>
+        <ul>
+          <li>A <strong>Tailscale account</strong> with <strong>both this PC and your phone signed in to the same tailnet</strong>. The phone reaches the PC over that shared private network &mdash; nothing is exposed publicly.</li>
+          <li><strong>MagicDNS enabled</strong> on the tailnet (Tailscale admin console &rarr; DNS). The whole <code>https://&lt;host&gt;.ts.net</code> scheme depends on it &mdash; without MagicDNS there is no friendly hostname for the phone to open, only a raw tailnet IP.</li>
+          <li>MultiTerminal installed and running on the PC, with a phone username and password set (see the settings tab &mdash; login is disabled until both are changed from their defaults).</li>
+        </ul>
+
+        <h2 id="how-it-works">2. How it works</h2>
+        <p>MultiTerminal hosts the phone experience itself. A second, independent ASP.NET Kestrel listener &mdash; the <code>MultiRemoteGatewayHost</code> &mdash; runs <strong>in-process</strong> on a loopback port (default <code>5100</code>) and serves a Progressive Web App (PWA &mdash; an installable web app that gets a home-screen icon and can receive push notifications) plus the API the phone needs. It is completely separate from MultiTerminal's unauthenticated <code>:5050</code> REST API, so it can carry its own session-auth pipeline without contaminating the desktop API.</p>
         <p>Public reachability comes from <strong>Tailscale serve</strong>, which terminates TLS on your tailnet and forwards requests to the loopback gateway. The gateway trusts the <code>X-Forwarded-Proto=https</code> header from the loopback proxy and issues Secure session cookies accordingly.</p>
 
         <div class="card">
@@ -98,9 +109,9 @@
          &rarr; MultiTerminal services (in-process &mdash; no extra HTTP hop)</code></pre>
         </div>
 
-        <p>Because the gateway calls MultiTerminal's services in-process, the phone gets the same task board, project list, team roster, chat/inbox, interactive terminal console (over WebSocket), and Web Push notifications that the desktop uses &mdash; with no proxy round-trips. The only remaining outbound hop is the off-box Cloudflare permission relay used for approving agent permission prompts from the phone.</p>
+        <p>Because the gateway calls MultiTerminal's services in-process, the phone gets the same task board, project list, team roster, chat/inbox, interactive terminal console (over WebSocket), and Web Push notifications that the desktop uses &mdash; with no proxy round-trips. The only remaining outbound hop is the off-box <strong>Cloudflare permission relay</strong> &mdash; a small Cloudflare-hosted message relay that forwards agent permission prompts to your phone and your tap-to-approve answer back, for cases where the phone is off the tailnet. It is optional and off-box: if you do not configure a relay base URL, MultiTerminal simply does not use it.</p>
 
-        <h2 id="quickstart">2. Quickstart (the setup skill)</h2>
+        <h2 id="quickstart">3. Quickstart (the setup skill)</h2>
         <p>The fastest path is the <code>/multi-connect-setup</code> skill. It is mostly automatic &mdash; the only manual step is a single browser login to Tailscale. Run it and it will:</p>
         <ol>
           <li>Detect (or install) Tailscale on this machine.</li>
@@ -113,7 +124,19 @@
           <p><strong>Before the phone can log in:</strong> set a phone username and password (see the settings tab below). Login is deliberately disabled &mdash; the gateway returns <code>503</code> &mdash; until both auth credentials are changed away from their default placeholder values, so the app never sits open on your tailnet with <code>changeme/changeme</code>.</p>
         </div>
 
-        <h2 id="settings-tab">3. The Multi-Connect settings tab</h2>
+        <h2 id="phone">4. On your phone</h2>
+        <p>Once the skill (or the settings tab) has published the gateway and you have a phone username/password set, the phone side is a one-time setup in the mobile browser:</p>
+        <ol>
+          <li>On your phone, open <code>https://&lt;your-host&gt;.ts.net</code> in the browser (use the exact URL the skill printed, or the one the <strong>Copy</strong> button puts on your clipboard). The phone must be signed in to the same tailnet.</li>
+          <li><strong>Log in</strong> with the username and password you configured in the Multi-Connect settings tab. (If login returns <code>503</code>, the credentials are still at their defaults &mdash; set them first.)</li>
+          <li><strong>Add to Home Screen</strong> to install the PWA &mdash; on iOS Safari via the Share menu &rarr; <em>Add to Home Screen</em>; on Android Chrome via the &#8942; menu &rarr; <em>Install app</em> / <em>Add to Home screen</em>. You then get a home-screen icon that launches the app full-screen.</li>
+          <li><strong>Allow notifications</strong> when prompted. This is what lets agent questions, permission prompts, and task/error alerts reach you as Web Push while you are away from the desk.</li>
+        </ol>
+        <div class="card">
+          <p>For push to work end-to-end the gateway also needs a <strong>VAPID</strong> keypair configured (VAPID is the Voluntary Application Server Identification keypair that authorizes Web Push to your phone &mdash; the <em>VAPID subject</em> and keys in the config are what identify MultiTerminal as the legitimate sender). The skill and settings tab manage these; you normally only set the VAPID subject.</p>
+        </div>
+
+        <h2 id="settings-tab">5. The Multi-Connect settings tab</h2>
         <p>Everything the skill writes can also be configured by hand in <strong>Settings &rarr; Multi-Connect</strong>. The tab is the self-service surface &mdash; no JSON editing required:</p>
         <table>
           <thead><tr><th>Control</th><th>What it does</th></tr></thead>
@@ -126,7 +149,7 @@
         </table>
         <p>Clicking <strong>OK</strong> restarts the gateway in-process so that restart-required fields (gateway port, VAPID subject, notification secret, relay base URL) take effect without relaunching MultiTerminal.</p>
 
-        <h2 id="config">4. Configuration surface</h2>
+        <h2 id="config">6. Configuration surface</h2>
         <p>Each per-install value resolves <strong>settings.txt (the Multi-Connect tab) &rarr; <code>appsettings.Local.json</code> &rarr; committed <code>appsettings.json</code> &rarr; built-in default</strong>. Per-install values and secrets belong in the tab or in the gitignored <code>appsettings.Local.json</code> &mdash; never in the committed <code>appsettings.json</code>.</p>
         <table>
           <thead><tr><th>Field</th><th>Default</th><th>Purpose</th></tr></thead>
@@ -146,7 +169,7 @@
         <p>The three secrets &mdash; phone password, notification secret, relay API key &mdash; are DPAPI-protected on this machine. The config API never returns them in cleartext (see below).</p>
         <p>For the full key reference, fallback sources, and deploy/migration steps, see <code>docs/multiremote-gateway.md</code>.</p>
 
-        <h2 id="security">5. Security model</h2>
+        <h2 id="security">7. Security model</h2>
         <ul>
           <li><strong>Loopback-only config.</strong> The <code>/api/multi-connect/*</code> endpoints are mounted only on the <code>:5050</code> loopback REST host and are explicitly excluded from the <code>:5100</code> phone gateway, so they are never reachable over Tailscale. Each action also rejects any non-loopback remote IP.</li>
           <li><strong>Secrets are never returned raw.</strong> <code>GET /api/multi-connect/config</code> reports each secret only as an <code>isSet</code> boolean plus its source (<code>settings</code> / <code>appsettings</code> / <code>unset</code>) &mdash; the cleartext value is never sent to any caller.</li>
@@ -155,7 +178,7 @@
           <li><strong>Secure cookies via forwarded headers.</strong> The gateway trusts <code>X-Forwarded-Proto</code> only from loopback (the Tailscale serve proxy), and issues <code>HttpOnly</code>, <code>SameSite=Strict</code>, Secure session cookies.</li>
         </ul>
 
-        <h2 id="rest">6. REST endpoints</h2>
+        <h2 id="rest">8. REST endpoints</h2>
         <p>The loopback configuration surface (used by the settings tab and the setup skill) lives under <code>/api/multi-connect</code> on <code>:5050</code>:</p>
         <table>
           <thead><tr><th>Method &amp; path</th><th>Purpose</th></tr></thead>
@@ -167,7 +190,19 @@
         </table>
         <p>Per-field POST semantics: <code>null</code> (omitted) leaves a value unchanged, an empty string clears it, and any other value sets it. This lets the tab send an untouched secret as <code>null</code> so it never overwrites a stored secret with a placeholder.</p>
 
-        <h2 id="legacy">7. Relationship to ClaudeRemote (legacy)</h2>
+        <h2 id="troubleshooting">9. Troubleshooting</h2>
+        <p>The most common phone-setup snags and where to look:</p>
+        <table>
+          <thead><tr><th>Symptom</th><th>Likely cause &amp; fix</th></tr></thead>
+          <tbody>
+            <tr><td>Phone can't reach <code>https://&lt;host&gt;.ts.net</code> at all</td><td>Tailscale/MagicDNS: confirm the phone is signed in to the same tailnet and up, and that MagicDNS is enabled. Verify <code>tailscale serve</code> is running on the PC and the hostname matches what the <strong>Detect</strong> button reports.</td></tr>
+            <tr><td><code>503</code> at login</td><td>Auth is still default/disabled. The gateway fails closed until both the phone username and password are changed away from <code>changeme</code>. Set them in the settings tab, then retry.</td></tr>
+            <tr><td>Logged in, but no push notifications</td><td>Check that you tapped <em>Allow</em> on the notification permission prompt (re-grant it in the phone's site settings if you dismissed it), and that a <strong>VAPID</strong> subject/keys are configured on the gateway.</td></tr>
+          </tbody>
+        </table>
+        <p>For the broader FAQ, see <a href="troubleshooting.html">Troubleshooting / FAQ</a>.</p>
+
+        <h2 id="legacy">10. Relationship to ClaudeRemote (legacy)</h2>
         <p>Multi-Connect <strong>supersedes</strong> the older approach, in which a standalone <code>ClaudeRemote</code> ASP.NET process was fronted by Caddy for HTTPS. That gateway has been folded into the MultiTerminal process: the phone PWA + API now run in-process, and TLS is handled by Tailscale serve rather than Caddy.</p>
         <div class="card">
           <p>If you are migrating from the standalone setup: the old <code>ClaudeRemote</code> companion is quarantined (its <code>companion-processes.json</code> entry is set to <code>autoStart:false</code>), not deleted, so a rollback stays cheap until end-to-end sign-off. Both the standalone and the in-process gateway bind port <code>5100</code>, so stop one before running the other. To preserve push identity, copy the standalone's <code>push-config.json</code> (VAPID keys + subscriptions) into the gateway's data path so phones don't have to re-subscribe.</p>

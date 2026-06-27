@@ -91,7 +91,7 @@
           <thead><tr><th>State</th><th>Condition</th></tr></thead>
           <tbody>
             <tr><td><strong>AtDesk</strong></td><td>The mmWave radar reports occupancy at the desk zone. This is the primary gate &mdash; present means at the desk, full stop.</td></tr>
-            <tr><td><strong>Nearby</strong></td><td>mmWave is absent, but a registered phone's Bluetooth (BLE) is still in range &mdash; a fresh BLE presence flag is ON, or its RSSI is at or above that device's calibrated threshold.</td></tr>
+            <tr><td><strong>Nearby</strong></td><td>mmWave is absent, but a registered phone's Bluetooth (BLE) is still in range &mdash; a fresh BLE presence flag is ON, or its RSSI (Bluetooth signal strength in dBm &mdash; a negative number where closer to 0 means nearer; the #1 calibration gotcha) is at or above that device's calibrated threshold.</td></tr>
             <tr><td><strong>Away</strong></td><td>mmWave is absent and no registered phone is in range (or BLE is degraded / the sensor is offline).</td></tr>
           </tbody>
         </table>
@@ -117,15 +117,24 @@
         <p>The machine degrades safely when it can't fully trust its inputs:</p>
         <ul>
           <li><strong>BLE stale or unavailable</strong> (no fresh phone signal within the staleness window, default <strong>30 seconds</strong>) &rarr; it collapses to mmWave-only: desk occupied = AtDesk, otherwise Away.</li>
-          <li><strong>Sensor / bridge offline</strong> (reported via the MQTT Last-Will topic) &rarr; the retained readings are treated as untrustworthy and the machine returns the safe default, <strong>Away</strong> (so notifications reach your phone rather than getting pinned to a dead desktop).</li>
+          <li><strong>Sensor / bridge offline</strong> (reported via the MQTT Last-Will topic &mdash; the Last-Will-and-Testament is the message the broker publishes on the sensor's behalf if it drops its connection) &rarr; the retained readings are treated as untrustworthy and the machine returns the safe default, <strong>Away</strong> (so notifications reach your phone rather than getting pinned to a dead desktop).</li>
         </ul>
 
         <h2 id="config">4. Configuration</h2>
         <p>Presence is configured through the <strong>Presence tab</strong> in Settings (and persisted via <code>SettingsService</code>). It is <strong>off by default</strong> so it never hijacks the manual remote-mode pill until you opt in and calibrate.</p>
+        <div class="card">
+          <h3>Enabling presence in MultiTerminal</h3>
+          <ol>
+            <li>Open <strong>Settings &rarr; Presence</strong> and turn it on &mdash; or set <code>presence.enabled=1</code> directly in <code>%APPDATA%\multiterminal\settings.txt</code>.</li>
+            <li>If you edit <code>settings.txt</code> by hand, do it while MultiTerminal is <strong>stopped</strong> &mdash; the running app owns the file and rewrites it from memory, so a live edit gets clobbered.</li>
+            <li><strong>Restart MultiTerminal.</strong> The adapter only starts at launch, so the toggle takes effect on the next start.</li>
+          </ol>
+          <p>For the full hardware-to-routing walkthrough &mdash; flashing firmware, the Mosquitto broker, calibrating the desk zone, and the BLE/IRK capture &mdash; see the prominent setup guide at <a href="../presence/SETUP-GUIDE.md"><strong>docs/presence/SETUP-GUIDE.md</strong></a>.</p>
+        </div>
         <table>
           <thead><tr><th>Setting</th><th>Key / default</th><th>Notes</th></tr></thead>
           <tbody>
-            <tr><td>Enabled</td><td><code>presence.enabled</code> = <code>"1"</code> (default off)</td><td>Gates whether the adapter runs at all.</td></tr>
+            <tr><td>Enabled</td><td>Set <code>presence.enabled</code> to <code>1</code> to enable; default is off (<code>0</code> or unset)</td><td>Gates whether the adapter runs at all.</td></tr>
             <tr><td>Config blob</td><td><code>presence.config</code> (compact JSON)</td><td>Holds MQTT, debounce, staleness, and the registered phones.</td></tr>
             <tr><td>Debounce</td><td><code>debounceSeconds</code> = <code>5</code></td><td>Hysteresis window before a state commits.</td></tr>
             <tr><td>BLE staleness</td><td><code>bleStaleSeconds</code> = <code>30</code></td><td>Age beyond which a phone signal is ignored.</td></tr>
@@ -146,13 +155,21 @@
           </tbody>
         </table>
         <p>Routing readiness is established only by the first <code>desk/occupancy</code> message &mdash; a retained <code>status</code> or BLE reading delivered first won't transiently flip you to phone-push before real occupancy data arrives. You can confirm the live routing flag with <code>GET /api/remote-mode</code>, which returns <code>{"remote_mode": false}</code> at the desk and <code>true</code> when away.</p>
+        <div class="card">
+          <h3>How do I know it's working?</h3>
+          <p>Without watching the status-bar pill, you can check the routing flag directly:</p>
+          <pre><code>curl http://localhost:5050/api/remote-mode
+# {"remote_mode": false}  &larr; at the desk
+# {"remote_mode": true}   &larr; away</code></pre>
+          <p>Sit at the desk and confirm it reads <code>false</code>; step away past the debounce window and confirm it flips to <code>true</code>. For an end-to-end check that publishes occupancy over MQTT and asserts the flip headlessly, run the bundled smoke test <code>docs/presence/presence-smoke-test.ps1</code> (<code>pwsh -File docs\presence\presence-smoke-test.ps1</code>).</p>
+        </div>
 
         <h2 id="hardware">6. Hardware &amp; setup</h2>
         <p>The reference build uses an <strong>Apollo Automation MSR-2</strong> multisensor &mdash; internally an <strong>ESP32-C3</strong> paired with an <strong>HLK-LD2410B</strong> 24&nbsp;GHz mmWave radar. mmWave (rather than PIR) is the point: it detects you sitting still at your desk. Any ESP32 + LD2410 board works with minor pin changes. The sensor runs ESPHome firmware and publishes to a local Mosquitto MQTT broker.</p>
         <div class="card">
           <p>The end-to-end walkthrough &mdash; ESPHome install, Mosquitto with a LAN listener, firewall rule, flashing the firmware, enabling presence in MultiTerminal, calibrating the desk zone, and the gotchas hit along the way &mdash; lives in <code>docs/presence/SETUP-GUIDE.md</code>. The firmware config (<code>docs/presence/msr2-presence.yaml</code>) and a headless smoke test (<code>docs/presence/presence-smoke-test.ps1</code>) are alongside it.</p>
         </div>
-        <p>Optional phone proximity (the Nearby distinction) adds a BLE tracker per phone, publishing <code>mt/presence/ble/&lt;id&gt;/presence</code> and <code>/rssi</code>; register each phone with a calibrated RSSI threshold in the presence config. Because iOS and Android randomize their BLE MAC, devices are matched by IRK &mdash; see the setup guide for the one-time capture.</p>
+        <p>Optional phone proximity (the Nearby distinction) adds a BLE tracker per phone, publishing <code>mt/presence/ble/&lt;id&gt;/presence</code> and <code>/rssi</code>; register each phone with a calibrated RSSI threshold in the presence config. Because iOS and Android randomize their BLE MAC, devices are matched by IRK (Identity Resolving Key &mdash; a per-phone key that lets the tracker still recognize a device whose MAC keeps rotating) &mdash; see the setup guide for the one-time capture.</p>
 
       </div>
     </main>

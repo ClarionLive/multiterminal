@@ -8,6 +8,11 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
   <div class="page-wrapper">
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -298,7 +303,7 @@
         <!-- =========================================== -->
         <!-- 2. TERMINAL MANAGEMENT -->
         <!-- =========================================== -->
-        <h2 id="terminal-management">2. Terminal Management</h2>
+        <h2 id="terminal-management">Terminal Management</h2>
 
         <h3>ConPty Hosting</h3>
         <p>Each terminal tab hosts a ConPty (Windows Console Pseudo-Terminal) instance rendered inside a WebView2 control. This provides a full terminal emulator experience with proper ANSI escape code support, colors, cursor positioning, and resize handling.</p>
@@ -337,31 +342,10 @@
         <!-- =========================================== -->
         <!-- 3. KANBAN BOARD -->
         <!-- =========================================== -->
-        <h2 id="kanban-board">3. Kanban Board</h2>
+        <h2 id="kanban-board">Kanban Board</h2>
 
-        <h3>Task Lifecycle</h3>
-        <p>Tasks follow a defined lifecycle with status transitions:</p>
-        <table>
-          <thead><tr><th>Status</th><th>Meaning</th><th>Next Status</th></tr></thead>
-          <tbody>
-            <tr><td><code>todo</code></td><td>Task created, waiting to be picked up</td><td>in_progress</td></tr>
-            <tr><td><code>in_progress</code></td><td>An agent has claimed the task and is actively working</td><td>done, todo (if unclaimed)</td></tr>
-            <tr><td><code>done</code></td><td>Task completed and verified</td><td>(terminal state)</td></tr>
-          </tbody>
-        </table>
-
-        <h3>Checklists</h3>
-        <p>Each task can have a checklist of work items. Checklist items have their own status lifecycle:</p>
-        <table>
-          <thead><tr><th>Status</th><th>Meaning</th><th>Transitions</th></tr></thead>
-          <tbody>
-            <tr><td><code>pending</code></td><td>Not yet started</td><td>coding</td></tr>
-            <tr><td><code>coding</code></td><td>Agent is implementing this item</td><td>testing</td></tr>
-            <tr><td><code>testing</code></td><td>Implementation complete, awaiting PM/tester review</td><td>done, coding (if failed)</td></tr>
-            <tr><td><code>done</code></td><td>Verified and accepted by PM/tester</td><td>(terminal state)</td></tr>
-          </tbody>
-        </table>
-        <p>Each transition requires notes explaining what was done or what needs fixing. Transition notes are delivered as inbox notifications.</p>
+        <h3>Task &amp; Checklist Lifecycle</h3>
+        <p>Tasks move through <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>done</code>, and each checklist item runs its own <code>pending</code> &rarr; <code>coding</code> &rarr; <code>testing</code> &rarr; <code>done</code> cycle (with <code>coding</code> &harr; <code>testing</code> looping when testing turns up a fix). Every transition carries a mandatory note that is delivered as an inbox notification. For the full state machines, the one-active-task rule, and the testing gate, the <a href="kanban-workflow.html">Kanban Workflow</a> guide is the canonical reference.</p>
 
         <h3>Plans</h3>
         <p>Tasks can have a markdown plan field describing the implementation approach. Plans are written by agents during the planning phase and serve as the work specification.</p>
@@ -396,7 +380,7 @@
         <!-- =========================================== -->
         <!-- 4. MESSAGING -->
         <!-- =========================================== -->
-        <h2 id="messaging">4. Messaging</h2>
+        <h2 id="messaging">Messaging</h2>
 
         <h3>Point-to-Point Chat</h3>
         <p>Any registered terminal can send a direct message to any other registered terminal. Messages are routed through the MessageBroker and delivered to the recipient's terminal via webhook injection.</p>
@@ -415,7 +399,7 @@
         </ul>
 
         <h3>Reliable Delivery</h3>
-        <p>Messages use a reliable delivery system backed by the <code>message_queue.db</code> database:</p>
+        <p>Messages use a reliable delivery system backed by the <code>messages.db</code> database:</p>
         <ul>
           <li>Messages are queued in SQLite before delivery</li>
           <li>Failed deliveries are retried on a timer (every 2 seconds)</li>
@@ -429,7 +413,7 @@
         <!-- =========================================== -->
         <!-- 5. PROJECT MANAGEMENT -->
         <!-- =========================================== -->
-        <h2 id="project-management">5. Project Management</h2>
+        <h2 id="project-management">Project Management</h2>
 
         <h3>Project Registration</h3>
         <p>Projects are registered in SQLite with metadata including:</p>
@@ -469,7 +453,7 @@
         <!-- =========================================== -->
         <!-- 6. TEAM & AGENT SYSTEM -->
         <!-- =========================================== -->
-        <h2 id="team-agent-system">6. Team &amp; Agent System</h2>
+        <h2 id="team-agent-system">Team &amp; Agent System</h2>
 
         <h3>Native Claude Code Teams</h3>
         <p>MultiTerminal supports Claude Code's native team agent system (requires <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code>). Teams are created via <code>TeamCreate</code>, and agents are spawned as subagents that appear in the Agent Panel.</p>
@@ -514,7 +498,7 @@
         <!-- =========================================== -->
         <!-- 7. INSTITUTIONAL MEMORY -->
         <!-- =========================================== -->
-        <h2 id="institutional-memory">7. Institutional Memory</h2>
+        <h2 id="institutional-memory">Institutional Memory</h2>
 
         <p>MultiTerminal implements a <strong>host-controlled memory</strong> system that replaces the traditional agent-controlled approach to context management.</p>
 
@@ -603,7 +587,7 @@
         <!-- =========================================== -->
         <!-- 8. SETTINGS & THEME -->
         <!-- =========================================== -->
-        <h2 id="settings-theme">8. Settings &amp; Theme</h2>
+        <h2 id="settings-theme">Settings &amp; Theme</h2>
 
         <h3>Dark / Light Theme</h3>
         <p>Toggle between dark and light themes using the sun/moon button in the toolbar. The theme applies to:</p>
@@ -642,7 +626,7 @@
         <!-- =========================================== -->
         <!-- 9. DIALOGS -->
         <!-- =========================================== -->
-        <h2 id="dialogs">9. Dialogs</h2>
+        <h2 id="dialogs">Dialogs</h2>
         <p>Modal dialogs for specific operations:</p>
 
         <table>
@@ -767,6 +751,10 @@
       const saved = localStorage.getItem('theme');
       if (saved) document.documentElement.setAttribute('data-theme', saved);
     })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
   </script>
   <script src="search-index.js"></script>
   <script src="search.js"></script>

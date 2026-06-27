@@ -91,7 +91,7 @@
         <h2 id="model">How hooks fire</h2>
         <p>Claude Code emits events at well-defined points in a session — when it starts, before and after each tool call, when the agent stops, before compaction, and so on. The plugin registers Node scripts against those events in <code>hooks/hooks.json</code>. Each entry has an optional <code>matcher</code> (which tools or session sub-types it applies to), a <code>command</code> (<code>node</code> or <code>powershell</code>), and a <code>timeout</code>. Scripts resolve their own path through <code>${CLAUDE_PLUGIN_ROOT}</code>, so the plugin is relocatable.</p>
         <ul>
-          <li><strong>Synchronous hooks</strong> run inline — Claude waits for them. They can inject context (stdout becomes additional context) or, for <code>PreToolUse</code>, block a tool call. These carry a short <code>timeout</code>.</li>
+          <li><strong>Synchronous hooks</strong> run inline — Claude waits for them. They can inject context (stdout becomes additional context) or, for <code>PreToolUse</code>, block a tool call. These carry a bounded <code>timeout</code> — short for most, but longer for the relays that wait on phone input (<code>ask-user-relay-hook</code> and <code>elicitation-relay-hook</code> allow ~130s).</li>
           <li><strong>Async hooks</strong> (<code>"async": true</code>) are fire-and-forget — activity recording, commentary, presence — so they never slow the agent down and fail silently if the API is unreachable.</li>
         </ul>
         <p>Almost every hook degrades gracefully: if the REST API or the SQLite native module isn't available, it exits 0 silently rather than breaking the session.</p>
@@ -105,13 +105,12 @@
             <tr><td><code>startup|resume|clear</code></td><td>(PowerShell parallel-subagents reminder), session-status-hook</td></tr>
             <tr><td><code>compact</code></td><td>session-compact-hook</td></tr>
             <tr><td><code>SessionEnd</code></td><td>(all)</td><td>session-status-hook, session-import-hook</td></tr>
-            <tr><td rowspan="7"><code>PreToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook</td></tr>
+            <tr><td rowspan="6"><code>PreToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook</td></tr>
             <tr><td><code>AskUserQuestion</code></td><td>ask-user-relay-hook</td></tr>
             <tr><td><code>Task</code></td><td>task-to-agent-hook</td></tr>
             <tr><td><code>Bash</code> / <code>Read</code> / <code>Write|Edit</code></td><td>safety-hook</td></tr>
             <tr><td><code>mcp__sqlite__write_query|mcp__mssql__query</code></td><td>safety-hook</td></tr>
             <tr><td><code>WebSearch|WebFetch</code></td><td>research-cache-hook</td></tr>
-            <tr><td>&nbsp;</td><td>&nbsp;</td></tr>
             <tr><td rowspan="4"><code>PostToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook, commentary-hook</td></tr>
             <tr><td>task checklist/status/continuation + build</td><td>active-context-hook, commentary-hook</td></tr>
             <tr><td><code>update_task_checklist</code></td><td>pipeline-trigger-hook</td></tr>
@@ -161,7 +160,7 @@
         <div class="card-grid">
           <div class="card">
             <h3>inbox-check-hook <em>(legacy)</em></h3>
-            <p><strong>Legacy / superseded by Channels.</strong> Ran on UserPromptSubmit, PostToolUse, Stop, and SubagentStop, checking a file-based inbox (<code>%APPDATA%/multiterminal/inbox/&lt;name&gt;.json</code>) and injecting any waiting teammate messages as context — the old <code>[cm]</code> "check messages" nudge, which relied on the agent then polling <code>get_messages</code>. Current builds deliver messages directly through <a href="channels.html#channels">Channels</a> instead, so this nudge is no longer the active path.</p>
+            <p><strong>Legacy / superseded by Channels.</strong> Checks a file-based inbox (<code>%APPDATA%/multiterminal/inbox/&lt;name&gt;.json</code>) and injects any waiting teammate messages as context — the old <code>[cm]</code> "check messages" nudge, which relied on the agent then polling <code>get_messages</code>. Current builds deliver messages directly through <a href="channels.html#channels">Channels</a>, which is now the primary path. It <strong>still runs</strong> as a file-based fallback, though — registered on UserPromptSubmit, PostToolUse, Stop, and SubagentStop — so a queued message is still surfaced even if the channel route misses it.</p>
           </div>
           <div class="card">
             <h3>notification-hook</h3>
@@ -201,8 +200,8 @@
             <p>Elicitation event. Forwards an MCP server's structured-input form to ClaudeRemote, polls for the response, and returns it to Claude Code. Falls back to the default terminal dialog on timeout.</p>
           </div>
           <div class="card">
-            <h3>stop-relay-hook</h3>
-            <p>Notifies ClaudeRemote when the agent has stopped and is waiting for input, so the phone user knows it's their turn to reply via the channel.</p>
+            <h3>stop-relay-hook <em>(dormant)</em></h3>
+            <p><strong>Ships in the folder but is not wired in <code>hooks.json</code>.</strong> When registered against <code>Stop</code> it would notify ClaudeRemote that the agent has stopped and is waiting for input, so the phone user knows it's their turn to reply via the channel. Today the <code>Stop</code> event only fires <code>session-save-hook</code> and <code>inbox-check-hook</code>, so this script stays inert unless added to the registry — like <code>pool-context.js</code> and <code>profile-status-hook.js</code> above.</p>
           </div>
         </div>
 

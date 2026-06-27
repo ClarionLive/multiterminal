@@ -78,11 +78,11 @@
       <li><a href="#task-relationships">Task Relationships</a> (3 tools)</li>
       <li><a href="#task-files">Task File Links</a> (3 tools)</li>
       <li><a href="#task-reports">Task Reports</a> (2 tools)</li>
-      <li><a href="#messaging">Messaging</a> (9 tools)</li>
+      <li><a href="#messaging">Messaging</a> (8 tools)</li>
       <li><a href="#team">Team &amp; Helpers</a> (4 tools)</li>
       <li><a href="#projects">Projects</a> (6 tools)</li>
       <li><a href="#knowledge">Knowledge Base</a> (4 tools)</li>
-      <li><a href="#sessions">Sessions</a> (8 tools)</li>
+      <li><a href="#sessions">Sessions</a> (9 tools)</li>
       <li><a href="#browser">Browser Tabs</a> (11 tools)</li>
       <li><a href="#build">Build &amp; Run</a> (5 tools)</li>
       <li><a href="#xaml-tools">XAML</a> (1 tool)</li>
@@ -1205,6 +1205,26 @@ add_project_association(projectId="proj-123", type="skill", skillName="kanban-ta
     <p>Matching session messages with context.</p>
     <h4>Example</h4>
     <pre><code>search_session_history(taskId="c0ce8037", query="FTS5", role="assistant")</code></pre>
+  </div>
+
+  <!-- search_session_memory -->
+  <div class="tool-block" id="search_session_memory">
+    <h3>search_session_memory</h3>
+    <p>Semantic (hybrid FTS5 + vector-similarity) search over session transcript chunks. Finds context by meaning rather than exact keywords -- ask a natural-language question. Use this when you remember the idea but not the wording; use <code>search_session_history</code> when you remember the words.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>query</code></td><td>string</td><td>Yes</td><td>Natural-language search text</td></tr>
+        <tr><td><code>projectPath</code></td><td>string</td><td>No</td><td>Limit results to a project path</td></tr>
+        <tr><td><code>topK</code></td><td>number</td><td>No</td><td>Max results to return (1-100). Default: <code>10</code></td></tr>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Filter by agent name</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Ranked transcript chunks with session ID, terminal name, project path, chunk text, and relevance score.</p>
+    <h4>Example</h4>
+    <pre><code>search_session_memory(query="what was the WebView2 event bridge approach?", topK=5)</code></pre>
   </div>
 
   <!-- get_latest_session -->
