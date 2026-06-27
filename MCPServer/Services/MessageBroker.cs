@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.Services;
+using MultiTerminal.Services.Presence;
 
 namespace MultiTerminal.MCPServer.Services
 {
@@ -15,7 +16,7 @@ namespace MultiTerminal.MCPServer.Services
     /// Routes messages between terminals and maintains message queues.
     /// Supports SQLite persistence for reliable delivery with retry.
     /// </summary>
-    public class MessageBroker : IDisposable
+    public class MessageBroker : IDisposable, IRemoteModeSink
     {
         private bool _isDisposed;
 

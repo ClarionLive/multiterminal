@@ -1,0 +1,120 @@
+# Apollo MSR-2 — ESPHome config for MT presence routing (task 9f9c3141, item [10] STARTER)
+#
+# This is a STARTING TEMPLATE, not a flash-and-go file. Before flashing you MUST:
+#   1. Fill in wifi + mqtt broker IP + secrets (use ESPHome secrets.yaml).
+#   2. Capture each phone's IRK (see docs/presence-routing.md §7) and paste it below.
+#   3. Calibrate the mmWave desk zone (gate distance / sensitivity) to YOUR desk.
+#   4. Calibrate per-phone RSSI thresholds against the values you observe here.
+#
+# Topic contract it targets (docs/presence-routing.md §2 — flat schema, NOT ESPHome auto-topics):
+#   mt/presence/desk/occupancy           ON|OFF   retained
+#   mt/presence/ble/<deviceId>/presence  ON|OFF   retained
+#   mt/presence/ble/<deviceId>/rssi      "-67"    not retained
+#   mt/presence/status                   online|offline (LWT, retained)
+#
+# IMPORTANT: ESPHome's MQTT component auto-publishes each entity to
+# <topic_prefix>/<component>/<name>/state, which does NOT match the flat schema above. We therefore
+# disable per-entity discovery/state publishing and emit the exact topics via on_* automations with
+# mqtt.publish. (Alternatively set a per-platform state_topic where supported.)
+
+substitutions:
+  device_name: msr2-desk
+  topic_prefix: mt/presence
+
+esphome:
+  name: ${device_name}
+
+esp32:
+  board: esp32-s3-devkitc-1   # MSR-2 is ESP32-S3; adjust to the exact variant if needed.
+  framework:
+    type: esp-idf
+
+logger:
+
+# --- Connectivity -----------------------------------------------------------
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+mqtt:
+  broker: !secret mqtt_broker      # e.g. 192.168.1.50 — the Windows box running Mosquitto
+  port: 1883
+  # username: !secret mqtt_user    # uncomment if the broker requires auth
+  # password: !secret mqtt_password
+  discovery: false                 # we publish explicit topics, not HA discovery
+  topic_prefix: ${topic_prefix}
+  birth_message:
+    topic: ${topic_prefix}/status
+    payload: online
+    retain: true
+  will_message:                    # LWT → MT graceful degradation when the sensor drops
+    topic: ${topic_prefix}/status
+    payload: offline
+    retain: true
+
+# --- mmWave occupancy (PRIMARY gate) ---------------------------------------
+# The MSR-2 carries an LD2410-class mmWave radar. has_target = someone in the zone (sitting still
+# still counts — that's the whole point vs PIR). Calibrate gate distance/sensitivity to your desk.
+ld2410:
+
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      name: "Desk occupancy"
+      id: desk_occupancy
+      # Publish the EXACT flat topic on every change (retained so MT gets state on (re)connect).
+      on_state:
+        - mqtt.publish:
+            topic: ${topic_prefix}/desk/occupancy
+            payload: !lambda 'return x ? "ON" : "OFF";'
+            retain: true
+            qos: 1
+
+  # --- Per-phone BLE presence (SECONDARY) ---------------------------------
+  # iOS/Android randomize their BLE MAC — match by IRK instead (see docs §7). One ble_presence per
+  # registered phone; deviceId here MUST match the slug registered in MT (presence.config.phones).
+  - platform: ble_presence
+    # deviceId: johns-iphone
+    irk: !secret iphone_irk          # 16-byte IRK hex; capture per docs/presence-routing.md §7
+    name: "Johns iPhone present"
+    on_state:
+      - mqtt.publish:
+          topic: ${topic_prefix}/ble/johns-iphone/presence
+          payload: !lambda 'return x ? "ON" : "OFF";'
+          retain: true
+          qos: 1
+
+  # Android can use an IRK too, or a fixed iBeacon UUID broadcaster app:
+  - platform: ble_presence
+    # deviceId: johns-pixel
+    ibeacon_uuid: !secret pixel_ibeacon_uuid
+    name: "Johns Pixel present"
+    on_state:
+      - mqtt.publish:
+          topic: ${topic_prefix}/ble/johns-pixel/presence
+          payload: !lambda 'return x ? "ON" : "OFF";'
+          retain: true
+          qos: 1
+
+# --- Optional: per-phone RSSI (for threshold-based range instead of/alongside presence) ----------
+# ble_rssi gives a continuous signal-strength reading MT compares against the per-device threshold.
+# Publish unretained (changes constantly). Match the address by IRK where the platform supports it.
+esp32_ble_tracker:
+
+sensor:
+  - platform: ble_rssi
+    # MT compares this against phones[].rssiThreshold; calibrate by watching real values at the desk
+    # edge vs across the room.
+    irk: !secret iphone_irk
+    name: "Johns iPhone RSSI"
+    on_value:
+      - mqtt.publish:
+          topic: ${topic_prefix}/ble/johns-iphone/rssi
+          payload: !lambda 'return to_string((int) x);'
+          qos: 1
+
+# --- Stretch (item [12]): RGB LED presence indicator off the GPIO header -------------------------
+# Subscribe to mt/presence/led/state and mirror the state machine (green=at_desk, amber=nearby,
+# off/red=away). Respect the 300mA @ 5V budget on the header. Left commented until wired.
+# light:
+#   - platform: ...   # e.g. esp32_rmt_led_strip / neopixelbus on the header GPIO
