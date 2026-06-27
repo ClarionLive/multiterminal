@@ -866,6 +866,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "check_my_context",
+        description: "Check YOUR terminal's live context-window fill (plus rate-limit quota and token usage). Returns contextPct 0–100 — the signal for whether it's a good time to wrap up and clear. At/above the nudge threshold (default 70%, env MULTITERMINAL_CONTEXT_THRESHOLD) you should finish your current step, write continuation notes (update_task_continuation), then call clear_my_context at a clean boundary. Reads the same statusline stats the HUD status bar shows.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agentName: {
+              type: "string",
+              description: "Your terminal/agent name. Omit to use $MULTITERMINAL_NAME.",
+            },
+            docId: {
+              type: "string",
+              description: "Optional terminal docId. Omit to use $MULTITERMINAL_DOC_ID, or the newest stats file for the name.",
+            },
+          },
+        },
+      },
+      {
+        name: "clear_my_context",
+        description: "Clear YOUR OWN context by submitting /clear into your terminal (types '/clear' + Enter). ⚠️ This WIPES the conversation. BEFORE calling: write continuation notes (update_task_continuation) capturing where to resume — SessionStart then rebuilds you from those notes + the session summary. Only call at a clean continuation point YOU chose, never mid-step, and make it the LAST action of your turn. Two-step guard: call once to get a reminder, then again with acknowledge:true to actually clear. Use check_my_context to decide when (≥70% is the nudge threshold).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agentName: {
+              type: "string",
+              description: "Your terminal/agent name. Omit to use $MULTITERMINAL_NAME.",
+            },
+            acknowledge: {
+              type: "boolean",
+              description: "Set true to confirm you have written continuation notes and are at a clean stopping point. Without it, the tool returns a reminder instead of clearing (guards against an accidental wipe).",
+            },
+          },
+        },
+      },
+      {
         name: "get_my_pickable_tasks",
         description: "Get tasks you can work on: your assigned in-progress tasks + unassigned todo tasks available to claim. Returns a compact formatted list. Use this instead of list_tasks when browsing for work.",
         inputSchema: {
@@ -3129,6 +3163,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{ type: "text", text: text.trim() }],
         };
+      }
+
+      case "check_my_context": {
+        const ctxName = args.agentName || process.env.MULTITERMINAL_NAME;
+        if (!ctxName) {
+          return { content: [{ type: "text", text: "No agent name. Pass agentName or set MULTITERMINAL_NAME." }] };
+        }
+        const ctxDocId = args.docId || process.env.MULTITERMINAL_DOC_ID;
+        const ctxQs = ctxDocId ? `?docId=${encodeURIComponent(ctxDocId)}` : "";
+        const stats = await apiCall(`/api/terminals/${encodeURIComponent(ctxName)}/stats${ctxQs}`);
+        if (!stats || stats.available === false) {
+          return { content: [{ type: "text", text: `No live context stats for '${ctxName}' yet (terminal not reporting). Try again after a turn or two.` }] };
+        }
+        const threshold = parseInt(process.env.MULTITERMINAL_CONTEXT_THRESHOLD || "70", 10);
+        const ctx = stats.contextPercent;
+        let ctxText = `🧠 Context for ${ctxName}: ${ctx == null ? "unknown" : ctx + "%"}`;
+        if (stats.stale) ctxText += " (stale reading)";
+        ctxText += "\n";
+        if (ctx != null) {
+          ctxText += ctx >= threshold
+            ? `⚠️ At/over the ${threshold}% nudge threshold — finish your current step, write continuation notes (update_task_continuation), then call clear_my_context at a clean boundary.\n`
+            : `✅ Headroom remaining (nudge threshold ${threshold}%).\n`;
+        }
+        if (stats.fiveHourPercent != null || stats.sevenDayPercent != null) {
+          ctxText += `Quota — 5h: ${stats.fiveHourPercent ?? "?"}%  7d: ${stats.sevenDayPercent ?? "?"}%`;
+          if (stats.quotaStale) ctxText += " (stale)";
+          ctxText += "\n";
+        }
+        if (stats.tokensTotal != null) {
+          ctxText += `Tokens: ${stats.tokensTotal.toLocaleString()}`;
+          if (stats.costUsd != null) ctxText += `  (~$${stats.costUsd}${stats.costIsEstimate ? " est" : ""})`;
+          ctxText += "\n";
+        }
+        return { content: [{ type: "text", text: ctxText }] };
+      }
+
+      case "clear_my_context": {
+        const clrName = args.agentName || process.env.MULTITERMINAL_NAME;
+        if (!clrName) {
+          return { content: [{ type: "text", text: "No agent name. Pass agentName or set MULTITERMINAL_NAME." }] };
+        }
+        if (!args.acknowledge) {
+          return { content: [{ type: "text", text: `⚠️ clear_my_context will WIPE your conversation. Before clearing:\n1. Write continuation notes: update_task_continuation (where to resume, current file, next step).\n2. Make sure you're at a clean stopping point (not mid-step).\nThen call clear_my_context again with acknowledge:true — as the LAST action of your turn. SessionStart will rebuild you from your notes + the session summary.` }] };
+        }
+        await apiCall(`/api/terminals/${encodeURIComponent(clrName)}/submit`, "POST", { text: "/clear" });
+        return { content: [{ type: "text", text: `🧹 Submitted /clear to '${clrName}'. Your context will clear and SessionStart will reload from continuation notes + session summary. (If nothing happens, the terminal may not be resolvable by that name — check MULTITERMINAL_NAME.)` }] };
       }
 
       case "get_my_active_task": {

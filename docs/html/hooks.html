@@ -111,17 +111,18 @@
             <tr><td><code>Bash</code> / <code>Read</code> / <code>Write|Edit</code></td><td>safety-hook</td></tr>
             <tr><td><code>mcp__sqlite__write_query|mcp__mssql__query</code></td><td>safety-hook</td></tr>
             <tr><td><code>WebSearch|WebFetch</code></td><td>research-cache-hook</td></tr>
-            <tr><td rowspan="4"><code>PostToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook, commentary-hook</td></tr>
+            <tr><td rowspan="5"><code>PostToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook, commentary-hook</td></tr>
             <tr><td>task checklist/status/continuation + build</td><td>active-context-hook, commentary-hook</td></tr>
             <tr><td><code>update_task_checklist</code></td><td>pipeline-trigger-hook</td></tr>
             <tr><td><code>WebSearch|WebFetch</code> / (all)</td><td>research-cache-hook, inbox-check-hook</td></tr>
+            <tr><td>(all)</td><td>context-threshold-hook</td></tr>
             <tr><td><code>PostToolUseFailure</code></td><td>(all)</td><td>activity-hook, commentary-hook</td></tr>
             <tr><td><code>PreCompact</code></td><td>(all)</td><td>session-save-hook</td></tr>
             <tr><td><code>Elicitation</code></td><td>(all)</td><td>elicitation-relay-hook</td></tr>
             <tr><td><code>Stop</code></td><td>(all)</td><td>session-save-hook, inbox-check-hook</td></tr>
             <tr><td><code>SubagentStart</code> / <code>SubagentStop</code></td><td>(all)</td><td>subagent-office-hook, activity-hook (+ inbox-check on stop)</td></tr>
             <tr><td><code>TeammateIdle</code></td><td>(all)</td><td>subagent-office-hook</td></tr>
-            <tr><td><code>UserPromptSubmit</code></td><td>(all)</td><td>inbox-check-hook, desktop-presence-hook</td></tr>
+            <tr><td><code>UserPromptSubmit</code></td><td>(all)</td><td>inbox-check-hook, desktop-presence-hook, context-threshold-hook</td></tr>
             <tr><td><code>Notification</code></td><td>(all)</td><td>notification-hook</td></tr>
           </tbody>
         </table>
@@ -165,6 +166,10 @@
           <div class="card">
             <h3>notification-hook</h3>
             <p>Notification event. Captures permission prompts, idle prompts, auth-success, and elicitation dialogs and POSTs them to the REST API for storage, a UI toast, and phone push via ClaudeRemote. Async, fails silently.</p>
+          </div>
+          <div class="card" id="context-threshold-hook">
+            <h3>context-threshold-hook</h3>
+            <p>PostToolUse + UserPromptSubmit. Reads the terminal's context-window fill from the statusline stats file and, at/above the threshold (<code>MULTITERMINAL_CONTEXT_THRESHOLD</code>, default 70%), injects an <strong>advisory</strong> nudge as plain context — escalating 🟡70 → 🟠80 → 🔴90. It is non-blocking (never <code>decision:"block"</code>) and never clears for you: it tells the agent to finish its current step, write continuation notes (<code>update_task_continuation</code>), then call <a href="mcp-tools.html#clear_my_context"><code>clear_my_context</code></a> at a clean boundary the agent chooses. Debounced per band via a marker file; resets after a clear so a later climb re-nudges. Silent fast-exit below threshold or on any error.</p>
           </div>
         </div>
 

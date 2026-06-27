@@ -7548,7 +7548,7 @@ namespace MultiTerminal.MCPServer.Services
         /// (task be599e08). Best-effort: the event is raised synchronously, but delivery/injection
         /// is the subscriber's responsibility — a missing terminal is a no-op, not an error here.
         /// </summary>
-        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text)
+        public (bool success, string error) RequestTerminalInject(string agentName, string sessionId, string text, string kind = "clear-trigger")
         {
             if (string.IsNullOrWhiteSpace(agentName))
                 return (false, "agentName is required");
@@ -7559,7 +7559,8 @@ namespace MultiTerminal.MCPServer.Services
             {
                 AgentName = agentName,
                 SessionId = sessionId,
-                Text = text
+                Text = text,
+                Kind = string.IsNullOrEmpty(kind) ? "clear-trigger" : kind
             });
 
             return (true, null);
@@ -8290,6 +8291,16 @@ namespace MultiTerminal.MCPServer.Services
         public string AgentName { get; set; }
         public string SessionId { get; set; }
         public string Text { get; set; }
+
+        /// <summary>
+        /// How the subscriber should deliver <see cref="Text"/>:
+        /// <c>"clear-trigger"</c> (default) routes through the deduped post-/clear
+        /// session-start trigger (task be599e08); <c>"submit"</c> types the text and
+        /// presses Enter as a normal prompt submission via the terminal's
+        /// InjectInputAsync — used by the self-clear MCP tool to submit "/clear"
+        /// (task 1d6e599d). Null/empty is treated as "clear-trigger" for back-compat.
+        /// </summary>
+        public string Kind { get; set; }
     }
 
     /// <summary>

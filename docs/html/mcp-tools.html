@@ -83,6 +83,7 @@
       <li><a href="#projects">Projects</a> (6 tools)</li>
       <li><a href="#knowledge">Knowledge Base</a> (4 tools)</li>
       <li><a href="#sessions">Sessions</a> (9 tools)</li>
+      <li><a href="#context">Context Self-Management</a> (2 tools)</li>
       <li><a href="#browser">Browser Tabs</a> (11 tools)</li>
       <li><a href="#build">Build &amp; Run</a> (5 tools)</li>
       <li><a href="#xaml-tools">XAML</a> (1 tool)</li>
@@ -1286,6 +1287,47 @@ get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal"
     <p>List of sessions without summaries, with session IDs, agent names, and timestamps.</p>
     <h4>Example</h4>
     <pre><code>get_unsummarized_sessions(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal", limit=5)</code></pre>
+  </div>
+
+  <!-- ================================================================== -->
+  <h2 id="context">Context Self-Management</h2>
+  <p>Tools that let an agent see and manage its own context window. When context crosses a threshold (default 70%), the <a href="hooks.html#context-threshold-hook"><code>context-threshold-hook</code></a> injects an advisory nudge; the agent then writes continuation notes and clears at a clean point of its own choosing. <code>/clear</code> is recoverable — the SessionStart(<code>source=clear</code>) flow rebuilds the agent from its continuation notes + session summary.</p>
+
+  <!-- check_my_context -->
+  <div class="tool-block" id="check_my_context">
+    <h3>check_my_context</h3>
+    <p>Check YOUR terminal's live context-window fill (plus rate-limit quota and token usage). Returns <code>contextPct</code> 0–100 — the signal for whether it's a good time to wrap up and clear. Reads the same statusline stats the HUD status bar shows.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Your terminal/agent name. Omit to use <code>$MULTITERMINAL_NAME</code>.</td></tr>
+        <tr><td><code>docId</code></td><td>string</td><td>No</td><td>Terminal docId. Omit to use <code>$MULTITERMINAL_DOC_ID</code>, or the newest stats file for the name.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>Context percentage with a recommendation (wrap-up vs headroom, relative to <code>MULTITERMINAL_CONTEXT_THRESHOLD</code>, default 70), plus 5h/7d quota, token total/cost, and staleness. Returns "not reporting" if the terminal hasn't written stats yet.</p>
+    <h4>Example</h4>
+    <pre><code>check_my_context(agentName="Alice")</code></pre>
+  </div>
+
+  <!-- clear_my_context -->
+  <div class="tool-block" id="clear_my_context">
+    <h3>clear_my_context</h3>
+    <p>Clear YOUR OWN context by submitting <code>/clear</code> into your terminal (types <code>/clear</code> + Enter). <strong>⚠️ This wipes the conversation.</strong> Write continuation notes first (<code>update_task_continuation</code>) — SessionStart then rebuilds you from those notes + the session summary. Call it only at a clean continuation point you chose, and as the last action of your turn.</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Your terminal/agent name. Omit to use <code>$MULTITERMINAL_NAME</code>.</td></tr>
+        <tr><td><code>acknowledge</code></td><td>boolean</td><td>No</td><td>Two-step guard. Without it, the tool returns a notes-first reminder instead of clearing. Set <code>true</code> to actually clear.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>A reminder (first call) or a confirmation that <code>/clear</code> was submitted (with <code>acknowledge=true</code>).</p>
+    <h4>Example</h4>
+    <pre><code>// 1. write notes, then:
+clear_my_context(agentName="Alice", acknowledge=true)</code></pre>
   </div>
 
   <!-- ================================================================== -->

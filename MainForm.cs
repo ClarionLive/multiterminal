@@ -1045,8 +1045,22 @@ namespace MultiTerminal
                 return;
             }
 
-            // Funnel through the deduped trigger so the hook path and the keystroke fallback
-            // can't double-inject for the same /clear.
+            // Kind=="submit" (task 1d6e599d): type the text and press Enter as a normal
+            // prompt submission. Used by the self-clear MCP tool to submit "/clear" into the
+            // agent's own terminal. Best-effort, fire-and-forget — matches the broker's
+            // "delivery is the subscriber's responsibility" contract. NOT routed through the
+            // post-/clear dedup trigger (that's for the SessionStart(source=clear) recovery).
+            if (string.Equals(e.Kind, "submit", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
+                    t => System.Diagnostics.Debug.WriteLine(
+                        $"[MainForm] TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
+                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+                return;
+            }
+
+            // Default (Kind=="clear-trigger"): funnel through the deduped trigger so the hook
+            // path and the keystroke fallback can't double-inject for the same /clear.
             targetDoc.Terminal.TriggerClearSessionStart("hook", e.Text);
         }
 
