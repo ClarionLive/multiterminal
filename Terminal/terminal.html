@@ -177,6 +177,42 @@
                 return true;
             });
 
+            // OSC 52 clipboard handler. TUI apps running inside the terminal
+            // (Claude Code, vim, tmux, etc.) copy to the clipboard by emitting an
+            // OSC 52 escape sequence (ESC ] 52 ; <target> ; <base64> BEL) rather
+            // than touching the system clipboard directly. xterm.js does not write
+            // the host clipboard for OSC 52 on its own, so without this the app's
+            // "copied N chars" succeeds from its point of view but nothing lands on
+            // the Windows clipboard. Route the payload through the same host copy
+            // path used by Ctrl-C / right-click so OnCopyRequested writes it.
+            // xterm strips the leading "52;" and hands us "<target>;<base64>".
+            term.parser.registerOscHandler(52, (data) => {
+                try {
+                    const sep = data.indexOf(';');
+                    const payload = sep >= 0 ? data.slice(sep + 1) : data;
+                    // "?" is a clipboard *read* query — we don't support reporting
+                    // the clipboard back, so let xterm handle/ignore it.
+                    if (!payload || payload === '?') {
+                        return false;
+                    }
+                    let text;
+                    try {
+                        const binary = atob(payload);
+                        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+                        text = new TextDecoder('utf-8').decode(bytes);
+                    } catch (e) {
+                        // Malformed base64 — not ours to handle cleanly.
+                        return false;
+                    }
+                    if (text) {
+                        sendToHost({ type: 'copy', selectedText: text });
+                    }
+                    return true; // handled; suppress default xterm processing
+                } catch (e) {
+                    return false;
+                }
+            });
+
             // Handle user input - send to C#
             // Use TextEncoder to properly encode multi-byte (UTF-8) characters before Base64
             term.onData((data) => {

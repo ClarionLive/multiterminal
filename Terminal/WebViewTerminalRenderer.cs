@@ -223,7 +223,12 @@ namespace MultiTerminal.Terminal
                 System.Diagnostics.Debug.WriteLine("Terminal HTML path: " + htmlPath);
                 if (File.Exists(htmlPath))
                 {
-                    _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
+                    // Append a cache-busting query (file mtime) so WebView2 can never
+                    // serve a stale copy of the document on the same file:// URL.
+                    string baseUri = new Uri(htmlPath).AbsoluteUri;
+                    long bust = File.GetLastWriteTimeUtc(htmlPath).Ticks;
+                    string navUri = baseUri + "?v=" + bust;
+                    _webView.CoreWebView2.Navigate(navUri);
                 }
                 else
                 {
@@ -466,7 +471,15 @@ namespace MultiTerminal.Terminal
             // (and right-click Copy) must route the copy through the host instead.
             if (!string.IsNullOrEmpty(text))
             {
-                System.Windows.Forms.Clipboard.SetText(text);
+                try
+                {
+                    System.Windows.Forms.Clipboard.SetText(text);
+                }
+                catch (Exception ex)
+                {
+                    // Clipboard can be locked by another process; copy is best-effort.
+                    System.Diagnostics.Debug.WriteLine("Clipboard.SetText failed: " + ex.Message);
+                }
             }
         }
 
