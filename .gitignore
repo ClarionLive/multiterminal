@@ -87,3 +87,6 @@ cq-windows-amd64.exe
 
 # Scratch HTML mockups (underscore prefix convention)
 scripts/_*.html
+
+# ESPHome presence-sensor secrets (wifi/broker creds) — never commit (task 9f9c3141)
+docs/presence/secrets.yaml
