@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Gateway
 {
@@ -52,15 +53,28 @@ namespace MultiTerminal.API.Gateway
                     return Results.BadRequest(new { error = "Invalid request" });
                 }
 
-                var expectedUser = config.GetValue<string>("Auth:Username");
-                var expectedPass = config.GetValue<string>("Auth:Password");
+                // Credentials resolve Multi-Connect settings-first → appsettings fallback (task
+                // 642c14e3). Setting creds in the Multi-Connect tab takes effect on the NEXT login
+                // (read per-request, not restart-required); an empty tab field falls through to
+                // appsettings.Local.json. BOTH this positive check and the fail-closed gate below
+                // run on the RESOLVED values so "set password in tab → still can't log in" can't happen.
+                // Trim the resolved creds so whitespace-only values ("   ") are treated identically
+                // to unset and never enable login (the resolver only fails OVER on whitespace from
+                // settings.txt — a whitespace-only appsettings value would otherwise survive). The
+                // trimmed values are also what the credential comparison below uses.
+                var expectedUser = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectPhoneAuthUsername(),
+                    config.GetValue<string>("Auth:Username"))?.Trim();
+                var expectedPass = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectPhoneAuthPassword(),
+                    config.GetValue<string>("Auth:Password"))?.Trim();
 
                 // Fail closed on missing/default credentials (pipeline Run-2 security HIGH). The
                 // committed appsettings.json ships changeme/changeme and appsettings.Local.json is
                 // only an OPTIONAL override, so an install that forgets it must NOT be reachable
                 // behind Tailscale with guessable creds. Disable login entirely until BOTH the
-                // username and password are configured to non-default values.
-                if (string.IsNullOrEmpty(expectedUser) || string.IsNullOrEmpty(expectedPass) ||
+                // username and password are configured to non-default, non-whitespace values.
+                if (string.IsNullOrWhiteSpace(expectedUser) || string.IsNullOrWhiteSpace(expectedPass) ||
                     string.Equals(expectedUser, "changeme", StringComparison.Ordinal) ||
                     string.Equals(expectedPass, "changeme", StringComparison.Ordinal))
                 {

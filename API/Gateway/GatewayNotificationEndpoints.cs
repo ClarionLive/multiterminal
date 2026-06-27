@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Gateway
 {
@@ -42,14 +43,24 @@ namespace MultiTerminal.API.Gateway
             _togglesPath = Path.Combine(GatewayPaths.DataDir(app.Configuration), "notification-toggles.json");
             LoadToggles();
 
-            var notificationSecret = app.Configuration.GetValue<string>("MultiRemote:NotificationSecret") ?? "";
-            if (string.IsNullOrEmpty(notificationSecret))
+            // Map-time read is ONLY for the startup warning. The shared secret is resolved
+            // settings-first → appsettings fallback and published on GatewayRuntimeConfig by
+            // MultiRemoteGatewayHost.StartAsync; it is re-read per-REQUEST below so this RECEIVER
+            // validates the SAME value the SENDER (NotificationsController, via GatewayRuntimeConfig)
+            // attaches. Capturing the map-time appsettings value alone would 403 every push once
+            // settings.txt overrides the secret (task 642c14e3, pipeline Run-1 split-brain).
+            var startupSecret = ResolveNotificationSecret(app.Configuration);
+            if (string.IsNullOrEmpty(startupSecret))
             {
-                app.Logger.LogWarning("MultiRemote:NotificationSecret is not configured — /api/notifications/runtime is unauthenticated. Set a secret in appsettings.Local.json to secure this endpoint.");
+                app.Logger.LogWarning("MultiRemote:NotificationSecret is not configured — /api/notifications/runtime is restricted to LOOPBACK callers only (remote/tailnet POSTs are rejected). Set a secret in the Multi-Connect tab or appsettings.Local.json to allow authenticated remote callers.");
             }
 
             app.MapPost("/api/notifications/runtime", async (HttpContext context, PushNotificationService push, ILogger<PushNotificationService> logger) =>
             {
+                // Resolve per-request so a secret set after startup (Multi-Connect tab → gateway
+                // restart republishes GatewayRuntimeConfig) is honoured without leaving this
+                // receiver stuck on the stale map-time value.
+                var notificationSecret = ResolveNotificationSecret(app.Configuration);
                 if (!string.IsNullOrEmpty(notificationSecret))
                 {
                     var providedSecret = context.Request.Headers["X-MT-Secret"].FirstOrDefault() ?? "";
@@ -59,6 +70,19 @@ namespace MultiTerminal.API.Gateway
                     if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
                             System.Text.Encoding.UTF8.GetBytes(providedSecret),
                             System.Text.Encoding.UTF8.GetBytes(notificationSecret)))
+                        return Results.Json(new { error = "Unauthorized" }, statusCode: 403);
+                }
+                else
+                {
+                    // No secret configured → this route would otherwise be fully unauthenticated, yet
+                    // it sits on the no-session PublicPaths allowlist AND is reachable on the
+                    // Tailscale-exposed :5100 gateway — so any tailnet peer could inject runtime
+                    // notifications / spam push (pipeline Run-2 HIGH). The ONLY legitimate no-secret
+                    // caller is MT's own NotificationsController forwarding to localhost:<port>
+                    // (loopback). Restrict the unauthenticated path to loopback; a null remote means
+                    // an in-process call and is allowed.
+                    var remoteIp = context.Connection.RemoteIpAddress;
+                    if (remoteIp != null && !System.Net.IPAddress.IsLoopback(remoteIp))
                         return Results.Json(new { error = "Unauthorized" }, statusCode: 403);
                 }
 
@@ -166,6 +190,23 @@ namespace MultiTerminal.API.Gateway
                 }
                 return Results.Ok(new { cleared = true });
             });
+        }
+
+        /// <summary>
+        /// Settings-first → appsettings-fallback resolve of the X-MT-Secret shared secret. Prefers
+        /// the value MultiRemoteGatewayHost.StartAsync published on <see cref="GatewayRuntimeConfig"/>
+        /// (the exact value the sender uses), falling back to the resolver/appsettings only when that
+        /// is empty (e.g. a host that mapped these endpoints without populating the runtime config).
+        /// </summary>
+        private static string ResolveNotificationSecret(IConfiguration configuration)
+        {
+            var runtime = GatewayRuntimeConfig.NotificationSecret;
+            if (!string.IsNullOrEmpty(runtime))
+                return runtime;
+
+            return MultiConnectConfig.Resolve(
+                SettingsService.Default.GetMultiConnectNotificationSecret(),
+                configuration.GetValue<string>("MultiRemote:NotificationSecret")) ?? "";
         }
 
         private static void LoadToggles()

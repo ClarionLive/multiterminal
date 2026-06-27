@@ -1,17 +1,23 @@
 {
-  "//": "MultiRemote phone-gateway local override (task ca6c5344). Copy this file to",
-  "//1": "'appsettings.Local.json' next to the MultiTerminal exe and fill in real values.",
-  "//2": "appsettings.Local.json is gitignored and overrides appsettings.json — keep ALL",
-  "//3": "secrets here, never in the committed appsettings.json. Only override what you need;",
-  "//4": "omitted keys fall back to appsettings.json defaults.",
+  "//": "MultiRemote phone-gateway local override. PREFERRED path: use the Settings →",
+  "//1": "Multi-Connect tab (or the /multi-connect-setup skill) — it writes per-install values",
+  "//2": "to settings.txt (secrets DPAPI-protected) and restarts the gateway for you. This file",
+  "//3": "is the FALLBACK/advanced route: copy it to 'appsettings.Local.json' next to the",
+  "//4": "MultiTerminal exe and fill in real values. appsettings.Local.json is gitignored and",
+  "//5": "overrides appsettings.json. Only override what you need; omitted keys fall back to",
+  "//6": "appsettings.json, then to the built-in defaults. Keys set in the Multi-Connect tab",
+  "//7": "(settings.txt) take precedence over this file.",
   "MultiRemote": {
+    "InboxUserId": "your-mt-identity-name",
+    "VapidSubject": "https://your-host.tailXXXXX.ts.net",
+    "NotificationSecret": "shared-secret-matching-MTs-X-MT-Secret-forward",
+    "PermissionRelay": {
+      "BaseUrl": "https://your-permission-relay.example.workers.dev",
+      "ApiKey": "your-relay-api-key"
+    },
     "Auth": {
       "Username": "your-phone-login-user",
       "Password": "your-strong-password"
-    },
-    "NotificationSecret": "shared-secret-matching-MTs-X-MT-Secret-forward",
-    "PermissionRelay": {
-      "ApiKey": "cloudflare-worker-api-key"
     }
   }
 }

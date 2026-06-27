@@ -133,16 +133,16 @@ namespace MultiTerminal.API.Gateway
                 // Gateway config section (port, auth credentials, cookie/session settings).
                 var gatewayConfig = builder.Configuration.GetSection("MultiRemote");
 
-                // Resolve the listen port from config (MultiRemote:Port) so a Dev can change
-                // it without recompiling; the constructor value is only the fallback. Keep
-                // tailscale serve + companion-processes.json aligned to this port (item [9]).
-                _port = gatewayConfig.GetValue<int>("Port", _port);
+                // Resolve the listen port: Multi-Connect settings.txt wins, else MultiRemote:Port
+                // config (lets a Dev change it without recompiling), else the constructor fallback.
+                // Keep tailscale serve + companion-processes.json aligned to this port (item [9]).
+                _port = SettingsService.Default.GetMultiConnectGatewayPort()
+                    ?? gatewayConfig.GetValue<int>("Port", _port);
 
-                // Publish runtime config so MT's own NotificationsController can forward to the
-                // right port AND attach X-MT-Secret (pipeline Run-1 cross-model HIGH: setting the
-                // secret must not silently break MT→phone push). See GatewayRuntimeConfig.
-                GatewayRuntimeConfig.Port = _port;
-                GatewayRuntimeConfig.NotificationSecret = gatewayConfig.GetValue<string>("NotificationSecret") ?? "";
+                // NOTE: GatewayRuntimeConfig.Port / .NotificationSecret are published AFTER
+                // _app.StartAsync succeeds (below), not here — a failed (re)start must not leave the
+                // sender (NotificationsController + the in-process receiver) pointing at a port that
+                // never bound or a secret for a gateway that isn't actually listening.
 
                 // Own listener — independent of MT's :5050 Kestrel.
                 builder.WebHost.ConfigureKestrel(options =>
@@ -227,7 +227,9 @@ namespace MultiTerminal.API.Gateway
 
                     // HttpClient for the off-box Cloudflare permission relay (item [5]) — the
                     // one remaining outbound hop (everything else is a direct service call).
-                    var relayUrl = gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl")
+                    var relayUrl = MultiConnectConfig.Resolve(
+                            SettingsService.Default.GetMultiConnectRelayBaseUrl(),
+                            gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl"))
                         ?? "https://mt-mcp-server.clarionlive.workers.dev";
                     builder.Services.AddHttpClient("PermissionRelay", c =>
                     {
@@ -344,6 +346,17 @@ namespace MultiTerminal.API.Gateway
                 _app.MapFallbackToFile("index.html");
 
                 await _app.StartAsync(cancellationToken).ConfigureAwait(false);
+
+                // Publish runtime config now that the listener is actually bound, so MT's own
+                // NotificationsController can forward to the right port AND attach X-MT-Secret
+                // (pipeline Run-1 cross-model HIGH: setting the secret must not silently break
+                // MT→phone push). The in-process receiver (GatewayNotificationEndpoints) reads the
+                // SAME GatewayRuntimeConfig.NotificationSecret per request, so sender == receiver.
+                // NotificationSecret resolves settings-first → appsettings fallback (task 642c14e3).
+                GatewayRuntimeConfig.Port = _port;
+                GatewayRuntimeConfig.NotificationSecret = MultiConnectConfig.Resolve(
+                    SettingsService.Default.GetMultiConnectNotificationSecret(),
+                    gatewayConfig.GetValue<string>("NotificationSecret")) ?? "";
             }
             catch (Exception ex)
             {

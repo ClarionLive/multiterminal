@@ -42,6 +42,37 @@
             </Setter>
         </Style>
 
+        <!-- Flat dark PasswordBox style (masked secrets — mirrors DarkTextBox) -->
+        <Style x:Key="DarkPasswordBox" TargetType="PasswordBox">
+            <Setter Property="Background" Value="#2D2D30"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E42"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CaretBrush" Value="#E0E0E0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="PasswordBox">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3"
+                                Padding="{TemplateBinding Padding}">
+                            <ScrollViewer x:Name="PART_ContentHost"
+                                          VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsFocused" Value="True">
+                                <Setter Property="BorderBrush" Value="#007ACC"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- ToggleButton style used inside ComboBox template (invisible, covers entire area) -->
         <Style x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
             <Setter Property="Template">
@@ -868,6 +899,233 @@
                                TextWrapping="Wrap"
                                Text="Phase 1: the binary path and default agent name are applied on launch. Model / effort are persisted here and can be wired into ~/.codex/config.toml in a follow-up."/>
                 </StackPanel>
+            </TabItem>
+
+            <TabItem Header="Multi-Connect" Style="{StaticResource DarkTabItem}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="16,16,16,16">
+                        <TextBlock Text="Self-service phone connectivity. Each field shows its effective value and where it resolves from (settings / appsettings / default) so you never edit into a shadow. Clearing a field falls back to the appsettings default. Restart-required fields re-apply the gateway when you click OK."
+                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="12"
+                                   Margin="4,4,4,16"
+                                   TextWrapping="Wrap"/>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="16"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- LEFT COLUMN: Network + Tailscale -->
+                            <StackPanel Grid.Column="0">
+
+                                <GroupBox Header="Network"
+                                          Style="{StaticResource DarkGroupBox}"
+                                          Margin="0,0,0,10">
+                                    <StackPanel Margin="8,12,8,8">
+                                        <TextBlock Text="Gateway port  —  restart required"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <TextBox x:Name="MC_GatewayPortText"
+                                                 Style="{StaticResource DarkTextBox}"
+                                                 Height="28"/>
+                                        <TextBlock x:Name="MC_GatewayPortSource"
+                                                   Text="(source: default)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,0"/>
+                                    </StackPanel>
+                                </GroupBox>
+
+                                <GroupBox Header="Tailscale"
+                                          Style="{StaticResource DarkGroupBox}"
+                                          Margin="0,0,0,10">
+                                    <StackPanel Margin="8,12,8,8">
+                                        <CheckBox x:Name="MC_TailscaleEnabledCheck"
+                                                  Content="Enable Tailscale integration"
+                                                  Foreground="#E0E0E0" FontFamily="Segoe UI" FontSize="13"
+                                                  VerticalContentAlignment="Center"
+                                                  Margin="0,0,0,10"/>
+
+                                        <TextBlock Text="Hostname (.ts.net)"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBox x:Name="MC_TailscaleHostnameText"
+                                                     Grid.Column="0"
+                                                     Style="{StaticResource DarkTextBox}"
+                                                     Height="28"
+                                                     TextChanged="MC_RecomputeUrl_TextChanged"/>
+                                            <Button x:Name="MC_DetectButton"
+                                                    Grid.Column="1"
+                                                    Content="Detect"
+                                                    Style="{StaticResource SmallActionButton}"
+                                                    Width="72" Height="28"
+                                                    Margin="6,0,0,0"
+                                                    Click="MC_DetectButton_Click"/>
+                                        </Grid>
+                                        <TextBlock x:Name="MC_TailscaleHostnameSource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,10"/>
+
+                                        <TextBlock Text="Tailscale serve HTTPS port"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <TextBox x:Name="MC_ServePortText"
+                                                 Style="{StaticResource DarkTextBox}"
+                                                 Height="28"
+                                                 TextChanged="MC_RecomputeUrl_TextChanged"/>
+                                        <TextBlock x:Name="MC_ServePortSource"
+                                                   Text="(source: default)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,10"/>
+
+                                        <TextBlock Text="Phone URL"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBox x:Name="MC_PhoneUrlText"
+                                                     Grid.Column="0"
+                                                     Style="{StaticResource DarkTextBox}"
+                                                     Height="28"
+                                                     IsReadOnly="True"
+                                                     Foreground="#C0C0C0"/>
+                                            <Button x:Name="MC_CopyUrlButton"
+                                                    Grid.Column="1"
+                                                    Content="Copy"
+                                                    Style="{StaticResource SmallActionButton}"
+                                                    Width="72" Height="28"
+                                                    Margin="6,0,0,0"
+                                                    Click="MC_CopyUrlButton_Click"/>
+                                        </Grid>
+
+                                        <Button x:Name="MC_TestButton"
+                                                Content="Test connection"
+                                                Style="{StaticResource SmallActionButton}"
+                                                Height="28"
+                                                HorizontalAlignment="Left"
+                                                Padding="16,0,16,0"
+                                                Margin="0,10,0,10"
+                                                Click="MC_TestButton_Click"/>
+
+                                        <Border Background="#252526"
+                                                BorderBrush="#3E3E42"
+                                                BorderThickness="1"
+                                                CornerRadius="3"
+                                                MinHeight="48">
+                                            <TextBlock x:Name="MC_TailscaleStatusText"
+                                                       Text="Status: not checked. Click Detect or Test."
+                                                       Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                       TextWrapping="Wrap"
+                                                       Margin="8,6,8,6"/>
+                                        </Border>
+                                    </StackPanel>
+                                </GroupBox>
+
+                            </StackPanel>
+
+                            <!-- RIGHT COLUMN: Phone Access + Relay & Push -->
+                            <StackPanel Grid.Column="2">
+
+                                <GroupBox Header="Phone Access"
+                                          Style="{StaticResource DarkGroupBox}"
+                                          Margin="0,0,0,10">
+                                    <StackPanel Margin="8,12,8,8">
+                                        <TextBlock Text="Username"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <TextBox x:Name="MC_PhoneAuthUsernameText"
+                                                 Style="{StaticResource DarkTextBox}"
+                                                 Height="28"/>
+                                        <TextBlock x:Name="MC_PhoneAuthUsernameSource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,10"/>
+
+                                        <TextBlock Text="Password"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <PasswordBox x:Name="MC_PhoneAuthPasswordBox"
+                                                     Style="{StaticResource DarkPasswordBox}"
+                                                     Height="28"
+                                                     PasswordChanged="MC_Secret_PasswordChanged"
+                                                     GotKeyboardFocus="MC_Secret_GotKeyboardFocus"
+                                                     PreviewMouseLeftButtonDown="MC_Secret_PreviewMouseLeftButtonDown"/>
+                                        <TextBlock x:Name="MC_PhoneAuthPasswordSource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,0"/>
+                                    </StackPanel>
+                                </GroupBox>
+
+                                <GroupBox Header="Relay &amp; Push"
+                                          Style="{StaticResource DarkGroupBox}"
+                                          Margin="0,0,0,10">
+                                    <StackPanel Margin="8,12,8,8">
+                                        <TextBlock Text="Relay BaseUrl  —  restart required"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <TextBox x:Name="MC_RelayBaseUrlText"
+                                                 Style="{StaticResource DarkTextBox}"
+                                                 Height="28"/>
+                                        <TextBlock x:Name="MC_RelayBaseUrlSource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,10"/>
+
+                                        <TextBlock Text="Relay ApiKey  —  restart required"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <PasswordBox x:Name="MC_RelayApiKeyBox"
+                                                     Style="{StaticResource DarkPasswordBox}"
+                                                     Height="28"
+                                                     PasswordChanged="MC_Secret_PasswordChanged"
+                                                     GotKeyboardFocus="MC_Secret_GotKeyboardFocus"
+                                                     PreviewMouseLeftButtonDown="MC_Secret_PreviewMouseLeftButtonDown"/>
+                                        <TextBlock x:Name="MC_RelayApiKeySource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,10"/>
+
+                                        <TextBlock Text="Push notification secret  —  restart required"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <PasswordBox x:Name="MC_NotificationSecretBox"
+                                                     Style="{StaticResource DarkPasswordBox}"
+                                                     Height="28"
+                                                     PasswordChanged="MC_Secret_PasswordChanged"
+                                                     GotKeyboardFocus="MC_Secret_GotKeyboardFocus"
+                                                     PreviewMouseLeftButtonDown="MC_Secret_PreviewMouseLeftButtonDown"/>
+                                        <TextBlock x:Name="MC_NotificationSecretSource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,10"/>
+
+                                        <TextBlock Text="VAPID subject  —  restart required"
+                                                   Foreground="#A0A0A0" FontFamily="Segoe UI" FontSize="11"
+                                                   FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                        <TextBox x:Name="MC_VapidSubjectText"
+                                                 Style="{StaticResource DarkTextBox}"
+                                                 Height="28"/>
+                                        <TextBlock x:Name="MC_VapidSubjectSource"
+                                                   Text="(source: not set)"
+                                                   Foreground="#808080" FontFamily="Segoe UI" FontSize="11"
+                                                   Margin="0,3,0,0"/>
+                                    </StackPanel>
+                                </GroupBox>
+
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
             </TabItem>
         </TabControl>
 

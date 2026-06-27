@@ -63,6 +63,10 @@
          VAPID key gen + RFC8291 payload encryption for Apple/Web Push. Same version
          the standalone MultiRemote shipped, so existing push-config.json keys load as-is. -->
     <PackageReference Include="WebPush" Version="1.0.12" />
+    <!-- DPAPI (ProtectedData, CurrentUser scope) for at-rest encryption of the three
+         Multi-Connect secrets in settings.txt (phone password, relay ApiKey, push
+         NotificationSecret). Not in the shared framework even on net8.0-windows. Task 642c14e3. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
   <!-- Analyzers: build-time only, not a runtime dependency. -->

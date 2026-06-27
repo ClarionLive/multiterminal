@@ -36,7 +36,10 @@ namespace MultiTerminal.API.Gateway
             _broker = broker;
             _push = push;
             _logger = logger;
-            _userId = config.GetValue<string>("MultiRemote:InboxUserId") ?? "John";
+            // Neutral committed default (task 642c14e3, item 8) — no per-owner identity baked in.
+            // The inbox is keyed by this id (GetInbox(_userId)); an existing owner whose inbox key
+            // differs sets MultiRemote:InboxUserId in appsettings.Local.json to keep inbox-rise pushes.
+            _userId = config.GetValue<string>("MultiRemote:InboxUserId") ?? "Owner";
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
