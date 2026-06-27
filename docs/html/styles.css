@@ -671,3 +671,25 @@ tbody tr:hover {
 /* Database schema groups */
 .schema-group { margin: 1.5rem 0; }
 .schema-table { width: 100%; }
+
+/* Architecture layer — intro description + two-column label/description rows */
+.arch-desc { font-size: 0.86rem; color: var(--text-secondary); margin: 0 0 0.7rem; }
+.arch-rows { display: flex; flex-direction: column; }
+.arch-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 190px) 1fr;
+  gap: 0.85rem;
+  padding: 0.4rem 0;
+  border-top: 1px solid var(--border);
+}
+.arch-row:first-child { border-top: none; }
+.arch-key {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+.arch-val { font-size: 0.84rem; color: var(--text-primary); }
+@media (max-width: 640px) {
+  .arch-row { grid-template-columns: 1fr; gap: 0.15rem; }
+}

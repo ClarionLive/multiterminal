@@ -91,22 +91,23 @@
     <div class="arch-layer">
       <div class="arch-layer-head">
         <span class="arch-layer-title">UI Host</span>
-        <span class="arch-layer-sub">MainForm.cs &middot; ~5.2K LOC &middot; 11 WebView2 panels</span>
+        <span class="arch-layer-sub">MainForm.cs &middot; ~5.2K LOC</span>
       </div>
-      <div class="arch-nodes">
-        <span class="arch-node">TasksPanel</span>
-        <span class="arch-node">ChatPanel</span>
-        <span class="arch-node">ActivityPanel</span>
-        <span class="arch-node">ProfilePanel</span>
-        <span class="arch-node">InboxPanel</span>
-        <span class="arch-node">ProjectPanel</span>
-        <span class="arch-node">LauncherPanel</span>
-        <span class="arch-node">OfficePanel</span>
-        <span class="arch-node">AgentPanel</span>
-        <span class="arch-node">DebugPanel</span>
-        <span class="arch-node">FilePreviewPanel</span>
+      <p class="arch-desc">Hosts the VS-style docking framework, owns the toolbar and terminal lifecycle, and wires every panel to the MessageBroker through C# events. Renders 11 WebView2 panels:</p>
+      <div class="arch-rows">
+        <div class="arch-row"><span class="arch-key">TasksPanel</span><span class="arch-val">Kanban board &mdash; create, claim and drag tasks across To&nbsp;Do / In&nbsp;Progress / Done; edit the plan and checklist.</span></div>
+        <div class="arch-row"><span class="arch-key">ChatPanel</span><span class="arch-val">Inter-terminal messaging UI &mdash; point-to-point and broadcast, with persistent history.</span></div>
+        <div class="arch-row"><span class="arch-key">ActivityPanel</span><span class="arch-val">Live activity feed of tool use, builds, and task changes across all terminals.</span></div>
+        <div class="arch-row"><span class="arch-key">ProfilePanel</span><span class="arch-val">Team-member profiles &mdash; avatar, role, skills, and online/availability state.</span></div>
+        <div class="arch-row"><span class="arch-key">InboxPanel</span><span class="arch-val">Notification center for checklist transitions, help requests, and alerts (unread badge).</span></div>
+        <div class="arch-row"><span class="arch-key">ProjectPanel</span><span class="arch-val">Browse and edit registered projects: agents, MCP servers, named paths, prompts.</span></div>
+        <div class="arch-row"><span class="arch-key">LauncherPanel</span><span class="arch-val">Launch app/agent processes and companion tools.</span></div>
+        <div class="arch-row"><span class="arch-key">OfficePanel</span><span class="arch-val">Animated &ldquo;office&rdquo; visualization of spawned agents&rsquo; presence and activity.</span></div>
+        <div class="arch-row"><span class="arch-key">AgentPanel</span><span class="arch-val">Read-only live transcript stream of a spawned team agent.</span></div>
+        <div class="arch-row"><span class="arch-key">DebugPanel</span><span class="arch-val">Internal debug log (pause / resume / clear) for troubleshooting.</span></div>
+        <div class="arch-row"><span class="arch-key">FilePreviewPanel</span><span class="arch-val">In-app preview of files &mdash; HTML, Markdown, images.</span></div>
       </div>
-      <div class="arch-note">+ <code>Terminal/</code> (ConPTY + WebView2) &middot; <code>Docking/</code> (GridLayoutManager) &middot; <code>Dialogs/</code> (11 modal windows)</div>
+      <div class="arch-note">Also in this layer: <code>Terminal/</code> (ConPTY terminals rendered in WebView2), <code>Docking/</code> (GridLayoutManager grid presets + layout persistence), and <code>Dialogs/</code> (11 modal windows &mdash; Settings, Project, History, Owner Profile, &hellip;).</div>
     </div>
 
     <div class="arch-conn"><span>C# events &darr;</span></div>
@@ -114,30 +115,26 @@
     <div class="arch-layer">
       <div class="arch-layer-head">
         <span class="arch-layer-title">REST API</span>
-        <span class="arch-layer-sub">MultiTerminalRestServer.cs &middot; port 5050 &middot; ~25 controllers</span>
+        <span class="arch-layer-sub">MultiTerminalRestServer.cs &middot; port 5050</span>
       </div>
-      <div class="arch-nodes">
-        <span class="arch-node">Tasks</span>
-        <span class="arch-node">Messaging</span>
-        <span class="arch-node">Office</span>
-        <span class="arch-node">Knowledge</span>
-        <span class="arch-node">Spawn</span>
-        <span class="arch-node">SessionLineage</span>
-        <span class="arch-node">ProjectContext</span>
-        <span class="arch-node">Team</span>
-        <span class="arch-node">Tools</span>
-        <span class="arch-node">AgentPanels</span>
-        <span class="arch-node">AgentStats</span>
-        <span class="arch-node">BrowserTabs</span>
-        <span class="arch-node">Companion</span>
-        <span class="arch-node">Gateway</span>
-        <span class="arch-node">Notifications</span>
-        <span class="arch-node">OwnerProfile</span>
-        <span class="arch-node">TaskReports</span>
-        <span class="arch-node">TerminalStream</span>
-        <span class="arch-node">XamlPreview</span>
-        <span class="arch-node">Ripgrep</span>
+      <p class="arch-desc">A loopback HTTP API on <code>localhost:5050</code>. Both the UI and the MCP server call it; every controller delegates to the MessageBroker. ~25 controllers &mdash; the main ones:</p>
+      <div class="arch-rows">
+        <div class="arch-row"><span class="arch-key">TasksController</span><span class="arch-val">Tasks, checklists, inbox, and attachments &mdash; the largest controller.</span></div>
+        <div class="arch-row"><span class="arch-key">MessagingController</span><span class="arch-val">Send/broadcast messages, terminal registration, and channel-port routing.</span></div>
+        <div class="arch-row"><span class="arch-key">SpawnController</span><span class="arch-val">Spawns Claude Code terminals and team agents.</span></div>
+        <div class="arch-row"><span class="arch-key">OfficeController</span><span class="arch-val">Spawned-agent office and helper coordination.</span></div>
+        <div class="arch-row"><span class="arch-key">KnowledgeController</span><span class="arch-val">Institutional knowledge entries + full-text search.</span></div>
+        <div class="arch-row"><span class="arch-key">SessionLineageController</span><span class="arch-val">Session history, lineage chains, and the start-of-session recap.</span></div>
+        <div class="arch-row"><span class="arch-key">ProjectContextController</span><span class="arch-val">One-call project context (agents, MCP servers, paths, prompts, skills).</span></div>
+        <div class="arch-row"><span class="arch-key">TeamController</span><span class="arch-val">Team roster and member profiles.</span></div>
+        <div class="arch-row"><span class="arch-key">TaskReportsController</span><span class="arch-val">Persisted pipeline / review-agent reports and verdicts.</span></div>
+        <div class="arch-row"><span class="arch-key">NotificationsController</span><span class="arch-val">Runtime notifications from hooks (push to phone).</span></div>
+        <div class="arch-row"><span class="arch-key">BrowserTabsController</span><span class="arch-val">HUD browser-tab pooling that agents drive via MCP.</span></div>
+        <div class="arch-row"><span class="arch-key">TerminalStreamController</span><span class="arch-val">WebSocket streaming of terminal output.</span></div>
+        <div class="arch-row"><span class="arch-key">OwnerProfileController</span><span class="arch-val">Git identity and the encrypted GitHub token.</span></div>
+        <div class="arch-row"><span class="arch-key">RipgrepController</span><span class="arch-val">Fast regex code search (bundled <code>rg.exe</code>).</span></div>
       </div>
+      <div class="arch-note">Loopback-only. Each MCP tool call becomes exactly one HTTP request to a controller here &mdash; the API is the single seam between the agents and the app. Other controllers: Tools, AgentPanels, AgentStats, Companion, Gateway, XamlPreview, CodeGraph, Settings.</div>
     </div>
 
     <div class="arch-conn"><span>method calls &darr;</span></div>
@@ -147,16 +144,16 @@
         <span class="arch-layer-title">MessageBroker</span>
         <span class="arch-layer-sub">MessageBroker.cs &middot; ~5.5K LOC</span>
       </div>
-      <div class="arch-note" style="margin-top:0;">Routes messages, manages task/terminal/profile caches (<code>ConcurrentDictionary</code>), delivers webhooks, and fires events to UI panels &mdash; everything flows through here.</div>
-      <div class="arch-nodes" style="margin-top:0.6rem;">
-        <span class="arch-node">ActivityService</span>
-        <span class="arch-node">PoolCoordinator</span>
-        <span class="arch-node">ComplexityDetector</span>
-        <span class="arch-node">SessionDiscovery</span>
-        <span class="arch-node">StaleTaskService</span>
-        <span class="arch-node">SpawnService</span>
-        <span class="arch-node">SummaryService</span>
-        <span class="arch-node">HttpWebhookService</span>
+      <p class="arch-desc">The central hub. Routes messages, caches tasks/terminals/profiles in <code>ConcurrentDictionary</code> stores, delivers webhooks, and fires ~19 events to the UI panels &mdash; everything flows through here. It owns these services:</p>
+      <div class="arch-rows">
+        <div class="arch-row"><span class="arch-key">ActivityService</span><span class="arch-val">Records workflow events to the activity feed.</span></div>
+        <div class="arch-row"><span class="arch-key">PoolCoordinator</span><span class="arch-val">Shared pool memory and cross-agent learnings.</span></div>
+        <div class="arch-row"><span class="arch-key">ComplexityDetector</span><span class="arch-val">Scores task complexity (SMALL / MEDIUM / LARGE) to scale workflow ceremony.</span></div>
+        <div class="arch-row"><span class="arch-key">SessionDiscovery</span><span class="arch-val">Resolves Claude Code session IDs for resume.</span></div>
+        <div class="arch-row"><span class="arch-key">StaleTaskService</span><span class="arch-val">Flags paused tasks at 7 and 14 days.</span></div>
+        <div class="arch-row"><span class="arch-key">SpawnService</span><span class="arch-val">Orchestrates agent spawning and registration.</span></div>
+        <div class="arch-row"><span class="arch-key">SummaryService</span><span class="arch-val">Auto-summarizes task progress on status transitions.</span></div>
+        <div class="arch-row"><span class="arch-key">HttpWebhookService</span><span class="arch-val">At-least-once webhook / message delivery with retries.</span></div>
       </div>
     </div>
 
@@ -167,14 +164,15 @@
         <span class="arch-layer-title">Persistence</span>
         <span class="arch-layer-sub">SQLite</span>
       </div>
-      <div class="arch-nodes">
-        <span class="arch-node">TaskDatabase.cs (~4.6K)</span>
-        <span class="arch-node">ProjectDatabase.cs + 7 assoc tables</span>
-        <span class="arch-node">KnowledgeDatabase (+ FTS5)</span>
-        <span class="arch-node">SessionLineageService</span>
-        <span class="arch-node">MessageQueueDatabase</span>
+      <p class="arch-desc">All durable state lives in SQLite &mdash; no external database server. Access is wrapped by per-domain data classes:</p>
+      <div class="arch-rows">
+        <div class="arch-row"><span class="arch-key">TaskDatabase.cs</span><span class="arch-val">CRUD for 21+ tables &mdash; tasks, checklists, reports, profiles, activity, attachments. (~4.6K LOC)</span></div>
+        <div class="arch-row"><span class="arch-key">ProjectDatabase.cs</span><span class="arch-val">Projects plus 6 association tables: agents, MCP servers, specialists, paths, prompts, skills.</span></div>
+        <div class="arch-row"><span class="arch-key">KnowledgeDatabase</span><span class="arch-val">Knowledge entries with FTS5 search and attention-decay ranking.</span></div>
+        <div class="arch-row"><span class="arch-key">SessionLineageService</span><span class="arch-val">Imports JSONL transcripts; lineage chains and session search.</span></div>
+        <div class="arch-row"><span class="arch-key">MessageQueueDatabase</span><span class="arch-val">Reliable message-delivery queue with retry and de-duplication.</span></div>
       </div>
-      <div class="arch-note">Stores: <code>multiterminal.db</code> (tasks, sessions, knowledge, projects) &middot; <code>message_queue.db</code> (reliable delivery)</div>
+      <div class="arch-note"><code>multiterminal.db</code> holds the bulk &mdash; tasks, sessions, knowledge, projects, and the code graph. <code>message_queue.db</code> is a separate store so at-least-once message delivery survives restarts independently. Both live under <code>%APPDATA%\multiterminal</code>.</div>
     </div>
 
     <div class="arch-conn"><span>stdio (JSON-RPC) &darr;</span></div>
@@ -184,7 +182,15 @@
         <span class="arch-layer-title">MCP Server</span>
         <span class="arch-layer-sub">Node.js &middot; ~90 tools</span>
       </div>
-      <div class="arch-note" style="margin-top:0;">Exposes ~90 tools to Claude Code agents over MCP. Each tool call wraps one HTTP request to the REST API above. Located at <code>%APPDATA%\multiterminal\mcp\index.js</code>.</div>
+      <p class="arch-desc">A stateless bridge that exposes ~90 tools to Claude Code agents over MCP. It holds no state of its own &mdash; each tool wraps a single HTTP request to the REST API above. Tools fall into groups:</p>
+      <div class="arch-rows">
+        <div class="arch-row"><span class="arch-key">Task tools</span><span class="arch-val">create / claim / update tasks, checklists, plans, continuation notes.</span></div>
+        <div class="arch-row"><span class="arch-key">Messaging tools</span><span class="arch-val">send / broadcast, inbox, and channel reply / send.</span></div>
+        <div class="arch-row"><span class="arch-key">Knowledge &amp; session</span><span class="arch-val">add / query knowledge, search session history and memory.</span></div>
+        <div class="arch-row"><span class="arch-key">Code graph tools</span><span class="arch-val">index, search symbols, callers / callees, impact analysis.</span></div>
+        <div class="arch-row"><span class="arch-key">Project &amp; team</span><span class="arch-val">projects, roster, profiles, spawn agents.</span></div>
+      </div>
+      <div class="arch-note">Located at <code>%APPDATA%\multiterminal\mcp\index.js</code>. See the <a href="mcp-tools.html">MCP Tools</a> reference for the full list.</div>
     </div>
 
   </div>
