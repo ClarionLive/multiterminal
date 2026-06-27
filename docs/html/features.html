@@ -21,7 +21,7 @@
           <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
           <div id="mt-search-results" class="doc-search-results" hidden></div>
         </div>
-      <nav class="sidebar-nav">
+            <nav class="sidebar-nav">
         <div class="nav-section-title">Getting Started</div>
         <a href="getting-started.html" class="nav-link">Getting Started</a>
         <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
@@ -45,6 +45,12 @@
         <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
         <a href="distribution.html" class="nav-link">Distribution</a>
         <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Extending</div>
+        <a href="skills.html" class="nav-link">Skills &amp; Commands</a>
+        <a href="hooks.html" class="nav-link">Hooks</a>
+        <a href="channels.html" class="nav-link">Channels (Messaging)</a>
+        <a href="plugin.html" class="nav-link">Plugin &amp; Distribution</a>
 
         <div class="nav-section-title">Help</div>
         <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
@@ -262,7 +268,7 @@
             <li><strong>Execute JavaScript:</strong> Run arbitrary JS in the tab and get the return value (<code>execute_browser_script</code>)</li>
             <li><strong>Read DOM elements:</strong> Query elements by CSS selector and read text, attributes, or innerHTML (<code>get_browser_element_content</code>)</li>
             <li><strong>Bidirectional messaging:</strong> Agent sends JSON to the page (<code>post_browser_message</code>); page sends JSON back via <code>window.chrome.webview.postMessage()</code> (<code>get_browser_messages</code>)</li>
-            <li><strong>Push notifications:</strong> When a page calls <code>postMessage()</code>, the agent receives a <code>[cm]</code> nudge automatically so it can react in real-time</li>
+            <li><strong>Push notifications:</strong> When a page calls <code>postMessage()</code>, the agent is notified automatically so it can react in real-time</li>
             <li><strong>Console logs:</strong> Read console.log/warn/error output from the tab for debugging (<code>get_browser_console_logs</code>)</li>
             <li><strong>Screenshots:</strong> Capture a PNG screenshot of the tab's rendered content (<code>capture_browser_screenshot</code>)</li>
           </ul>
@@ -417,8 +423,8 @@
           <li>Messages expire after a configurable TTL</li>
         </ul>
 
-        <h3>Push Notifications (Nudge System)</h3>
-        <p>When a message arrives for a terminal, the InboxMonitorService injects a <code>[cm]</code> (check messages) nudge into the terminal. Claude Code agents are trained to immediately check their messages when they see this nudge. A 5-second throttle prevents nudge storms.</p>
+        <h3>Real-Time Delivery (Channels)</h3>
+        <p>When a message arrives for a terminal, it is delivered through Claude Code's native <strong>Channels</strong> transport: the message appears in the session as a structured <code>&lt;channel&gt;</code> event the agent reacts to immediately, and the agent replies with the channel's <code>reply</code>/<code>send</code> tools &mdash; no polling required. This replaces the older <code>[cm]</code> ConPTY "check messages" nudge. See <a href="channels.html">Channels (Messaging)</a> for how it works and the setting it requires.</p>
 
         <!-- =========================================== -->
         <!-- 5. PROJECT MANAGEMENT -->

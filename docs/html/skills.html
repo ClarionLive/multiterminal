@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The 15 slash-command skills and 9 specialist agents shipped by the MultiTerminal plugin — what each does and when to reach for it.">
+  <title>Skills &amp; Commands - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+        <div class="doc-search">
+          <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
+          <div id="mt-search-results" class="doc-search-results" hidden></div>
+        </div>
+            <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Extending</div>
+        <a href="skills.html" class="nav-link active">Skills &amp; Commands</a>
+        <a href="hooks.html" class="nav-link">Hooks</a>
+        <a href="channels.html" class="nav-link">Channels (Messaging)</a>
+        <a href="plugin.html" class="nav-link">Plugin &amp; Distribution</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Skills &amp; Commands</h1>
+        <p class="lead">The MultiTerminal plugin ships <strong>15 skills</strong> — slash commands that orchestrate the agent workflow — and <strong>9 specialist agents</strong> that the workflow skills dispatch for review, debugging, and session work. Each skill is invoked as <code>/&lt;name&gt;</code>; each agent is spawned automatically by the pipeline and project-management skills.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#what">What skills are</a></li>
+            <li><a href="#workflow">Workflow skills</a></li>
+            <li><a href="#setup">Setup &amp; onboarding skills</a></li>
+            <li><a href="#utility">Utility &amp; intel skills</a></li>
+            <li><a href="#agents">Specialist agents</a></li>
+          </ol>
+        </div>
+
+        <h2 id="what">What skills are</h2>
+        <p>A <em>skill</em> is a packaged instruction set Claude Code loads on demand when you type <code>/&lt;name&gt;</code> (or when the model recognizes a matching intent). Each lives in <code>skills/&lt;name&gt;/SKILL.md</code> inside the plugin, with a frontmatter <code>name</code>/<code>description</code> the model uses to decide when to invoke it. Skills are <em>instructions for the agent to execute</em> — they drive the Bash, PowerShell, MCP, and Task tools — not standalone scripts. The 15 skills fall into three groups: the <strong>workflow</strong> skills that run the kanban lifecycle, the <strong>setup/onboarding</strong> skills that bootstrap projects and connectivity, and the <strong>utility/intel</strong> skills that handle profiles, briefings, and verification.</p>
+
+        <h2 id="workflow">Workflow skills</h2>
+        <p>These five drive the day-to-day task lifecycle — from picking work, through single- and multi-ticket coordination, to the post-coding review gates.</p>
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th><th>When to use</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>/session-start</code></td>
+              <td>Lightweight startup menu. Establishes identity, registers the session in the lifecycle pipeline, reads active context, and presents quick choices (continue task, new task, pick task, just chat). No heavy loading until you pick.</td>
+              <td>Auto-runs at the start of every session; the entry point that routes you into the heavier workflows.</td>
+            </tr>
+            <tr>
+              <td><code>/kanban-task</code></td>
+              <td>Orchestrates a single ticket's full lifecycle: auto-detects current state, guides planning/coding/testing cycles, enforces completion gates, and writes continuation notes for clean session handoffs.</td>
+              <td>Working one ticket end-to-end, resuming after context ran out, or checking your current task state.</td>
+            </tr>
+            <tr>
+              <td><code>/project-management</code></td>
+              <td>Orchestrates the full development lifecycle — task dashboard, planning, team assembly, code review, build verification, and testing. Tiered SMALL/MEDIUM/LARGE workflows scale ceremony to task complexity.</td>
+              <td>Picking up new work, managing agents, or coordinating multi-step development (options 2&ndash;3 of the start menu).</td>
+            </tr>
+            <tr>
+              <td><code>/program-management</code></td>
+              <td>Coordinates a multi-ticket program as a PM — sequences 2+ related tickets across agents, runs quality-gate cycles, and triages findings across cycles. Distinct from <code>/kanban-task</code>'s single-ticket scope.</td>
+              <td>"Act as PM" / "dispatch these tickets" — any batch of 2+ related tickets coordinated together.</td>
+            </tr>
+            <tr>
+              <td><code>/pipeline</code></td>
+              <td>Runs the complete post-coding review pipeline — verifier, code-reviewer, security-auditor, debugger, and a cross-model adversary — each gate dispatched to Claude, Codex, or off per the saved topology. Verifier runs first (must pass build), then the rest in parallel; failures cycle back as coding items and it loops until all gates pass.</td>
+              <td>"Run the pipeline" / "full review" / "run all gates" once coding is complete.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="setup">Setup &amp; onboarding skills</h2>
+        <p>These five bootstrap projects into MultiTerminal, stand up the remote/phone connectivity stack, and rebuild context after a clear.</p>
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th><th>When to use</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>/new-project</code></td>
+              <td>Interactive onboarding wizard with two modes: <strong>Create New</strong> (scaffold folders from an archetype — Clarion COM, WebView2, Clarion App, MT Feature, Generic C# — init git, register) or <strong>Add Existing</strong> (point at a folder, auto-discover details, confirm, register).</td>
+              <td>Starting a brand-new project, or registering an existing folder so MultiTerminal can track it.</td>
+            </tr>
+            <tr>
+              <td><code>/multiterminal-addproject</code></td>
+              <td>The lower-level path: creates <code>.claude/project.json</code> in the current directory and registers it in the central MultiTerminal registry.</td>
+              <td>Quickly registering the current working directory as a project without the full wizard.</td>
+            </tr>
+            <tr>
+              <td><code>/multi-connect-setup</code></td>
+              <td>Guided, mostly-automatic phone connectivity via Tailscale: detects/installs Tailscale, brings the node up (one manual browser login), publishes the loopback gateway over HTTPS with <code>tailscale serve</code>, writes the hostname back into the Multi-Connect config, and prints the phone URL. Windows only.</td>
+              <td>Connecting a phone to MultiTerminal or configuring remote/Multi-Connect access.</td>
+            </tr>
+            <tr>
+              <td><code>/start-servers</code></td>
+              <td>Starts the ClaudeRemote server stack — ClaudeRemote (HTTP), Caddy (HTTPS), and optionally the TTS server — checking which ports are already listening and only starting what's missing.</td>
+              <td>Beginning a ClaudeRemote session when the user needs phone access.</td>
+            </tr>
+            <tr>
+              <td><code>/reload-context</code></td>
+              <td>Rebuilds session context after <code>/clear</code> — replays what the SessionStart hooks inject: terminal identity, ACTIVE-CONTEXT.md, kanban tasks, active task detail, and the last session recap.</td>
+              <td>After a <code>/clear</code>, or "reload context" / "what was I working on".</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="utility">Utility &amp; intel skills</h2>
+        <p>These five cover profiles, the daily intelligence/briefing pipeline, the Claude Code internals search, and build verification.</p>
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th><th>When to use</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>/profile</code></td>
+              <td>A friendly front-end for updating your team-member profile — personal info, skills, interests, avatar — auto-detecting the calling agent from <code>MULTITERMINAL_NAME</code> so you never specify identity manually.</td>
+              <td>Filling in or updating your team profile without raw MCP calls.</td>
+            </tr>
+            <tr>
+              <td><code>/daily-digest</code></td>
+              <td>Runs the DailyDigest fetch script to gather raw AI/Claude-ecosystem data from GitHub, Reddit, HN, and the web, then summarizes it into an actionable morning briefing.</td>
+              <td>"Daily digest" / "morning briefing" / "what happened today in AI".</td>
+            </tr>
+            <tr>
+              <td><code>/daily-intel</code></td>
+              <td>A four-phase intelligence pipeline: digest triage (action items &rarr; suggestion tasks), version watch (new Claude Code CLI releases via npm), KB update (fetch + append changelog), and an Owner push notification with the summary. Can be cron-triggered daily.</td>
+              <td>Daily automated intel, or manually to process the digest and check for CLI updates.</td>
+            </tr>
+            <tr>
+              <td><code>/claude-code-search</code></td>
+              <td>Searches the Claude Code internals knowledge base — architecture, tools, commands, state management, and hidden features distilled from a source-code analysis.</td>
+              <td>Looking up how Claude Code itself works (tools, slash commands, the query engine, state).</td>
+            </tr>
+            <tr>
+              <td><code>/verifier-multiterminal</code></td>
+              <td>Verifies MultiTerminal code changes by building the project, validating MCP tool operations, and checking REST API health. Constrained to a build/inspect tool set.</td>
+              <td>"Verify the build" / "check if it works" — after coding, before code review.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 id="agents">Specialist agents</h2>
+        <p>The plugin's <code>agents/</code> directory defines <strong>9 specialist subagents</strong>. These aren't invoked by slash command — they're dispatched automatically by the workflow skills: <code>/pipeline</code> fans out the review gates, and <code>/project-management</code> / <code>/program-management</code> spawn the planning, design, and session agents at the right lifecycle step. Most run on Opus; each ships with a constrained tool set scoped to its job. (The folder also contains <code>report-template.html</code>, a shared HTML report template the review agents render into — it is a template, not an agent.)</p>
+        <div class="card-grid">
+          <div class="card">
+            <h3>verifier</h3>
+            <p>Quality gate that validates coding work is actually complete before it reaches the tester. Builds the project and confirms the implementation is present. First gate in the pipeline.</p>
+          </div>
+          <div class="card">
+            <h3>code-reviewer</h3>
+            <p>Reviews code quality, patterns, naming, duplication, and consistency with codebase conventions. Runs after the verifier passes — fills the gap between completeness and security checks.</p>
+          </div>
+          <div class="card">
+            <h3>security-auditor</h3>
+            <p>Scans code changes for security vulnerabilities — OWASP Top 10, injection, XSS, and architecture-specific risks. Runs during the code-review phase or on demand.</p>
+          </div>
+          <div class="card">
+            <h3>debugger</h3>
+            <p>Root-cause analyst for failed tests and bugs. Traces data flow, identifies the root cause, and produces targeted fix instructions when testing reveals failures.</p>
+          </div>
+          <div class="card">
+            <h3>devils-advocate</h3>
+            <p>Challenges plans and proposals <em>before</em> coding begins. Scores proposals, finds flaws, and blocks bad ideas during the planning phase.</p>
+          </div>
+          <div class="card">
+            <h3>test-designer</h3>
+            <p>Designs test criteria for checklist items so coders know what "done" looks like and testers know what to verify. Used when building checklists after planning.</p>
+          </div>
+          <div class="card">
+            <h3>session-summarizer</h3>
+            <p>Generates concise session recaps from raw session messages. Spawned at session start when no cached summary exists, and saves the summary to SQLite for reuse.</p>
+          </div>
+          <div class="card">
+            <h3>session-distiller</h3>
+            <p>Compresses session learnings into persistent memory files. Used at session end or when asked to distill/save what was learned this session.</p>
+          </div>
+          <div class="card">
+            <h3>session-reviewer</h3>
+            <p><em>Disabled.</em> Was a session-context specialist, but the underlying session-history database went stale — the agent file is shipped but flagged not-for-use pending a review ticket.</p>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+  <script src="search-index.js"></script>
+  <script src="search.js"></script>
+</body>
+</html>

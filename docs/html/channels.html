@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="How MultiTerminal delivers agent-to-agent messages through Claude Code's native Channels transport — the channel MCP server, the authorization setting it requires, and how it replaced the legacy [cm] nudge.">
+  <title>Channels (Messaging) - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+        <div class="doc-search">
+          <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
+          <div id="mt-search-results" class="doc-search-results" hidden></div>
+        </div>
+            <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Extending</div>
+        <a href="skills.html" class="nav-link">Skills &amp; Commands</a>
+        <a href="hooks.html" class="nav-link">Hooks</a>
+        <a href="channels.html" class="nav-link active">Channels (Messaging)</a>
+        <a href="plugin.html" class="nav-link">Plugin &amp; Distribution</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Channels (Messaging)</h1>
+        <p class="lead">MultiTerminal delivers agent-to-agent messages through Claude Code's native <strong>Channels</strong> transport. Each terminal runs a small channel server that pushes incoming messages straight into the session as structured <code>&lt;channel&gt;</code> events &mdash; replacing the older <code>[cm]</code> "check messages" nudge. Channels need a one-time authorization flag, which MultiTerminal applies for you.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#channels">What channels are</a></li>
+            <li><a href="#flow">How a message flows</a></li>
+            <li><a href="#server">The channel server</a></li>
+            <li><a href="#setting">Enabling channels (the required setting)</a></li>
+            <li><a href="#env">Environment variables</a></li>
+            <li><a href="#using">Sending &amp; replying</a></li>
+            <li><a href="#legacy">Legacy: the <code>[cm]</code> nudge</a></li>
+          </ol>
+        </div>
+
+        <h2 id="channels">What channels are</h2>
+        <p>A <strong>channel</strong> is a first-class Claude Code transport for pushing messages into a running session. When another agent (or the desktop) sends you a message, it arrives inline as a structured event:</p>
+        <pre><code>&lt;channel source="multiterminal" from="Diana" priority="normal"&gt;
+  Can you take the API page? I'll start on presence.
+&lt;/channel&gt;</code></pre>
+        <p>You react to it immediately and reply with the channel's tools &mdash; no polling, no terminal-injected reminders. MultiTerminal provides a channel server (bundled in the plugin) so every docked terminal participates automatically.</p>
+
+        <h2 id="flow">How a message flows</h2>
+        <div class="card">
+          <ol>
+            <li>Each terminal's <strong>channel server</strong> starts up and registers its listen port with the MultiTerminal broker (<code>POST /api/messaging/register</code> with its agent name + <code>channelPort</code>).</li>
+            <li>An agent calls <code>send_message</code> (or a skill does). The broker looks up the recipient's registered <code>channelPort</code>.</li>
+            <li>The broker delivers the message over HTTP to that port.</li>
+            <li>The recipient's channel server pushes it into the Claude Code session as a <code>&lt;channel&gt;</code> event.</li>
+            <li>The receiving agent reads it and replies with the channel <code>reply</code> / <code>send</code> tools, which route back through the broker.</li>
+          </ol>
+        </div>
+
+        <h2 id="server">The channel server</h2>
+        <p>The server is bundled with the plugin at <code>server/multiterminal-channel.mjs</code> and declared in the plugin's <code>plugin.json</code>:</p>
+        <pre><code>"mcpServers": {
+  "multiterminal-channel": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/server/multiterminal-channel.mjs"]
+  }
+},
+"channels": [
+  { "server": "multiterminal-channel" }
+]</code></pre>
+        <p>It runs as an MCP server (stdio) for the session, and in parallel opens a small HTTP listener that the broker delivers messages to. If its preferred port is busy it falls back to another and re-registers the actual port, so multiple terminals on one machine don't collide.</p>
+
+        <h2 id="setting">Enabling channels (the required setting)</h2>
+        <p>The channel server ships <em>inside</em> the plugin rather than from a published marketplace, so Claude Code treats it as a <strong>development (inline) channel</strong>. Development channels must be explicitly authorized &mdash; otherwise Claude Code will not load the channel server. MultiTerminal launches every terminal with two flags:</p>
+        <pre><code># MultiTerminal applies these automatically when it spawns a terminal
+claude \
+  --plugin-dir &lt;path-to-multiterminal-plugin&gt; \
+  --dangerously-load-development-channels plugin:multiterminal@inline</code></pre>
+        <ul>
+          <li><code>--plugin-dir</code> loads the MultiTerminal plugin (hooks, skills, agents, and the channel server) for that session.</li>
+          <li><code>--dangerously-load-development-channels plugin:multiterminal@inline</code> authorizes the plugin's inline channel server. (Plugins loaded via <code>--plugin-dir</code> are sourced as <code>name@inline</code>.)</li>
+        </ul>
+        <div class="card">
+          <p><strong>For MultiTerminal terminals this is automatic</strong> &mdash; the launch builder adds both flags, so channels just work in any docked terminal. You only need to pass the flags yourself if you run Claude Code by hand (outside MultiTerminal) and want the same channel messaging.</p>
+        </div>
+
+        <h2 id="env">Environment variables</h2>
+        <p>MultiTerminal sets these when it spawns a terminal so the channel server knows who it is and where to register:</p>
+        <table>
+          <thead><tr><th>Variable</th><th>Purpose</th><th>Default</th></tr></thead>
+          <tbody>
+            <tr><td><code>CHANNEL_PORT</code></td><td>HTTP port the channel server listens on for incoming messages (MultiTerminal assigns a unique one per terminal)</td><td><code>8800</code></td></tr>
+            <tr><td><code>MULTITERMINAL_NAME</code></td><td>This terminal's agent name (e.g. <code>Alice</code>)</td><td><code>unknown</code></td></tr>
+            <tr><td><code>MT_API_URL</code></td><td>MultiTerminal REST API base URL used for registration/routing</td><td><code>http://localhost:5050</code></td></tr>
+            <tr><td><code>MULTITERMINAL_ID</code></td><td>This terminal's ID, used for <code>send_message</code> routing</td><td><em>(empty)</em></td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="using">Sending &amp; replying</h2>
+        <p>From an agent's point of view, channel messaging is just tools and events:</p>
+        <ul>
+          <li><strong>Receive:</strong> messages arrive as <code>&lt;channel source="multiterminal" from="…"&gt;</code> events &mdash; treat them the same as any teammate message and act on them.</li>
+          <li><strong>Reply:</strong> use the channel <code>reply</code> tool (answer the sender) or <code>send</code> tool (message any agent by name).</li>
+          <li><strong>Broker tools:</strong> the broader MCP surface (<code>send_message</code>, <code>broadcast_message</code>, <code>get_messages</code>) still works and routes through the same broker. See <a href="mcp-tools.html">MCP Tools</a>.</li>
+        </ul>
+
+        <h2 id="legacy">Legacy: the <code>[cm]</code> nudge</h2>
+        <p>Before channels, MultiTerminal surfaced inter-terminal messages with a <code>[cm]</code> ("check messages") nudge &mdash; a string injected into the terminal (originally via ConPTY) that prompted the agent to poll <code>get_messages</code>. That approach was indirect and easy to miss. Channels replace it with direct, structured delivery, so <code>[cm]</code> is now <strong>deprecated</strong>. You may still see references to the inbox-check hook (see <a href="hooks.html#messaging">Hooks</a>) for backward compatibility, but channels are the current mechanism.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function () {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+  <script src="search-index.js"></script>
+  <script src="search.js"></script>
+</body>
+</html>

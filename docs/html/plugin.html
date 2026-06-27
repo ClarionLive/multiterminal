@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The MultiTerminal plugin package — what it bundles (skills, agents, hooks, MCP/channel server), its plugin.json manifest, directory layout, and distribution through the marketplace.">
+  <title>Plugin &amp; Distribution - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+        <div class="doc-search">
+          <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
+          <div id="mt-search-results" class="doc-search-results" hidden></div>
+        </div>
+            <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Extending</div>
+        <a href="skills.html" class="nav-link">Skills &amp; Commands</a>
+        <a href="hooks.html" class="nav-link">Hooks</a>
+        <a href="channels.html" class="nav-link">Channels (Messaging)</a>
+        <a href="plugin.html" class="nav-link active">Plugin &amp; Distribution</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Plugin &amp; Distribution</h1>
+        <p class="lead">The <strong>MultiTerminal plugin</strong> is the unit that packages the skills, agents, hooks, and the bundled MCP/channel server and ships them to Claude Code. The desktop app hosts the data and UI; the plugin gives every Claude Code agent its skills, hooks, and messaging surface. This page covers the manifest, the directory layout, and how the plugin is distributed through the marketplace.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#what">What the plugin is</a></li>
+            <li><a href="#manifest">The plugin.json manifest</a></li>
+            <li><a href="#layout">Directory layout</a></li>
+            <li><a href="#server">The bundled channel server &amp; vendored binary</a></li>
+            <li><a href="#marketplace">Distribution via the marketplace</a></li>
+            <li><a href="#install">Installing &amp; updating</a></li>
+            <li><a href="#relationship">Plugin vs. the desktop app</a></li>
+          </ol>
+        </div>
+
+        <h2 id="what">What the plugin is</h2>
+        <p>A Claude Code <em>plugin</em> is a self-contained bundle that Claude Code loads to extend an agent's behavior. The MultiTerminal plugin packages four things into one installable unit:</p>
+        <ul>
+          <li><strong>Skills</strong> — 15 slash commands that orchestrate the kanban/review workflow (see <a href="skills.html">Skills &amp; Commands</a>).</li>
+          <li><strong>Agents</strong> — 9 specialist subagents the workflow skills dispatch for review, debugging, and session work.</li>
+          <li><strong>Hooks</strong> — lifecycle scripts that inject identity/context and react to session events (see <a href="hooks.html">Hooks</a>).</li>
+          <li><strong>An MCP/channel server</strong> — the bundled <code>multiterminal-channel</code> server that bridges agent-to-agent messaging into Claude Code as native channel events.</li>
+          <li><strong>Agent rules</strong> — a top-level <code>CLAUDE.md</code> carrying the agent behavioral instructions (kanban workflow, MCP tools, messaging, task terminology).</li>
+        </ul>
+        <p>Installing the plugin is what turns a plain Claude Code session into a MultiTerminal-aware agent — one that knows its identity, its task, its messages, and its team.</p>
+
+        <h2 id="manifest">The plugin.json manifest</h2>
+        <p>Every plugin is described by <code>.claude-plugin/plugin.json</code>. MultiTerminal's declares the name, version, author, and — importantly — the bundled MCP server and channel:</p>
+        <pre><code>{
+  "name": "multiterminal",
+  "description": "Multi-agent coordination system for Claude Code. Hooks, skills,
+                  and agents for kanban task management, review pipelines, team
+                  orchestration, and session lifecycle.",
+  "version": "1.0.0",
+  "author": { "name": "ClarionLive", "email": "noreply@multiterminal.dev" },
+  "mcpServers": {
+    "multiterminal-channel": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/multiterminal-channel.mjs"]
+    }
+  },
+  "channels": [ { "server": "multiterminal-channel" } ]
+}</code></pre>
+        <p>The <code>mcpServers</code> block makes Claude Code launch the bundled channel server (via <code>node</code>, resolved through <code>${CLAUDE_PLUGIN_ROOT}</code> so the path is install-location independent), and the <code>channels</code> block registers that server as a native messaging channel. Skills and agents are discovered by convention from the <code>skills/</code> and <code>agents/</code> directories; hooks are wired separately in <code>hooks/hooks.json</code> — they don't need to be re-listed in the manifest.</p>
+
+        <h2 id="layout">Directory layout</h2>
+        <p>The plugin root contains these top-level entries:</p>
+        <table>
+          <thead><tr><th>Path</th><th>Contents</th></tr></thead>
+          <tbody>
+            <tr><td><code>.claude-plugin/plugin.json</code></td><td>The manifest (name, version, MCP server, channel).</td></tr>
+            <tr><td><code>skills/&lt;name&gt;/SKILL.md</code></td><td>The 15 skills, each in its own folder with frontmatter + instructions (some carry a <code>references/</code> subfolder).</td></tr>
+            <tr><td><code>agents/*.md</code></td><td>The 9 specialist agent definitions, plus <code>report-template.html</code> (the shared review-report template).</td></tr>
+            <tr><td><code>hooks/hooks.json</code> + <code>hooks/*.js</code></td><td>The hook registry and its Node scripts (plus <code>_sqlite.js</code> for native-module resolution and migration/policy notes).</td></tr>
+            <tr><td><code>server/</code></td><td><code>multiterminal-channel.mjs</code> (the channel MCP server), its <code>package.json</code>, and <code>node_modules</code>.</td></tr>
+            <tr><td><code>vendor/</code></td><td>Vendored <code>node_modules</code> — notably the prebuilt <code>better-sqlite3</code> native binary the hooks depend on.</td></tr>
+            <tr><td><code>CLAUDE.md</code></td><td>Agent behavioral rules shipped to every session.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="server">The bundled channel server &amp; vendored binary</h2>
+        <p>The plugin bundles its runtime dependencies so a clean install needs no build toolchain on the typical target.</p>
+        <div class="card-grid">
+          <div class="card">
+            <h3>multiterminal-channel.mjs</h3>
+            <p>A Channels MCP server (one per terminal) that bridges MultiTerminal's agent-to-agent messaging into Claude Code. It listens on an HTTP port for incoming messages, pushes them into the session as <code>&lt;channel&gt;</code> events, and exposes <code>send</code>/<code>reply</code> tools so Claude can message back — the current transport, which replaced the legacy <code>[cm]</code> ConPTY nudge (see <a href="channels.html#channels">Channels</a>). It reads <code>CHANNEL_PORT</code>, <code>MULTITERMINAL_NAME</code>, <code>MULTITERMINAL_ID</code>, and <code>MT_API_URL</code> from the environment and depends on <code>@modelcontextprotocol/sdk</code>.</p>
+          </div>
+          <div class="card">
+            <h3>vendor/ &mdash; better-sqlite3</h3>
+            <p>DB-backed features (profiles, session lifecycle, activity, the kanban board) use the native <code>better-sqlite3</code> module. A prebuilt binary for <strong>win32-x64</strong> is checked into git verbatim under <code>vendor/node_modules/better-sqlite3</code>, so hooks resolve it automatically with no <code>npm install</code>. On a mismatched runtime (different Node ABI, or non-Windows/ARM) the binary won't load and DB features disable for the session — the rest of the plugin still works. Fixes: rebuild it, use a global install, or point <code>MT_BETTER_SQLITE3</code> at an explicit build.</p>
+          </div>
+        </div>
+
+        <h2 id="marketplace">Distribution via the marketplace</h2>
+        <p>The plugin ships through a Claude Code <em>marketplace</em> — a small repository that advertises one or more installable plugins. The marketplace root holds <code>.claude-plugin/marketplace.json</code> plus the plugins themselves under <code>plugins/</code>:</p>
+        <pre><code>{
+  "name": "multiterminal-marketplace",
+  "description": "MultiTerminal plugins for Claude Code multi-agent coordination",
+  "owner": { "name": "ClarionLive" },
+  "plugins": [
+    {
+      "name": "multiterminal",
+      "description": "Multi-agent coordination system for Claude Code. ...",
+      "source": "./plugins/multiterminal",
+      "category": "productivity"
+    }
+  ]
+}</code></pre>
+        <p>The marketplace points at the plugin via a relative <code>source</code> path, so the marketplace repo and the plugin travel together. A user adds the marketplace once, then installs (or later updates) the plugin from it.</p>
+
+        <h2 id="install">Installing &amp; updating</h2>
+        <p>From the marketplace README, the install flow is:</p>
+        <pre><code># Add the marketplace, then install the plugin
+claude plugin marketplace add ClarionLive/multiterminal-marketplace
+claude plugin install multiterminal@multiterminal-marketplace
+
+# Later, to pull updates
+claude plugin marketplace update multiterminal-marketplace</code></pre>
+        <p>Or use the interactive <code>/plugin</code> menu inside Claude Code and pick <strong>multiterminal</strong> from the <code>multiterminal-marketplace</code> source. Requirements: Claude Code <strong>v2.1.139+</strong> (the hooks use the <code>args: string[]</code> exec form), <strong>Node.js 18+</strong> on <code>PATH</code> (hooks and the channel server run under Node), and for the bundled DB binary, a <strong>win32-x64</strong> runtime (other platforms work after a one-line <code>npm rebuild</code>).</p>
+
+        <h2 id="relationship">Plugin vs. the desktop app</h2>
+        <p>MultiTerminal has two halves that work together:</p>
+        <ul>
+          <li>The <strong>desktop app</strong> (the WinForms host) owns the data and the UI — it runs the REST API on <code>:5050</code>, the SQLite databases, the kanban board, the panels, and the Office/Agent visualizations.</li>
+          <li>The <strong>plugin</strong> gives the Claude Code <em>agents</em> their surface — the skills they run, the hooks that inject identity/context, the specialist agents, and the channel server for messaging. Its hooks and the channel server reach the app over the same <code>:5050</code> REST API and the shared SQLite stores.</li>
+        </ul>
+        <p>In short: the app is where the work and the team live; the plugin is what makes each Claude Code session a participating member of that team. Neither requires you to hand-wire the other — installing the plugin and running the app is enough for a session to find its identity, task, inbox, and teammates. For the data side, see <a href="architecture.html">Architecture</a>; for the messaging internals, see <a href="mcp-architecture.html">MCP Architecture</a> and <a href="distribution.html">Distribution</a>.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+  <script src="search-index.js"></script>
+  <script src="search.js"></script>
+</body>
+</html>

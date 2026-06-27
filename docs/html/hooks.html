@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="How the MultiTerminal plugin wires Claude Code lifecycle events to hook scripts — identity injection, messaging nudges, activity tracking, remote relays, session lifecycle, workflow triggers, and safety.">
+  <title>Hooks - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+        <div class="doc-search">
+          <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
+          <div id="mt-search-results" class="doc-search-results" hidden></div>
+        </div>
+            <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Extending</div>
+        <a href="skills.html" class="nav-link">Skills &amp; Commands</a>
+        <a href="hooks.html" class="nav-link active">Hooks</a>
+        <a href="channels.html" class="nav-link">Channels (Messaging)</a>
+        <a href="plugin.html" class="nav-link">Plugin &amp; Distribution</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Hooks</h1>
+        <p class="lead">Hooks are how the MultiTerminal plugin injects identity and context into a Claude Code session and reacts to lifecycle events. The plugin's <code>hooks/hooks.json</code> maps Claude Code events to Node scripts that talk to the REST API on <code>:5050</code> and the local SQLite databases — making each terminal aware of its task, its inbox, and its team.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#model">How hooks fire</a></li>
+            <li><a href="#events">Event &rarr; hook mapping</a></li>
+            <li><a href="#identity">Identity &amp; context injection</a></li>
+            <li><a href="#messaging">Messaging &amp; nudges</a></li>
+            <li><a href="#activity">Activity tracking</a></li>
+            <li><a href="#remote">Remote &amp; presence relays</a></li>
+            <li><a href="#lifecycle">Session lifecycle</a></li>
+            <li><a href="#workflow">Workflow automation</a></li>
+            <li><a href="#safety">Safety</a></li>
+          </ol>
+        </div>
+
+        <h2 id="model">How hooks fire</h2>
+        <p>Claude Code emits events at well-defined points in a session — when it starts, before and after each tool call, when the agent stops, before compaction, and so on. The plugin registers Node scripts against those events in <code>hooks/hooks.json</code>. Each entry has an optional <code>matcher</code> (which tools or session sub-types it applies to), a <code>command</code> (<code>node</code> or <code>powershell</code>), and a <code>timeout</code>. Scripts resolve their own path through <code>${CLAUDE_PLUGIN_ROOT}</code>, so the plugin is relocatable.</p>
+        <ul>
+          <li><strong>Synchronous hooks</strong> run inline — Claude waits for them. They can inject context (stdout becomes additional context) or, for <code>PreToolUse</code>, block a tool call. These carry a short <code>timeout</code>.</li>
+          <li><strong>Async hooks</strong> (<code>"async": true</code>) are fire-and-forget — activity recording, commentary, presence — so they never slow the agent down and fail silently if the API is unreachable.</li>
+        </ul>
+        <p>Almost every hook degrades gracefully: if the REST API or the SQLite native module isn't available, it exits 0 silently rather than breaking the session.</p>
+
+        <h2 id="events">Event &rarr; hook mapping</h2>
+        <p>This is the actual wiring from <code>hooks.json</code>. Several events fan out to more than one script.</p>
+        <table>
+          <thead><tr><th>Event</th><th>Matcher</th><th>Hook script(s)</th></tr></thead>
+          <tbody>
+            <tr><td rowspan="3"><code>SessionStart</code></td><td>(all)</td><td>project-context-hook</td></tr>
+            <tr><td><code>startup|resume|clear</code></td><td>(PowerShell parallel-subagents reminder), session-status-hook</td></tr>
+            <tr><td><code>compact</code></td><td>session-compact-hook</td></tr>
+            <tr><td><code>SessionEnd</code></td><td>(all)</td><td>session-status-hook, session-import-hook</td></tr>
+            <tr><td rowspan="7"><code>PreToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook</td></tr>
+            <tr><td><code>AskUserQuestion</code></td><td>ask-user-relay-hook</td></tr>
+            <tr><td><code>Task</code></td><td>task-to-agent-hook</td></tr>
+            <tr><td><code>Bash</code> / <code>Read</code> / <code>Write|Edit</code></td><td>safety-hook</td></tr>
+            <tr><td><code>mcp__sqlite__write_query|mcp__mssql__query</code></td><td>safety-hook</td></tr>
+            <tr><td><code>WebSearch|WebFetch</code></td><td>research-cache-hook</td></tr>
+            <tr><td>&nbsp;</td><td>&nbsp;</td></tr>
+            <tr><td rowspan="4"><code>PostToolUse</code></td><td><code>Edit|Write|Bash|Task</code></td><td>activity-hook, commentary-hook</td></tr>
+            <tr><td>task checklist/status/continuation + build</td><td>active-context-hook, commentary-hook</td></tr>
+            <tr><td><code>update_task_checklist</code></td><td>pipeline-trigger-hook</td></tr>
+            <tr><td><code>WebSearch|WebFetch</code> / (all)</td><td>research-cache-hook, inbox-check-hook</td></tr>
+            <tr><td><code>PostToolUseFailure</code></td><td>(all)</td><td>activity-hook, commentary-hook</td></tr>
+            <tr><td><code>PreCompact</code></td><td>(all)</td><td>session-save-hook</td></tr>
+            <tr><td><code>Elicitation</code></td><td>(all)</td><td>elicitation-relay-hook</td></tr>
+            <tr><td><code>Stop</code></td><td>(all)</td><td>session-save-hook, inbox-check-hook</td></tr>
+            <tr><td><code>SubagentStart</code> / <code>SubagentStop</code></td><td>(all)</td><td>subagent-office-hook, activity-hook (+ inbox-check on stop)</td></tr>
+            <tr><td><code>TeammateIdle</code></td><td>(all)</td><td>subagent-office-hook</td></tr>
+            <tr><td><code>UserPromptSubmit</code></td><td>(all)</td><td>inbox-check-hook, desktop-presence-hook</td></tr>
+            <tr><td><code>Notification</code></td><td>(all)</td><td>notification-hook</td></tr>
+          </tbody>
+        </table>
+        <p>The sections below group those scripts by what they do. (The companion <code>pool-context.js</code> and <code>profile-status-hook.js</code> scripts ship in the folder for SessionStart plan-context injection and profile online/offline status respectively; the registered mapping above is what fires by default.)</p>
+
+        <h2 id="identity">Identity &amp; context injection</h2>
+        <p>These hooks make a fresh session immediately aware of who it is and what it's working on — the heart of why MultiTerminal terminals "know things" without you re-explaining.</p>
+        <div class="card-grid">
+          <div class="card">
+            <h3>project-context-hook</h3>
+            <p>SessionStart. Auto-installs the plugin on first run for a project, then reads <code>MULTITERMINAL_PROJECT_ID</code> and injects the project's context. No-ops gracefully if the ID is unset or the API is down.</p>
+          </div>
+          <div class="card">
+            <h3>session-status-hook</h3>
+            <p>SessionStart/SessionEnd. Marks the terminal's profile online or offline so the team roster and Office Panel reflect who is active.</p>
+          </div>
+          <div class="card">
+            <h3>active-context-hook</h3>
+            <p>PostToolUse on task/build tools. Queries the REST API for current task state and rewrites <code>ACTIVE-CONTEXT.md</code> — no agent cooperation needed — so the next session can read exactly where work stood.</p>
+          </div>
+          <div class="card">
+            <h3>pool-context</h3>
+            <p>SessionStart plan-context injector. Pulls the active plan and kanban task context from the task DB and formats it for injection at the top of the session.</p>
+          </div>
+          <div class="card">
+            <h3>session-compact-hook</h3>
+            <p>SessionStart with matcher <code>compact</code>. Fires only after compaction and re-injects the critical rules + active task state that would otherwise be lost, so behavior survives a compact.</p>
+          </div>
+        </div>
+
+        <h2 id="messaging">Messaging &amp; nudges</h2>
+        <div class="card">
+          <h3>Agent-to-agent messaging now uses Channels, not the <code>[cm]</code> nudge</h3>
+          <p>Inter-agent message <em>delivery</em> has moved off the hook-based <code>[cm]</code> "check messages" nudge and onto Claude Code's native <strong>Channels</strong> transport — the plugin's <code>multiterminal-channel</code> MCP server pushes messages straight into the session as <code>&lt;channel&gt;</code> events. See <a href="channels.html#channels">Channels (Messaging)</a> for the current mechanism. The <code>inbox-check-hook</code> below is documented as <strong>legacy</strong>.</p>
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <h3>inbox-check-hook <em>(legacy)</em></h3>
+            <p><strong>Legacy / superseded by Channels.</strong> Ran on UserPromptSubmit, PostToolUse, Stop, and SubagentStop, checking a file-based inbox (<code>%APPDATA%/multiterminal/inbox/&lt;name&gt;.json</code>) and injecting any waiting teammate messages as context — the old <code>[cm]</code> "check messages" nudge, which relied on the agent then polling <code>get_messages</code>. Current builds deliver messages directly through <a href="channels.html#channels">Channels</a> instead, so this nudge is no longer the active path.</p>
+          </div>
+          <div class="card">
+            <h3>notification-hook</h3>
+            <p>Notification event. Captures permission prompts, idle prompts, auth-success, and elicitation dialogs and POSTs them to the REST API for storage, a UI toast, and phone push via ClaudeRemote. Async, fails silently.</p>
+          </div>
+        </div>
+
+        <h2 id="activity">Activity tracking</h2>
+        <div class="card-grid">
+          <div class="card">
+            <h3>activity-hook</h3>
+            <p>PreToolUse, PostToolUse, PostToolUseFailure, SubagentStart/Stop. Records tool usage, build events, and subagent activity to the MultiTerminal activity feed. Always async — never blocks the agent.</p>
+          </div>
+          <div class="card">
+            <h3>commentary-hook</h3>
+            <p>PostToolUse. Filters for interesting events (Edit, Write, Bash, Task, MCP tools) and forwards them to the "Commentator" agent over MT messaging, with rate-limiting. Async, fire-and-forget.</p>
+          </div>
+          <div class="card">
+            <h3>subagent-office-hook</h3>
+            <p>SubagentStart/Stop and TeammateIdle. Triggers walk-in / exit / idle animations for native subagents in the Office Panel, tracking agent-id&rarr;name mappings (and cleaning up "ghost" agents from interrupted sessions).</p>
+          </div>
+        </div>
+
+        <h2 id="remote">Remote &amp; presence relays</h2>
+        <p>These bridge a desktop Claude session to the phone (ClaudeRemote / Multi-Connect), so prompts and questions can be answered remotely.</p>
+        <div class="card-grid">
+          <div class="card">
+            <h3>desktop-presence-hook</h3>
+            <p>UserPromptSubmit. When a <em>real</em> desk keyboard prompt is submitted, flips remote-mode off ("user is at the desk"). Carefully detects channel-injected prompts from the phone and skips them so phone input doesn't toggle presence.</p>
+          </div>
+          <div class="card">
+            <h3>ask-user-relay-hook</h3>
+            <p>PreToolUse on AskUserQuestion. In remote mode, converts the question + options into a form, sends it to ClaudeRemote, polls for the answer, and blocks the tool call with the answer as the reason. Falls back to the normal terminal prompt when off or on timeout.</p>
+          </div>
+          <div class="card">
+            <h3>elicitation-relay-hook</h3>
+            <p>Elicitation event. Forwards an MCP server's structured-input form to ClaudeRemote, polls for the response, and returns it to Claude Code. Falls back to the default terminal dialog on timeout.</p>
+          </div>
+          <div class="card">
+            <h3>stop-relay-hook</h3>
+            <p>Notifies ClaudeRemote when the agent has stopped and is waiting for input, so the phone user knows it's their turn to reply via the channel.</p>
+          </div>
+        </div>
+
+        <h2 id="lifecycle">Session lifecycle</h2>
+        <div class="card-grid">
+          <div class="card">
+            <h3>session-save-hook</h3>
+            <p>PreCompact + Stop. Ensures <code>ACTIVE-CONTEXT.md</code> is fresh before context is lost — catching cases (compaction, agent stop) where no tool call would otherwise trigger active-context-hook.</p>
+          </div>
+          <div class="card">
+            <h3>session-import-hook</h3>
+            <p>SessionEnd. Imports the session transcript into the MultiTerminal session-lineage system and links it to the terminal's active kanban task.</p>
+          </div>
+          <div class="card">
+            <h3>session-compact-hook</h3>
+            <p>SessionStart (compact). Re-injects rules + task state after compaction — see Identity &amp; context above; it bridges both groups.</p>
+          </div>
+        </div>
+
+        <h2 id="workflow">Workflow automation</h2>
+        <div class="card-grid">
+          <div class="card">
+            <h3>pipeline-trigger-hook</h3>
+            <p>PostToolUse on <code>update_task_checklist</code>. When every checklist item reaches <code>testing</code>/<code>done</code>, it nudges the agent to auto-run the pipeline — both as a system reminder and as a harder-to-ignore channel message.</p>
+          </div>
+          <div class="card">
+            <h3>task-to-agent-hook</h3>
+            <p>PreToolUse on Task. Intercepts <code>general-purpose</code> subagent spawns and redirects them through AgentProcess (piped I/O) so team coding agents are <em>visible</em> in the Agent Panel. Quick utility tasks (Explore, Plan, haiku) pass through natively.</p>
+          </div>
+          <div class="card">
+            <h3>research-cache-hook</h3>
+            <p>PreToolUse + PostToolUse on WebSearch/WebFetch. Before: returns matching cached research from the knowledge base so the agent can skip redundant searches. After: auto-saves a summarized result for future agents, deduped by query hash. Never blocks.</p>
+          </div>
+        </div>
+
+        <h2 id="safety">Safety</h2>
+        <div class="card">
+          <h3>safety-hook</h3>
+          <p>PreToolUse guard registered against Bash, Read, Write/Edit, and the SQL MCP tools (<code>mcp__sqlite__write_query</code>, <code>mcp__mssql__query</code>). It intercepts those calls to block outright (DENY) or gate dangerous operations — the guardrail that matters most in a multi-agent environment where one rogue command can do real damage. It's the only hook here whose job is to <em>stop</em> a tool call rather than observe or enrich it.</p>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+  <script src="search-index.js"></script>
+  <script src="search.js"></script>
+</body>
+</html>
