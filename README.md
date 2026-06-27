@@ -1,16 +1,36 @@
 # MultiTerminal
 
-A Windows application for managing multiple Claude Code terminal sessions with inter-terminal messaging, coordinated task management, and a plan-centric workflow system.
+A Windows desktop app (.NET 8 / WinForms / WebView2) for running and coordinating multiple Claude Code terminal sessions — with a kanban task board, inter-terminal messaging, per-task git isolation, institutional memory, and phone access.
 
 ## Features
 
-- **Multiple Terminal Sessions**: Run multiple Claude Code instances in a tabbed interface
-- **Inter-Terminal Messaging**: Claude instances can communicate with each other via MCP tools
-- **Plan System**: Coordinate work across terminals with phases, assignments, and checklists
+- **Multiple Terminal Sessions**: Run multiple Claude Code instances in a docked, tabbed interface
+- **Kanban Task Workflow**: Claim → plan → checklist (coding/testing/done) → continuation notes, with helpers and a review pipeline
+- **Inter-Terminal Messaging**: Claude instances communicate with each other (and you) via MCP tools and an in-app chat
+- **Git Worktree Isolation**: Each task/agent gets its own worktree, auto-merged and pruned on completion
+- **Multi-Connect (Phone Access)**: Reach your tasks and terminals from your phone over a private Tailscale network
+- **Presence-Aware Routing**: mmWave + phone-BLE presence detection routes agent questions to the desktop or your phone
+- **Code Intelligence**: Roslyn-based code graph (symbols, callers/callees, impact analysis) and an auto-generated subsystem wiki
+- **Institutional Memory**: Queryable knowledge base + searchable session history/lineage
 - **Session Persistence**: Resume sessions and maintain identity across restarts
-- **Startup Context Injection**: Automatic plan context provided to terminals at session start
+- **Startup Context Injection**: Automatic task/plan context provided to terminals at session start
+
+## Documentation
+
+Full documentation ships with the app as a local HTML site under [`docs/html/`](docs/html/index.html). Open it any time from the **Help** button (❓) in the toolbar, immediately right of History.
+
+Highlights:
+[Getting Started](docs/html/getting-started.html) ·
+[Kanban Workflow](docs/html/kanban-workflow.html) ·
+[Git Worktrees](docs/html/worktrees.html) ·
+[Multi-Connect (Phone)](docs/html/multi-connect.html) ·
+[Presence Sensors](docs/html/presence.html) ·
+[Code Graph](docs/html/code-graph.html) ·
+[Troubleshooting / FAQ](docs/html/troubleshooting.html)
 
 ## Plan System Overview
+
+> **Note:** The sections below (Plan System and the MCP Tools Reference) describe the original plan-centric workflow and an early tool set. Day-to-day work now centers on the **Kanban Task Workflow** — see [`docs/html/kanban-workflow.html`](docs/html/kanban-workflow.html) and the [MCP Tools](docs/html/mcp-tools.html) reference for the current surface.
 
 The Plan System enables coordinated multi-agent workflows where multiple Claude terminals collaborate on a shared goal. Plans progress through defined phases with team assignments and decision tracking.
 

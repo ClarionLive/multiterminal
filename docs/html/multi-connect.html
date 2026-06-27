@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Connect your phone to MultiTerminal over Tailscale using the in-app Multi-Connect gateway.">
+  <title>Multi-Connect (Phone) - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link active">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Multi-Connect (Phone)</h1>
+        <p class="lead">Multi-Connect is the current, recommended way to reach MultiTerminal from your phone: an in-process gateway that serves a mobile PWA, published securely over your private <strong>Tailscale</strong> network. There is no separate companion app and no public web server &mdash; just MultiTerminal and your tailnet.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#how-it-works">How it works</a></li>
+            <li><a href="#quickstart">Quickstart (the skill)</a></li>
+            <li><a href="#settings-tab">The Multi-Connect settings tab</a></li>
+            <li><a href="#config">Configuration surface</a></li>
+            <li><a href="#security">Security model</a></li>
+            <li><a href="#rest">REST endpoints</a></li>
+            <li><a href="#legacy">Relationship to ClaudeRemote (legacy)</a></li>
+          </ol>
+        </div>
+
+        <h2 id="how-it-works">1. How it works</h2>
+        <p>MultiTerminal hosts the phone experience itself. A second, independent ASP.NET Kestrel listener &mdash; the <code>MultiRemoteGatewayHost</code> &mdash; runs <strong>in-process</strong> on a loopback port (default <code>5100</code>) and serves a Progressive Web App (PWA) plus the API the phone needs. It is completely separate from MultiTerminal's unauthenticated <code>:5050</code> REST API, so it can carry its own session-auth pipeline without contaminating the desktop API.</p>
+        <p>Public reachability comes from <strong>Tailscale serve</strong>, which terminates TLS on your tailnet and forwards requests to the loopback gateway. The gateway trusts the <code>X-Forwarded-Proto=https</code> header from the loopback proxy and issues Secure session cookies accordingly.</p>
+
+        <div class="card">
+          <h3>Request path</h3>
+          <pre><code>Phone (PWA over Tailscale)
+   &rarr; Tailscale serve (HTTPS, on &lt;host&gt;.ts.net)
+      &rarr; MultiRemoteGatewayHost (loopback :5100, in MultiTerminal.exe)
+         &rarr; MultiTerminal services (in-process &mdash; no extra HTTP hop)</code></pre>
+        </div>
+
+        <p>Because the gateway calls MultiTerminal's services in-process, the phone gets the same task board, project list, team roster, chat/inbox, interactive terminal console (over WebSocket), and Web Push notifications that the desktop uses &mdash; with no proxy round-trips. The only remaining outbound hop is the off-box Cloudflare permission relay used for approving agent permission prompts from the phone.</p>
+
+        <h2 id="quickstart">2. Quickstart (the setup skill)</h2>
+        <p>The fastest path is the <code>/multi-connect-setup</code> skill. It is mostly automatic &mdash; the only manual step is a single browser login to Tailscale. Run it and it will:</p>
+        <ol>
+          <li>Detect (or install) Tailscale on this machine.</li>
+          <li>Bring the node up &mdash; you complete <strong>one</strong> browser sign-in to your tailnet.</li>
+          <li>Publish the loopback gateway over HTTPS with <code>tailscale serve</code> (forwarding to <code>http://localhost:5100</code>).</li>
+          <li>Detect this node's MagicDNS hostname and write it back into the Multi-Connect config via the loopback <code>POST /api/multi-connect/config</code>.</li>
+          <li>Verify the gateway answers on <code>/health</code> and print the final phone URL.</li>
+        </ol>
+        <div class="card">
+          <p><strong>Before the phone can log in:</strong> set a phone username and password (see the settings tab below). Login is deliberately disabled &mdash; the gateway returns <code>503</code> &mdash; until both auth credentials are changed away from their default placeholder values, so the app never sits open on your tailnet with <code>changeme/changeme</code>.</p>
+        </div>
+
+        <h2 id="settings-tab">3. The Multi-Connect settings tab</h2>
+        <p>Everything the skill writes can also be configured by hand in <strong>Settings &rarr; Multi-Connect</strong>. The tab is the self-service surface &mdash; no JSON editing required:</p>
+        <table>
+          <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Detect Tailscale</strong></td><td>Probes Tailscale (runs <code>tailscale status --json</code>) and fills in this node's hostname, install/running state, and backend state.</td></tr>
+            <tr><td><strong>Test connection</strong></td><td>Checks that the in-process gateway answers on its <code>/health</code> endpoint.</td></tr>
+            <tr><td><strong>Copy</strong></td><td>Copies the computed phone URL (<code>https://&lt;host&gt;.ts.net</code>) to the clipboard.</td></tr>
+            <tr><td><strong>Load / Save (OK)</strong></td><td>Loads the effective config and persists changes. Each field shows its <strong>effective value and source</strong> (settings / appsettings / default) so you never edit on top of a hidden value.</td></tr>
+          </tbody>
+        </table>
+        <p>Clicking <strong>OK</strong> restarts the gateway in-process so that restart-required fields (gateway port, VAPID subject, notification secret, relay base URL) take effect without relaunching MultiTerminal.</p>
+
+        <h2 id="config">4. Configuration surface</h2>
+        <p>Each per-install value resolves <strong>settings.txt (the Multi-Connect tab) &rarr; <code>appsettings.Local.json</code> &rarr; committed <code>appsettings.json</code> &rarr; built-in default</strong>. Per-install values and secrets belong in the tab or in the gitignored <code>appsettings.Local.json</code> &mdash; never in the committed <code>appsettings.json</code>.</p>
+        <table>
+          <thead><tr><th>Field</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>Gateway port</td><td><code>5100</code></td><td>Loopback port the in-process gateway listens on. Keep <code>tailscale serve</code> aligned to it. <em>(restart-required)</em></td></tr>
+            <tr><td>Tailscale enabled</td><td><code>false</code></td><td>Whether Tailscale fronting is in use for this install.</td></tr>
+            <tr><td>Tailscale hostname</td><td><em>unset</em></td><td>This node's MagicDNS name (e.g. <code>desktop.tailXXXX.ts.net</code>). Filled by Detect / the skill.</td></tr>
+            <tr><td>Tailscale serve port</td><td><code>443</code></td><td>The HTTPS port Tailscale serve publishes on. Drives the phone URL.</td></tr>
+            <tr><td>Phone auth username</td><td><code>changeme</code></td><td>Phone-login username. Login disabled until non-default.</td></tr>
+            <tr><td>Phone auth password</td><td><code>changeme</code></td><td><strong>Secret</strong> (DPAPI-protected at rest). Login disabled until non-default.</td></tr>
+            <tr><td>Notification secret</td><td><em>empty</em></td><td><strong>Secret</strong> shared with the push endpoint; when set, MultiTerminal attaches the matching <code>X-MT-Secret</code> on every forward. <em>(restart-required)</em></td></tr>
+            <tr><td>VAPID subject</td><td><em>unset</em></td><td>The <code>sub</code> claim for Web Push (a <code>mailto:</code> address or an http(s) URL). <em>(restart-required)</em></td></tr>
+            <tr><td>Relay base URL</td><td><em>unset</em></td><td>Base URL of the Cloudflare permission relay used for phone approvals. <em>(restart-required)</em></td></tr>
+            <tr><td>Relay API key</td><td><em>empty</em></td><td><strong>Secret</strong> (DPAPI-protected) sent as the relay <code>X-API-Key</code>.</td></tr>
+          </tbody>
+        </table>
+        <p>The three secrets &mdash; phone password, notification secret, relay API key &mdash; are DPAPI-protected on this machine. The config API never returns them in cleartext (see below).</p>
+        <p>For the full key reference, fallback sources, and deploy/migration steps, see <code>docs/multiremote-gateway.md</code>.</p>
+
+        <h2 id="security">5. Security model</h2>
+        <ul>
+          <li><strong>Loopback-only config.</strong> The <code>/api/multi-connect/*</code> endpoints are mounted only on the <code>:5050</code> loopback REST host and are explicitly excluded from the <code>:5100</code> phone gateway, so they are never reachable over Tailscale. Each action also rejects any non-loopback remote IP.</li>
+          <li><strong>Secrets are never returned raw.</strong> <code>GET /api/multi-connect/config</code> reports each secret only as an <code>isSet</code> boolean plus its source (<code>settings</code> / <code>appsettings</code> / <code>unset</code>) &mdash; the cleartext value is never sent to any caller.</li>
+          <li><strong>CSRF / cross-origin guard.</strong> Both the GET and the POST require a local, non-browser caller (an Origin / <code>Sec-Fetch-Site</code> check). A malicious page in a loopback browser is refused, while local tooling and the setup skill (which send no Origin) pass.</li>
+          <li><strong>Fail-closed phone login.</strong> The gateway returns <code>503</code> for login until both auth username and password are set to non-default values, so it never accepts the committed placeholders behind Tailscale.</li>
+          <li><strong>Secure cookies via forwarded headers.</strong> The gateway trusts <code>X-Forwarded-Proto</code> only from loopback (the Tailscale serve proxy), and issues <code>HttpOnly</code>, <code>SameSite=Strict</code>, Secure session cookies.</li>
+        </ul>
+
+        <h2 id="rest">6. REST endpoints</h2>
+        <p>The loopback configuration surface (used by the settings tab and the setup skill) lives under <code>/api/multi-connect</code> on <code>:5050</code>:</p>
+        <table>
+          <thead><tr><th>Method &amp; path</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /api/multi-connect/config</code></td><td>Effective per-install config. Secrets reported as is-set booleans with their source; carries a stable <code>schemaVersion</code>.</td></tr>
+            <tr><td><code>POST /api/multi-connect/config</code></td><td>Validates then persists. Cleared fields are removed (never stored as <code>""</code>); returns <code>400</code> on bad input with no partial write. Echoes the new effective config plus <code>applied</code>/<code>restartRequired</code> markers.</td></tr>
+            <tr><td><code>GET /api/multi-connect/tailscale-status</code></td><td>Typed Tailscale probe backing the tab's <strong>Detect</strong> button (installed / running / backend state / hostname / error).</td></tr>
+          </tbody>
+        </table>
+        <p>Per-field POST semantics: <code>null</code> (omitted) leaves a value unchanged, an empty string clears it, and any other value sets it. This lets the tab send an untouched secret as <code>null</code> so it never overwrites a stored secret with a placeholder.</p>
+
+        <h2 id="legacy">7. Relationship to ClaudeRemote (legacy)</h2>
+        <p>Multi-Connect <strong>supersedes</strong> the older approach, in which a standalone <code>ClaudeRemote</code> ASP.NET process was fronted by Caddy for HTTPS. That gateway has been folded into the MultiTerminal process: the phone PWA + API now run in-process, and TLS is handled by Tailscale serve rather than Caddy.</p>
+        <div class="card">
+          <p>If you are migrating from the standalone setup: the old <code>ClaudeRemote</code> companion is quarantined (its <code>companion-processes.json</code> entry is set to <code>autoStart:false</code>), not deleted, so a rollback stays cheap until end-to-end sign-off. Both the standalone and the in-process gateway bind port <code>5100</code>, so stop one before running the other. To preserve push identity, copy the standalone's <code>push-config.json</code> (VAPID keys + subscriptions) into the gateway's data path so phones don't have to re-subscribe.</p>
+        </div>
+        <p>For the deep configuration reference, hosting model, and migration runbook, see <code>docs/multiremote-gateway.md</code>.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

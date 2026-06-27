@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Worked MultiTerminal REST API examples in curl, PowerShell (Invoke-RestMethod), and Python (requests) — list/create tasks, send a message, get project context, and search the code graph.">
+  <title>API Examples - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link active">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>API Examples</h1>
+        <p class="lead">Copy-paste worked examples against the MultiTerminal REST API on <code>http://localhost:5050</code>, each shown in curl, PowerShell (<code>Invoke-RestMethod</code>), and Python (<code>requests</code>). For the full endpoint catalogue, see the <a href="api-reference.html">REST API Reference</a>.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#notes">Before you start</a></li>
+            <li><a href="#list-tasks">List tasks</a></li>
+            <li><a href="#create-task">Create a task</a></li>
+            <li><a href="#send-message">Send a message</a></li>
+            <li><a href="#project-context">Get project context</a></li>
+            <li><a href="#code-search">Search the code graph</a></li>
+          </ol>
+        </div>
+
+        <h2 id="notes">Before you start</h2>
+        <ul>
+          <li>The API binds to <strong>loopback only</strong> (<code>localhost:5050</code>). It has no auth boundary by design — it's reachable only from the local machine. Don't expose it directly; the phone story goes through the gateway (see <a href="multi-connect.html">Multi-Connect</a>).</li>
+          <li>MultiTerminal must be running so the API is listening. Verify with <code>curl http://localhost:5050/health</code>.</li>
+          <li>All request and response bodies are JSON.</li>
+          <li>The Python snippets assume <code>pip install requests</code> and a shared base URL:</li>
+        </ul>
+        <pre><code>import requests
+BASE = "http://localhost:5050"</code></pre>
+
+        <h2 id="list-tasks">List tasks</h2>
+        <p><code>GET /api/tasks</code> — optionally filter with <code>?status=</code> (<code>all</code>, <code>todo</code>, <code>in_progress</code>, <code>done</code>, <code>suggestion</code>).</p>
+        <h3>curl</h3>
+        <pre><code>curl "http://localhost:5050/api/tasks?status=in_progress"</code></pre>
+        <h3>PowerShell</h3>
+        <pre><code>Invoke-RestMethod -Uri "http://localhost:5050/api/tasks?status=in_progress" |
+  Select-Object id, title, status, assignee</code></pre>
+        <h3>Python</h3>
+        <pre><code>r = requests.get(f"{BASE}/api/tasks", params={"status": "in_progress"})
+for task in r.json():
+    print(task["id"], task["title"], task["status"])</code></pre>
+
+        <h2 id="create-task">Create a task</h2>
+        <p><code>POST /api/tasks</code>. Required: <code>title</code>, <code>description</code>, <code>createdBy</code>. Optional: <code>status</code> (default <code>todo</code>), <code>priority</code> (default <code>normal</code>), <code>projectId</code>. The response is <code>{ "taskId": "...", "task": { ... } }</code>.</p>
+        <h3>curl</h3>
+        <pre><code>curl -X POST http://localhost:5050/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Fix login bug",
+    "description": "500 error on login when password contains special characters",
+    "createdBy": "Alice",
+    "status": "todo",
+    "priority": "high"
+  }'</code></pre>
+        <h3>PowerShell</h3>
+        <pre><code>$body = @{
+  title       = "Fix login bug"
+  description = "500 error on login when password contains special characters"
+  createdBy   = "Alice"
+  status      = "todo"
+  priority    = "high"
+} | ConvertTo-Json
+
+$resp = Invoke-RestMethod -Uri "http://localhost:5050/api/tasks" `
+  -Method Post -ContentType "application/json" -Body $body
+$resp.taskId</code></pre>
+        <h3>Python</h3>
+        <pre><code>resp = requests.post(f"{BASE}/api/tasks", json={
+    "title": "Fix login bug",
+    "description": "500 error on login when password contains special characters",
+    "createdBy": "Alice",
+    "status": "todo",
+    "priority": "high",
+})
+print(resp.json()["taskId"])</code></pre>
+
+        <h2 id="send-message">Send a message</h2>
+        <p>Messaging is keyed by a terminal id, not a name. First register to get a <code>terminalId</code> via <code>POST /api/messaging/register</code>, then send with that id as <code>fromTerminalId</code>.</p>
+        <pre><code># 1) Register once — returns { "terminalId": "..." }
+curl -X POST http://localhost:5050/api/messaging/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice","docId":"cli"}'</code></pre>
+        <p><code>POST /api/messaging/send</code> — fields: <code>fromTerminalId</code>, <code>to</code> (recipient name), <code>message</code>, and optional <code>priority</code>.</p>
+        <h3>curl</h3>
+        <pre><code>curl -X POST http://localhost:5050/api/messaging/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromTerminalId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "to": "Bob",
+    "message": "Build is ready for testing",
+    "priority": "normal"
+  }'</code></pre>
+        <h3>PowerShell</h3>
+        <pre><code># Register, then send using the returned terminalId
+$reg = Invoke-RestMethod -Uri "http://localhost:5050/api/messaging/register" `
+  -Method Post -ContentType "application/json" `
+  -Body (@{ name = "Alice"; docId = "cli" } | ConvertTo-Json)
+
+$body = @{
+  fromTerminalId = $reg.terminalId
+  to             = "Bob"
+  message        = "Build is ready for testing"
+  priority       = "normal"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "http://localhost:5050/api/messaging/send" `
+  -Method Post -ContentType "application/json" -Body $body</code></pre>
+        <h3>Python</h3>
+        <pre><code>reg = requests.post(f"{BASE}/api/messaging/register",
+                    json={"name": "Alice", "docId": "cli"}).json()
+
+requests.post(f"{BASE}/api/messaging/send", json={
+    "fromTerminalId": reg["terminalId"],
+    "to": "Bob",
+    "message": "Build is ready for testing",
+    "priority": "normal",
+})</code></pre>
+
+        <h2 id="project-context">Get project context</h2>
+        <p><code>GET /api/projects/{projectId}/context</code> returns the single "everything an agent needs" object — the project plus all its associations (agents, MCP servers, specialists, paths, prompts, skills). List projects with <code>GET /api/projects</code> to find an id.</p>
+        <h3>curl</h3>
+        <pre><code># Find a project id, then fetch its context
+curl http://localhost:5050/api/projects
+curl http://localhost:5050/api/projects/proj-123/context</code></pre>
+        <h3>PowerShell</h3>
+        <pre><code>$ctx = Invoke-RestMethod -Uri "http://localhost:5050/api/projects/proj-123/context"
+$ctx | ConvertTo-Json -Depth 6</code></pre>
+        <h3>Python</h3>
+        <pre><code>ctx = requests.get(f"{BASE}/api/projects/proj-123/context").json()
+print(ctx)</code></pre>
+        <p><strong>Note:</strong> a missing project id returns <code>404</code> with <code>{ "error": "Project '...' not found" }</code>.</p>
+
+        <h2 id="code-search">Search the code graph</h2>
+        <p><code>GET /api/code-graph/search?query=...</code> finds symbols by name, with an optional <code>type</code> filter (<code>class</code>, <code>method</code>, <code>interface</code>, ...). The response is <code>{ "success": true, "count": N, "results": [ ... ] }</code>. Index the project first (see <a href="code-graph.html">Code Graph</a>) — an unindexed graph returns <code>503</code>.</p>
+        <h3>curl</h3>
+        <pre><code>curl "http://localhost:5050/api/code-graph/search?query=MessageBroker&type=class"</code></pre>
+        <h3>PowerShell</h3>
+        <pre><code>$res = Invoke-RestMethod `
+  -Uri "http://localhost:5050/api/code-graph/search?query=MessageBroker&type=class"
+$res.count
+$res.results | Select-Object name, type, file_path, line_number</code></pre>
+        <h3>Python</h3>
+        <pre><code>res = requests.get(f"{BASE}/api/code-graph/search",
+                   params={"query": "MessageBroker", "type": "class"}).json()
+print(res["count"])
+for sym in res["results"]:
+    print(sym["name"], sym["type"], sym["file_path"], sym["line_number"])</code></pre>
+        <p>From a result's symbol id you can walk the graph further: <code>/api/code-graph/callers</code>, <code>/api/code-graph/callees</code>, <code>/api/code-graph/impact</code>, and <code>/api/code-graph/inheritance</code> all accept <code>?symbolId=</code> (or <code>?symbolName=</code>).</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="MultiTerminal troubleshooting and FAQ — port conflicts, MCP server, database location and backup, layout reset, frozen terminals, WebView2 runtime, and where to find logs.">
+  <title>Troubleshooting / FAQ - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link active">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Troubleshooting / FAQ</h1>
+        <p class="lead">Concrete fixes for the issues you are most likely to hit: port conflicts on 5050, MCP tools not connecting, database location and backup, resetting the docking layout, frozen terminals, the WebView2 runtime, and where the logs live.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#paths">Key paths &amp; ports at a glance</a></li>
+            <li><a href="#port">REST API / port 5050 conflicts</a></li>
+            <li><a href="#mcp">MCP tools not connecting</a></li>
+            <li><a href="#db">Database location &amp; backup</a></li>
+            <li><a href="#layout">Resetting the docking layout</a></li>
+            <li><a href="#terminal">Frozen terminal / respawn</a></li>
+            <li><a href="#webview2">WebView2 runtime</a></li>
+            <li><a href="#logs">Where to see logs</a></li>
+          </ol>
+        </div>
+
+        <h2 id="paths">Key paths &amp; ports at a glance</h2>
+        <table>
+          <thead><tr><th>What</th><th>Where</th></tr></thead>
+          <tbody>
+            <tr><td>REST API</td><td><code>http://localhost:5050</code> (loopback only)</td></tr>
+            <tr><td>MCP server (Node.js)</td><td><code>%APPDATA%\multiterminal\mcp\</code> (entry point <code>index.js</code>)</td></tr>
+            <tr><td>Main database</td><td><code>%APPDATA%\multiterminal\multiterminal.db</code></td></tr>
+            <tr><td>Message queue database</td><td><code>%APPDATA%\multiterminal\messages.db</code></td></tr>
+            <tr><td>Startup error log</td><td><code>%APPDATA%\multiterminal\startup-error.log</code></td></tr>
+            <tr><td>Worktrees (when enabled)</td><td><code>&lt;project&gt;\.claude\worktrees\</code></td></tr>
+          </tbody>
+        </table>
+        <p>On Windows, paste <code>%APPDATA%\multiterminal</code> straight into the File Explorer address bar to open that folder.</p>
+
+        <h2 id="port">REST API / port 5050 conflicts</h2>
+        <p>MultiTerminal hosts its REST API on <code>localhost:5050</code>. Every MCP tool and panel talks to that port, so a conflict breaks task, chat, and code-graph operations across the app.</p>
+        <p><strong>Symptoms:</strong> the app launches but tasks/chat never load; MCP tools time out or return connection errors.</p>
+        <p><strong>Check what owns the port (PowerShell):</strong></p>
+        <pre><code>Get-NetTCPConnection -LocalPort 5050 -State Listen |
+  Select-Object LocalAddress, OwningProcess
+Get-Process -Id (Get-NetTCPConnection -LocalPort 5050 -State Listen).OwningProcess</code></pre>
+        <p><strong>Fixes:</strong></p>
+        <ul>
+          <li>A stale MultiTerminal process is the usual culprit — fully exit any prior instance (check the system tray and Task Manager) before relaunching.</li>
+          <li>If a genuinely unrelated process owns 5050, stop it, then relaunch MultiTerminal.</li>
+          <li>Confirm the API is healthy once the app is up: <code>curl http://localhost:5050/health</code> should return <code>{"status":"healthy","port":5050}</code>.</li>
+        </ul>
+
+        <h2 id="mcp">MCP tools not connecting</h2>
+        <p>The MCP server is a Node.js process under <code>%APPDATA%\multiterminal\mcp\</code>. Its tools are thin wrappers that call the REST API on <code>localhost:5050</code>, so MCP problems are usually really API-or-path problems.</p>
+        <p><strong>Work through these in order:</strong></p>
+        <ul>
+          <li><strong>Is the app running?</strong> The MCP tools need MultiTerminal open so the API on 5050 is listening. Start the app first.</li>
+          <li><strong>Is the API up?</strong> <code>curl http://localhost:5050/health</code>. If that fails, fix the <a href="#port">port</a> first — the MCP layer can't work without it.</li>
+          <li><strong>Does the MCP folder exist?</strong> Confirm <code>%APPDATA%\multiterminal\mcp\index.js</code> is present. MultiTerminal provisions this on startup; if it's missing, restart the app to let it re-provision.</li>
+          <li><strong>Is Node.js available?</strong> The MCP server runs under Node; <code>node --version</code> should succeed on your PATH.</li>
+          <li><strong>Restart the client.</strong> After fixing the above, restart your Claude Code session so it re-handshakes with the MCP server.</li>
+        </ul>
+
+        <h2 id="db">Database location &amp; backup</h2>
+        <p>MultiTerminal stores its data in SQLite under <code>%APPDATA%\multiterminal\</code>:</p>
+        <ul>
+          <li><code>multiterminal.db</code> — tasks, checklists, sessions, knowledge, profiles, projects, and the code graph (all in one file).</li>
+          <li><code>messages.db</code> — the inter-terminal message queue.</li>
+        </ul>
+        <p><strong>To back up:</strong> close MultiTerminal completely, then copy the <code>.db</code> files somewhere safe. Closing first matters — SQLite uses write-ahead logging (WAL), so copying while the app is running can capture a half-written state.</p>
+        <pre><code># PowerShell — back up both databases with the app closed
+$src = "$env:APPDATA\multiterminal"
+$dst = "$env:USERPROFILE\Desktop\mt-backup"
+New-Item -ItemType Directory -Force $dst | Out-Null
+Copy-Item "$src\multiterminal.db" $dst
+Copy-Item "$src\messages.db" $dst</code></pre>
+        <p><strong>To restore:</strong> close the app and copy the saved <code>.db</code> files back over the ones in <code>%APPDATA%\multiterminal\</code>.</p>
+
+        <h2 id="layout">Resetting the docking layout</h2>
+        <p>MultiTerminal's panels are arranged with a docking layout manager, and the layout is persisted between runs. If panels end up off-screen, collapsed to zero size, or otherwise wedged:</p>
+        <ul>
+          <li>Use the toolbar toggle buttons to hide and re-show the affected panel — panels are hidden on close (not destroyed), so toggling re-docks them.</li>
+          <li>If the whole layout is corrupt, exit the app and remove the persisted layout file in <code>%APPDATA%\multiterminal\</code> (the docking-layout file), then relaunch to rebuild the default arrangement. Your tasks and chat history live in the databases, so they are unaffected.</li>
+        </ul>
+
+        <h2 id="terminal">Frozen terminal / respawn</h2>
+        <p>Each terminal hosts a real shell process (ConPTY). If one stops responding — no echo, no output, a hung command:</p>
+        <ul>
+          <li>Click into the terminal and press <kbd>Ctrl</kbd>+<kbd>C</kbd> to interrupt a stuck foreground command.</li>
+          <li>If it's truly frozen, close that terminal tab and open a new one — this respawns a fresh shell process. Other terminals and panels are unaffected.</li>
+          <li>A frozen <em>agent</em> terminal (a spawned teammate) can likewise be closed and re-spawned; its task state persists in the database, so a new session can pick the task back up from its continuation notes.</li>
+        </ul>
+
+        <h2 id="webview2">WebView2 runtime</h2>
+        <p>Most of MultiTerminal's panels (Tasks, Chat, Activity, Office, and others) render in embedded WebView2 controls, which require the <strong>Microsoft Edge WebView2 Runtime</strong>.</p>
+        <p><strong>Symptoms of a missing/broken runtime:</strong> panels are blank or white, or the app errors on startup referencing WebView2.</p>
+        <p><strong>Fix:</strong> install the Evergreen WebView2 Runtime from Microsoft (it ships with current Windows 11 but can be absent or outdated on older images), then relaunch. WebView2's own user-data cache lives under your local app data; a corrupt cache is rare but clears by reinstalling the runtime.</p>
+
+        <h2 id="logs">Where to see logs</h2>
+        <ul>
+          <li><strong>Debug panel.</strong> The in-app Debug panel is the first place to look — it streams live diagnostic output (including remote-mode changes, worktree strands, and service warnings). Toggle it from the toolbar.</li>
+          <li><strong>Startup errors.</strong> If the app fails early (before panels load), check <code>%APPDATA%\multiterminal\startup-error.log</code>.</li>
+          <li><strong>API health.</strong> <code>curl http://localhost:5050/health</code> and <code>curl http://localhost:5050/api/tools</code> confirm the API is up and list every available endpoint.</li>
+        </ul>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

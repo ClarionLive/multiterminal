@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Per-task git worktree isolation in MultiTerminal — auto-create on claim, branch naming, the WORKTREE_MODE gate, and auto-commit + merge + prune on done.">
+  <title>Git Worktrees - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link active">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Git Worktrees</h1>
+        <p class="lead">Per-task git worktree isolation gives every active task its own checkout on its own branch, so parallel agents never trample each other's working tree. Claiming a task materializes a worktree; finishing it auto-commits, merges back to trunk, and prunes the directory.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#why">Why worktrees</a></li>
+            <li><a href="#gate">Turning it on (WORKTREE_MODE)</a></li>
+            <li><a href="#create">Auto-create on claim</a></li>
+            <li><a href="#naming">Branch &amp; path naming</a></li>
+            <li><a href="#done">Teardown on done (commit &rarr; merge &rarr; prune)</a></li>
+            <li><a href="#cwd">Where your shell ends up</a></li>
+            <li><a href="#hud">HUD git panel rebind</a></li>
+            <li><a href="#query">Querying the active worktree</a></li>
+            <li><a href="#failure">Failure handling</a></li>
+          </ol>
+        </div>
+
+        <h2 id="why">Why worktrees</h2>
+        <p>A git worktree is a second working directory backed by the same repository — a separate checkout on a separate branch that shares the one <code>.git</code> store. MultiTerminal uses one worktree per active task so that:</p>
+        <ul>
+          <li>Two agents working two tasks in the same repo never see each other's uncommitted edits.</li>
+          <li>Each task's commits land on a dedicated <code>task/&lt;id&gt;</code> branch, keeping trunk clean until the task is done.</li>
+          <li>A helper joining a task gets its <em>own</em> branch and worktree, so helper work integrates deliberately rather than racing the assignee's tree.</li>
+        </ul>
+        <p>Worktrees live <strong>inside</strong> the project at <code>.claude/worktrees/</code> (gitignored). Keeping them under the main checkout matters for Claude Code's permission scope, harness cwd pinning, and the <code>EnterWorktree</code> enter-existing form (see below).</p>
+
+        <h2 id="gate">Turning it on (WORKTREE_MODE)</h2>
+        <p>Worktree isolation is <strong>opt-in</strong>, gated by an environment variable. With it unset, MultiTerminal behaves exactly as before — everyone works directly in the main checkout.</p>
+        <pre><code># Enable per-task worktree isolation
+MULTITERMINAL_WORKTREE_MODE=on</code></pre>
+        <p>When the gate is on, the worktree lifecycle hooks fire automatically at task-activate and task-done time. When it is off, no worktrees are created and the teardown steps are skipped.</p>
+
+        <h2 id="create">Auto-create on claim</h2>
+        <p>Setting a task <em>active</em> (claiming it, or activating an already-claimed task) materializes a worktree for the acting agent. The operation is idempotent: if that agent already has an <code>active</code> worktree on disk for the task, the existing one is returned unchanged — no second checkout, no git work.</p>
+        <ul>
+          <li>The <strong>assignee</strong> gets the <em>canonical</em> worktree on branch <code>task/&lt;id&gt;</code>, forked from trunk.</li>
+          <li>Each <strong>helper</strong> gets their own worktree on <code>task/&lt;id&gt;--&lt;slug&gt;</code>, forked from the canonical branch's tip (the canonical branch is created first if it does not yet exist).</li>
+        </ul>
+        <p>Fresh worktrees contain only tracked files. A few build-required artifacts in this repo are vendored and gitignored (notably <code>tools/rg.exe</code>), so MultiTerminal seeds the known vendored directories from the main checkout into each new worktree — otherwise a post-build copy step would fail.</p>
+        <div class="card">
+          <h3>Trunk safety</h3>
+          <p>The canonical branch is always rooted explicitly at trunk, never at "whatever HEAD points to." If the main checkout is on a detached HEAD or sitting on another <code>task/</code> branch, worktree creation fails loudly rather than silently forking the new branch from the wrong commit.</p>
+        </div>
+
+        <h2 id="naming">Branch &amp; path naming</h2>
+        <p>The first 8 characters of the task id (<code>&lt;idShort&gt;</code>) drive both the directory name and the branch name.</p>
+        <table>
+          <thead><tr><th>Role</th><th>Branch</th><th>Worktree path</th><th>Forked from</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Assignee (canonical)</td>
+              <td><code>task/&lt;idShort&gt;</code></td>
+              <td><code>.claude/worktrees/&lt;idShort&gt;/</code></td>
+              <td>trunk</td>
+            </tr>
+            <tr>
+              <td>Helper</td>
+              <td><code>task/&lt;idShort&gt;--&lt;slug&gt;</code></td>
+              <td><code>.claude/worktrees/&lt;idShort&gt;--&lt;slug&gt;/</code></td>
+              <td>canonical branch tip</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Records are persisted in the <code>task_worktrees</code> table, keyed by the composite <code>(task_id, agent_name)</code>. A record is <code>active</code> while the directory exists on disk and <code>pruned</code> after removal; pruned rows are retained for audit/history.</p>
+
+        <h2 id="done">Teardown on done (commit &rarr; merge &rarr; prune)</h2>
+        <p>Moving a task to <code>done</code> runs a multi-phase teardown so nothing the agents wrote is lost and trunk ends up carrying every agent's work:</p>
+        <ol>
+          <li><strong>Auto-commit</strong> — each worktree's changes are committed on its own branch. MultiTerminal stages the exact file list from <code>git status --porcelain</code> (never a blanket <code>git add -A</code>), honors pre-commit hooks (never <code>--no-verify</code>), and writes a single commit with the task title, the implementation summary, and a <code>Co-Authored-By</code> trailer for the agent. A clean worktree is a no-op.</li>
+          <li><strong>Integrate helper branches</strong> — each <code>task/&lt;id&gt;--&lt;slug&gt;</code> branch is merged into the canonical <code>task/&lt;id&gt;</code> branch (inside the still-checked-out canonical worktree). A conflict aborts the merge cleanly and halts teardown so nothing is dropped.</li>
+          <li><strong>Prune</strong> — every worktree directory for the task is removed and its record marked <code>pruned</code>. Prune must run before the trunk merge: git refuses to merge a branch while it is checked out anywhere.</li>
+          <li><strong>Merge to trunk</strong> — the canonical <code>task/&lt;id&gt;</code> branch is merged into the main checkout's trunk with <code>git merge --no-edit</code> (fast-forward or merge commit), then the branch is deleted.</li>
+        </ol>
+        <div class="card">
+          <h3>Merge guards (fail closed)</h3>
+          <p>The trunk merge refuses rather than guessing when it cannot be sure it is landing in the right place:</p>
+          <ul>
+            <li>The expected trunk is resolved from the project's configured <code>git_default_branch</code>, then the remote's <code>origin/HEAD</code>, then the sole non-task local branch <em>only if</em> it bears a conventional name (<code>main</code>, <code>master</code>, <code>develop</code>, <code>trunk</code>). If none resolve, the merge refuses.</li>
+            <li>If the main checkout's branch is not the expected trunk, the merge refuses with a "check out trunk and re-mark done" message.</li>
+            <li>If the main checkout has uncommitted tracked changes (beyond MT's own <code>.claude/project.json</code> bookkeeping), the merge refuses — genuine user work is never auto-committed.</li>
+            <li>A merge conflict triggers <code>git merge --abort</code>; the main checkout stays clean and the task branch is left alive for manual resolution.</li>
+          </ul>
+        </div>
+
+        <h2 id="cwd">Where your shell ends up</h2>
+        <p>On Claude Code 2.1.157 and later, MultiTerminal uses the <code>EnterWorktree</code> / <code>ExitWorktree</code> harness operations to move a session's working directory into and out of a task worktree cleanly (rather than a raw <code>cd</code>, which the cwd-pinned harness does not honor). The session-start auto-cd flow enters the active task's worktree so a resumed shell lands in the right checkout.</p>
+        <p>This is also why worktrees must live under <code>.claude/worktrees/</code>: the <code>EnterWorktree(path=...)</code> enter-existing form requires the target be a worktree under that directory for cwd-pinned-at-launch agents (MT terminals).</p>
+
+        <h2 id="hud">HUD git panel rebind</h2>
+        <p>The HUD git panel always shows the repository state of the <em>active</em> task's worktree, and rebinds itself when the active task changes. Three events drive this:</p>
+        <ul>
+          <li><strong><code>TaskActiveChanged</code></strong> — fires after the active task swaps. The HUD git renderer resolves the new task's worktree path agent-aware (a helper rebinds to its own <code>task/&lt;id&gt;--&lt;slug&gt;</code> worktree, not the assignee's canonical one).</li>
+          <li><strong><code>WorktreePruning</code></strong> — fires synchronously just before the directory is removed at task-done. Subscribers drop live git handles, and a control message tells any agent whose cwd is inside the worktree to <code>cd</code> out before the rmdir.</li>
+          <li><strong><code>WorktreeReady</code></strong> — fires after both prune and the post-prune trunk merge complete. The HUD git renderer releases its cached service for the pruned path and rebinds to the post-merge repo root.</li>
+        </ul>
+        <p>The contract between the last two: <em>pruning</em> says "drop your handles, the directory is about to disappear"; <em>ready</em> says "the post-merge state is durable, refresh your view."</p>
+
+        <h2 id="query">Querying the active worktree</h2>
+        <p>A long-running shell can switch tasks, so the launch-time worktree path goes stale. Agents query the live path instead via the <code>get_active_worktree</code> MCP tool, which is backed by:</p>
+        <pre><code>GET http://localhost:5050/api/worktrees/active/{agentName}</code></pre>
+        <p>The endpoint always returns HTTP 200. A null <code>worktreePath</code> means "no active worktree" (no active task, worktree mode off, or project unregistered) and is used as the no-op signal in the auto-cd protocol. A representative response:</p>
+        <pre><code>{
+  "agentName": "Alice",
+  "taskId": "c0ce8037",
+  "taskTitle": "Add dark mode",
+  "worktreePath": "H:\\DevLaptop\\...\\.claude\\worktrees\\c0ce8037",
+  "repoRoot": "H:\\DevLaptop\\...\\MultiTerminal",
+  "branchName": "task/c0ce8037"
+}</code></pre>
+        <p>This is a read-or-create endpoint: if the agent's active task is eligible but its worktree was never materialized, the call backfills it (idempotent, bounded to that agent's one legitimate worktree).</p>
+
+        <h2 id="failure">Failure handling</h2>
+        <ul>
+          <li><strong>Partial prune (Windows):</strong> when an agent's terminal has its cwd inside a worktree, <code>git worktree remove</code> wipes contents and unregisters the worktree but cannot rmdir the directory (the OS holds an open handle). MultiTerminal detects this by re-querying <code>git worktree list</code>; if the path is gone from git's view it treats the removal as a success and leaves only an empty shell, which the janitor sweeps later. A strand signal is surfaced to the activity feed so it is observable in real time.</li>
+          <li><strong>Stranded directories:</strong> <code>GET /api/worktrees/stranded</code> reports de-registered-but-on-disk worktree shells. Its payload carries an explicit <code>status</code> (<code>ok</code> / <code>partial</code> / <code>unavailable</code>) so a caller can never mistake "couldn't tell" for "none."</li>
+          <li><strong>Dirty main checkout / conflicts:</strong> see the merge guards above — these refuse and leave state recoverable rather than forcing a merge.</li>
+        </ul>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

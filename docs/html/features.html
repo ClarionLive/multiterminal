@@ -19,17 +19,33 @@
       </div>
       <nav class="sidebar-nav">
         <div class="nav-section-title">Getting Started</div>
-        <a href="getting-started.html" class="nav-link">Quick Start</a>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
         <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
-        <div class="nav-section-title">Reference</div>
+
+        <div class="nav-section-title">Features</div>
         <a href="features.html" class="nav-link active">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
         <a href="api-reference.html" class="nav-link">REST API</a>
         <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
         <div class="nav-section-title">Technical</div>
         <a href="architecture.html" class="nav-link">Architecture</a>
         <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
         <a href="distribution.html" class="nav-link">Distribution</a>
         <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
         <div class="nav-section-title"></div>
         <a href="index.html" class="nav-link">&larr; Home</a>
       </nav>
@@ -46,23 +62,33 @@
         <div class="card">
           <h3>On This Page</h3>
           <ol>
-            <li><a href="#ui-panels">UI Panels (10 panels + controls)</a></li>
+            <li><a href="#ui-panels">UI Panels (11 panels + controls)</a></li>
             <li><a href="#terminal-management">Terminal Management</a></li>
             <li><a href="#kanban-board">Kanban Board</a></li>
+            <li><a href="#worktrees">Git Worktree Isolation</a></li>
             <li><a href="#messaging">Messaging</a></li>
             <li><a href="#project-management">Project Management</a></li>
             <li><a href="#team-agent-system">Team &amp; Agent System</a></li>
+            <li><a href="#code-intelligence">Code Intelligence (Code Graph &amp; Wiki)</a></li>
             <li><a href="#institutional-memory">Institutional Memory</a></li>
             <li><a href="#settings-theme">Settings &amp; Theme</a></li>
             <li><a href="#dialogs">Dialogs</a></li>
-            <li><a href="#claude-remote">ClaudeRemote (Mobile Access)</a></li>
+            <li><a href="#remote-access">Remote &amp; Phone Access (Multi-Connect)</a></li>
+            <li><a href="#presence">Presence-Aware Routing</a></li>
           </ol>
+          <p style="margin-top:1rem;">Newer subsystems each have a dedicated guide:
+            <a href="worktrees.html">Git Worktrees</a> &middot;
+            <a href="multi-connect.html">Multi-Connect</a> &middot;
+            <a href="presence.html">Presence Sensors</a> &middot;
+            <a href="code-graph.html">Code Graph</a> &middot;
+            <a href="branch-outcomes-wiki.html">Branch Outcomes &amp; Wiki</a>.
+          </p>
         </div>
 
         <!-- =========================================== -->
         <!-- 1. UI PANELS -->
         <!-- =========================================== -->
-        <h2 id="ui-panels">1. UI Panels (10 panels + controls)</h2>
+        <h2 id="ui-panels">UI Panels (11 panels + controls)</h2>
         <p>MultiTerminal uses a VS-style docking framework (DockPanelSuite). All panels can be toggled from the toolbar, dragged to dock at any edge, floated as windows, or auto-hidden as slide-out tabs.</p>
 
         <!-- Tasks Panel -->
@@ -343,6 +369,21 @@
         <p>Tasks can be assigned priority levels that affect their visual presentation on the board. Higher-priority tasks are highlighted with color-coded badges.</p>
 
         <!-- =========================================== -->
+        <!-- GIT WORKTREE ISOLATION -->
+        <!-- =========================================== -->
+        <h2 id="worktrees">Git Worktree Isolation</h2>
+        <p>When worktree mode is enabled (<code>MULTITERMINAL_WORKTREE_MODE=on</code>), claiming a task automatically gives each agent its own git worktree, so multiple agents can work on different tasks &mdash; or different parts of the same task &mdash; without stepping on each other's files.</p>
+        <div class="card">
+          <ul>
+            <li><strong>Auto-create on claim:</strong> the assignee gets a canonical <code>task/&lt;id&gt;</code> branch; each helper gets <code>task/&lt;id&gt;--&lt;slug&gt;</code></li>
+            <li><strong>Auto-merge &amp; prune on done:</strong> work is committed, merged back to the trunk, and the worktree directory is removed</li>
+            <li><strong>HUD git panel</strong> rebinds to the active task's worktree as you switch tasks</li>
+            <li><strong>Clean cwd moves</strong> via <code>EnterWorktree</code>/<code>ExitWorktree</code> (Claude Code &ge; 2.1.157)</li>
+          </ul>
+          <p>Full walkthrough: <a href="worktrees.html">Git Worktrees guide</a>.</p>
+        </div>
+
+        <!-- =========================================== -->
         <!-- 4. MESSAGING -->
         <!-- =========================================== -->
         <h2 id="messaging">4. Messaging</h2>
@@ -443,6 +484,22 @@
             <tr><td>Native Teams</td><td>"Agent " prefix</td><td>Agent Alice</td><td>Coding sprints (parallel)</td></tr>
           </tbody>
         </table>
+
+        <!-- =========================================== -->
+        <!-- CODE INTELLIGENCE -->
+        <!-- =========================================== -->
+        <h2 id="code-intelligence">Code Intelligence (Code Graph &amp; Wiki)</h2>
+        <p>MultiTerminal indexes your C# codebase so agents can reason about it structurally instead of grepping blindly.</p>
+        <div class="card">
+          <h3>Code Graph</h3>
+          <p>A Roslyn-based two-pass indexer extracts symbols (classes, methods, properties, constructors) and relationships (calls, inherits, implements, overrides, references). Agents query it to find callers/callees, walk inheritance trees, run impact analysis before a change, and surface dead code.</p>
+          <p>Guide: <a href="code-graph.html">Code Graph</a>.</p>
+        </div>
+        <div class="card">
+          <h3>Wiki Generator &amp; Branch Outcomes</h3>
+          <p>The wiki generator auto-writes per-subsystem articles from the code graph (stored under <code>.claude/wiki/</code>). Branch outcomes let you attach a one-sentence, user-facing capability statement to a branch so it reads as a feature, not a commit log.</p>
+          <p>Guide: <a href="branch-outcomes-wiki.html">Branch Outcomes &amp; Wiki</a>.</p>
+        </div>
 
         <!-- =========================================== -->
         <!-- 7. INSTITUTIONAL MEMORY -->
@@ -569,7 +626,7 @@
         <h3>Toolbar</h3>
         <p>The main toolbar contains buttons for all panel toggles, layout controls, and settings:</p>
         <p>
-          <code>New Terminal</code> | <code>Project</code> | <code>Chat</code> | <code>History</code> | <code>Activity</code> | <code>Tasks</code> | <code>Profiles</code> | <code>Inbox</code> | <code>Office</code> | <code>Agent</code> | <code>Debug</code> | <code>HUD</code> | <code>Recent</code> | <code>Grid Layout</code> | Theme | Settings | About
+          <code>New Terminal</code> | <code>Project</code> | <code>Chat</code> | <code>History</code> | <code>Help</code> | <code>Activity</code> | <code>Tasks</code> | <code>Profiles</code> | <code>Inbox</code> | <code>Office</code> | <code>Debug</code> | <code>File Preview</code> | <code>Recent</code> | <code>Grid Layout</code> | Theme | Settings | About
         </p>
 
         <!-- =========================================== -->
@@ -641,16 +698,22 @@
           </tbody>
         </table>
 
-        <h2 id="claude-remote">10. ClaudeRemote (Mobile Access)</h2>
-        <p>ClaudeRemote is a companion application that provides mobile access to MultiTerminal from your phone. It runs as a lightweight ASP.NET web server (port 5100) that proxies requests to the MultiTerminal REST API and adds mobile-friendly features.</p>
-
+        <h2 id="remote-access">Remote &amp; Phone Access (Multi-Connect)</h2>
+        <p>The current, recommended way to reach MultiTerminal from your phone is <strong>Multi-Connect</strong> &mdash; an in-app gateway published over your private <strong>Tailscale</strong> network. It serves a mobile PWA for task access without exposing anything to the public internet.</p>
         <div class="card">
-          <h3>Architecture</h3>
+          <p><strong>Set it up:</strong> open <em>Settings &rarr; Multi-Connect</em> (Detect Tailscale, Test, Copy hostname), or run the <code>/multi-connect-setup</code> skill, which brings the Tailscale node up, publishes the loopback gateway over HTTPS with <code>tailscale serve</code>, and prints your phone URL.</p>
+          <p>Full walkthrough: <a href="multi-connect.html">Multi-Connect (Phone) guide</a>.</p>
+        </div>
+        <p class="lead" style="font-size:0.95rem;">Mobile features include a kanban task board, terminal management, an interactive console, chat with voice input, and Web-Push notifications.</p>
+
+        <h3>ClaudeRemote (legacy companion)</h3>
+        <div class="card">
+          <p>Earlier builds shipped <strong>ClaudeRemote</strong>, a separate ASP.NET companion (port 5100) fronted by Caddy for HTTPS:</p>
           <pre><code>Phone (PWA) &rarr; Caddy (HTTPS) &rarr; ClaudeRemote :5100 &rarr; MultiTerminal :5050</code></pre>
-          <p>ClaudeRemote is managed as a <strong>companion process</strong> &mdash; MultiTerminal's <code>CompanionProcessManager</code> auto-launches it on startup using the configuration in <code>%AppData%\MultiTerminal\companion-processes.json</code>.</p>
+          <p>It is managed as a <strong>companion process</strong> via <code>CompanionProcessManager</code> (<code>%AppData%\MultiTerminal\companion-processes.json</code>). New setups should prefer Multi-Connect/Tailscale above; ClaudeRemote remains for existing deployments.</p>
         </div>
 
-        <h3>Mobile Features</h3>
+        <h3>Mobile Features (Phone PWA)</h3>
         <table>
           <thead>
             <tr><th>Feature</th><th>Description</th></tr>
@@ -665,12 +728,18 @@
             <tr><td><strong>PWA Support</strong></td><td>Add to home screen, works offline-first with service worker</td></tr>
           </tbody>
         </table>
+        <p>Notifications flow from Claude Code hooks &rarr; <code>NotificationsController</code> &rarr; the active gateway &rarr; Web Push to subscribed phones.</p>
 
-        <h3>Notification Pipeline</h3>
-        <p>Claude Code hooks fire events &rarr; MultiTerminal's <code>NotificationsController</code> receives them &rarr; forwards to ClaudeRemote at <code>http://localhost:5100/api/notifications/runtime</code> &rarr; ClaudeRemote pushes to subscribed phones via Web Push.</p>
-
-        <h3>Setup</h3>
-        <p>ClaudeRemote is bundled with the MultiTerminal installer as an optional component. Configuration is in <code>appsettings.json</code> (port, auth credentials, MultiTerminal API URL). HTTPS is provided by Caddy with automatic Let's Encrypt certificates for external access.</p>
+        <h2 id="presence">Presence-Aware Routing</h2>
+        <p>MultiTerminal can sense whether you're at your desk and route agent questions accordingly &mdash; to the desktop when you're present, or to phone-push when you've stepped away.</p>
+        <div class="card">
+          <ul>
+            <li><strong>At desk</strong> &mdash; mmWave radar (Apollo MSR-2 / ESP32-C3) detects you at the machine</li>
+            <li><strong>Nearby</strong> &mdash; a registered phone's BLE signal is above its threshold</li>
+            <li><strong>Away</strong> &mdash; neither; questions and elicitations relay to your phone</li>
+          </ul>
+          <p>Presence drives the remote-mode gate (debounced to avoid flapping). Setup and tuning: <a href="presence.html">Presence Sensors guide</a>.</p>
+        </div>
 
       </div>
     </main>

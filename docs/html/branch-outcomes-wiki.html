@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Branch outcomes (per-branch capability statements) and the wiki generator (auto-generated subsystem articles from the code graph) in MultiTerminal.">
+  <title>Branch Outcomes &amp; Wiki - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link active">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Branch Outcomes &amp; Wiki</h1>
+        <p class="lead">Two metadata subsystems that label your work without cluttering it: <strong>branch outcomes</strong> attach a one-sentence capability statement to each branch, and the <strong>wiki generator</strong> auto-builds per-subsystem reference articles from the code graph.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#outcomes">Branch outcomes</a></li>
+            <li><a href="#outcomes-tools">Branch-outcome MCP tools</a></li>
+            <li><a href="#outcomes-rest">Branch-outcome REST endpoints</a></li>
+            <li><a href="#wiki">Wiki generator</a></li>
+            <li><a href="#wiki-tools">Wiki MCP tools</a></li>
+            <li><a href="#wiki-rest">Wiki REST endpoints</a></li>
+            <li><a href="#wiki-manifest">The wiki manifest</a></li>
+          </ol>
+        </div>
+
+        <h2 id="outcomes">Branch outcomes</h2>
+        <p>A branch's <em>outcome</em> is the user-facing capability the branch delivers — distinct from the commit subjects or task titles inside it. Where a commit log says "fix null deref in exporter" and "add CSV column," the outcome says what the user gets:</p>
+        <pre><code>Allow users to export reports as CSV</code></pre>
+        <p>Each outcome is one short sentence (aimed at &le; 15 words — these are tree-row labels, not paragraphs), stored per <code>(project, branch)</code> with the author (<code>draftedBy</code>) and an <code>updatedAt</code> timestamp. The UI uses it to label branches in the git panel without forcing that prose into commit messages.</p>
+        <p>Outcomes are persisted in the <code>branch_metadata</code> table as an idempotent upsert keyed by <code>(project_id, branch_name)</code> — re-setting an outcome overwrites the prior value. Branch names keep their <code>/</code> (the project's <code>task/&lt;id&gt;</code> convention) because the branch name travels in the request body/query, never as a URL path segment.</p>
+        <div class="card">
+          <h3>Drafting vs. setting</h3>
+          <p>Drafting and setting are deliberately separate steps. <strong>Drafting</strong> fetches the originating task's title and description plus a prompt hint; the calling agent rewrites that into the one-sentence capability. <strong>Setting</strong> persists the final text. The draft endpoint never writes — it only gathers context, and it treats task fields strictly as untrusted data.</p>
+        </div>
+
+        <h2 id="outcomes-tools">Branch-outcome MCP tools</h2>
+        <table>
+          <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>draft_branch_outcome</code></td><td>Fetch the originating task's title/description + prompt hint so the agent can compose a one-sentence outcome. Read-only.</td></tr>
+            <tr><td><code>set_branch_outcome</code></td><td>Upsert the final outcome text for a <code>(project, branch)</code> pair.</td></tr>
+            <tr><td><code>get_branch_outcomes</code></td><td>List all stored outcomes for a project.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="outcomes-rest">Branch-outcome REST endpoints</h2>
+        <p>All under <code>/api/branch-metadata</code> on <code>http://localhost:5050</code>. The <code>projectId</code> must be a registered project; arbitrary ids are rejected to prevent phantom rows and cross-project leakage.</p>
+        <pre><code># Draft context for an outcome (read-only)
+GET /api/branch-metadata/{projectId}/draft-context?branch=task/c0ce8037
+
+# Persist an outcome (branchName in the body so "/" round-trips)
+POST /api/branch-metadata/{projectId}/outcome
+{
+  "branchName": "task/c0ce8037",
+  "outcome": "Allow users to export reports as CSV",
+  "draftedBy": "agent"
+}
+
+# List all outcomes for a project
+GET /api/branch-metadata/{projectId}/outcomes</code></pre>
+        <p>A successful <code>set</code> returns the saved row:</p>
+        <pre><code>{
+  "projectId": "proj-123",
+  "branchName": "task/c0ce8037",
+  "outcome": "Allow users to export reports as CSV",
+  "draftedBy": "agent",
+  "updatedAt": "2026-06-27T10:30:00Z"
+}</code></pre>
+        <p>Saving an outcome fires a <code>BranchOutcomeUpdated</code> event, which prompts the HUD git renderer to refresh its branch labels.</p>
+
+        <h2 id="wiki">Wiki generator</h2>
+        <p>The wiki generator builds per-<em>subsystem</em> markdown articles from the code graph, the code digests, and parsed controller routes — then writes them under <code>.claude/wiki/</code>. A subsystem is a coherent module that spans several files (e.g. "Messaging" = <code>Message.cs</code> + <code>MessageBroker.cs</code> + <code>MessagingController.cs</code> + the chat panel).</p>
+        <p>The point is targeted session-start context: load a ~200-token <code>index.md</code> at the start of a session and fetch a specific ~500-token subsystem article only when you touch that area, instead of re-deriving structure from raw source every time.</p>
+        <p>Each generated article aggregates:</p>
+        <ul>
+          <li><strong>Key files</strong> with line counts and a one-line purpose pulled from the file's code digest.</li>
+          <li><strong>Key classes &amp; methods</strong> (public/internal) with <code>file:line</code> references from the code graph.</li>
+          <li><strong>Routes</strong> parsed from controller <code>[HttpGet]</code>/<code>[Route]</code> attributes.</li>
+          <li><strong>External callers</strong> — symbols outside the subsystem that call into it, derived from the call graph.</li>
+          <li><strong>Gotchas</strong> aggregated from the root files' code digests.</li>
+        </ul>
+        <div class="card">
+          <h3>Prerequisite: an indexed code graph</h3>
+          <p>Articles are assembled from the code graph and code digests, so index the project first (see the <a href="code-graph.html">Code Graph</a> guide). Without an index, articles still render from the manifest but key classes, methods, routes, and callers will be sparse.</p>
+        </div>
+
+        <h2 id="wiki-tools">Wiki MCP tools</h2>
+        <table>
+          <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>generate_wiki</code></td><td>Regenerate all articles for a project (or one, when a subsystem id is given). Writes <code>.claude/wiki/*.md</code> + <code>index.md</code>.</td></tr>
+            <tr><td><code>list_wiki_articles</code></td><td>List the articles currently on disk for a project (id, name, description, tags, generated timestamp) without regenerating.</td></tr>
+            <tr><td><code>get_wiki_article</code></td><td>Fetch the markdown body of a single article by id.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="wiki-rest">Wiki REST endpoints</h2>
+        <p>All under <code>/api/wiki</code> on <code>http://localhost:5050</code>. The <code>projectRoot</code> must resolve to an existing directory; subsystem ids are restricted to <code>^[A-Za-z0-9_-]{1,64}$</code> so they round-trip safely through the filesystem.</p>
+        <pre><code># Regenerate every article (omit subsystemId for "all")
+POST /api/wiki/generate
+{
+  "projectRoot": "H:\\DevLaptop\\...\\MultiTerminal",
+  "projectId": "proj-123",
+  "subsystemId": null
+}
+
+# List articles on disk
+GET /api/wiki/articles?projectRoot=H%3A%5CDevLaptop%5C...%5CMultiTerminal
+
+# Fetch one article's markdown
+GET /api/wiki/articles/{id}?projectRoot=H%3A%5CDevLaptop%5C...%5CMultiTerminal</code></pre>
+        <p>A full <code>generate</code> returns a per-article summary:</p>
+        <pre><code>{
+  "success": true,
+  "count": 12,
+  "articles": [
+    {
+      "id": "messaging",
+      "name": "Messaging",
+      "classCount": 4,
+      "methodCount": 18,
+      "routeCount": 6,
+      "fileCount": 4,
+      "markdownBytes": 5120
+    }
+  ]
+}</code></pre>
+
+        <h2 id="wiki-manifest">The wiki manifest</h2>
+        <p>The generator is driven by <code>.claude/wiki/wiki-manifest.json</code>, which declares each subsystem: its id, display name, description, tags, root files, and an optional controller glob. The manifest is a trusted, in-repo artifact (authored by maintainers, not request bodies). If no manifest exists, <code>generate_wiki</code> reports that none was found rather than guessing the project's structure.</p>
+        <p>Generated articles and the <code>index.md</code> are plain markdown — diff-able, committable, and meant to be read by agents at session start.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

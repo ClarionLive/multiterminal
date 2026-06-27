@@ -26,15 +26,24 @@
       </div>
       <div class="tagline">Documentation</div>
     </div>
-    <nav>
+    <nav class="sidebar-nav">
       <div class="nav-section-title">Getting Started</div>
       <a href="getting-started.html" class="nav-link">Getting Started</a>
+      <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
       <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
 
-      <div class="nav-section-title">Reference</div>
+      <div class="nav-section-title">Features</div>
       <a href="features.html" class="nav-link">Features</a>
+      <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+      <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+      <a href="presence.html" class="nav-link">Presence Sensors</a>
+      <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+      <div class="nav-section-title">Reference</div>
       <a href="api-reference.html" class="nav-link">REST API</a>
       <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+      <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+      <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
 
       <div class="nav-section-title">Technical</div>
       <a href="architecture.html" class="nav-link">Architecture</a>
@@ -42,8 +51,9 @@
       <a href="distribution.html" class="nav-link">Distribution</a>
       <a href="deployment.html" class="nav-link">Deployment</a>
 
-      <div class="nav-section-title">Companion Apps</div>
-      <a href="../claude-remote/docs/ClaudeRemote-UserGuide.html" class="nav-link">ClaudeRemote</a>
+      <div class="nav-section-title">Help</div>
+      <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+      <a href="api-examples.html" class="nav-link">API Examples</a>
 
       <div class="nav-section-title"></div>
       <a href="index.html" class="nav-link active">Home</a>
@@ -69,6 +79,13 @@
           <a href="getting-started.html">
             <h3>Getting Started</h3>
             <p>System requirements, installation, first launch walkthrough, and key concepts.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="kanban-workflow.html">
+            <h3>Kanban Workflow</h3>
+            <p>The shipped task lifecycle: statuses, the checklist state machine, helpers, and handoff notes.</p>
           </a>
         </div>
 
@@ -115,6 +132,62 @@
         </div>
 
         <div class="card">
+          <a href="knowledge-sessions.html">
+            <h3>Knowledge &amp; Sessions</h3>
+            <p>Store and recall institutional memory; search past session transcripts and lineage.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="branch-outcomes-wiki.html">
+            <h3>Branch Outcomes &amp; Wiki</h3>
+            <p>Per-branch capability statements and the code-graph-driven wiki generator.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="worktrees.html">
+            <h3>Git Worktrees</h3>
+            <p>Per-task git worktree isolation: auto-create on claim, auto-merge and prune on done.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="code-graph.html">
+            <h3>Code Graph</h3>
+            <p>Roslyn-indexed symbols and relationships: callers, callees, inheritance, and search.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="multi-connect.html">
+            <h3>Multi-Connect (Phone)</h3>
+            <p>Connect your phone to MultiTerminal over Tailscale &mdash; the current mobile access path.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="presence.html">
+            <h3>Presence Sensors</h3>
+            <p>At-desk vs nearby vs away routing that drives where remote questions are sent.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="troubleshooting.html">
+            <h3>Troubleshooting / FAQ</h3>
+            <p>Common issues and answers: terminals, MCP connectivity, ports, and data location.</p>
+          </a>
+        </div>
+
+        <div class="card">
+          <a href="api-examples.html">
+            <h3>API Examples</h3>
+            <p>Worked curl, PowerShell, and Python examples against the REST API on port 5050.</p>
+          </a>
+        </div>
+
+        <div class="card">
           <a href="../claude-remote/docs/ClaudeRemote-UserGuide.html">
             <h3>ClaudeRemote</h3>
             <p>Mobile access companion app &mdash; setup, features, push notifications, and phone control.</p>
@@ -137,7 +210,7 @@
         </div>
         <div class="card">
           <h3>MCP Server</h3>
-          <p>Node.js MCP server exposes 80 tools to Claude Code agents via the Model Context Protocol.</p>
+          <p>Node.js MCP server exposes ~90 tools to Claude Code agents via the Model Context Protocol.</p>
         </div>
         <div class="card">
           <h3>Team Agents</h3>

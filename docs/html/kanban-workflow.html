@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The shipped MultiTerminal task lifecycle: task and checklist states, the active-task rule, helpers, continuation notes, and file traceability.">
+  <title>Kanban Workflow - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link active">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Kanban Workflow</h1>
+        <p class="lead">MultiTerminal's task board is a two-level state machine: tasks move through three statuses, and each checklist item runs its own coding/testing cycle. This page describes the lifecycle exactly as it ships &mdash; the rules the app and its MCP tools actually enforce.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#task-status">Task Status &amp; Sub-Status</a></li>
+            <li><a href="#active-rule">The One-Active-Task Rule</a></li>
+            <li><a href="#checklist">The Checklist State Machine</a></li>
+            <li><a href="#testing-gate">Who Marks an Item Done</a></li>
+            <li><a href="#plan-notes">Plans &amp; Continuation Notes</a></li>
+            <li><a href="#helpers">Helpers</a></li>
+            <li><a href="#traceability">File Traceability</a></li>
+            <li><a href="#lifecycle">A Task, End to End</a></li>
+          </ol>
+        </div>
+
+        <h2 id="task-status">Task Status &amp; Sub-Status</h2>
+        <p>Every task has a top-level <code>Status</code> with one of three values:</p>
+        <table>
+          <thead>
+            <tr><th>Status</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>todo</code></td><td>Created but not started. The default for a new task.</td></tr>
+            <tr><td><code>in_progress</code></td><td>Being worked on.</td></tr>
+            <tr><td><code>done</code></td><td>Complete.</td></tr>
+          </tbody>
+        </table>
+        <p>While a task is <code>in_progress</code> it also carries a <code>SubStatus</code> of either <code>active</code> (the task you are working on right now) or <code>paused</code> (started but set aside). A task can be claimed by an <strong>assignee</strong> &mdash; the identity that owns it &mdash; and records who created it.</p>
+        <p>Tasks can also be linked to one another with relationships of type <code>blocks</code>, <code>depends_on</code>, or <code>related_to</code>, and carry a priority of <code>urgent</code>, <code>normal</code> (default), or <code>low</code> that influences whether claiming a task interrupts your current work or queues behind it.</p>
+        <p>When a task is opened on the lifecycle board with <code>AutoStatus</code> enabled, its top-level status is derived automatically from where its checklist items sit: all items in planning &rarr; <code>todo</code>; any item in coding or testing &rarr; <code>in_progress</code>; all items done &rarr; <code>done</code>. Turning AutoStatus off lets you set the status by hand.</p>
+
+        <h2 id="active-rule">The One-Active-Task Rule</h2>
+        <p>An assignee may have only <strong>one active task at a time</strong>. Setting a task active (via <code>set_task_active</code>) automatically pauses every other active task held by the same assignee and returns the list of what it paused. This keeps a single, unambiguous answer to &ldquo;what are you working on right now?&rdquo; &mdash; which is exactly what the auto-cd and worktree features rely on.</p>
+        <p>Priority interacts with this rule when you <em>claim</em> a task: a <code>normal</code> or <code>low</code> priority task claimed while you already have active work is queued behind it rather than interrupting; the claim result reports that it was queued and what it is queued behind.</p>
+
+        <h2 id="checklist">The Checklist State Machine</h2>
+        <p>A task's real work happens in its checklist. Each item is more than a checkbox &mdash; it has its own status and a trail of transition notes. The valid item statuses are:</p>
+        <table>
+          <thead>
+            <tr><th>Item status</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>pending</code></td><td>Not started.</td></tr>
+            <tr><td><code>coding</code></td><td>Being implemented.</td></tr>
+            <tr><td><code>testing</code></td><td>Implementation complete, awaiting verification.</td></tr>
+            <tr><td><code>done</code></td><td>Verified and finished.</td></tr>
+          </tbody>
+        </table>
+        <p>The transition tool (<code>update_task_checklist</code>) enforces the state machine: <code>pending</code> &rarr; <code>coding</code> &rarr; <code>testing</code> &rarr; <code>done</code>, with <strong>cycling allowed between <code>coding</code> and <code>testing</code></strong> when testing turns up something to fix. Notes are <strong>mandatory</strong> on the <code>coding</code>&rarr;<code>testing</code>, <code>testing</code>&rarr;<code>coding</code>, and <code>testing</code>&rarr;<code>done</code> transitions &mdash; you must say what you did or what needs fixing.</p>
+        <p>Every transition appends a note to the item's history recording <em>who</em> made it, <em>when</em>, the transition (e.g. &ldquo;coding &rarr; testing&rdquo;), and the text. The item also tracks a <code>CycleCount</code> that increments each time it bounces from <code>testing</code> back to <code>coding</code>; at four or more cycles the item triggers an escalation so a stuck item gets attention instead of looping silently.</p>
+
+        <h2 id="testing-gate">Who Marks an Item Done</h2>
+        <p>The coder drives an item up to <code>testing</code> with a note describing what was built. By team convention the <code>testing</code>&rarr;<code>done</code> transition is reserved for the <strong>PM / tester</strong> &mdash; the person verifying the work &mdash; not the coder who wrote it. This separation is the quality gate: the implementer says &ldquo;ready for verification,&rdquo; and someone else confirms it actually works before the item is closed. (The state machine permits the transition with a note; the &ldquo;only the tester closes it&rdquo; rule is the workflow discipline layered on top.)</p>
+
+        <h2 id="plan-notes">Plans &amp; Continuation Notes</h2>
+        <p>Two free-text fields keep a task self-documenting across sessions:</p>
+        <ul>
+          <li><strong>Plan</strong> &mdash; a markdown field describing the approach and steps. Write it before you start coding so the checklist has a rationale behind it.</li>
+          <li><strong>Continuation notes</strong> &mdash; a short &ldquo;pick up here&rdquo; field for session handoffs. It captures the current file, checklist progress, what's next, and any blockers, and is read back when a later session resumes the task. It is updated as checklist items transition and at session end, so the next agent (or the next you) lands with context instead of a cold start.</li>
+        </ul>
+        <p>Tasks additionally support an implementation summary and test-results field used when a task is completed, plus structured review notes written by a human reviewer from the diff viewer.</p>
+
+        <h2 id="helpers">Helpers</h2>
+        <p>A task's assignee can pull in <strong>helpers</strong> &mdash; other agents (often spawned sub-agents) added to the task to work alongside the assignee. Helpers are notified when added and can receive help requests from the assignee. Individual checklist items can also be assigned to a specific agent, so a helper owns just the items relevant to them while the assignee keeps the task as a whole.</p>
+
+        <h2 id="traceability">File Traceability</h2>
+        <p>As work touches the codebase, link the files to the task with <code>link_task_file</code>. Each link records the file path, an optional description and line range, and who added it. Links can be task-scoped (the default, applying to the whole task) or scoped to a single checklist item, which drives per-item routing of review notes. The result is a durable record of exactly which files a task changed &mdash; useful for review, for the next session, and for tracing why a file changed months later.</p>
+
+        <h2 id="lifecycle">A Task, End to End</h2>
+        <p>Putting the pieces together, the shipped lifecycle of a typical task looks like this:</p>
+        <ol>
+          <li><strong>Create</strong> a task (<code>todo</code>) with a title and description.</li>
+          <li><strong>Claim</strong> it so it has an assignee &mdash; claiming before working is the rule that keeps ownership clear.</li>
+          <li><strong>Set it active</strong>, which pauses any other active task you hold.</li>
+          <li><strong>Plan</strong> the approach and add checklist items (all <code>pending</code>).</li>
+          <li><strong>Code</strong> each item: <code>pending</code> &rarr; <code>coding</code>, then <code>coding</code> &rarr; <code>testing</code> with a note. Link the files you touched.</li>
+          <li><strong>Test</strong>: the tester/PM verifies and moves <code>testing</code> &rarr; <code>done</code>, or sends it back to <code>coding</code> with a note for a fix (incrementing the cycle count).</li>
+          <li>When all items are <code>done</code>, the task reaches <code>done</code> &mdash; automatically under AutoStatus, or by hand otherwise.</li>
+        </ol>
+        <p>Throughout, continuation notes and linked files keep the task readable to whoever picks it up next. For where this board fits in the bigger picture, see <a href="getting-started.html">Getting Started</a>; for the tools agents use to drive it, see the <a href="mcp-tools.html">MCP Tools</a> reference.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

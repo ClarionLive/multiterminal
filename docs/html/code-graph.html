@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="The MultiTerminal code graph: a Roslyn-indexed map of C# symbols and relationships for searching, tracing callers/callees, impact analysis, and dead-code detection.">
+  <title>Code Graph - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link active">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Code Graph</h1>
+        <p class="lead">The code graph is a Roslyn-indexed map of the C# codebase &mdash; every class, method, property, and constructor, plus the relationships between them. Agents and users query it to find a symbol, trace who calls what, run an impact analysis before a change, and spot dead code, without reading every file.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#what">What the index captures</a></li>
+            <li><a href="#building">Building the index</a></li>
+            <li><a href="#workflows">Practical workflows</a></li>
+            <li><a href="#mcp-tools">MCP tools</a></li>
+            <li><a href="#rest">REST API</a></li>
+            <li><a href="#storage">Storage</a></li>
+          </ol>
+        </div>
+
+        <h2 id="what">1. What the index captures</h2>
+        <p>The indexer (<code>CSharpCodeGraphIndexer</code>) parses <code>.cs</code> files with Roslyn using a <strong>two-pass</strong> strategy &mdash; symbols first, then the relationships between them:</p>
+
+        <h3>Pass 1 &mdash; Symbols</h3>
+        <p>Each declaration becomes a symbol row capturing its accessibility, <code>static</code>/<code>async</code>/<code>abstract</code> modifiers, generic parameters, return type, parameter list, the type it belongs to, line number, and a one-line source preview. Symbol kinds:</p>
+        <ul>
+          <li><code>class</code>, <code>interface</code>, <code>struct</code>, <code>enum</code>, <code>delegate</code></li>
+          <li><code>method</code>, <code>constructor</code>, <code>property</code></li>
+          <li><code>event</code>, <code>field</code></li>
+        </ul>
+
+        <h3>Pass 2 &mdash; Relationships</h3>
+        <p>A second walk resolves edges between symbols using the semantic model:</p>
+        <table>
+          <thead><tr><th>Relationship</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>calls</code></td><td>A method/property/constructor invokes another (includes object creation).</td></tr>
+            <tr><td><code>inherits</code></td><td>A type derives from a base class.</td></tr>
+            <tr><td><code>implements</code></td><td>A type implements an interface.</td></tr>
+            <tr><td><code>overrides</code></td><td>A method overrides a base method.</td></tr>
+            <tr><td><code>uses_type</code></td><td>A field, property, parameter, or return type references another type.</td></tr>
+            <tr><td><code>subscribes</code></td><td>A member subscribes to an event (<code>+=</code>).</td></tr>
+            <tr><td><code>handles</code></td><td>A handler method is wired to an event.</td></tr>
+          </tbody>
+        </table>
+        <p>Generated and build output is skipped: <code>obj/</code>, <code>bin/</code>, <code>node_modules/</code>, and <code>.g.cs</code> / <code>.designer.cs</code> / <code>.AssemblyInfo.cs</code> files.</p>
+
+        <h2 id="building">2. Building the index</h2>
+        <p>Indexing is triggered per directory. The indexer registers (or clears and rebuilds) a project, parses every non-excluded <code>.cs</code> file into a Roslyn compilation, runs the two passes inside a transaction, and records statistics (file count, symbol count, relationship count, duration). Re-running re-indexes that project in place.</p>
+        <p>Use the MCP tool <code>index_code_graph</code> or <code>POST /api/code-graph/index</code> (see below). After indexing, <code>GET /api/code-graph/stats</code> reports per-kind counts and the last-indexed timestamp.</p>
+
+        <h2 id="workflows">3. Practical workflows</h2>
+        <div class="card">
+          <h3>Find a symbol</h3>
+          <p>Search by name (exact matches first, then substring), optionally filtered by kind. This returns the symbol's id, file, line, accessibility, signature, and source preview &mdash; the starting point for every other query.</p>
+        </div>
+        <div class="card">
+          <h3>Trace callers and callees</h3>
+          <p>Given a symbol, list its direct <strong>callers</strong> ("who depends on this?") and direct <strong>callees</strong> ("what does this reach?"). Each result includes the call site's file and line.</p>
+        </div>
+        <div class="card">
+          <h3>Impact analysis before a change</h3>
+          <p>Run a transitive blast-radius query &mdash; the recursive set of everything that (in)directly calls a symbol, with cycle detection and a depth cap (default 10). Do this before refactoring a hot method to see what you might break.</p>
+        </div>
+        <div class="card">
+          <h3>Find dead code</h3>
+          <p>List <code>public</code>/<code>internal</code> methods and properties with no incoming <code>calls</code> edge &mdash; candidates for removal. Scope it to a single project if you like.</p>
+        </div>
+        <div class="card">
+          <h3>Map a type's hierarchy</h3>
+          <p>Walk the inheritance/implementation tree to see everything that derives from or implements a class or interface.</p>
+        </div>
+
+        <h2 id="mcp-tools">4. MCP tools</h2>
+        <p>Agents reach the graph through these MCP tools:</p>
+        <table>
+          <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>index_code_graph</code></td><td>Index (or re-index) a directory.</td></tr>
+            <tr><td><code>search_code_graph</code></td><td>Find symbols by name, with an optional kind filter.</td></tr>
+            <tr><td><code>get_symbol_callers</code></td><td>Direct callers of a symbol.</td></tr>
+            <tr><td><code>get_symbol_callees</code></td><td>Direct callees of a symbol.</td></tr>
+            <tr><td><code>get_impact_analysis</code></td><td>Transitive callers (blast radius).</td></tr>
+            <tr><td><code>get_inheritance_tree</code></td><td>Inheritance / implementation tree.</td></tr>
+            <tr><td><code>get_dead_code</code></td><td>Unreferenced public/internal members.</td></tr>
+            <tr><td><code>get_file_symbols</code></td><td>All symbols defined in a file.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="rest">5. REST API</h2>
+        <p>The same operations are exposed under <code>/api/code-graph</code> (the MCP tools call these):</p>
+        <table>
+          <thead><tr><th>Method &amp; path</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /api/code-graph/search?query=&amp;type=</code></td><td>Search symbols by name (optional kind filter).</td></tr>
+            <tr><td><code>GET /api/code-graph/callers?symbolId=&amp;symbolName=</code></td><td>Direct callers (resolve by id or name).</td></tr>
+            <tr><td><code>GET /api/code-graph/callees?symbolId=&amp;symbolName=</code></td><td>Direct callees.</td></tr>
+            <tr><td><code>GET /api/code-graph/impact?symbolId=&amp;maxDepth=</code></td><td>Transitive impact (default depth 10).</td></tr>
+            <tr><td><code>GET /api/code-graph/inheritance?symbolId=</code></td><td>Inheritance / implementation tree.</td></tr>
+            <tr><td><code>GET /api/code-graph/dead-code?projectId=</code></td><td>Unreferenced public/internal members.</td></tr>
+            <tr><td><code>GET /api/code-graph/file-symbols?filePath=</code></td><td>All symbols in a file.</td></tr>
+            <tr><td><code>POST /api/code-graph/index</code></td><td>Index a directory: body <code>{ directory, projectName }</code>.</td></tr>
+            <tr><td><code>GET /api/code-graph/stats</code></td><td>Index statistics and last-indexed time.</td></tr>
+          </tbody>
+        </table>
+        <p>Callers/callees/impact/inheritance accept either a numeric <code>symbolId</code> or a <code>symbolName</code> (resolved to an id). When the graph hasn't been built yet the endpoints return <code>503</code>.</p>
+
+        <h2 id="storage">6. Storage</h2>
+        <p>The graph lives in the same SQLite database as the rest of MultiTerminal, in three core tables managed by <code>CodeGraphDatabase</code> and queried by <code>CodeGraphQuery</code>:</p>
+        <table>
+          <thead><tr><th>Table</th><th>Holds</th></tr></thead>
+          <tbody>
+            <tr><td><code>cg_projects</code></td><td>One row per indexed project (name + optional <code>.csproj</code> path).</td></tr>
+            <tr><td><code>cg_symbols</code></td><td>Every extracted symbol with its metadata.</td></tr>
+            <tr><td><code>cg_relationships</code></td><td>The typed edges between symbols, with the source file and line of each edge.</td></tr>
+          </tbody>
+        </table>
+        <p>Callers, callees, impact, inheritance, and dead-code queries are SQL over these tables &mdash; the transitive ones use recursive CTEs with cycle detection &mdash; so results are fast and reproducible.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Presence-based notification routing: route agent questions to your phone when you are away and your desktop when you are at your desk.">
+  <title>Presence Sensors - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link active">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Presence Sensors</h1>
+        <p class="lead">Presence-based routing makes MultiTerminal self-driving about <em>where</em> it interrupts you. A real mmWave sensor (and, optionally, your phone's Bluetooth) decides whether you're at your desk &mdash; and MultiTerminal automatically routes agent questions and notifications to your desktop when you're present and to phone push when you're away. No human or agent in the loop.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#states">The three presence states</a></li>
+            <li><a href="#routing">How states drive routing</a></li>
+            <li><a href="#debounce">Debounce &amp; graceful degradation</a></li>
+            <li><a href="#config">Configuration</a></li>
+            <li><a href="#mqtt">The MQTT signal contract</a></li>
+            <li><a href="#hardware">Hardware &amp; setup</a></li>
+          </ol>
+        </div>
+
+        <h2 id="states">1. The three presence states</h2>
+        <p>A pure, deterministic state machine (<code>PresenceStateMachine</code>) models three states from the latest sensor signals:</p>
+        <table>
+          <thead><tr><th>State</th><th>Condition</th></tr></thead>
+          <tbody>
+            <tr><td><strong>AtDesk</strong></td><td>The mmWave radar reports occupancy at the desk zone. This is the primary gate &mdash; present means at the desk, full stop.</td></tr>
+            <tr><td><strong>Nearby</strong></td><td>mmWave is absent, but a registered phone's Bluetooth (BLE) is still in range &mdash; a fresh BLE presence flag is ON, or its RSSI is at or above that device's calibrated threshold.</td></tr>
+            <tr><td><strong>Away</strong></td><td>mmWave is absent and no registered phone is in range (or BLE is degraded / the sensor is offline).</td></tr>
+          </tbody>
+        </table>
+        <p>The mmWave radar is the authoritative signal. BLE is only consulted to distinguish <strong>Nearby</strong> from <strong>Away</strong> when mmWave already reports the desk as empty.</p>
+
+        <h2 id="routing">2. How states drive routing</h2>
+        <p>The presence adapter maps the committed state onto MultiTerminal's binary remote-mode gate &mdash; <code>MessageBroker.IsRemoteMode</code> / <code>SetRemoteMode</code>. When remote mode is on, every phone-push path (permission prompts, agent questions and elicitations, task and error notifications) routes to the phone; when off, they stay on the desktop.</p>
+        <table>
+          <thead><tr><th>State</th><th>Remote mode</th><th>Notifications go to</th></tr></thead>
+          <tbody>
+            <tr><td>AtDesk</td><td><code>false</code></td><td>Desktop</td></tr>
+            <tr><td>Nearby</td><td><code>false</code></td><td>Desktop <em>(v1: Nearby behaves as AtDesk)</em></td></tr>
+            <tr><td>Away</td><td><code>true</code></td><td>Phone push</td></tr>
+          </tbody>
+        </table>
+        <div class="card">
+          <p><strong>v1 routing collapses Nearby into AtDesk</strong> (desktop-only), per the Owner decision. The machine still tracks Nearby as a distinct state; switching to true three-state routing later is a change to a single mapping method (<code>PresenceRouting.ToRemoteMode</code>).</p>
+          <p>While presence is enabled it is the <strong>authoritative</strong> source of remote mode: a manual Local/Remote pill toggle is re-corrected on the next presence evaluation, not left latched.</p>
+        </div>
+
+        <h2 id="debounce">3. Debounce &amp; graceful degradation</h2>
+        <p>To keep brief movements from thrashing your routing, a desired state must persist for a debounce window before it commits &mdash; default <strong>5 seconds</strong> (the first state commits immediately). Combined with the radar's absence timeout and your walk time, expect roughly <strong>10&ndash;15 seconds</strong> to switch.</p>
+        <p>The machine degrades safely when it can't fully trust its inputs:</p>
+        <ul>
+          <li><strong>BLE stale or unavailable</strong> (no fresh phone signal within the staleness window, default <strong>30 seconds</strong>) &rarr; it collapses to mmWave-only: desk occupied = AtDesk, otherwise Away.</li>
+          <li><strong>Sensor / bridge offline</strong> (reported via the MQTT Last-Will topic) &rarr; the retained readings are treated as untrustworthy and the machine returns the safe default, <strong>Away</strong> (so notifications reach your phone rather than getting pinned to a dead desktop).</li>
+        </ul>
+
+        <h2 id="config">4. Configuration</h2>
+        <p>Presence is configured through the <strong>Presence tab</strong> in Settings (and persisted via <code>SettingsService</code>). It is <strong>off by default</strong> so it never hijacks the manual remote-mode pill until you opt in and calibrate.</p>
+        <table>
+          <thead><tr><th>Setting</th><th>Key / default</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Enabled</td><td><code>presence.enabled</code> = <code>"1"</code> (default off)</td><td>Gates whether the adapter runs at all.</td></tr>
+            <tr><td>Config blob</td><td><code>presence.config</code> (compact JSON)</td><td>Holds MQTT, debounce, staleness, and the registered phones.</td></tr>
+            <tr><td>Debounce</td><td><code>debounceSeconds</code> = <code>5</code></td><td>Hysteresis window before a state commits.</td></tr>
+            <tr><td>BLE staleness</td><td><code>bleStaleSeconds</code> = <code>30</code></td><td>Age beyond which a phone signal is ignored.</td></tr>
+            <tr><td>MQTT broker</td><td><code>127.0.0.1:1883</code>, prefix <code>mt/presence</code>, QoS <code>1</code></td><td>Where the adapter subscribes for sensor signals.</td></tr>
+            <tr><td>Registered phones</td><td>per device: <code>deviceId</code>, <code>label</code>, <code>rssiThreshold</code> (default <code>-75</code> dBm), <code>os</code></td><td>Each phone has its own calibrated RSSI threshold; readings at or above it count as in-range.</td></tr>
+          </tbody>
+        </table>
+
+        <h2 id="mqtt">5. The MQTT signal contract</h2>
+        <p>The sensor publishes flat topics under the configured prefix (default <code>mt/presence</code>); the adapter subscribes to <code>&lt;prefix&gt;/#</code> and normalizes each message:</p>
+        <table>
+          <thead><tr><th>Topic</th><th>Payload</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>mt/presence/desk/occupancy</code></td><td><code>ON</code> / <code>OFF</code></td><td>mmWave occupancy &mdash; the primary AtDesk gate.</td></tr>
+            <tr><td><code>mt/presence/status</code></td><td><code>online</code> / <code>offline</code></td><td>Sensor availability (Last-Will). Anything not "online" degrades to Away.</td></tr>
+            <tr><td><code>mt/presence/ble/&lt;deviceId&gt;/rssi</code></td><td>integer dBm (e.g. <code>-67</code>)</td><td>Per-phone Bluetooth signal strength.</td></tr>
+            <tr><td><code>mt/presence/ble/&lt;deviceId&gt;/presence</code></td><td><code>ON</code> / <code>OFF</code></td><td>Per-phone in-range flag (authoritative over raw RSSI when fresh).</td></tr>
+          </tbody>
+        </table>
+        <p>Routing readiness is established only by the first <code>desk/occupancy</code> message &mdash; a retained <code>status</code> or BLE reading delivered first won't transiently flip you to phone-push before real occupancy data arrives. You can confirm the live routing flag with <code>GET /api/remote-mode</code>, which returns <code>{"remote_mode": false}</code> at the desk and <code>true</code> when away.</p>
+
+        <h2 id="hardware">6. Hardware &amp; setup</h2>
+        <p>The reference build uses an <strong>Apollo Automation MSR-2</strong> multisensor &mdash; internally an <strong>ESP32-C3</strong> paired with an <strong>HLK-LD2410B</strong> 24&nbsp;GHz mmWave radar. mmWave (rather than PIR) is the point: it detects you sitting still at your desk. Any ESP32 + LD2410 board works with minor pin changes. The sensor runs ESPHome firmware and publishes to a local Mosquitto MQTT broker.</p>
+        <div class="card">
+          <p>The end-to-end walkthrough &mdash; ESPHome install, Mosquitto with a LAN listener, firewall rule, flashing the firmware, enabling presence in MultiTerminal, calibrating the desk zone, and the gotchas hit along the way &mdash; lives in <code>docs/presence/SETUP-GUIDE.md</code>. The firmware config (<code>docs/presence/msr2-presence.yaml</code>) and a headless smoke test (<code>docs/presence/presence-smoke-test.ps1</code>) are alongside it.</p>
+        </div>
+        <p>Optional phone proximity (the Nearby distinction) adds a BLE tracker per phone, publishing <code>mt/presence/ble/&lt;id&gt;/presence</code> and <code>/rssi</code>; register each phone with a calibrated RSSI threshold in the presence config. Because iOS and Android randomize their BLE MAC, devices are matched by IRK &mdash; see the setup guide for the one-time capture.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>

@@ -71,6 +71,7 @@ namespace MultiTerminal
         private readonly Dictionary<string, TerminalDocument> _terminalDocMap = new();
         private ToolStripButton _chatPanelButton;
         private ToolStripButton _chatHistoryButton;
+        private ToolStripButton _helpButton;
         private ActivityPanelDocument _activityPanel;
         private ToolStripButton _activityPanelButton;
         private TasksPanelDocument _tasksPanel;
@@ -2165,6 +2166,16 @@ namespace MultiTerminal
             };
             _chatHistoryButton.Click += (s, e) => ShowChatHistoryDialog();
 
+            // Help button (opens the local HTML documentation site in the default browser)
+            _helpButton = new ToolStripButton
+            {
+                Text = "\u2753", // Question mark symbol
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                ForeColor = Color.White,
+                ToolTipText = "Help & Documentation"
+            };
+            _helpButton.Click += (s, e) => OpenHelpDocs();
+
             // Activity panel toggle button (Mission Control)
             _activityPanelButton = new ToolStripButton
             {
@@ -2302,27 +2313,6 @@ namespace MultiTerminal
             };
             _settingsButton.Click += (s, e) => ShowSettingsDialog();
 
-            // Documentation button (book icon)
-            var docsButton = new ToolStripButton
-            {
-                Text = "\uD83D\uDCD6", // Open book symbol
-                DisplayStyle = ToolStripItemDisplayStyle.Text,
-                ForeColor = Color.White,
-                ToolTipText = "Documentation"
-            };
-            docsButton.Click += (s, e) =>
-            {
-                var docsPath = System.IO.Path.Combine(Application.StartupPath, "docs", "html", "index.html");
-                if (System.IO.File.Exists(docsPath))
-                {
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = docsPath,
-                        UseShellExecute = true
-                    });
-                }
-            };
-
             // About button (info icon)
             _aboutButton = new ToolStripButton
             {
@@ -2338,6 +2328,7 @@ namespace MultiTerminal
             _toolStrip.Items.Add(_projectPanelButton);
             _toolStrip.Items.Add(_chatPanelButton);
             _toolStrip.Items.Add(_chatHistoryButton);
+            _toolStrip.Items.Add(_helpButton);
             _toolStrip.Items.Add(_activityPanelButton);
             _toolStrip.Items.Add(_tasksPanelButton);
             _toolStrip.Items.Add(_profilePanelButton);
@@ -2350,7 +2341,6 @@ namespace MultiTerminal
             _toolStrip.Items.Add(_gridDropdown);
             _toolStrip.Items.Add(new ToolStripSeparator());
             _toolStrip.Items.Add(_themeButton);
-            _toolStrip.Items.Add(docsButton);
             _toolStrip.Items.Add(_settingsButton);
             _toolStrip.Items.Add(_aboutButton);
 
@@ -2422,6 +2412,31 @@ namespace MultiTerminal
             using (var dialog = new Dialogs.ChatHistoryDialog(_chatTaskDatabase, _currentTheme))
             {
                 dialog.ShowDialog(this);
+            }
+        }
+
+        /// <summary>
+        /// Opens the bundled HTML documentation site (docs/html/index.html) in the user's default browser.
+        /// </summary>
+        private void OpenHelpDocs()
+        {
+            var docsPath = System.IO.Path.Combine(Application.StartupPath, "docs", "html", "index.html");
+            if (System.IO.File.Exists(docsPath))
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = docsPath,
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                MessageBox.Show(
+                    this,
+                    "Documentation was not found at:\n" + docsPath,
+                    "Help & Documentation",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
             }
         }
 

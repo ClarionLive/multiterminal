@@ -3,235 +3,192 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Getting started with MultiTerminal - installation, first launch, and key concepts">
+  <meta name="description" content="First-run walkthrough for MultiTerminal: launch, register a project, open a terminal, and run your first task on the Kanban board.">
   <title>Getting Started - MultiTerminal Documentation</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
 
-<!-- Hamburger (mobile) -->
-<button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
-
-<!-- Sidebar overlay (mobile) -->
-<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
-
-<div class="page-wrapper">
-
-  <!-- Sidebar Navigation -->
-  <aside class="sidebar">
-    <div class="sidebar-header">
-      <div class="logo">
-        <span class="logo-icon">MT</span>
-        MultiTerminal
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
       </div>
-      <div class="tagline">Documentation</div>
-    </div>
-    <nav>
-      <div class="nav-section-title">Getting Started</div>
-      <a href="getting-started.html" class="nav-link active">Getting Started</a>
-      <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link active">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
 
-      <div class="nav-section-title">Reference</div>
-      <a href="features.html" class="nav-link">Features</a>
-      <a href="api-reference.html" class="nav-link">REST API</a>
-      <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
 
-      <div class="nav-section-title">Technical</div>
-      <a href="architecture.html" class="nav-link">Architecture</a>
-      <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
-      <a href="distribution.html" class="nav-link">Distribution</a>
-      <a href="deployment.html" class="nav-link">Deployment</a>
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
 
-      <div class="nav-section-title"></div>
-      <a href="index.html" class="nav-link">Home</a>
-    </nav>
-  </aside>
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
 
-  <!-- Main Content -->
-  <main class="main-content">
-    <div class="content-container">
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
 
-      <h1>Getting Started</h1>
-      <p>This guide walks you through system requirements, installation, your first launch, and the key concepts you need to understand MultiTerminal.</p>
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
 
-      <!-- System Requirements -->
-      <h2>System Requirements</h2>
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
 
-      <div class="table-wrapper">
+        <h1>Getting Started</h1>
+        <p class="lead">MultiTerminal is a Windows desktop host for running multiple Claude&nbsp;Code terminal sessions side by side, with a shared Kanban board, agent messaging, and institutional memory built in. This page walks you from first launch to your first task.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#what-it-is">What MultiTerminal Is</a></li>
+            <li><a href="#first-launch">First Launch &amp; the Start Screen</a></li>
+            <li><a href="#register-project">Register or Open a Project</a></li>
+            <li><a href="#open-terminal">Open a Terminal with an Identity</a></li>
+            <li><a href="#first-task">Run Your First Task</a></li>
+            <li><a href="#toolbar">The Toolbar at a Glance</a></li>
+            <li><a href="#next-steps">Next Steps</a></li>
+          </ol>
+        </div>
+
+        <h2 id="what-it-is">What MultiTerminal Is</h2>
+        <p>MultiTerminal is a desktop application (.NET&nbsp;8, WinForms, WebView2) that hosts many terminal sessions in one window. Each terminal can run a Claude&nbsp;Code session that registers a named identity (for example, &ldquo;Alice&rdquo;), so agents can message one another, claim tasks, and hand work off. Behind the window runs an embedded REST API (port&nbsp;5050) and an MCP server that give those agents structured access to the Kanban board, knowledge base, and session history.</p>
+        <p>You do not have to use multiple agents to get value from it &mdash; a single terminal plus the Kanban board is a perfectly good way to start. The multi-agent features are there when you want them.</p>
+        <p>For installation, system requirements, and MCP server registration, see the <a href="deployment.html">Deployment</a> guide. This page assumes the app is installed and focuses on what to do the first time you open it.</p>
+
+        <h2 id="first-launch">First Launch &amp; the Start Screen</h2>
+        <p>When you launch MultiTerminal, the <strong>Start Screen</strong> greets you with the list of projects already registered with the app. From here you can:</p>
+        <ul>
+          <li>Open one of your registered projects (a terminal opens rooted in that project's folder).</li>
+          <li>Register a new project so MultiTerminal can track it.</li>
+          <li>Open a plain terminal in any folder.</li>
+        </ul>
+        <p>On a clean install the project list is empty, so the first real step is to register a project.</p>
+
+        <h2 id="register-project">Register or Open a Project</h2>
+        <p>A <em>project</em> is a folder MultiTerminal knows about. Registering it stores its path plus optional metadata &mdash; assigned agents, MCP servers, named paths, prompts, and skills &mdash; in the app's SQLite database. There are two ways to register one:</p>
+        <ul>
+          <li><strong>The <code>/new-project</code> wizard</strong> &mdash; run inside a Claude&nbsp;Code terminal, this interactive wizard onboards either a brand-new project from an archetype (Clarion COM, WebView2, Clarion App, MT Feature, Generic C#) or an existing folder you already have on disk.</li>
+          <li><strong>The Project panel</strong> &mdash; toggle it from the toolbar (the <strong>Project</strong> button) to add, edit, and inspect projects through the UI.</li>
+        </ul>
+        <p>Once a project is registered it appears on the Start Screen and in the Project panel, and any terminal you open in it inherits its context.</p>
+
+        <h2 id="open-terminal">Open a Terminal with an Identity</h2>
+        <p>Open a terminal by choosing a project on the Start Screen, or with the <strong>New Terminal</strong> toolbar button. Each terminal tab is a full ConPTY-based shell rendered in WebView2, so you can run Claude&nbsp;Code or any normal command.</p>
+        <p>When a Claude&nbsp;Code session starts inside a terminal, it registers a <strong>named identity</strong> (such as &ldquo;Alice&rdquo;) with MultiTerminal. That name is how the agent appears in the team roster, how it sends and receives messages, and how it claims tasks. A registered terminal is a teammate; an unregistered shell is just a shell.</p>
+
+        <h2 id="first-task">Run Your First Task</h2>
+        <p>The shared Kanban board is the heart of the workflow. Open it with the <strong>Tasks</strong> toolbar button. A task moves through three top-level states &mdash; <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>done</code> &mdash; and carries a checklist, a plan, and continuation notes. A minimal first run looks like this:</p>
+        <ol>
+          <li><strong>Create a task</strong> on the board with a clear title and description.</li>
+          <li><strong>Claim it</strong> so it is assigned to your identity. Claiming is required before you work &mdash; it records who owns the task.</li>
+          <li><strong>Make it active.</strong> Each assignee has only one active task at a time; activating this one automatically pauses any other active task you hold.</li>
+          <li><strong>Plan</strong> the approach (a short markdown plan on the task) and break it into <strong>checklist</strong> items.</li>
+          <li><strong>Work</strong> each item: move it from <code>pending</code> to <code>coding</code>, then to <code>testing</code> with a note describing what you did.</li>
+        </ol>
+        <p>That is the whole loop in miniature. The full lifecycle &mdash; checklist state machine, who is allowed to mark an item done, helpers, and session handoff &mdash; is documented in the <a href="kanban-workflow.html">Kanban Workflow</a> guide.</p>
+
+        <h2 id="toolbar">The Toolbar at a Glance</h2>
+        <p>The top toolbar toggles the app's panels and a few global actions. From left to right:</p>
         <table>
           <thead>
-            <tr>
-              <th>Requirement</th>
-              <th>Details</th>
-            </tr>
+            <tr><th>Button</th><th>What it does</th></tr>
           </thead>
           <tbody>
-            <tr>
-              <td>Operating System</td>
-              <td>Windows 10 or Windows 11 (x64)</td>
-            </tr>
-            <tr>
-              <td>Runtime</td>
-              <td>.NET 8 (bundled with the application)</td>
-            </tr>
-            <tr>
-              <td>WebView2 Runtime</td>
-              <td>Microsoft Edge WebView2 Runtime (usually pre-installed on Windows 10/11)</td>
-            </tr>
-            <tr>
-              <td>Disk Space</td>
-              <td>~400 MB</td>
-            </tr>
-            <tr>
-              <td>Claude Code</td>
-              <td>Required for agent features. Install via <code>npm install -g @anthropic-ai/claude-code</code></td>
-            </tr>
-            <tr>
-              <td>Node.js</td>
-              <td>Required for the MCP server (v18+ recommended)</td>
-            </tr>
+            <tr><td>New Terminal</td><td>Opens a new terminal tab.</td></tr>
+            <tr><td>Project</td><td>Toggles the Project panel (project registry and settings).</td></tr>
+            <tr><td>Chat</td><td>Toggles the Chat panel for messaging between terminals.</td></tr>
+            <tr><td>History</td><td>Opens chat history.</td></tr>
+            <tr><td>Activity</td><td>Toggles the Activity feed of task changes, messages, and agent events.</td></tr>
+            <tr><td>Tasks</td><td>Toggles the Kanban board.</td></tr>
+            <tr><td>Profiles</td><td>Toggles team member profiles (avatars, specialties, availability).</td></tr>
+            <tr><td>Inbox</td><td>Toggles personal notifications.</td></tr>
+            <tr><td>Office</td><td>Toggles the agent &ldquo;office&rdquo; view of spawned teammates.</td></tr>
+            <tr><td>Debug</td><td>Toggles the Debug panel (logs and diagnostics).</td></tr>
+            <tr><td>Preview</td><td>Toggles the File Preview panel.</td></tr>
+            <tr><td>Recent</td><td>Drop-down of recently opened folders.</td></tr>
+            <tr><td>Grid layout</td><td>Drop-down of tiling presets (2/3 horizontal or vertical, reset to tabs).</td></tr>
+            <tr><td>Theme</td><td>Toggles dark / light theme.</td></tr>
+            <tr><td>Help</td><td>Opens this documentation site (book icon &mdash; new).</td></tr>
+            <tr><td>Settings</td><td>Opens the Settings dialog (gear icon).</td></tr>
+            <tr><td>About</td><td>Shows the About dialog (info icon).</td></tr>
           </tbody>
         </table>
-      </div>
+        <p>The Agent panel (live agent transcript) and other views are surfaced contextually rather than from this toolbar; see <a href="features.html">Features</a> for the full panel tour.</p>
 
-      <div class="tip">
-        <p>If WebView2 is not installed, download it from <a href="https://developer.microsoft.com/en-us/microsoft-edge/webview2/" target="_blank" rel="noopener">developer.microsoft.com</a>.</p>
-      </div>
-
-      <!-- Installation -->
-      <h2>Installation</h2>
-
-      <h3>Option A: Installer (Recommended)</h3>
-      <p>MultiTerminal includes an Inno Setup installer (v1.3.0+) that handles file placement, MCP server registration, and post-install configuration:</p>
-      <ol>
-        <li><strong>Download</strong> the latest MultiTerminal installer (<code>MultiTerminal-Setup.exe</code>).</li>
-        <li><strong>Run the installer</strong> and follow the prompts to choose an installation directory.</li>
-        <li><strong>Launch</strong> MultiTerminal from the Start Menu or desktop shortcut.</li>
-      </ol>
-
-      <h3>Option B: Portable (Manual)</h3>
-      <ol>
-        <li><strong>Download</strong> the latest MultiTerminal release archive.</li>
-        <li><strong>Extract</strong> the archive to a folder of your choice (e.g., <code>C:\MultiTerminal</code>).</li>
-        <li><strong>Run</strong> <code>MultiTerminal.exe</code> to launch the application.</li>
-      </ol>
-
-      <div class="note">
-        <p>Both installation methods store user data and databases in <code>%APPDATA%\MultiTerminal</code>. The portable option requires manual MCP server registration (see <a href="deployment.html">Deployment Guide</a>).</p>
-      </div>
-
-      <!-- First Launch -->
-      <h2>First Launch</h2>
-
-      <p>When you first launch MultiTerminal, you will see the main window with several dockable panels:</p>
-
-      <h3>1. Terminal Panel</h3>
-      <p>The central area hosts terminal tabs. Each tab is a full terminal emulator (ConPTY-based) where you can run Claude Code sessions or any shell command. Click the <strong>+</strong> button or use the Launcher panel to create a new terminal.</p>
-
-      <h3>2. Kanban Board</h3>
-      <p>The Tasks panel shows your kanban board with columns for <span class="badge badge-info">To Do</span>, <span class="badge badge-warning">In Progress</span>, <span class="badge badge-success">Done</span>, and more. Tasks are persisted in SQLite and shared across all terminals.</p>
-
-      <h3>3. Chat Panel</h3>
-      <p>Send messages between terminals. When multiple Claude Code agents are running, they can communicate through this panel.</p>
-
-      <h3>4. Other Panels</h3>
-      <p>Use the toolbar buttons to toggle additional panels:</p>
-      <ul>
-        <li><strong>Activity</strong> &mdash; Real-time feed of task changes, messages, and agent events</li>
-        <li><strong>Inbox</strong> &mdash; Personal notifications for task assignments and mentions</li>
-        <li><strong>Profiles</strong> &mdash; Team member avatars, specialties, and availability</li>
-        <li><strong>Projects</strong> &mdash; Project registry with paths, agents, and MCP servers</li>
-        <li><strong>Launcher</strong> &mdash; Quick-launch terminals with pre-configured settings</li>
-        <li><strong>Agents</strong> &mdash; Monitor and manage spawned team agents</li>
-        <li><strong>File Preview</strong> &mdash; WebView2-based panel for previewing files</li>
-      </ul>
-
-      <!-- Key Concepts -->
-      <h2>Key Concepts</h2>
-
-      <h3>Terminals</h3>
-      <p>Each terminal tab hosts a ConPTY-based shell rendered via WebView2. Terminals can register with the MultiTerminal system to gain an identity (name) for messaging and task management. A registered terminal appears in the team roster and can send/receive messages.</p>
-
-      <h3>Kanban Board</h3>
-      <p>The built-in task tracker uses a kanban workflow: <code>todo</code> &rarr; <code>in_progress</code> &rarr; <code>review</code> &rarr; <code>done</code>. Tasks support checklists (with per-item status tracking), plans, continuation notes, and helper assignments. All data is stored in SQLite (<code>multiterminal.db</code>).</p>
-
-      <h3>Messaging</h3>
-      <p>The MessageBroker routes messages between terminals. Messages can be direct (one-to-one) or broadcast (one-to-all). Claude Code agents use MCP tools to send and receive messages, enabling multi-agent collaboration.</p>
-
-      <h3>Projects</h3>
-      <p>Projects are registered in SQLite with associated paths, agents, MCP servers, prompts, and skills. The project context API (<code>GET /api/projects/{id}/context</code>) provides a complete snapshot for agent consumption.</p>
-
-      <h3>Agents</h3>
-      <p>MultiTerminal can spawn Claude Code agent teammates using the native agent teams feature. Agents are visible in the Agent panel, where you can monitor their transcript output in real time. Agents coordinate through the messaging system and work on kanban tasks.</p>
-
-      <h3>Knowledge Base</h3>
-      <p>The institutional memory system stores code digests, session history, and knowledge entries in SQLite. Agents can query the knowledge base for context about the codebase, past decisions, and established patterns.</p>
-
-      <!-- Next Steps -->
-      <h2>Next Steps</h2>
-
-      <div class="card-grid">
-        <div class="card">
-          <a href="features.html">
-            <h3>Explore Features</h3>
-            <p>Deep dive into all panels, workflows, and capabilities.</p>
-          </a>
+        <h2 id="next-steps">Next Steps</h2>
+        <div class="card-grid">
+          <div class="card">
+            <a href="kanban-workflow.html">
+              <h3>Kanban Workflow</h3>
+              <p>The full task lifecycle: statuses, checklist state machine, helpers, and handoff notes.</p>
+            </a>
+          </div>
+          <div class="card">
+            <a href="deployment.html">
+              <h3>Deployment</h3>
+              <p>Install, system requirements, and MCP server registration.</p>
+            </a>
+          </div>
+          <div class="card">
+            <a href="knowledge-sessions.html">
+              <h3>Knowledge &amp; Sessions</h3>
+              <p>Store and recall institutional memory and search past work.</p>
+            </a>
+          </div>
+          <div class="card">
+            <a href="mcp-guide.html">
+              <h3>MCP Guide</h3>
+              <p>How Claude&nbsp;Code agents talk to MultiTerminal through MCP tools.</p>
+            </a>
+          </div>
         </div>
-        <div class="card">
-          <a href="api-reference.html">
-            <h3>REST API Reference</h3>
-            <p>Learn the HTTP endpoints for programmatic access.</p>
-          </a>
-        </div>
-        <div class="card">
-          <a href="mcp-tools.html">
-            <h3>MCP Tools Guide</h3>
-            <p>See the full list of tools available to Claude Code agents.</p>
-          </a>
-        </div>
-        <div class="card">
-          <a href="architecture.html">
-            <h3>Architecture Overview</h3>
-            <p>Understand the system layers and data flow.</p>
-          </a>
-        </div>
+
       </div>
+    </main>
+  </div>
 
-      <!-- Footer -->
-      <footer class="footer">
-        <p>MultiTerminal &copy; 2026. See <code>THIRD-PARTY-NOTICES.md</code> for license information.</p>
-      </footer>
-
-    </div>
-  </main>
-
-</div>
-
-<!-- Theme Toggle -->
-<button class="theme-toggle" aria-label="Toggle theme" onclick="toggleTheme()">&#9790;</button>
-
-<script>
-/* Theme toggle */
-function toggleTheme() {
-  var html = document.documentElement;
-  var current = html.getAttribute('data-theme') || 'dark';
-  var next = current === 'dark' ? 'light' : 'dark';
-  html.setAttribute('data-theme', next);
-  localStorage.setItem('mt-docs-theme', next);
-}
-
-/* Restore saved theme */
-(function() {
-  var saved = localStorage.getItem('mt-docs-theme');
-  if (saved) document.documentElement.setAttribute('data-theme', saved);
-})();
-
-/* Mobile sidebar toggle */
-function toggleSidebar() {
-  document.querySelector('.sidebar').classList.toggle('open');
-  document.querySelector('.sidebar-overlay').classList.toggle('visible');
-}
-</script>
-
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
 </body>
 </html>

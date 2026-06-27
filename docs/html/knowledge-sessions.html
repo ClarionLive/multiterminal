@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="How MultiTerminal stores and recalls institutional memory: the knowledge base with attention-decay ranking, and searchable session memory and lineage.">
+  <title>Knowledge &amp; Sessions - MultiTerminal Documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Hamburger (mobile) -->
+  <button class="hamburger" aria-label="Toggle navigation" onclick="toggleSidebar()">&#9776;</button>
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <div class="page-wrapper">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">MT</span>
+          <span class="logo-text">MultiTerminal</span>
+        </div>
+        <span class="version">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">Getting Started</div>
+        <a href="getting-started.html" class="nav-link">Getting Started</a>
+        <a href="kanban-workflow.html" class="nav-link">Kanban Workflow</a>
+        <a href="mcp-guide.html" class="nav-link">MCP Guide</a>
+
+        <div class="nav-section-title">Features</div>
+        <a href="features.html" class="nav-link">Features</a>
+        <a href="worktrees.html" class="nav-link">Git Worktrees</a>
+        <a href="multi-connect.html" class="nav-link">Multi-Connect (Phone)</a>
+        <a href="presence.html" class="nav-link">Presence Sensors</a>
+        <a href="code-graph.html" class="nav-link">Code Graph</a>
+
+        <div class="nav-section-title">Reference</div>
+        <a href="api-reference.html" class="nav-link">REST API</a>
+        <a href="mcp-tools.html" class="nav-link">MCP Tools</a>
+        <a href="knowledge-sessions.html" class="nav-link active">Knowledge &amp; Sessions</a>
+        <a href="branch-outcomes-wiki.html" class="nav-link">Branch Outcomes &amp; Wiki</a>
+
+        <div class="nav-section-title">Technical</div>
+        <a href="architecture.html" class="nav-link">Architecture</a>
+        <a href="mcp-architecture.html" class="nav-link">MCP Architecture</a>
+        <a href="distribution.html" class="nav-link">Distribution</a>
+        <a href="deployment.html" class="nav-link">Deployment</a>
+
+        <div class="nav-section-title">Help</div>
+        <a href="troubleshooting.html" class="nav-link">Troubleshooting / FAQ</a>
+        <a href="api-examples.html" class="nav-link">API Examples</a>
+
+        <div class="nav-section-title"></div>
+        <a href="index.html" class="nav-link">&larr; Home</a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <div class="content-container">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127763;</button>
+
+        <h1>Knowledge &amp; Sessions</h1>
+        <p class="lead">MultiTerminal remembers two kinds of things: <strong>knowledge</strong> &mdash; the durable decisions, patterns, and gotchas worth keeping &mdash; and <strong>sessions</strong> &mdash; the full transcripts of past work you can search back through. Both live in SQLite and are reachable from MCP tools, so an agent can store what it learns and recall what was done before.</p>
+
+        <div class="card">
+          <h3>On This Page</h3>
+          <ol>
+            <li><a href="#knowledge">The Knowledge Base</a></li>
+            <li><a href="#knowledge-store">Storing Knowledge</a></li>
+            <li><a href="#knowledge-recall">Recalling Knowledge &amp; Attention Decay</a></li>
+            <li><a href="#sessions">Session Memory &amp; History</a></li>
+            <li><a href="#sessions-search">Finding Past Work</a></li>
+            <li><a href="#lineage">Lineage Chains</a></li>
+          </ol>
+        </div>
+
+        <h2 id="knowledge">The Knowledge Base</h2>
+        <p>The knowledge base is institutional memory: short, titled entries capturing things the team has learned. It is stored in the <code>knowledge_entries</code> table and managed by <code>KnowledgeDatabase</code>, which shares the same SQLite file (and FTS5 full-text index) as the task board. Each entry has a <strong>category</strong> describing what kind of knowledge it is:</p>
+        <table>
+          <thead>
+            <tr><th>Category</th><th>Use it for</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>decision</code></td><td>A choice that was made and why.</td></tr>
+            <tr><td><code>pattern</code></td><td>A reusable approach that works here.</td></tr>
+            <tr><td><code>gotcha</code></td><td>A surprising trap or footgun to avoid.</td></tr>
+            <tr><td><code>anti_pattern</code></td><td>An approach that looks reasonable but should not be used.</td></tr>
+            <tr><td><code>debug_insight</code></td><td>A root cause or diagnosis worth remembering.</td></tr>
+            <tr><td><code>preference</code></td><td>A team or owner preference about how things are done.</td></tr>
+          </tbody>
+        </table>
+        <p>An entry also carries an optional project ID (null means the entry is global), comma-separated tags, the source it came from (manual, session, task, and similar), and a <strong>confidence</strong> level. Confidence runs from <code>confirmed</code> (the default) and <code>likely</code> down to <code>uncertain</code> when adding; entries can later be marked <code>deprecated</code>, which excludes them from search results by default. Deprecating an entry can also point at the newer entry that supersedes it, so you can follow the chain.</p>
+
+        <h2 id="knowledge-store">Storing Knowledge</h2>
+        <p>Add an entry with the <code>add_knowledge</code> MCP tool. It requires a <code>title</code>, the <code>content</code>, and a <code>category</code>; everything else (project, tags, source, confidence) is optional. A good entry is a single, self-contained lesson with a title you would actually search for later &mdash; for example a <code>gotcha</code> titled &ldquo;WebView2 host objects must be added before navigation&rdquo; rather than a vague note.</p>
+        <p>Capture knowledge at the moment you learn it &mdash; right after a tricky debug, a design decision, or discovering a constraint &mdash; while the detail is fresh. That is what makes it useful to the next agent who hits the same wall.</p>
+
+        <h2 id="knowledge-recall">Recalling Knowledge &amp; Attention Decay</h2>
+        <p>Search the base with <code>query_knowledge</code>, passing a free-text query and optionally a category, project, or tag filter. Search uses FTS5 full-text matching when available and falls back to a LIKE query otherwise; deprecated entries are left out unless you ask for them.</p>
+        <p>Every time an entry is queried or injected into context, its reference count is bumped and its &ldquo;last referenced&rdquo; timestamp is updated. That feeds an <strong>attention-decay</strong> ranking used when surfacing the most relevant memory:</p>
+        <pre><code>score = (reference_count + 1) / (days_since_last_referenced + 1)</code></pre>
+        <p>Entries that are referenced often and recently rank highest; an entry that has not been touched in a long time decays toward the bottom even if it was once popular. The effect is that memory which is still being used stays prominent, while stale memory quietly recedes without having to be deleted.</p>
+
+        <h2 id="sessions">Session Memory &amp; History</h2>
+        <p>Beyond curated knowledge, MultiTerminal keeps the raw record of past work. Claude&nbsp;Code writes each session to a JSONL transcript on disk; <code>SessionLineageService</code> imports those transcripts into SQLite &mdash; a <code>session_lineage</code> record per session plus the extracted messages in <code>session_messages</code>, indexed for full-text search. A separate session-memory store additionally chunks transcripts and embeds them for semantic search.</p>
+        <p>Importing happens a few ways: <code>import_session</code> brings in a single transcript and links it to a task; <code>sync_sessions</code> incrementally scans a Claude project folder and imports any sessions not already stored, skipping ones it has seen for a fast re-sync.</p>
+
+        <h2 id="sessions-search">Finding Past Work</h2>
+        <p>There are two complementary ways to search the history, plus a shortcut for the most common need:</p>
+        <table>
+          <thead>
+            <tr><th>Tool</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>search_session_history</code></td><td>Full-text (FTS5, with LIKE fallback) search across imported session messages. Filter by task, role (user/assistant), agent, or free text. Best when you remember roughly what was said.</td></tr>
+            <tr><td><code>search_session_memory</code></td><td>Semantic search over transcript chunks using vector embeddings plus FTS5. Finds context by meaning, not just keywords &mdash; ask it a natural-language question like &ldquo;what was the WebView2 event bridge approach?&rdquo;</td></tr>
+            <tr><td><code>get_latest_session</code></td><td>Returns the most recent <em>previous</em> session for a project (with its cached summary, or recent messages if none), filterable by agent. Use it at session start to recall what was last worked on.</td></tr>
+          </tbody>
+        </table>
+        <p>Reach for <code>search_session_history</code> when you remember the words; reach for <code>search_session_memory</code> when you only remember the idea.</p>
+
+        <h2 id="lineage">Lineage Chains</h2>
+        <p>Sessions are not isolated &mdash; they form <strong>lineage chains</strong>. When one session continues from another (an agent cycling through coding then review, or a session rolling over), the new session records the previous one as its parent. <code>get_session_lineage</code> walks that parent chain to reconstruct the full history of a task from root to leaf, and <code>get_task_sessions</code> lists every session linked to a task with its agent, type, and parent links. Together they let you replay how a piece of work actually unfolded across multiple sessions and agents.</p>
+        <p>For the institutional-memory tools alongside the rest of the MCP surface, see the <a href="mcp-tools.html">MCP Tools</a> reference; for how all of this is wired together, see the <a href="architecture.html">Architecture</a> overview.</p>
+
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+    function toggleSidebar() {
+      document.querySelector('.sidebar').classList.toggle('open');
+      document.querySelector('.sidebar-overlay').classList.toggle('visible');
+    }
+  </script>
+</body>
+</html>
