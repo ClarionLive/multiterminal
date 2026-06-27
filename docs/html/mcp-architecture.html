@@ -26,6 +26,10 @@
       </div>
       <div class="tagline">Documentation</div>
     </div>
+        <div class="doc-search">
+          <input type="search" id="mt-search" class="doc-search-input" placeholder="Search docs…  ( / )" autocomplete="off" spellcheck="false" aria-label="Search documentation">
+          <div id="mt-search-results" class="doc-search-results" hidden></div>
+        </div>
     <nav class="sidebar-nav">
       <div class="nav-section-title">Getting Started</div>
       <a href="getting-started.html" class="nav-link">Getting Started</a>
@@ -617,5 +621,7 @@ function toggleSidebar() {
 }
 </script>
 
+  <script src="search-index.js"></script>
+  <script src="search.js"></script>
 </body>
 </html>
