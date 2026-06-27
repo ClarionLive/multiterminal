@@ -2,9 +2,9 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Settings"
-        Width="880" Height="680"
+        Width="880" Height="740"
         MinWidth="880" MaxWidth="880"
-        MinHeight="680" MaxHeight="680"
+        MinHeight="740" MaxHeight="740"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
@@ -450,7 +450,8 @@
         <TabControl Grid.Row="0" Margin="16,16,16,8" Style="{StaticResource DarkTabControl}">
             <TabItem Header="General" Style="{StaticResource DarkTabItem}">
 
-        <!-- Two-column form content -->
+        <!-- Two-column form content (ScrollViewer guards against clipping at the fixed window height) -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -759,6 +760,7 @@
 
             </StackPanel>
         </Grid>
+        </ScrollViewer>
             </TabItem>
 
             <TabItem Header="Pipeline" Style="{StaticResource DarkTabItem}">
