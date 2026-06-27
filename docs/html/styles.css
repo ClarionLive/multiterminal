@@ -585,3 +585,89 @@ tbody tr:hover {
 .doc-search-result:hover mark,
 .doc-search-result.active mark { background: rgba(255, 255, 255, 0.3); color: #fff; }
 .doc-search-empty { padding: 0.6rem 0.7rem; font-size: 0.8rem; color: var(--text-secondary); }
+
+/* ============================================================
+   Architecture page — layered diagram, flow diagrams, TOC
+   ============================================================ */
+
+/* Layered system diagram (replaces the old ASCII <pre>) */
+.arch-stack { display: flex; flex-direction: column; align-items: stretch; gap: 0; margin: 1.75rem 0; }
+.arch-layer {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem 1.05rem;
+}
+.arch-layer-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 0.75rem; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem; margin-bottom: 0.65rem;
+}
+.arch-layer-title { font-weight: 700; color: var(--accent); font-size: 1.05rem; }
+.arch-layer-sub { font-size: 0.8rem; color: var(--text-secondary); font-family: ui-monospace, Consolas, "Courier New", monospace; }
+.arch-nodes { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.arch-node {
+  font-size: 0.78rem;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.arch-note { margin-top: 0.6rem; font-size: 0.82rem; color: var(--text-secondary); }
+.arch-hub { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.arch-hub .arch-layer-title::after {
+  content: " — central hub"; color: var(--text-secondary); font-weight: 400; font-size: 0.8rem;
+}
+.arch-conn { display: flex; justify-content: center; align-items: center; height: 2.3rem; position: relative; }
+.arch-conn::before { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; background: var(--border); }
+.arch-conn span {
+  position: relative; z-index: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 0.72rem; letter-spacing: 0.02em;
+  padding: 0.18rem 0.65rem; border-radius: 999px;
+}
+
+/* Step-by-step flow diagrams (data flow / pipelines) */
+.flow-diagram { display: flex; flex-direction: column; align-items: stretch; gap: 0; margin: 1.25rem 0; }
+.flow-step {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+}
+.flow-label { font-weight: 600; color: var(--text-primary); font-size: 0.92rem; }
+.flow-detail { font-size: 0.83rem; color: var(--text-secondary); margin-top: 0.2rem; }
+.flow-arrow { text-align: center; color: var(--accent); font-size: 1.15rem; line-height: 1; padding: 0.3rem 0; }
+/* A step that fans out into parallel branches (declared AFTER .flow-step to win) */
+.flow-split { background: transparent; border: none; border-radius: 0; padding: 0; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.flow-branch {
+  flex: 1 1 180px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+}
+
+/* On-this-page table of contents */
+.toc {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1.1rem;
+  margin: 1.25rem 0;
+}
+.toc h3 { margin-top: 0; margin-bottom: 0.4rem; }
+.toc ul { margin: 0; padding-left: 1.15rem; }
+.toc li { margin: 0.15rem 0; }
+
+/* Database schema groups */
+.schema-group { margin: 1.5rem 0; }
+.schema-table { width: 100%; }

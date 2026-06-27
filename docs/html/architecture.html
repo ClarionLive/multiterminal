@@ -86,99 +86,107 @@
 
   <p>The system is organized into five distinct layers, with the MessageBroker serving as the central hub connecting everything together.</p>
 
-  <div class="architecture-diagram">
-<pre>
-+-------------------------------------------------------------+
-|  MainForm.cs (5.2K LOC) - UI Host &amp; Panel Orchestrator      |
-|  +-------------------+  +-------------------+               |
-|  | TasksPanel/       |  | ChatPanel/        |  11 WebView2  |
-|  | (Kanban board)    |  | (Messaging)       |  panels total |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+  +-------------------+               |
-|  | ActivityPanel/    |  | ProfilePanel/     |               |
-|  | (Activity feed)   |  | (Team profiles)   |               |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+  +-------------------+               |
-|  | InboxPanel/       |  | ProjectPanel/     |               |
-|  | (Notifications)   |  | (Project mgmt)    |               |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+  +-------------------+               |
-|  | LauncherPanel/    |  | OfficePanel/      |               |
-|  | (Agent launcher)  |  | (Agent presence)  |               |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+  +-------------------+               |
-|  | AgentPanel/       |  | DebugPanel/       |               |
-|  | (Subagent viewer) |  | (Debug logs)      |               |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+                                      |
-|  | FilePreviewPanel/ |  + Terminal/ (ConPTY + WebView2)      |
-|  | (File previews)   |  + Docking/ (GridLayoutManager)       |
-|  +-------------------+  + Dialogs/ (11 modal windows)        |
-+-------------------------------------------------------------+
-                           |
-                   Events (C# EventHandler)
-                           |
-+-------------------------------------------------------------+
-|  REST API (port 5050) - MultiTerminalRestServer.cs          |
-|  +-----------------------+  +----------------------------+  |
-|  | TasksController       |  | MessagingController        |  |
-|  | OfficeController      |  | KnowledgeController        |  |
-|  | SpawnController       |  | SessionLineageController   |  |
-|  | ProjectContextController | TeamController              |  |
-|  | DebugController       |  | ToolsController            |  |
-|  | AgentPanelsController |  | AgentStatsController       |  |
-|  | BrowserTabsController |  | CompanionController        |  |
-|  | GatewayController     |  | NotificationsController    |  |
-|  | OwnerProfileController|  | TaskReportsController      |  |
-|  | TerminalStreamController| XamlPreviewController       |  |
-|  | RipgrepController     |  |                            |  |
-|  +-----------------------+  +----------------------------+  |
-+-------------------------------------------------------------+
-                           |
-                    Method calls
-                           |
-+-------------------------------------------------------------+
-|  MessageBroker.cs (5.5K LOC) - CENTRAL HUB                 |
-|                                                             |
-|  Routes messages, manages task/terminal/profile caches      |
-|  (ConcurrentDictionary), delivers webhooks, fires events    |
-|  to UI panels. Everything flows through here.               |
-|                                                             |
-|  Services:                                                  |
-|  - ActivityService    - StaleTaskService                    |
-|  - PoolCoordinator    - SpawnService                        |
-|  - ComplexityDetector - SummaryService                      |
-|  - SessionDiscovery   - HttpWebhookService                  |
-+-------------------------------------------------------------+
-                           |
-                    SQLite calls
-                           |
-+-------------------------------------------------------------+
-|  Persistence Layer (SQLite)                                 |
-|  +-------------------+  +-------------------+               |
-|  | TaskDatabase.cs   |  | ProjectDatabase.cs|  multiterminal.db     |
-|  | (4.6K LOC)        |  | + 7 assoc tables  |               |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+  +-------------------+               |
-|  | KnowledgeDatabase |  | SessionLineage-   |  multiterminal.db     |
-|  | (knowledge + FTS) |  | Service (sessions)|               |
-|  +-------------------+  +-------------------+               |
-|  +-------------------+                                      |
-|  | MessageQueue-     |  message_queue.db                    |
-|  | Database.cs       |  (reliable delivery)                 |
-|  +-------------------+                                      |
-+-------------------------------------------------------------+
-                           |
-                    stdio (JSON-RPC)
-                           |
-+-------------------------------------------------------------+
-|  MCP Server (Node.js) - multiterminal-mcp/index.js          |
-|                                                             |
-|  Exposes ~90 tools to Claude Code agents via MCP protocol.  |
-|  Wraps the REST API - each tool call = one HTTP request.    |
-|  Located: %APPDATA%\multiterminal\mcp\index.js              |
-+-------------------------------------------------------------+
-</pre>
+  <div class="arch-stack">
+
+    <div class="arch-layer">
+      <div class="arch-layer-head">
+        <span class="arch-layer-title">UI Host</span>
+        <span class="arch-layer-sub">MainForm.cs &middot; ~5.2K LOC &middot; 11 WebView2 panels</span>
+      </div>
+      <div class="arch-nodes">
+        <span class="arch-node">TasksPanel</span>
+        <span class="arch-node">ChatPanel</span>
+        <span class="arch-node">ActivityPanel</span>
+        <span class="arch-node">ProfilePanel</span>
+        <span class="arch-node">InboxPanel</span>
+        <span class="arch-node">ProjectPanel</span>
+        <span class="arch-node">LauncherPanel</span>
+        <span class="arch-node">OfficePanel</span>
+        <span class="arch-node">AgentPanel</span>
+        <span class="arch-node">DebugPanel</span>
+        <span class="arch-node">FilePreviewPanel</span>
+      </div>
+      <div class="arch-note">+ <code>Terminal/</code> (ConPTY + WebView2) &middot; <code>Docking/</code> (GridLayoutManager) &middot; <code>Dialogs/</code> (11 modal windows)</div>
+    </div>
+
+    <div class="arch-conn"><span>C# events &darr;</span></div>
+
+    <div class="arch-layer">
+      <div class="arch-layer-head">
+        <span class="arch-layer-title">REST API</span>
+        <span class="arch-layer-sub">MultiTerminalRestServer.cs &middot; port 5050 &middot; ~25 controllers</span>
+      </div>
+      <div class="arch-nodes">
+        <span class="arch-node">Tasks</span>
+        <span class="arch-node">Messaging</span>
+        <span class="arch-node">Office</span>
+        <span class="arch-node">Knowledge</span>
+        <span class="arch-node">Spawn</span>
+        <span class="arch-node">SessionLineage</span>
+        <span class="arch-node">ProjectContext</span>
+        <span class="arch-node">Team</span>
+        <span class="arch-node">Tools</span>
+        <span class="arch-node">AgentPanels</span>
+        <span class="arch-node">AgentStats</span>
+        <span class="arch-node">BrowserTabs</span>
+        <span class="arch-node">Companion</span>
+        <span class="arch-node">Gateway</span>
+        <span class="arch-node">Notifications</span>
+        <span class="arch-node">OwnerProfile</span>
+        <span class="arch-node">TaskReports</span>
+        <span class="arch-node">TerminalStream</span>
+        <span class="arch-node">XamlPreview</span>
+        <span class="arch-node">Ripgrep</span>
+      </div>
+    </div>
+
+    <div class="arch-conn"><span>method calls &darr;</span></div>
+
+    <div class="arch-layer arch-hub">
+      <div class="arch-layer-head">
+        <span class="arch-layer-title">MessageBroker</span>
+        <span class="arch-layer-sub">MessageBroker.cs &middot; ~5.5K LOC</span>
+      </div>
+      <div class="arch-note" style="margin-top:0;">Routes messages, manages task/terminal/profile caches (<code>ConcurrentDictionary</code>), delivers webhooks, and fires events to UI panels &mdash; everything flows through here.</div>
+      <div class="arch-nodes" style="margin-top:0.6rem;">
+        <span class="arch-node">ActivityService</span>
+        <span class="arch-node">PoolCoordinator</span>
+        <span class="arch-node">ComplexityDetector</span>
+        <span class="arch-node">SessionDiscovery</span>
+        <span class="arch-node">StaleTaskService</span>
+        <span class="arch-node">SpawnService</span>
+        <span class="arch-node">SummaryService</span>
+        <span class="arch-node">HttpWebhookService</span>
+      </div>
+    </div>
+
+    <div class="arch-conn"><span>SQLite calls &darr;</span></div>
+
+    <div class="arch-layer">
+      <div class="arch-layer-head">
+        <span class="arch-layer-title">Persistence</span>
+        <span class="arch-layer-sub">SQLite</span>
+      </div>
+      <div class="arch-nodes">
+        <span class="arch-node">TaskDatabase.cs (~4.6K)</span>
+        <span class="arch-node">ProjectDatabase.cs + 7 assoc tables</span>
+        <span class="arch-node">KnowledgeDatabase (+ FTS5)</span>
+        <span class="arch-node">SessionLineageService</span>
+        <span class="arch-node">MessageQueueDatabase</span>
+      </div>
+      <div class="arch-note">Stores: <code>multiterminal.db</code> (tasks, sessions, knowledge, projects) &middot; <code>message_queue.db</code> (reliable delivery)</div>
+    </div>
+
+    <div class="arch-conn"><span>stdio (JSON-RPC) &darr;</span></div>
+
+    <div class="arch-layer">
+      <div class="arch-layer-head">
+        <span class="arch-layer-title">MCP Server</span>
+        <span class="arch-layer-sub">Node.js &middot; ~90 tools</span>
+      </div>
+      <div class="arch-note" style="margin-top:0;">Exposes ~90 tools to Claude Code agents over MCP. Each tool call wraps one HTTP request to the REST API above. Located at <code>%APPDATA%\multiterminal\mcp\index.js</code>.</div>
+    </div>
+
   </div>
 
   <!-- ================================================================== -->
