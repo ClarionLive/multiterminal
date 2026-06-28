@@ -359,6 +359,27 @@ namespace MultiTerminal.Dialogs
             CommandsGrid.ItemsSource = _commands;
         }
 
+        // The DataGrid hosts its own ScrollViewer which would otherwise swallow the mouse
+        // wheel and block scrolling of the outer (General-tab) ScrollViewer. Re-raise the
+        // wheel event on the grid's parent so it bubbles up to the form's ScrollViewer,
+        // keeping the Source Control Accounts section below the grid reachable by wheel.
+        private void CommandsGrid_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (e.Handled) return;
+
+            e.Handled = true;
+            var forwarded = new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+            {
+                RoutedEvent = UIElement.MouseWheelEvent,
+                Source = sender,
+            };
+
+            if (((FrameworkElement)sender).Parent is UIElement parent)
+            {
+                parent.RaiseEvent(forwarded);
+            }
+        }
+
         private void AddCommandButton_Click(object sender, RoutedEventArgs e)
         {
             string command = ShowCommandInputDialog("Add Command", "");
