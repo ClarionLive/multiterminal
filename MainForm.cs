@@ -94,6 +94,7 @@ namespace MultiTerminal
         private readonly Dictionary<string, AgentProcess> _agentProcessMap = new();
         private readonly Dictionary<string, (AgentPanelControl Control, Panel Slot, TerminalDocument Terminal)> _embeddedAgentMap = new();
         private TeamWatcherService _teamWatcher;
+        private Services.CodeGraphWatcher _codeGraphWatcher;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
 #pragma warning restore CA2213
@@ -436,8 +437,11 @@ namespace MultiTerminal
             try
             {
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 1: About to create REST API server");
-                // Create REST API server
-                _mcpServer = new MultiTerminalRestServer(5050);
+                // Create REST API server. Pass MainForm's existing _projectService so the REST DI
+                // shares the ONE ProjectService instance the CodeGraphWatcher subscribes to (G8) —
+                // otherwise the container creates a second instance and project-creation events
+                // (ProjectUpdated) fire on an instance the watcher never hears.
+                _mcpServer = new MultiTerminalRestServer(5050, _projectService);
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 2: REST API server created");
 
                 if (_mcpServer == null)
@@ -482,6 +486,23 @@ namespace MultiTerminal
                 var codeGraphDb = new Services.CodeGraphDatabase(_mcpServer.Broker.TaskDb);
                 _mcpServer.Broker.CodeGraphDb = codeGraphDb;
                 _mcpServer.Broker.CodeGraphQuery = new Services.CodeGraphQuery(codeGraphDb);
+
+                // Wire up CodeGraphIndexCoordinator — single global permit shared by the manual REST
+                // index trigger and the background CodeGraphWatcher so reindexes never run concurrently.
+                _mcpServer.Broker.CodeGraphIndexCoordinator = new Services.CodeGraphIndexCoordinator(
+                    codeGraphDb, _mcpServer.Broker.CodeGraphQuery);
+
+                // Wire up CodeGraphWatcher — background service that debounce-reindexes registered C#
+                // roots on .cs changes so the code graph stays fresh without manual index_code_graph runs.
+                _codeGraphWatcher = new Services.CodeGraphWatcher(
+                    _projectService,
+                    codeGraphDb,
+                    _mcpServer.Broker.CodeGraphQuery,
+                    _mcpServer.Broker.CodeGraphIndexCoordinator)
+                {
+                    DebugLogService = _debugLogService
+                };
+                _codeGraphWatcher.Start();
 
                 // Wire up WikiGeneratorService — produces per-subsystem markdown articles
                 _mcpServer.Broker.WikiGenerator = new Services.WikiGeneratorService(
@@ -6161,6 +6182,9 @@ namespace MultiTerminal
                 _sessionSyncTimer?.Stop();
                 _sessionSyncTimer?.Dispose();
                 _teamWatcher?.Dispose();
+                _codeGraphWatcher?.Dispose();
+                // Dispose the coordinator after the watcher that uses it, before the DB it indexes.
+                _mcpServer?.Broker?.CodeGraphIndexCoordinator?.Dispose();
                 _sessionIndexingService?.Dispose();
                 _chatTaskDatabase?.Dispose();
                 _sharedProjectDatabase?.Dispose();

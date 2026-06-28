@@ -58,6 +58,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public event EventHandler RegistryChangedExternally;
 
+        /// <summary>
+        /// Creates a ProjectService over a fresh ProjectDatabase.
+        /// CANONICAL INSTANCE: the app has ONE ProjectService — <c>MainForm._projectService</c> — which
+        /// is threaded into the REST DI via the <see cref="MultiTerminal.API.MultiTerminalRestServer"/>
+        /// ctor (G8) so <c>broker.ProjectService</c> and every REST controller share it. Do NOT
+        /// construct a second instance for any event-bearing path (ProjectRegistered/Updated/Removed):
+        /// subscribers on a different instance (e.g. CodeGraphWatcher) won't hear its events.
+        /// </summary>
         public ProjectService()
         {
             _projectDb = new ProjectDatabase();

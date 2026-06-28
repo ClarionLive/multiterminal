@@ -143,7 +143,13 @@ namespace MultiTerminal.Services
 
             // Store metadata
             sw.Stop();
-            _db.SetMetadata("last_indexed", DateTime.UtcNow.ToString("o"));
+            string indexedAt = DateTime.UtcNow.ToString("o");
+            _db.SetMetadata("last_indexed", indexedAt);
+            // Per-project last_indexed so a background watcher can apply an INDEPENDENT freshness
+            // floor per project (indexing project A must not floor-suppress an unrelated dirty
+            // project B). Keyed by stable project name (not the churning projectId) so it doesn't
+            // orphan a row per reindex; the global key above is kept for back-compat / GetStats.
+            _db.SetProjectLastIndexed(projectName, indexedAt);
             _db.SetMetadata("index_duration_ms", sw.ElapsedMilliseconds.ToString());
             _db.SetMetadata("project:" + projectId + ":file_count", csFiles.Count.ToString());
             _db.SetMetadata("project:" + projectId + ":symbol_count", symbolCount.ToString());
@@ -160,8 +166,14 @@ namespace MultiTerminal.Services
             };
         }
 
-        private bool IsExcludedPath(string filePath)
+        /// <summary>
+        /// True if a <c>.cs</c> path should be skipped by indexing (build output + generated files).
+        /// Public+static so the background <see cref="CodeGraphWatcher"/> can apply the exact same
+        /// filter to FS events without a second, drift-prone copy of these rules.
+        /// </summary>
+        public static bool IsExcludedPath(string filePath)
         {
+            if (string.IsNullOrEmpty(filePath)) return true;
             var normalized = filePath.Replace('\\', '/');
             return normalized.Contains("/obj/")
                 || normalized.Contains("/bin/")

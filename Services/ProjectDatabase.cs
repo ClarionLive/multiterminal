@@ -22,10 +22,25 @@ namespace MultiTerminal.Services
         private SQLiteConnection _connection;
         private bool _isDisposed;
 
+        // G9: serializes access to the shared _connection THROUGH THIS CLASS'S METHODS. After the G8
+        // ProjectService unification this one ProjectDatabase is reachable concurrently from the UI
+        // thread, Kestrel REST threads (CreateProject), gateway threads, and the CodeGraphWatcher timer
+        // — concurrent ExecuteReader/ExecuteNonQuery on one System.Data.SQLite connection throws
+        // 'database is locked'/busy. Mirrors TaskDatabase._dbLock: every public connection-touching
+        // method below wraps its body in lock (_dbLock). Private reader helpers stay lock-free (they
+        // run inside a locked block); the migration/schema methods run once in the ctor before any
+        // concurrency. NOTE: this does NOT GLOBALLY serialize the connection — callers that borrow the
+        // exposed Connection property (below) run commands the lock never sees (same escape hatch as
+        // TaskDatabase). Closing that hole is a separate cross-service-serialization concern.
+        private readonly object _dbLock = new object();
+
         /// <summary>
         /// The open SQLite connection to multiterminal.db. Exposed so callers that need to
         /// read sibling tables in the same file (e.g. source_control_accounts) can reuse it
         /// rather than opening a second connection — mirrors TaskDatabase.Connection.
+        /// WARNING: commands run on this borrowed connection do NOT take <see cref="_dbLock"/>, so
+        /// they are not serialized against this class's methods. Callers sharing it must coordinate
+        /// their own access to avoid 'database is locked'/busy under concurrency.
         /// </summary>
         public SQLiteConnection Connection => _connection;
 
@@ -233,22 +248,25 @@ namespace MultiTerminal.Services
         /// </summary>
         public MultiTerminal.MCPServer.Models.Project GetProject(string projectId)
         {
-            const string sql = @"
-                SELECT id, name, description, path, created_by, created_at, updated_at
-                FROM projects
-                WHERE id = @id
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", projectId);
-            using var reader = command.ExecuteReader();
-
-            if (reader.Read())
+            lock (_dbLock)
             {
-                return ReadProject(reader);
-            }
+                const string sql = @"
+                    SELECT id, name, description, path, created_by, created_at, updated_at
+                    FROM projects
+                    WHERE id = @id
+                ";
 
-            return null;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                using var reader = command.ExecuteReader();
+
+                if (reader.Read())
+                {
+                    return ReadProject(reader);
+                }
+
+                return null;
+            }
         }
 
         /// <summary>
@@ -258,18 +276,21 @@ namespace MultiTerminal.Services
         {
             var projects = new List<MultiTerminal.MCPServer.Models.Project>();
 
-            const string sql = @"
-                SELECT id, name, description, path, created_by, created_at, updated_at
-                FROM projects
-                ORDER BY created_at DESC
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                projects.Add(ReadProject(reader));
+                const string sql = @"
+                    SELECT id, name, description, path, created_by, created_at, updated_at
+                    FROM projects
+                    ORDER BY created_at DESC
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
+                {
+                    projects.Add(ReadProject(reader));
+                }
             }
 
             return projects;
@@ -281,26 +302,29 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProject(MultiTerminal.MCPServer.Models.Project project)
         {
-            const string sql = @"
-                INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at)
-                VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = @name,
-                    description = @description,
-                    path = @path,
-                    updated_at = @updatedAt
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at)
+                    VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = @name,
+                        description = @description,
+                        path = @path,
+                        updated_at = @updatedAt
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", project.Id);
-            command.Parameters.AddWithValue("@name", project.Name);
-            command.Parameters.AddWithValue("@description", (object)project.Description ?? DBNull.Value);
-            command.Parameters.AddWithValue("@path", (object)project.Path ?? DBNull.Value);
-            command.Parameters.AddWithValue("@createdBy", (object)project.CreatedBy ?? DBNull.Value);
-            command.Parameters.AddWithValue("@createdAt", project.CreatedAt);
-            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", project.Id);
+                command.Parameters.AddWithValue("@name", project.Name);
+                command.Parameters.AddWithValue("@description", (object)project.Description ?? DBNull.Value);
+                command.Parameters.AddWithValue("@path", (object)project.Path ?? DBNull.Value);
+                command.Parameters.AddWithValue("@createdBy", (object)project.CreatedBy ?? DBNull.Value);
+                command.Parameters.AddWithValue("@createdAt", project.CreatedAt);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
 
-            command.ExecuteNonQuery();
+                command.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -309,21 +333,24 @@ namespace MultiTerminal.Services
         /// <returns>True if a project was updated, false if project not found.</returns>
         public bool UpdateProject(string projectId, string name, string description)
         {
-            const string sql = @"
-                UPDATE projects
-                SET name = COALESCE(@name, name),
-                    description = COALESCE(@description, description),
-                    updated_at = @updatedAt
-                WHERE id = @id
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    UPDATE projects
+                    SET name = COALESCE(@name, name),
+                        description = COALESCE(@description, description),
+                        updated_at = @updatedAt
+                    WHERE id = @id
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", projectId);
-            command.Parameters.AddWithValue("@name", (object)name ?? DBNull.Value);
-            command.Parameters.AddWithValue("@description", (object)description ?? DBNull.Value);
-            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                command.Parameters.AddWithValue("@name", (object)name ?? DBNull.Value);
+                command.Parameters.AddWithValue("@description", (object)description ?? DBNull.Value);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
 
-            return command.ExecuteNonQuery() > 0;
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         // Whitelist of project columns that are safe to update via UpdateProjectField.
@@ -398,18 +425,21 @@ namespace MultiTerminal.Services
             // Safe to interpolate fieldName here because it passed the whitelist check above
             string sql = $"UPDATE projects SET {fieldName} = @value, updated_at = @updatedAt WHERE id = @id";
 
-            // CA2100 / CA3001: fieldName is whitelist-validated against _allowedProjectFields above (rejected if not present);
-            // all user-supplied values (projectId, paramValue) flow through SQLiteParameter.
-            #pragma warning disable CA2100
-            #pragma warning disable CA3001
-            using var command = new SQLiteCommand(sql, _connection);
-            #pragma warning restore CA3001
-            #pragma warning restore CA2100
-            command.Parameters.AddWithValue("@id", projectId);
-            command.Parameters.AddWithValue("@value", paramValue);
-            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+            lock (_dbLock)
+            {
+                // CA2100 / CA3001: fieldName is whitelist-validated against _allowedProjectFields above (rejected if not present);
+                // all user-supplied values (projectId, paramValue) flow through SQLiteParameter.
+                #pragma warning disable CA2100
+                #pragma warning disable CA3001
+                using var command = new SQLiteCommand(sql, _connection);
+                #pragma warning restore CA3001
+                #pragma warning restore CA2100
+                command.Parameters.AddWithValue("@id", projectId);
+                command.Parameters.AddWithValue("@value", paramValue);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
 
-            return command.ExecuteNonQuery() > 0;
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         /// <summary>
@@ -417,12 +447,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProject(string projectId)
         {
-            const string sql = "DELETE FROM projects WHERE id = @id";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM projects WHERE id = @id";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", projectId);
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", projectId);
 
-            return command.ExecuteNonQuery() > 0;
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         /// <summary>
@@ -430,13 +463,16 @@ namespace MultiTerminal.Services
         /// </summary>
         public int GetProjectTaskCount(string projectId)
         {
-            const string sql = "SELECT COUNT(*) FROM tasks WHERE project_id = @projectId";
+            lock (_dbLock)
+            {
+                const string sql = "SELECT COUNT(*) FROM tasks WHERE project_id = @projectId";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
 
-            var result = command.ExecuteScalar();
-            return result != null ? Convert.ToInt32(result) : 0;
+                var result = command.ExecuteScalar();
+                return result != null ? Convert.ToInt32(result) : 0;
+            }
         }
 
         /// <summary>
@@ -444,10 +480,13 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteAllProjects()
         {
-            const string sql = "DELETE FROM projects";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM projects";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.ExecuteNonQuery();
+                using var command = new SQLiteCommand(sql, _connection);
+                command.ExecuteNonQuery();
+            }
         }
 
         private MultiTerminal.MCPServer.Models.Project ReadProject(SQLiteDataReader reader)
@@ -474,26 +513,29 @@ namespace MultiTerminal.Services
         /// </summary>
         public MultiTerminal.Models.Project GetRichProject(string projectId)
         {
-            const string sql = @"
-                SELECT id, name, description, path, created_by, created_at, updated_at,
-                       source_path, deploy_path, build_output_path, build_command, deploy_command,
-                       launch_command, project_type, current_version, change_log, is_pinned,
-                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                       team_lead, default_terminal, source_control_account_id
-                FROM projects
-                WHERE id = @id
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", projectId);
-            using var reader = command.ExecuteReader();
-
-            if (reader.Read())
+            lock (_dbLock)
             {
-                return ReadRichProject(reader);
-            }
+                const string sql = @"
+                    SELECT id, name, description, path, created_by, created_at, updated_at,
+                           source_path, deploy_path, build_output_path, build_command, deploy_command,
+                           launch_command, project_type, current_version, change_log, is_pinned,
+                           icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
+                           team_lead, default_terminal, source_control_account_id
+                    FROM projects
+                    WHERE id = @id
+                ";
 
-            return null;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                using var reader = command.ExecuteReader();
+
+                if (reader.Read())
+                {
+                    return ReadRichProject(reader);
+                }
+
+                return null;
+            }
         }
 
         /// <summary>
@@ -503,22 +545,25 @@ namespace MultiTerminal.Services
         {
             var projects = new List<MultiTerminal.Models.Project>();
 
-            const string sql = @"
-                SELECT id, name, description, path, created_by, created_at, updated_at,
-                       source_path, deploy_path, build_output_path, build_command, deploy_command,
-                       launch_command, project_type, current_version, change_log, is_pinned,
-                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                       team_lead, default_terminal, source_control_account_id
-                FROM projects
-                ORDER BY is_pinned DESC, created_at DESC
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                projects.Add(ReadRichProject(reader));
+                const string sql = @"
+                    SELECT id, name, description, path, created_by, created_at, updated_at,
+                           source_path, deploy_path, build_output_path, build_command, deploy_command,
+                           launch_command, project_type, current_version, change_log, is_pinned,
+                           icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
+                           team_lead, default_terminal, source_control_account_id
+                    FROM projects
+                    ORDER BY is_pinned DESC, created_at DESC
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
+                {
+                    projects.Add(ReadRichProject(reader));
+                }
             }
 
             return projects;
@@ -539,75 +584,78 @@ namespace MultiTerminal.Services
             // bump), so a null here must NOT erase the SQLite binding. The deliberate
             // "(None)"/clear is applied out-of-band by ProjectDatabase.SetSourceControlAccount
             // (EditProjectDialog) and UpdateProjectField (ProjectPanel), never via this UPSERT.
-            const string sql = @"
-                INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at,
-                       source_path, deploy_path, build_output_path, build_command, deploy_command,
-                       launch_command, project_type, current_version, change_log, is_pinned,
-                       icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                       team_lead, default_terminal, source_control_account_id)
-                VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
-                       @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
-                       @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
-                       @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
-                       @teamLead, @defaultTerminal, @sourceControlAccountId)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = COALESCE(@name, projects.name),
-                    description = COALESCE(@description, projects.description),
-                    path = COALESCE(@path, projects.path),
-                    updated_at = @updatedAt,
-                    source_path = COALESCE(@sourcePath, projects.source_path),
-                    deploy_path = COALESCE(@deployPath, projects.deploy_path),
-                    build_output_path = COALESCE(@buildOutputPath, projects.build_output_path),
-                    build_command = COALESCE(@buildCommand, projects.build_command),
-                    deploy_command = COALESCE(@deployCommand, projects.deploy_command),
-                    launch_command = COALESCE(@launchCommand, projects.launch_command),
-                    project_type = COALESCE(@projectType, projects.project_type),
-                    current_version = COALESCE(@currentVersion, projects.current_version),
-                    change_log = COALESCE(@changeLog, projects.change_log),
-                    is_pinned = @isPinned,
-                    icon = COALESCE(@icon, projects.icon),
-                    icon_color = COALESCE(@iconColor, projects.icon_color),
-                    last_opened_at = COALESCE(@lastOpenedAt, projects.last_opened_at),
-                    git_repo_url = COALESCE(@gitRepoUrl, projects.git_repo_url),
-                    git_default_branch = COALESCE(@gitDefaultBranch, projects.git_default_branch),
-                    git_auto_commit = @gitAutoCommit,
-                    team_lead = COALESCE(@teamLead, projects.team_lead),
-                    default_terminal = COALESCE(@defaultTerminal, projects.default_terminal),
-                    source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id)
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    INSERT INTO projects (id, name, description, path, created_by, created_at, updated_at,
+                           source_path, deploy_path, build_output_path, build_command, deploy_command,
+                           launch_command, project_type, current_version, change_log, is_pinned,
+                           icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
+                           team_lead, default_terminal, source_control_account_id)
+                    VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
+                           @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
+                           @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
+                           @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
+                           @teamLead, @defaultTerminal, @sourceControlAccountId)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = COALESCE(@name, projects.name),
+                        description = COALESCE(@description, projects.description),
+                        path = COALESCE(@path, projects.path),
+                        updated_at = @updatedAt,
+                        source_path = COALESCE(@sourcePath, projects.source_path),
+                        deploy_path = COALESCE(@deployPath, projects.deploy_path),
+                        build_output_path = COALESCE(@buildOutputPath, projects.build_output_path),
+                        build_command = COALESCE(@buildCommand, projects.build_command),
+                        deploy_command = COALESCE(@deployCommand, projects.deploy_command),
+                        launch_command = COALESCE(@launchCommand, projects.launch_command),
+                        project_type = COALESCE(@projectType, projects.project_type),
+                        current_version = COALESCE(@currentVersion, projects.current_version),
+                        change_log = COALESCE(@changeLog, projects.change_log),
+                        is_pinned = @isPinned,
+                        icon = COALESCE(@icon, projects.icon),
+                        icon_color = COALESCE(@iconColor, projects.icon_color),
+                        last_opened_at = COALESCE(@lastOpenedAt, projects.last_opened_at),
+                        git_repo_url = COALESCE(@gitRepoUrl, projects.git_repo_url),
+                        git_default_branch = COALESCE(@gitDefaultBranch, projects.git_default_branch),
+                        git_auto_commit = @gitAutoCommit,
+                        team_lead = COALESCE(@teamLead, projects.team_lead),
+                        default_terminal = COALESCE(@defaultTerminal, projects.default_terminal),
+                        source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id)
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", project.Id);
-            command.Parameters.AddWithValue("@name", project.Name);
-            command.Parameters.AddWithValue("@description", (object)project.Description ?? DBNull.Value);
-            command.Parameters.AddWithValue("@path", (object)project.Path ?? DBNull.Value);
-            command.Parameters.AddWithValue("@createdBy", (object)project.CreatedBy ?? DBNull.Value);
-            command.Parameters.AddWithValue("@createdAt", project.CreatedAt == default ? DateTime.UtcNow : project.CreatedAt);
-            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
-            command.Parameters.AddWithValue("@sourcePath", (object)project.SourcePath ?? DBNull.Value);
-            command.Parameters.AddWithValue("@deployPath", (object)project.DeployPath ?? DBNull.Value);
-            command.Parameters.AddWithValue("@buildOutputPath", (object)project.BuildOutputPath ?? DBNull.Value);
-            command.Parameters.AddWithValue("@buildCommand", (object)project.BuildCommand ?? DBNull.Value);
-            command.Parameters.AddWithValue("@deployCommand", (object)project.DeployCommand ?? DBNull.Value);
-            command.Parameters.AddWithValue("@launchCommand", (object)project.LaunchCommand ?? DBNull.Value);
-            command.Parameters.AddWithValue("@projectType", (object)project.ProjectType ?? DBNull.Value);
-            command.Parameters.AddWithValue("@currentVersion", (object)project.CurrentVersion ?? DBNull.Value);
-            command.Parameters.AddWithValue("@changeLog", (object)project.ChangeLog ?? DBNull.Value);
-            command.Parameters.AddWithValue("@isPinned", project.IsPinned ? 1 : 0);
-            command.Parameters.AddWithValue("@icon", (object)project.Icon ?? DBNull.Value);
-            command.Parameters.AddWithValue("@iconColor", (object)project.IconColor ?? DBNull.Value);
-            command.Parameters.AddWithValue("@lastOpenedAt", project.LastOpenedAt == default ? (object)DBNull.Value : project.LastOpenedAt);
-            command.Parameters.AddWithValue("@gitRepoUrl", (object)project.GitRepoUrl ?? DBNull.Value);
-            command.Parameters.AddWithValue("@gitDefaultBranch", (object)project.GitDefaultBranch ?? DBNull.Value);
-            command.Parameters.AddWithValue("@gitAutoCommit", project.GitAutoCommit ? 1 : 0);
-            command.Parameters.AddWithValue("@teamLead", (object)project.TeamLead ?? DBNull.Value);
-            // Normalize on write so an unrecognized string can never persist — callers
-            // always see a canonical value on read.
-            command.Parameters.AddWithValue("@defaultTerminal",
-                (object)MultiTerminal.Models.TerminalKindHelper.Normalize(project.DefaultTerminal) ?? DBNull.Value);
-            command.Parameters.AddWithValue("@sourceControlAccountId", (object)project.SourceControlAccountId ?? DBNull.Value);
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", project.Id);
+                command.Parameters.AddWithValue("@name", project.Name);
+                command.Parameters.AddWithValue("@description", (object)project.Description ?? DBNull.Value);
+                command.Parameters.AddWithValue("@path", (object)project.Path ?? DBNull.Value);
+                command.Parameters.AddWithValue("@createdBy", (object)project.CreatedBy ?? DBNull.Value);
+                command.Parameters.AddWithValue("@createdAt", project.CreatedAt == default ? DateTime.UtcNow : project.CreatedAt);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@sourcePath", (object)project.SourcePath ?? DBNull.Value);
+                command.Parameters.AddWithValue("@deployPath", (object)project.DeployPath ?? DBNull.Value);
+                command.Parameters.AddWithValue("@buildOutputPath", (object)project.BuildOutputPath ?? DBNull.Value);
+                command.Parameters.AddWithValue("@buildCommand", (object)project.BuildCommand ?? DBNull.Value);
+                command.Parameters.AddWithValue("@deployCommand", (object)project.DeployCommand ?? DBNull.Value);
+                command.Parameters.AddWithValue("@launchCommand", (object)project.LaunchCommand ?? DBNull.Value);
+                command.Parameters.AddWithValue("@projectType", (object)project.ProjectType ?? DBNull.Value);
+                command.Parameters.AddWithValue("@currentVersion", (object)project.CurrentVersion ?? DBNull.Value);
+                command.Parameters.AddWithValue("@changeLog", (object)project.ChangeLog ?? DBNull.Value);
+                command.Parameters.AddWithValue("@isPinned", project.IsPinned ? 1 : 0);
+                command.Parameters.AddWithValue("@icon", (object)project.Icon ?? DBNull.Value);
+                command.Parameters.AddWithValue("@iconColor", (object)project.IconColor ?? DBNull.Value);
+                command.Parameters.AddWithValue("@lastOpenedAt", project.LastOpenedAt == default ? (object)DBNull.Value : project.LastOpenedAt);
+                command.Parameters.AddWithValue("@gitRepoUrl", (object)project.GitRepoUrl ?? DBNull.Value);
+                command.Parameters.AddWithValue("@gitDefaultBranch", (object)project.GitDefaultBranch ?? DBNull.Value);
+                command.Parameters.AddWithValue("@gitAutoCommit", project.GitAutoCommit ? 1 : 0);
+                command.Parameters.AddWithValue("@teamLead", (object)project.TeamLead ?? DBNull.Value);
+                // Normalize on write so an unrecognized string can never persist — callers
+                // always see a canonical value on read.
+                command.Parameters.AddWithValue("@defaultTerminal",
+                    (object)MultiTerminal.Models.TerminalKindHelper.Normalize(project.DefaultTerminal) ?? DBNull.Value);
+                command.Parameters.AddWithValue("@sourceControlAccountId", (object)project.SourceControlAccountId ?? DBNull.Value);
 
-            command.ExecuteNonQuery();
+                command.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -622,15 +670,18 @@ namespace MultiTerminal.Services
             if (string.IsNullOrWhiteSpace(projectId))
                 return false;
 
-            using var command = new SQLiteCommand(
-                "UPDATE projects SET source_control_account_id = @accountId, updated_at = @updatedAt WHERE id = @id",
-                _connection);
-            command.Parameters.AddWithValue("@accountId",
-                string.IsNullOrEmpty(accountId) ? (object)DBNull.Value : accountId);
-            command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
-            command.Parameters.AddWithValue("@id", projectId);
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand(
+                    "UPDATE projects SET source_control_account_id = @accountId, updated_at = @updatedAt WHERE id = @id",
+                    _connection);
+                command.Parameters.AddWithValue("@accountId",
+                    string.IsNullOrEmpty(accountId) ? (object)DBNull.Value : accountId);
+                command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
+                command.Parameters.AddWithValue("@id", projectId);
 
-            return command.ExecuteNonQuery() > 0;
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         private MultiTerminal.Models.Project ReadRichProject(SQLiteDataReader reader)
@@ -678,22 +729,25 @@ namespace MultiTerminal.Services
         {
             var result = new List<(string Id, string DisplayName, string AvatarUrl)>();
 
-            const string sql = @"
-                SELECT id, display_name, avatar_url
-                FROM team_member_profiles
-                WHERE is_team_lead = 1
-                ORDER BY COALESCE(display_name, id) ASC
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                string id = reader.GetString(0);
-                string displayName = reader.IsDBNull(1) ? id : reader.GetString(1);
-                string avatarUrl = reader.IsDBNull(2) ? null : reader.GetString(2);
-                result.Add((id, displayName, avatarUrl));
+                const string sql = @"
+                    SELECT id, display_name, avatar_url
+                    FROM team_member_profiles
+                    WHERE is_team_lead = 1
+                    ORDER BY COALESCE(display_name, id) ASC
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
+                {
+                    string id = reader.GetString(0);
+                    string displayName = reader.IsDBNull(1) ? id : reader.GetString(1);
+                    string avatarUrl = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    result.Add((id, displayName, avatarUrl));
+                }
             }
 
             return result;
@@ -707,22 +761,25 @@ namespace MultiTerminal.Services
         {
             var result = new List<(string Id, string DisplayName, string Role, string PreferredModel)>();
 
-            const string sql = @"
-                SELECT id, display_name, role, preferred_model
-                FROM team_member_profiles
-                ORDER BY COALESCE(display_name, id) ASC
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                string id = reader.GetString(0);
-                string displayName = reader.IsDBNull(1) ? id : reader.GetString(1);
-                string role = reader.IsDBNull(2) ? null : reader.GetString(2);
-                string preferredModel = reader.IsDBNull(3) ? null : reader.GetString(3);
-                result.Add((id, displayName, role, preferredModel));
+                const string sql = @"
+                    SELECT id, display_name, role, preferred_model
+                    FROM team_member_profiles
+                    ORDER BY COALESCE(display_name, id) ASC
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
+                {
+                    string id = reader.GetString(0);
+                    string displayName = reader.IsDBNull(1) ? id : reader.GetString(1);
+                    string role = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    string preferredModel = reader.IsDBNull(3) ? null : reader.GetString(3);
+                    result.Add((id, displayName, role, preferredModel));
+                }
             }
 
             return result;
@@ -739,27 +796,30 @@ namespace MultiTerminal.Services
         {
             var agents = new List<MultiTerminal.Models.ProjectAgent>();
 
-            const string sql = @"
-                SELECT id, project_id, agent_name, role, preferred_model
-                FROM project_agents
-                WHERE project_id = @projectId
-                ORDER BY agent_name
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                agents.Add(new MultiTerminal.Models.ProjectAgent
+                const string sql = @"
+                    SELECT id, project_id, agent_name, role, preferred_model
+                    FROM project_agents
+                    WHERE project_id = @projectId
+                    ORDER BY agent_name
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
                 {
-                    Id = reader.GetInt32(0),
-                    ProjectId = reader.GetString(1),
-                    AgentName = reader.GetString(2),
-                    Role = reader.IsDBNull(3) ? null : reader.GetString(3),
-                    PreferredModel = reader.IsDBNull(4) ? null : reader.GetString(4)
-                });
+                    agents.Add(new MultiTerminal.Models.ProjectAgent
+                    {
+                        Id = reader.GetInt32(0),
+                        ProjectId = reader.GetString(1),
+                        AgentName = reader.GetString(2),
+                        Role = reader.IsDBNull(3) ? null : reader.GetString(3),
+                        PreferredModel = reader.IsDBNull(4) ? null : reader.GetString(4)
+                    });
+                }
             }
 
             return agents;
@@ -770,20 +830,23 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProjectAgent(MultiTerminal.Models.ProjectAgent agent)
         {
-            const string sql = @"
-                INSERT INTO project_agents (project_id, agent_name, role, preferred_model)
-                VALUES (@projectId, @agentName, @role, @preferredModel)
-                ON CONFLICT(project_id, agent_name) DO UPDATE SET
-                    role = @role,
-                    preferred_model = @preferredModel
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    INSERT INTO project_agents (project_id, agent_name, role, preferred_model)
+                    VALUES (@projectId, @agentName, @role, @preferredModel)
+                    ON CONFLICT(project_id, agent_name) DO UPDATE SET
+                        role = @role,
+                        preferred_model = @preferredModel
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", agent.ProjectId);
-            command.Parameters.AddWithValue("@agentName", agent.AgentName);
-            command.Parameters.AddWithValue("@role", (object)agent.Role ?? DBNull.Value);
-            command.Parameters.AddWithValue("@preferredModel", (object)agent.PreferredModel ?? DBNull.Value);
-            command.ExecuteNonQuery();
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", agent.ProjectId);
+                command.Parameters.AddWithValue("@agentName", agent.AgentName);
+                command.Parameters.AddWithValue("@role", (object)agent.Role ?? DBNull.Value);
+                command.Parameters.AddWithValue("@preferredModel", (object)agent.PreferredModel ?? DBNull.Value);
+                command.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -791,12 +854,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProjectAgent(string projectId, string agentName)
         {
-            const string sql = "DELETE FROM project_agents WHERE project_id = @projectId AND agent_name = @agentName";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM project_agents WHERE project_id = @projectId AND agent_name = @agentName";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            command.Parameters.AddWithValue("@agentName", agentName);
-            return command.ExecuteNonQuery() > 0;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                command.Parameters.AddWithValue("@agentName", agentName);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         #endregion
@@ -810,26 +876,29 @@ namespace MultiTerminal.Services
         {
             var servers = new List<MultiTerminal.Models.ProjectMcpServer>();
 
-            const string sql = @"
-                SELECT id, project_id, server_name, is_enabled
-                FROM project_mcp_servers
-                WHERE project_id = @projectId
-                ORDER BY server_name
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                servers.Add(new MultiTerminal.Models.ProjectMcpServer
+                const string sql = @"
+                    SELECT id, project_id, server_name, is_enabled
+                    FROM project_mcp_servers
+                    WHERE project_id = @projectId
+                    ORDER BY server_name
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
                 {
-                    Id = reader.GetInt32(0),
-                    ProjectId = reader.GetString(1),
-                    ServerName = reader.GetString(2),
-                    IsEnabled = reader.GetInt32(3) == 1
-                });
+                    servers.Add(new MultiTerminal.Models.ProjectMcpServer
+                    {
+                        Id = reader.GetInt32(0),
+                        ProjectId = reader.GetString(1),
+                        ServerName = reader.GetString(2),
+                        IsEnabled = reader.GetInt32(3) == 1
+                    });
+                }
             }
 
             return servers;
@@ -840,18 +909,21 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProjectMcpServer(MultiTerminal.Models.ProjectMcpServer server)
         {
-            const string sql = @"
-                INSERT INTO project_mcp_servers (project_id, server_name, is_enabled)
-                VALUES (@projectId, @serverName, @isEnabled)
-                ON CONFLICT(project_id, server_name) DO UPDATE SET
-                    is_enabled = @isEnabled
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    INSERT INTO project_mcp_servers (project_id, server_name, is_enabled)
+                    VALUES (@projectId, @serverName, @isEnabled)
+                    ON CONFLICT(project_id, server_name) DO UPDATE SET
+                        is_enabled = @isEnabled
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", server.ProjectId);
-            command.Parameters.AddWithValue("@serverName", server.ServerName);
-            command.Parameters.AddWithValue("@isEnabled", server.IsEnabled ? 1 : 0);
-            command.ExecuteNonQuery();
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", server.ProjectId);
+                command.Parameters.AddWithValue("@serverName", server.ServerName);
+                command.Parameters.AddWithValue("@isEnabled", server.IsEnabled ? 1 : 0);
+                command.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -859,11 +931,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool UpdateMcpServerEnabled(int id, bool isEnabled)
         {
-            const string sql = "UPDATE project_mcp_servers SET is_enabled = @isEnabled WHERE id = @id";
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", id);
-            command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
-            return command.ExecuteNonQuery() > 0;
+            lock (_dbLock)
+            {
+                const string sql = "UPDATE project_mcp_servers SET is_enabled = @isEnabled WHERE id = @id";
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", id);
+                command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         /// <summary>
@@ -871,12 +946,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProjectMcpServer(string projectId, string serverName)
         {
-            const string sql = "DELETE FROM project_mcp_servers WHERE project_id = @projectId AND server_name = @serverName";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM project_mcp_servers WHERE project_id = @projectId AND server_name = @serverName";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            command.Parameters.AddWithValue("@serverName", serverName);
-            return command.ExecuteNonQuery() > 0;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                command.Parameters.AddWithValue("@serverName", serverName);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         #endregion
@@ -890,27 +968,30 @@ namespace MultiTerminal.Services
         {
             var specialists = new List<MultiTerminal.Models.ProjectSpecialistAgent>();
 
-            const string sql = @"
-                SELECT id, project_id, agent_type, is_enabled, custom_prompt
-                FROM project_specialist_agents
-                WHERE project_id = @projectId
-                ORDER BY agent_type
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                specialists.Add(new MultiTerminal.Models.ProjectSpecialistAgent
+                const string sql = @"
+                    SELECT id, project_id, agent_type, is_enabled, custom_prompt
+                    FROM project_specialist_agents
+                    WHERE project_id = @projectId
+                    ORDER BY agent_type
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
                 {
-                    Id = reader.GetInt32(0),
-                    ProjectId = reader.GetString(1),
-                    AgentType = reader.GetString(2),
-                    IsEnabled = reader.GetInt32(3) == 1,
-                    CustomPrompt = reader.IsDBNull(4) ? null : reader.GetString(4)
-                });
+                    specialists.Add(new MultiTerminal.Models.ProjectSpecialistAgent
+                    {
+                        Id = reader.GetInt32(0),
+                        ProjectId = reader.GetString(1),
+                        AgentType = reader.GetString(2),
+                        IsEnabled = reader.GetInt32(3) == 1,
+                        CustomPrompt = reader.IsDBNull(4) ? null : reader.GetString(4)
+                    });
+                }
             }
 
             return specialists;
@@ -921,20 +1002,23 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProjectSpecialistAgent(MultiTerminal.Models.ProjectSpecialistAgent specialist)
         {
-            const string sql = @"
-                INSERT INTO project_specialist_agents (project_id, agent_type, is_enabled, custom_prompt)
-                VALUES (@projectId, @agentType, @isEnabled, @customPrompt)
-                ON CONFLICT(project_id, agent_type) DO UPDATE SET
-                    is_enabled = @isEnabled,
-                    custom_prompt = @customPrompt
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    INSERT INTO project_specialist_agents (project_id, agent_type, is_enabled, custom_prompt)
+                    VALUES (@projectId, @agentType, @isEnabled, @customPrompt)
+                    ON CONFLICT(project_id, agent_type) DO UPDATE SET
+                        is_enabled = @isEnabled,
+                        custom_prompt = @customPrompt
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", specialist.ProjectId);
-            command.Parameters.AddWithValue("@agentType", specialist.AgentType);
-            command.Parameters.AddWithValue("@isEnabled", specialist.IsEnabled ? 1 : 0);
-            command.Parameters.AddWithValue("@customPrompt", (object)specialist.CustomPrompt ?? DBNull.Value);
-            command.ExecuteNonQuery();
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", specialist.ProjectId);
+                command.Parameters.AddWithValue("@agentType", specialist.AgentType);
+                command.Parameters.AddWithValue("@isEnabled", specialist.IsEnabled ? 1 : 0);
+                command.Parameters.AddWithValue("@customPrompt", (object)specialist.CustomPrompt ?? DBNull.Value);
+                command.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -942,11 +1026,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool UpdateSpecialistAgentEnabled(int id, bool isEnabled)
         {
-            const string sql = "UPDATE project_specialist_agents SET is_enabled = @isEnabled WHERE id = @id";
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", id);
-            command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
-            return command.ExecuteNonQuery() > 0;
+            lock (_dbLock)
+            {
+                const string sql = "UPDATE project_specialist_agents SET is_enabled = @isEnabled WHERE id = @id";
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", id);
+                command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         /// <summary>
@@ -954,12 +1041,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProjectSpecialistAgent(string projectId, string agentType)
         {
-            const string sql = "DELETE FROM project_specialist_agents WHERE project_id = @projectId AND agent_type = @agentType";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM project_specialist_agents WHERE project_id = @projectId AND agent_type = @agentType";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            command.Parameters.AddWithValue("@agentType", agentType);
-            return command.ExecuteNonQuery() > 0;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                command.Parameters.AddWithValue("@agentType", agentType);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         #endregion
@@ -973,27 +1063,30 @@ namespace MultiTerminal.Services
         {
             var paths = new List<MultiTerminal.Models.ProjectPath>();
 
-            const string sql = @"
-                SELECT id, project_id, path_type, path_value, description
-                FROM project_paths
-                WHERE project_id = @projectId
-                ORDER BY path_type
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                paths.Add(new MultiTerminal.Models.ProjectPath
+                const string sql = @"
+                    SELECT id, project_id, path_type, path_value, description
+                    FROM project_paths
+                    WHERE project_id = @projectId
+                    ORDER BY path_type
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
                 {
-                    Id = reader.GetInt32(0),
-                    ProjectId = reader.GetString(1),
-                    PathType = reader.GetString(2),
-                    PathValue = reader.GetString(3),
-                    Description = reader.IsDBNull(4) ? null : reader.GetString(4)
-                });
+                    paths.Add(new MultiTerminal.Models.ProjectPath
+                    {
+                        Id = reader.GetInt32(0),
+                        ProjectId = reader.GetString(1),
+                        PathType = reader.GetString(2),
+                        PathValue = reader.GetString(3),
+                        Description = reader.IsDBNull(4) ? null : reader.GetString(4)
+                    });
+                }
             }
 
             return paths;
@@ -1004,35 +1097,38 @@ namespace MultiTerminal.Services
         /// </summary>
         public int SaveProjectPath(MultiTerminal.Models.ProjectPath path)
         {
-            if (path.Id > 0)
+            lock (_dbLock)
             {
-                const string updateSql = @"
-                    UPDATE project_paths
-                    SET path_type = @pathType, path_value = @pathValue, description = @description
-                    WHERE id = @id AND project_id = @projectId
-                ";
-                using var updateCommand = new SQLiteCommand(updateSql, _connection);
-                updateCommand.Parameters.AddWithValue("@id", path.Id);
-                updateCommand.Parameters.AddWithValue("@projectId", path.ProjectId);
-                updateCommand.Parameters.AddWithValue("@pathType", path.PathType);
-                updateCommand.Parameters.AddWithValue("@pathValue", path.PathValue);
-                updateCommand.Parameters.AddWithValue("@description", (object)path.Description ?? DBNull.Value);
-                updateCommand.ExecuteNonQuery();
-                return path.Id;
-            }
-            else
-            {
-                const string insertSql = @"
-                    INSERT INTO project_paths (project_id, path_type, path_value, description)
-                    VALUES (@projectId, @pathType, @pathValue, @description);
-                    SELECT last_insert_rowid();
-                ";
-                using var insertCommand = new SQLiteCommand(insertSql, _connection);
-                insertCommand.Parameters.AddWithValue("@projectId", path.ProjectId);
-                insertCommand.Parameters.AddWithValue("@pathType", path.PathType);
-                insertCommand.Parameters.AddWithValue("@pathValue", path.PathValue);
-                insertCommand.Parameters.AddWithValue("@description", (object)path.Description ?? DBNull.Value);
-                return Convert.ToInt32(insertCommand.ExecuteScalar());
+                if (path.Id > 0)
+                {
+                    const string updateSql = @"
+                        UPDATE project_paths
+                        SET path_type = @pathType, path_value = @pathValue, description = @description
+                        WHERE id = @id AND project_id = @projectId
+                    ";
+                    using var updateCommand = new SQLiteCommand(updateSql, _connection);
+                    updateCommand.Parameters.AddWithValue("@id", path.Id);
+                    updateCommand.Parameters.AddWithValue("@projectId", path.ProjectId);
+                    updateCommand.Parameters.AddWithValue("@pathType", path.PathType);
+                    updateCommand.Parameters.AddWithValue("@pathValue", path.PathValue);
+                    updateCommand.Parameters.AddWithValue("@description", (object)path.Description ?? DBNull.Value);
+                    updateCommand.ExecuteNonQuery();
+                    return path.Id;
+                }
+                else
+                {
+                    const string insertSql = @"
+                        INSERT INTO project_paths (project_id, path_type, path_value, description)
+                        VALUES (@projectId, @pathType, @pathValue, @description);
+                        SELECT last_insert_rowid();
+                    ";
+                    using var insertCommand = new SQLiteCommand(insertSql, _connection);
+                    insertCommand.Parameters.AddWithValue("@projectId", path.ProjectId);
+                    insertCommand.Parameters.AddWithValue("@pathType", path.PathType);
+                    insertCommand.Parameters.AddWithValue("@pathValue", path.PathValue);
+                    insertCommand.Parameters.AddWithValue("@description", (object)path.Description ?? DBNull.Value);
+                    return Convert.ToInt32(insertCommand.ExecuteScalar());
+                }
             }
         }
 
@@ -1041,11 +1137,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProjectPath(int pathId)
         {
-            const string sql = "DELETE FROM project_paths WHERE id = @id";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM project_paths WHERE id = @id";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", pathId);
-            return command.ExecuteNonQuery() > 0;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", pathId);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         #endregion
@@ -1059,27 +1158,30 @@ namespace MultiTerminal.Services
         {
             var prompts = new List<MultiTerminal.Models.ProjectPromptEntry>();
 
-            const string sql = @"
-                SELECT id, project_id, prompt_type, prompt_text, display_order
-                FROM project_prompts
-                WHERE project_id = @projectId
-                ORDER BY display_order, id
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                prompts.Add(new MultiTerminal.Models.ProjectPromptEntry
+                const string sql = @"
+                    SELECT id, project_id, prompt_type, prompt_text, display_order
+                    FROM project_prompts
+                    WHERE project_id = @projectId
+                    ORDER BY display_order, id
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
                 {
-                    Id = reader.GetInt32(0),
-                    ProjectId = reader.GetString(1),
-                    PromptType = reader.GetString(2),
-                    PromptText = reader.GetString(3),
-                    DisplayOrder = reader.IsDBNull(4) ? 0 : reader.GetInt32(4)
-                });
+                    prompts.Add(new MultiTerminal.Models.ProjectPromptEntry
+                    {
+                        Id = reader.GetInt32(0),
+                        ProjectId = reader.GetString(1),
+                        PromptType = reader.GetString(2),
+                        PromptText = reader.GetString(3),
+                        DisplayOrder = reader.IsDBNull(4) ? 0 : reader.GetInt32(4)
+                    });
+                }
             }
 
             return prompts;
@@ -1090,35 +1192,38 @@ namespace MultiTerminal.Services
         /// </summary>
         public int SaveProjectPrompt(MultiTerminal.Models.ProjectPromptEntry prompt)
         {
-            if (prompt.Id > 0)
+            lock (_dbLock)
             {
-                const string updateSql = @"
-                    UPDATE project_prompts
-                    SET prompt_type = @promptType, prompt_text = @promptText, display_order = @displayOrder
-                    WHERE id = @id AND project_id = @projectId
-                ";
-                using var updateCommand = new SQLiteCommand(updateSql, _connection);
-                updateCommand.Parameters.AddWithValue("@id", prompt.Id);
-                updateCommand.Parameters.AddWithValue("@projectId", prompt.ProjectId);
-                updateCommand.Parameters.AddWithValue("@promptType", prompt.PromptType);
-                updateCommand.Parameters.AddWithValue("@promptText", prompt.PromptText);
-                updateCommand.Parameters.AddWithValue("@displayOrder", prompt.DisplayOrder);
-                updateCommand.ExecuteNonQuery();
-                return prompt.Id;
-            }
-            else
-            {
-                const string insertSql = @"
-                    INSERT INTO project_prompts (project_id, prompt_type, prompt_text, display_order)
-                    VALUES (@projectId, @promptType, @promptText, @displayOrder);
-                    SELECT last_insert_rowid();
-                ";
-                using var insertCommand = new SQLiteCommand(insertSql, _connection);
-                insertCommand.Parameters.AddWithValue("@projectId", prompt.ProjectId);
-                insertCommand.Parameters.AddWithValue("@promptType", prompt.PromptType);
-                insertCommand.Parameters.AddWithValue("@promptText", prompt.PromptText);
-                insertCommand.Parameters.AddWithValue("@displayOrder", prompt.DisplayOrder);
-                return Convert.ToInt32(insertCommand.ExecuteScalar());
+                if (prompt.Id > 0)
+                {
+                    const string updateSql = @"
+                        UPDATE project_prompts
+                        SET prompt_type = @promptType, prompt_text = @promptText, display_order = @displayOrder
+                        WHERE id = @id AND project_id = @projectId
+                    ";
+                    using var updateCommand = new SQLiteCommand(updateSql, _connection);
+                    updateCommand.Parameters.AddWithValue("@id", prompt.Id);
+                    updateCommand.Parameters.AddWithValue("@projectId", prompt.ProjectId);
+                    updateCommand.Parameters.AddWithValue("@promptType", prompt.PromptType);
+                    updateCommand.Parameters.AddWithValue("@promptText", prompt.PromptText);
+                    updateCommand.Parameters.AddWithValue("@displayOrder", prompt.DisplayOrder);
+                    updateCommand.ExecuteNonQuery();
+                    return prompt.Id;
+                }
+                else
+                {
+                    const string insertSql = @"
+                        INSERT INTO project_prompts (project_id, prompt_type, prompt_text, display_order)
+                        VALUES (@projectId, @promptType, @promptText, @displayOrder);
+                        SELECT last_insert_rowid();
+                    ";
+                    using var insertCommand = new SQLiteCommand(insertSql, _connection);
+                    insertCommand.Parameters.AddWithValue("@projectId", prompt.ProjectId);
+                    insertCommand.Parameters.AddWithValue("@promptType", prompt.PromptType);
+                    insertCommand.Parameters.AddWithValue("@promptText", prompt.PromptText);
+                    insertCommand.Parameters.AddWithValue("@displayOrder", prompt.DisplayOrder);
+                    return Convert.ToInt32(insertCommand.ExecuteScalar());
+                }
             }
         }
 
@@ -1127,11 +1232,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProjectPrompt(int promptId)
         {
-            const string sql = "DELETE FROM project_prompts WHERE id = @id";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM project_prompts WHERE id = @id";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", promptId);
-            return command.ExecuteNonQuery() > 0;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", promptId);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         #endregion
@@ -1163,17 +1271,20 @@ namespace MultiTerminal.Services
         {
             var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            const string sql = @"
-                SELECT server_name FROM project_mcp_servers
-                WHERE project_id = @projectId AND is_enabled = 1
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    SELECT server_name FROM project_mcp_servers
+                    WHERE project_id = @projectId AND is_enabled = 1
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
 
-            while (reader.Read())
-                result.Add(reader.GetString(0));
+                while (reader.Read())
+                    result.Add(reader.GetString(0));
+            }
 
             return result;
         }
@@ -1189,26 +1300,29 @@ namespace MultiTerminal.Services
         {
             var skills = new List<MultiTerminal.Models.ProjectSkill>();
 
-            const string sql = @"
-                SELECT id, project_id, skill_name, is_enabled
-                FROM project_skills
-                WHERE project_id = @projectId
-                ORDER BY skill_name
-            ";
-
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            using var reader = command.ExecuteReader();
-
-            while (reader.Read())
+            lock (_dbLock)
             {
-                skills.Add(new MultiTerminal.Models.ProjectSkill
+                const string sql = @"
+                    SELECT id, project_id, skill_name, is_enabled
+                    FROM project_skills
+                    WHERE project_id = @projectId
+                    ORDER BY skill_name
+                ";
+
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                using var reader = command.ExecuteReader();
+
+                while (reader.Read())
                 {
-                    Id = reader.GetInt32(0),
-                    ProjectId = reader.GetString(1),
-                    SkillName = reader.GetString(2),
-                    IsEnabled = reader.GetInt32(3) == 1
-                });
+                    skills.Add(new MultiTerminal.Models.ProjectSkill
+                    {
+                        Id = reader.GetInt32(0),
+                        ProjectId = reader.GetString(1),
+                        SkillName = reader.GetString(2),
+                        IsEnabled = reader.GetInt32(3) == 1
+                    });
+                }
             }
 
             return skills;
@@ -1219,18 +1333,21 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProjectSkill(MultiTerminal.Models.ProjectSkill skill)
         {
-            const string sql = @"
-                INSERT INTO project_skills (project_id, skill_name, is_enabled)
-                VALUES (@projectId, @skillName, @isEnabled)
-                ON CONFLICT(project_id, skill_name) DO UPDATE SET
-                    is_enabled = @isEnabled
-            ";
+            lock (_dbLock)
+            {
+                const string sql = @"
+                    INSERT INTO project_skills (project_id, skill_name, is_enabled)
+                    VALUES (@projectId, @skillName, @isEnabled)
+                    ON CONFLICT(project_id, skill_name) DO UPDATE SET
+                        is_enabled = @isEnabled
+                ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", skill.ProjectId);
-            command.Parameters.AddWithValue("@skillName", skill.SkillName);
-            command.Parameters.AddWithValue("@isEnabled", skill.IsEnabled ? 1 : 0);
-            command.ExecuteNonQuery();
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", skill.ProjectId);
+                command.Parameters.AddWithValue("@skillName", skill.SkillName);
+                command.Parameters.AddWithValue("@isEnabled", skill.IsEnabled ? 1 : 0);
+                command.ExecuteNonQuery();
+            }
         }
 
         /// <summary>
@@ -1238,11 +1355,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool UpdateSkillEnabled(int id, bool isEnabled)
         {
-            const string sql = "UPDATE project_skills SET is_enabled = @isEnabled WHERE id = @id";
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@id", id);
-            command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
-            return command.ExecuteNonQuery() > 0;
+            lock (_dbLock)
+            {
+                const string sql = "UPDATE project_skills SET is_enabled = @isEnabled WHERE id = @id";
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@id", id);
+                command.Parameters.AddWithValue("@isEnabled", isEnabled ? 1 : 0);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         /// <summary>
@@ -1250,12 +1370,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProjectSkill(string projectId, string skillName)
         {
-            const string sql = "DELETE FROM project_skills WHERE project_id = @projectId AND skill_name = @skillName";
+            lock (_dbLock)
+            {
+                const string sql = "DELETE FROM project_skills WHERE project_id = @projectId AND skill_name = @skillName";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@projectId", projectId);
-            command.Parameters.AddWithValue("@skillName", skillName);
-            return command.ExecuteNonQuery() > 0;
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@projectId", projectId);
+                command.Parameters.AddWithValue("@skillName", skillName);
+                return command.ExecuteNonQuery() > 0;
+            }
         }
 
         #endregion

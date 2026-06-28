@@ -16,6 +16,20 @@ MainForm.cs (5.2K LOC) - UI Host, 11 WebView2 panels
   MCP Server (Node.js) - 90 tools at %APPDATA%/multiterminal/mcp
 ```
 
+## Code Graph Auto-Indexing
+
+`Services/CodeGraphWatcher.cs` keeps the Roslyn code graph fresh automatically: it watches every registered C# project root (top-level `*.csproj`) for `.cs` changes and runs a **debounced full reindex**, plus a **startup staleness sweep** (and the same one-time bootstrap when a project is registered mid-session) that heals an already-stale or never-indexed graph. Sweep/bootstrap roots SKIP-if-fresh (no needless reindex of an up-to-date graph); real `.cs` edits defer-and-retry so they're never lost. All reindexes — watcher AND the manual `POST /api/code-graph/index` / `index_code_graph` MCP tool — funnel through `Services/CodeGraphIndexCoordinator.cs` (a single global `SemaphoreSlim(1,1)`) so two non-atomic rebuilds can't corrupt the `cg_` tables on the shared SQLite connection. A **per-project freshness floor** (`project:{name}:last_indexed` metadata) prevents thrash without one project suppressing another. Constructed + `Start()`ed in `MainForm` next to `_teamWatcher`; disposed before the DB.
+
+Tuning env vars (all optional; `MULTITERMINAL_*` convention, read once at startup):
+
+| Var | Default | Range | Effect |
+|-----|---------|-------|--------|
+| `MULTITERMINAL_CODEGRAPH_WATCH` | on | `0`/`false`/`off`/`no`/`disabled` disable (case-insensitive); `1`/`true`/`on`/`yes`/`enabled` enable | Master switch; when off, no watchers install. Unrecognized values log a warning and are treated as on. |
+| `MULTITERMINAL_CODEGRAPH_DEBOUNCE_MS` | `12000` | clamped to `[3000, 600000]` | Quiet window after the last `.cs` change before a reindex fires. |
+| `MULTITERMINAL_CODEGRAPH_MIN_INTERVAL_MS` | `300000` | clamped to `[0, 86400000]` (0 disables floor) | Per-project freshness floor — skip/defer reindex if the project was indexed within this window. |
+
+Present-but-unparseable or clamped values are logged (`DebugLogService` "CodeGraphWatcher") so a typo is distinguishable from intent.
+
 ## Critical Files
 
 | File | LOC | Role |

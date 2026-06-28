@@ -163,9 +163,8 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("index")]
         public IActionResult Index([FromBody] IndexRequest request)
         {
-            var db = GetDb();
-            var q = GetQuery();
-            if (db == null || q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            var coordinator = _broker.CodeGraphIndexCoordinator;
+            if (coordinator == null) return StatusCode(503, new { error = "CodeGraph not available" });
             if (request == null) return BadRequest(new { error = "request body is required" });
             var directory = SafeProjectRoot(request.Directory);
             if (directory == null)
@@ -173,8 +172,9 @@ namespace MultiTerminal.API.Controllers
 
             try
             {
-                var indexer = new CSharpCodeGraphIndexer(db, q);
-                var result = indexer.IndexDirectory(directory, request.ProjectName);
+                // Route through the coordinator so this manual reindex is serialized against the
+                // background CodeGraphWatcher (and any other manual trigger) on the shared connection.
+                var result = coordinator.Index(directory, request.ProjectName);
                 return Ok(new
                 {
                     success = true,

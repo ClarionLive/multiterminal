@@ -303,6 +303,19 @@ namespace MultiTerminal.Services
             return result != null ? result.ToString() : null;
         }
 
+        // Per-project last_indexed timestamp, keyed by the STABLE project name rather than the
+        // autoincrement id. The indexer mints a fresh id every reindex (ClearProject deleteProjectRow
+        // + InsertProject), so an id-keyed metadata row would orphan on each pass and leak forever;
+        // name-keying makes the row idempotent under INSERT OR REPLACE. One owner of the key format
+        // so the indexer (writer) and CodeGraphWatcher (reader) can't drift.
+        private static string ProjectLastIndexedKey(string projectName) => "project:" + projectName + ":last_indexed";
+
+        public void SetProjectLastIndexed(string projectName, string isoUtcTimestamp)
+            => SetMetadata(ProjectLastIndexedKey(projectName), isoUtcTimestamp);
+
+        public string GetProjectLastIndexed(string projectName)
+            => GetMetadata(ProjectLastIndexedKey(projectName));
+
         // --- Transactions ---
 
         public SQLiteTransaction BeginTransaction()

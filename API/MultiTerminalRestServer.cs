@@ -29,6 +29,10 @@ namespace MultiTerminal.API
         private SpawnService _spawnService;
         private TerminalStreamService _terminalStreamService;
         private CompanionProcessManager _companionProcessManager;
+        // G8: MainForm's ProjectService instance, supplied so the REST DI shares the ONE instance the
+        // CodeGraphWatcher subscribes to (instead of the container creating a second). Owned/disposed
+        // by MainForm — the container does not dispose instances it didn't create.
+        private readonly MultiTerminal.Services.ProjectService _externalProjectService;
         private MultiTerminal.Services.Presence.PresenceAdapter _presenceAdapter;
         private bool _isDisposed;
 
@@ -88,13 +92,19 @@ namespace MultiTerminal.API
         /// </summary>
         public event EventHandler<Exception> ServerError;
 
-        public MultiTerminalRestServer(int port = 5050)
+        public MultiTerminalRestServer(int port, MultiTerminal.Services.ProjectService projectService)
         {
             _port = port;
             _broker = new MessageBroker();
             _poolCoordinator = new PoolCoordinator();
             _spawnService = new SpawnService();
             _companionProcessManager = new CompanionProcessManager();
+            // Required (G8): the REST DI must share MainForm's single ProjectService instance so
+            // project-creation events reach the CodeGraphWatcher. Fail fast rather than silently
+            // letting DI construct a second, deaf instance.
+            _externalProjectService = projectService
+                ?? throw new ArgumentNullException(nameof(projectService),
+                    "ProjectService must be supplied so the REST DI shares MainForm's single instance (G8).");
         }
 
         /// <summary>
@@ -136,7 +146,13 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<SummaryService>();
                 builder.Services.AddSingleton<StaleTaskService>();
                 builder.Services.AddSingleton<ComplexityDetector>();
-                builder.Services.AddSingleton<MultiTerminal.Services.ProjectService>();
+                // G8: register MainForm's existing ProjectService instance (not a DI-created second
+                // one) so broker.ProjectService — and every REST controller / broker path that fires
+                // ProjectUpdated etc. — lands on the SAME instance the CodeGraphWatcher subscribes to.
+                // Registering an existing instance means the container does NOT own its disposal
+                // (mirrors _broker/_companionProcessManager above), so MainForm keeps single ownership
+                // and there's no double-dispose. The ctor guarantees _externalProjectService is non-null.
+                builder.Services.AddSingleton(_externalProjectService);
                 builder.Services.AddSingleton<MultiTerminal.Services.VersioningService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.ChangelogService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.ProjectDatabase>();
@@ -211,8 +227,12 @@ namespace MultiTerminal.API
                 var changelogService = app.Services.GetRequiredService<MultiTerminal.Services.ChangelogService>();
                 _broker.ChangelogService = changelogService;
 
-                // Wire up ProjectService to MessageBroker for .claude/project.json management
-                var projectService = app.Services.GetRequiredService<MultiTerminal.Services.ProjectService>();
+                // Wire up ProjectService to MessageBroker for .claude/project.json management.
+                // It's MainForm's instance (passed into this server's ctor and DI-registered above), so
+                // use it directly rather than round-tripping through DI — broker.ProjectService ===
+                // MainForm._projectService === the instance the CodeGraphWatcher subscribes to, so
+                // every creation path now notifies the watcher.
+                var projectService = _externalProjectService;
                 _broker.ProjectService = projectService;
 
                 // Wire up ActivityFeedService to MessageBroker so hook-generated events reach the UI

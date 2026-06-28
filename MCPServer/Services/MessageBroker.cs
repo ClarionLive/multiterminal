@@ -954,6 +954,14 @@ namespace MultiTerminal.MCPServer.Services
         public MultiTerminal.Services.CodeGraphQuery CodeGraphQuery { get; set; }
 
         /// <summary>
+        /// Serializes all Code Graph reindexes (manual REST trigger + background CodeGraphWatcher)
+        /// through a single global permit so the non-atomic indexer can't corrupt the cg_ tables by
+        /// running two rebuilds concurrently on the shared SQLite connection.
+        /// Set via DI after broker is created.
+        /// </summary>
+        public MultiTerminal.Services.CodeGraphIndexCoordinator CodeGraphIndexCoordinator { get; set; }
+
+        /// <summary>
         /// Wiki generator service — produces per-subsystem markdown articles from the code graph + code digests.
         /// Set via DI after broker is created.
         /// </summary>
