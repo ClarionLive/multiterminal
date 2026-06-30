@@ -6109,31 +6109,7 @@ namespace MultiTerminal.Services
         /// empty tabs.
         /// </summary>
         private static bool LooksLikeWorktreePath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            var segs = path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
-            for (int i = 0; i < segs.Length - 1; i++)
-            {
-                bool isWorktreesDir =
-                    segs[i].Equals("worktrees", StringComparison.OrdinalIgnoreCase) ||
-                    segs[i].EndsWith("-worktrees", StringComparison.OrdinalIgnoreCase);
-                if (isWorktreesDir && IsWorktreeIdSegment(segs[i + 1]))
-                    return true;
-            }
-            return false;
-        }
-
-        /// <summary>True when a path segment is an 8-hex MT worktree id (optionally "&lt;id&gt;--&lt;slug&gt;").</summary>
-        private static bool IsWorktreeIdSegment(string seg)
-        {
-            if (string.IsNullOrEmpty(seg)) return false;
-            int dash = seg.IndexOf("--", StringComparison.Ordinal);
-            string id = dash >= 0 ? seg.Substring(0, dash) : seg;
-            if (id.Length != 8) return false;
-            foreach (char c in id)
-                if (!Uri.IsHexDigit(c)) return false;
-            return true;
-        }
+            => WorktreeLayout.LooksLikeWorktreePath(path);
 
         /// <summary>
         /// One-time migration: rewrite every project_note_tabs.project_path to its

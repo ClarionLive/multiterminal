@@ -192,6 +192,20 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(project.Path))
                 throw new ArgumentException("Project path is required", nameof(project));
 
+            // Guard the canonical project path at the source (task 19d0d867): if a caller passes a
+            // git-worktree directory (e.g. create_project / the New Project dialog invoked from a
+            // worktree cwd), rewrite it to the stable repo root BEFORE we write .claude/project.json
+            // and upsert into SQLite. A worktree path is ephemeral — once pruned the project goes
+            // invisible to CodeGraphWatcher and every other path-dependent feature. The DB layer
+            // (ProjectDatabase) enforces this too as a chokepoint; normalizing here additionally
+            // keeps the on-disk project.json under the durable root rather than the worktree.
+            if (WorktreeLayout.TryResolveStableProjectPath(project.Path, project.SourcePath, out var canonicalRoot))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ProjectService] Canonicalized worktree path for project '{project.Name}': '{project.Path}' -> '{canonicalRoot}'");
+                project.Path = canonicalRoot;
+            }
+
             // Ensure .claude folder exists
             string claudeFolder = Path.Combine(project.Path, ".claude");
             // CA3003: project.Path is an app-managed Project object path, assigned at

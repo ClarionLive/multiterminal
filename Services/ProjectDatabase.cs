@@ -80,6 +80,65 @@ namespace MultiTerminal.Services
 
             // Drop the mcp_registry table — gateway is now the source of truth for server catalog
             MigrateDropMcpRegistry();
+
+            // One-time repair: heal any projects.path that points at a git-worktree directory
+            // (written before the canonical-path write-guard existed). Task 19d0d867.
+            MigrateRepairOrphanedWorktreePaths();
+        }
+
+        /// <summary>
+        /// One-time, idempotent repair (task 19d0d867): rewrite any <c>projects.path</c> that points
+        /// at a git-worktree directory back to its stable repo root. A worktree path is ephemeral —
+        /// once the worktree is pruned the project becomes invisible to <see cref="CodeGraphWatcher"/>
+        /// and every other path-dependent feature (the watcher's <c>Directory.Exists</c> gate skipped
+        /// it silently). The write-guard (<see cref="CanonicalizeProjectPath"/>) stops new worktree
+        /// paths from being persisted; this sweep heals rows written before that guard existed.
+        ///
+        /// <para>Idempotent: re-running finds nothing once paths are canonical. Only rewrites when a
+        /// stable repo root is resolvable (validated to contain <c>.git</c>); a worktree whose repo
+        /// root is also gone is left untouched and logged rather than guessed at.</para>
+        /// </summary>
+        private void MigrateRepairOrphanedWorktreePaths()
+        {
+            try
+            {
+                var rows = new List<(string Id, string Name, string Path, string SourcePath)>();
+                using (var sel = new SQLiteCommand(
+                    "SELECT id, name, path, source_path FROM projects WHERE path IS NOT NULL AND path <> ''", _connection))
+                using (var r = sel.ExecuteReader())
+                {
+                    while (r.Read())
+                        rows.Add((r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetString(2),
+                            r.IsDBNull(3) ? null : r.GetString(3)));
+                }
+                if (rows.Count == 0) return;
+
+                int repaired = 0;
+                foreach (var row in rows)
+                {
+                    // CanonicalizeProjectPath returns the input unchanged for non-worktree paths and
+                    // for worktree paths with no resolvable target (it logs the latter as a warning).
+                    string target = CanonicalizeProjectPath(row.Path, row.SourcePath, row.Id, row.Name);
+                    if (string.Equals(target, row.Path, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    using var upd = new SQLiteCommand(
+                        "UPDATE projects SET path = @p, updated_at = @u WHERE id = @id", _connection);
+                    upd.Parameters.AddWithValue("@p", target);
+                    upd.Parameters.AddWithValue("@u", DateTime.UtcNow);
+                    upd.Parameters.AddWithValue("@id", row.Id);
+                    upd.ExecuteNonQuery();
+                    repaired++;
+                }
+
+                if (repaired > 0)
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[ProjectDatabase] Worktree-path migration: repaired {repaired} of {rows.Count} project path(s).");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ProjectDatabase] MigrateRepairOrphanedWorktreePaths failed: {ex.Message}");
+            }
         }
 
         private void CreateSchema()
@@ -318,7 +377,9 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@id", project.Id);
                 command.Parameters.AddWithValue("@name", project.Name);
                 command.Parameters.AddWithValue("@description", (object)project.Description ?? DBNull.Value);
-                command.Parameters.AddWithValue("@path", (object)project.Path ?? DBNull.Value);
+                // 5-column model carries no source_path; repo-root derivation is the only signal.
+                command.Parameters.AddWithValue("@path",
+                    (object)CanonicalizeProjectPath(project.Path, null, project.Id, project.Name) ?? DBNull.Value);
                 command.Parameters.AddWithValue("@createdBy", (object)project.CreatedBy ?? DBNull.Value);
                 command.Parameters.AddWithValue("@createdAt", project.CreatedAt);
                 command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);
@@ -416,6 +477,15 @@ namespace MultiTerminal.Services
             {
                 bool boolVal = value == "true" || value == "1";
                 paramValue = boolVal ? 1 : 0;
+            }
+            else if (string.Equals(fieldName, "path", StringComparison.OrdinalIgnoreCase))
+            {
+                // Guard the canonical path column: a worktree path must never be persisted here
+                // (task 19d0d867). Load the row's existing source_path so a csproj-in-subfolder
+                // project canonicalizes to its real subfolder (within the repo) instead of the bare,
+                // unwatchable repo root. projectName is unavailable here; the id traces the correction.
+                string existingSourcePath = ReadProjectSourcePath(projectId);
+                paramValue = (object)CanonicalizeProjectPath(value, existingSourcePath, projectId, projectId) ?? DBNull.Value;
             }
             else
             {
@@ -573,6 +643,53 @@ namespace MultiTerminal.Services
         /// Save (upsert) the full rich project record including all new enhanced columns.
         /// Used by ProjectContextService and ProjectJsonMigrationService.
         /// </summary>
+        /// <summary>
+        /// Guards the canonical <c>projects.path</c> column: when <paramref name="path"/> is a
+        /// git-worktree directory (current <c>.../.claude/worktrees/&lt;id&gt;</c> or a legacy
+        /// layout), rewrite it to a STABLE path — preferring <paramref name="sourcePath"/>, else the
+        /// derived repo root (see <see cref="WorktreeLayout.TryResolveStableProjectPath"/>). A
+        /// worktree path is ephemeral — once the worktree is pruned (e.g. on task completion) the
+        /// project silently becomes invisible to every path-dependent feature (CodeGraphWatcher's
+        /// <c>Directory.Exists</c> eligibility gate, etc.). The canonical path must always be the
+        /// durable project root; the active worktree is tracked separately by the broker
+        /// (<c>get_active_worktree</c>). A correction is logged (not silent) so the original
+        /// injecting caller can be traced. Task 19d0d867.
+        /// </summary>
+        /// <summary>
+        /// Reads a project's stored <c>source_path</c> by id (null if unset/not found). Used by the
+        /// single-field <see cref="UpdateProjectField"/> path-guard so a worktree path can be
+        /// canonicalized to the project's real subfolder, not just the bare repo root. Task 19d0d867.
+        /// </summary>
+        private string ReadProjectSourcePath(string projectId)
+        {
+            lock (_dbLock)
+            {
+                using var command = new SQLiteCommand("SELECT source_path FROM projects WHERE id = @id", _connection);
+                command.Parameters.AddWithValue("@id", projectId);
+                var result = command.ExecuteScalar();
+                return (result == null || result == DBNull.Value) ? null : (string)result;
+            }
+        }
+
+        private static string CanonicalizeProjectPath(string path, string sourcePath, string projectId, string projectName)
+        {
+            if (WorktreeLayout.TryResolveStableProjectPath(path, sourcePath, out var stable))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ProjectDatabase] Canonicalized worktree path for project '{projectName}' ({projectId}): '{path}' -> '{stable}'");
+                return stable;
+            }
+
+            // A worktree path we couldn't resolve to a stable target — surface it rather than
+            // persisting a vanishing path silently.
+            if (WorktreeLayout.LooksLikeWorktreePath(path))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[ProjectDatabase] WARNING: project '{projectName}' ({projectId}) path is a worktree path with no resolvable stable root; persisting as-is: '{path}'");
+            }
+            return path;
+        }
+
         public void SaveRichProject(MultiTerminal.Models.Project project)
         {
             // COALESCE preserves existing non-null values when the incoming project has nulls.
@@ -627,7 +744,8 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@id", project.Id);
                 command.Parameters.AddWithValue("@name", project.Name);
                 command.Parameters.AddWithValue("@description", (object)project.Description ?? DBNull.Value);
-                command.Parameters.AddWithValue("@path", (object)project.Path ?? DBNull.Value);
+                command.Parameters.AddWithValue("@path",
+                    (object)CanonicalizeProjectPath(project.Path, project.SourcePath, project.Id, project.Name) ?? DBNull.Value);
                 command.Parameters.AddWithValue("@createdBy", (object)project.CreatedBy ?? DBNull.Value);
                 command.Parameters.AddWithValue("@createdAt", project.CreatedAt == default ? DateTime.UtcNow : project.CreatedAt);
                 command.Parameters.AddWithValue("@updatedAt", DateTime.UtcNow);

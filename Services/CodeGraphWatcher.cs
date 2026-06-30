@@ -284,7 +284,27 @@ namespace MultiTerminal.Services
                 try { root = Path.GetFullPath(p.Path); }
                 catch { continue; }
 
-                if (!Directory.Exists(root)) continue;
+                // Self-heal (task 19d0d867): a git-worktree path must never be treated as the
+                // canonical root. Map it to its STABLE on-disk equivalent (repo root, with any
+                // worktree-subdir suffix re-rooted under it — so a csproj-in-subfolder project still
+                // lands on a watchable path) so the project stays watched even after its worktree is
+                // pruned. NOTE: ProjectRegistryEntry carries no source_path, so unlike the write-guard
+                // (which prefers source_path) the watcher uses path-derivation only — this is
+                // defense-in-depth; the write-guard + startup migration are the durable repair.
+                if (WorktreeLayout.TryMapWorktreePath(root, out _, out var stableRoot))
+                {
+                    LogInfo($"Project '{p.Name}' is registered at a worktree path '{root}'; watching stable path '{stableRoot}' instead.");
+                    root = stableRoot;
+                }
+
+                // Previously skipped silently — the orphaned-worktree bug hid here (no error, no
+                // log). Log so a missing root (pruned worktree whose repo root couldn't be derived,
+                // or a moved folder) is diagnosable instead of invisible.
+                if (!Directory.Exists(root))
+                {
+                    LogError($"Skipping project '{p.Name}': registered path '{root}' does not exist (pruned worktree or moved folder?).");
+                    continue;
+                }
 
                 bool hasCsproj;
                 try { hasCsproj = Directory.GetFiles(root, "*.csproj", SearchOption.TopDirectoryOnly).Length > 0; }
