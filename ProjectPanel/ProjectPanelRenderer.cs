@@ -108,6 +108,12 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler<string> SelectProjectRequested;
 
         /// <summary>
+        /// Raised when the user clicks the "delete project" button in the panel header.
+        /// Carries the project ID (may be empty — the host falls back to the current project).
+        /// </summary>
+        public event EventHandler<string> ProjectDeleteRequested;
+
+        /// <summary>
         /// Raised when the user clicks the "+" (new project) button in the WebView2 panel.
         /// </summary>
         public event EventHandler NewProjectRequested;
@@ -312,6 +318,10 @@ namespace MultiTerminal.ProjectPanel
 
                     case "selectProject":
                         SelectProjectRequested?.Invoke(this, message.Value);
+                        break;
+
+                    case "deleteProject":
+                        ProjectDeleteRequested?.Invoke(this, message.ProjectId);
                         break;
 
                     case "newProject":
@@ -958,6 +968,9 @@ namespace MultiTerminal.ProjectPanel
                 if (root.TryGetProperty("sessionId", out var sessionIdEl))
                     result.SessionId = sessionIdEl.GetString();
 
+                if (root.TryGetProperty("projectId", out var projectIdEl))
+                    result.ProjectId = projectIdEl.GetString();
+
                 if (root.TryGetProperty("query", out var queryEl))
                     result.Query = queryEl.GetString();
 
@@ -998,6 +1011,7 @@ namespace MultiTerminal.ProjectPanel
             public string PromptId { get; set; }
             public string Path { get; set; }
             public string SessionId { get; set; }
+            public string ProjectId { get; set; }
             public string Query { get; set; }
             // Editing fields
             public string Field { get; set; }

@@ -85,6 +85,13 @@ namespace MultiTerminal.Docking
         /// </summary>
         public event EventHandler<string> FilePreviewRequested;
 
+        /// <summary>
+        /// Raised when the user clicks the delete button in the project header. Carries the resolved
+        /// project ID. The host (MainForm) confirms and performs the canonical delete via the broker,
+        /// then calls <see cref="RefreshAfterProjectDeleted"/> to update this pane.
+        /// </summary>
+        public event EventHandler<string> ProjectDeleteRequested;
+
         #endregion
 
         public ProjectPanelDocument()
@@ -126,6 +133,7 @@ namespace MultiTerminal.Docking
             _renderer.AvailableSkillsRequested += OnAvailableSkillsRequested;
             _renderer.AvailableSpecialistAgentsRequested += OnAvailableSpecialistAgentsRequested;
             _renderer.SelectProjectRequested += OnSelectProjectRequested;
+            _renderer.ProjectDeleteRequested += OnRendererProjectDeleteRequested;
             _renderer.NewProjectRequested += OnNewProjectRequested;
             _renderer.ProjectListRequested += OnProjectListRequested;
             _renderer.ListDirectoryRequested += OnListDirectoryRequested;
@@ -1247,6 +1255,39 @@ namespace MultiTerminal.Docking
             {
                 System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Failed to load project: {projectId}");
             }
+        }
+
+        /// <summary>
+        /// Handles the JS "delete project" request. Resolves the target id (message id, falling back
+        /// to the currently-shown project) and raises <see cref="ProjectDeleteRequested"/> to the host,
+        /// which owns the confirmation + canonical broker delete.
+        /// </summary>
+        private void OnRendererProjectDeleteRequested(object sender, string projectId)
+        {
+            string id = string.IsNullOrWhiteSpace(projectId) ? _currentProject?.Id : projectId;
+            if (string.IsNullOrEmpty(id)) return;
+            ProjectDeleteRequested?.Invoke(this, id);
+        }
+
+        /// <summary>
+        /// Refreshes the pane after a project was deleted via the canonical broker path. Repopulates
+        /// the selector and, when the deleted project was the one being shown, switches to the first
+        /// remaining registered project (or clears the current selection if none remain).
+        /// </summary>
+        public void RefreshAfterProjectDeleted(string deletedProjectId)
+        {
+            SendProjectListToRenderer();
+
+            bool deletedWasCurrent = !string.IsNullOrEmpty(deletedProjectId)
+                && string.Equals(_currentProject?.Id, deletedProjectId, StringComparison.OrdinalIgnoreCase);
+            if (!deletedWasCurrent) return;
+
+            var remaining = _projectService?.GetAllRegisteredProjects() ?? new List<ProjectRegistryEntry>();
+            var next = remaining.FirstOrDefault();
+            if (next != null)
+                OnSelectProjectRequested(this, next.Id); // reuse the normal selection/load path
+            else
+                _currentProject = null;
         }
 
         /// <summary>

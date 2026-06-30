@@ -334,6 +334,7 @@ namespace MultiTerminal
 
             // File preview — route file explorer clicks to the separate preview panel
             _projectPanel.FilePreviewRequested += OnFilePreviewRequested;
+            _projectPanel.ProjectDeleteRequested += OnProjectPanelDeleteRequested;
 
             // Create debug log service (available immediately)
             _debugLogService = new DebugLogService();
@@ -5994,6 +5995,44 @@ namespace MultiTerminal
                 }
 
             }
+        }
+
+        /// <summary>
+        /// Handles the projects-pane delete button. Confirms, then routes through the canonical
+        /// broker delete (which unregisters the project — firing ProjectRemoved so the code-graph
+        /// watcher drops it — evicts its code-graph rows, and records activity), then refreshes the
+        /// pane. The on-disk .claude/project.json is kept; tasks are not deleted.
+        /// </summary>
+        private void OnProjectPanelDeleteRequested(object sender, string projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return;
+
+            var broker = _mcpServer?.Broker;
+            if (broker == null) return;
+
+            string name = broker.GetProjectsList()?.FirstOrDefault(p => p.Id == projectId)?.Name ?? projectId;
+
+            var confirm = MessageBox.Show(
+                this,
+                $"Delete project '{name}' from MultiTerminal?\n\nThe project is unregistered and its code-graph data removed. The .claude/project.json file on disk is kept, and tasks are not deleted.",
+                "Delete Project",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes) return;
+
+            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: false);
+            if (!result.Success)
+            {
+                MessageBox.Show(
+                    this,
+                    result.Error ?? "Failed to delete project.",
+                    "Delete Project",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            _projectPanel?.RefreshAfterProjectDeleted(projectId);
         }
 
         private void OnPromptPasteRequested(object sender, PromptEventArgs e)

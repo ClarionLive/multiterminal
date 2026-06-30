@@ -8,7 +8,7 @@ paths:
 
 - ~156 C# production files, ~66K lines of code
 - 3 SQLite databases (multiterminal.db for tasks/sessions/knowledge/profiles/code-graph, projects in same db, message queue separate)
-- 19 data models, 23 REST controllers, 90 MCP tools
+- 19 data models, 23 REST controllers, 91 MCP tools
 - 11 UI panels (WebView2-based), 11 dialog windows
 - REST API on port 5050, MCP server via Node.js, MCP Gateway (McpGateway.exe)
 

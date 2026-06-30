@@ -1506,6 +1506,12 @@
             }
         }
 
+        // Request the host unregister/delete the current project. The host shows the confirmation
+        // dialog (native MessageBox) and performs the canonical delete, then refreshes this pane.
+        function deleteProject(projectId) {
+            sendToHost({ type: 'deleteProject', projectId: projectId || '' });
+        }
+
         // Render project view
         function renderProject(project) {
             const container = document.getElementById('container');
@@ -1546,6 +1552,7 @@
                         ${iconDisplay}
                         <span class="editable" data-field="name" data-value="${escapeHtml(project.name || '')}" onclick="startEdit(this)">${escapeHtml(project.name || 'Unnamed Project')}</span>
                         <button class="project-selector-btn" onclick="openProjectSelector()" title="Switch project">&#9660;</button>
+                        <button class="project-selector-btn" onclick="deleteProject('${escapeJs(project.id || '')}')" title="Delete this project from MultiTerminal">&#128465;</button>
                     </div>
                     <div class="project-path" onclick="copyPath('${escapeJs(project.path)}')" title="Click to copy path">
                         ${escapeHtml(project.path || '')}

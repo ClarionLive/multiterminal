@@ -72,6 +72,32 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Remove a project's symbols, relationships, and project row from the code graph,
+        /// serialized through the SAME gate as reindexing so the (non-atomic) delete can never run
+        /// while an index is mid-rebuild on the shared SQLite connection. Blocks until any in-flight
+        /// index completes. Best-effort: a no-op when <paramref name="projectName"/> is blank or the
+        /// project isn't present in the graph. Used by the canonical project-delete path
+        /// (MessageBroker.DeleteProject) so removing a project also evicts its stale cg_ rows.
+        /// </summary>
+        public void ClearProject(string projectName)
+        {
+            if (string.IsNullOrWhiteSpace(projectName))
+                return;
+
+            _gate.Wait();
+            try
+            {
+                int cgProjectId = _db.FindProjectIdByName(projectName);
+                if (cgProjectId >= 0)
+                    _db.ClearProject(cgProjectId, deleteProjectRow: true);
+            }
+            finally
+            {
+                ReleaseGate();
+            }
+        }
+
         // Runs a full reindex with the gate already held by the caller. Only the gate-acquisition
         // policy differs between Index (blocking) and TryIndex (skip-if-busy).
         private CSharpCodeGraphIndexer.IndexResult RunIndex(string directory, string projectName)

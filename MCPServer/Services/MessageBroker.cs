@@ -6554,18 +6554,55 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Delete a project. Associated tasks are not deleted.
+        /// Canonical project-delete path. Every surface (REST DELETE /api/projects/{id}, the
+        /// delete_project MCP tool, the Project Manager dialog's callers, and the projects-pane
+        /// delete) routes here so a project is removed consistently:
+        ///  - unregistered via <see cref="Services.ProjectService.UnregisterProject"/> — the only
+        ///    removal that fires ProjectRemoved/RegistryChangedExternally (so CodeGraphWatcher drops
+        ///    the root's FileSystemWatcher) AND deletes .claude/project.json when asked;
+        ///  - its stale code-graph rows evicted via the gated <see cref="CodeGraphIndexCoordinator"/>;
+        ///  - broadcast + recorded in the activity feed.
+        /// Associated tasks are intentionally NOT deleted. <paramref name="deleteLocalConfig"/> also
+        /// removes the on-disk .claude/project.json (default false = unregister only).
         /// </summary>
-        public DeleteProjectResult DeleteProject(string projectId, string deletedBy)
+        public DeleteProjectResult DeleteProject(string projectId, string deletedBy, bool deleteLocalConfig = false)
         {
-            if (!_projects.TryRemove(projectId, out var project))
-            {
+            if (string.IsNullOrWhiteSpace(projectId))
+                return new DeleteProjectResult { Success = false, Error = "Project id is required" };
+
+            // Existence + name resolution from the database (single source of truth post-G8), with a
+            // fall back to the in-memory cache name for the activity-feed line.
+            var rich = _projectDb.GetRichProject(projectId);
+            _projects.TryRemove(projectId, out var cached);
+            if (rich == null && cached == null)
                 return new DeleteProjectResult { Success = false, Error = $"Project not found: {projectId}" };
+
+            string projectName = rich?.Name ?? cached?.Name ?? projectId;
+
+            // Canonical unregister: DB delete + optional .claude/project.json + fires
+            // ProjectRemoved/RegistryChangedExternally (CodeGraphWatcher reconciles and drops the
+            // watcher). Falls back to a bare DB delete only if ProjectService isn't wired.
+            // This is the AUTHORITATIVE step — if it throws, the project was not removed, so report
+            // failure instead of a false success (and restore the optimistically-evicted cache entry
+            // so callers don't see a phantom-deleted project that's still in the DB).
+            try
+            {
+                if (ProjectService != null)
+                    ProjectService.UnregisterProject(projectId, deleteLocalConfig);
+                else
+                    _projectDb.DeleteProject(projectId);
+            }
+            catch (Exception ex)
+            {
+                LogError($"Failed to delete project {projectId}: {ex.Message}");
+                if (cached != null) _projects.TryAdd(projectId, cached);
+                return new DeleteProjectResult { Success = false, Error = $"Failed to delete project: {ex.Message}" };
             }
 
-            // Delete from database
-            try { _projectDb.DeleteProject(projectId); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to delete project: {ex.Message}"); }
+            // Best-effort: evict the project's code-graph rows, serialized through the index gate so
+            // it can't race a reindex. No-op if the project was never indexed.
+            try { CodeGraphIndexCoordinator?.ClearProject(projectName); }
+            catch (Exception ex) { LogError($"Failed to clear code graph for project {projectName}: {ex.Message}"); }
 
             BroadcastProjectUpdate();
 
@@ -6575,7 +6612,7 @@ namespace MultiTerminal.MCPServer.Services
                 Terminal = deletedBy ?? "System",
                 Type = "project",
                 Action = "deleted",
-                Content = $"Deleted project: {project.Name}",
+                Content = $"Deleted project: {projectName}",
                 RelatedId = projectId
             });
 

@@ -5,6 +5,17 @@ A multi-agent coordination system for Claude Code. WinForms desktop app (C#/.NET
 > Agent behavioral instructions (kanban workflow, MCP tools, messaging, task terminology) are in the MultiTerminal plugin CLAUDE.md. This file is only the codebase reference for working on MT source code.
 > Detailed reference tables (database schema, folder map, task guides, events) are in `.claude/rules/` and load on demand.
 
+## ⛔ YOU ARE RUNNING INSIDE MULTITERMINAL — READ FIRST
+
+**You (this Claude Code terminal) are ALWAYS one of MultiTerminal's hosted terminals. MT is the desktop app you live inside.** This changes how build/run/deploy work here:
+
+- **NEVER end/kill the running MultiTerminal process.** No `taskkill`, no `Stop-Process MultiTerminal`, nothing that ends MT. Killing it ends your own host (and every sibling terminal). There is no scenario where you do this.
+- **NEVER launch `MultiTerminal.exe` yourself.** Don't start a second instance (from `staged`, `Deploy`, or anywhere). The human owns MT's lifecycle. If MT needs (re)starting, ask the human to do it.
+- **Build = safe, and does NOT affect the running app.** `dotnet build MultiTerminal.csproj -c Debug` compiles and the csproj `CopyToStaged` target mirrors output into the **shared staged folder** `H:\DevLaptop\ClarionPowerShell\staged` (stamped via `.build-info.json`). **Staged is NOT where MT runs from**, so building never disturbs the live app. Build freely to check for errors.
+- **The live app runs from the Deploy folder** `H:\DevLaptop\ClarionPowerShell\Deploy`. It is populated only by `deploy.ps1`, which copies `staged → Deploy`.
+- **You CANNOT deploy.** `deploy.ps1` hard-refuses while `MultiTerminal.exe` is running (locked files) — and it's always running because you're in it. **Only the human** can: exit MT → run `deploy.ps1` → relaunch from `Deploy`. So the path to make your code changes go live is: *you build (→ staged); the human deploys + restarts.*
+- **Live-testing your changes** therefore means asking the human to deploy+restart first, then exercising the new behavior. You cannot self-serve a "rebuild + restart MT" loop.
+
 ## Architecture
 
 ```
@@ -13,7 +24,7 @@ MainForm.cs (5.2K LOC) - UI Host, 11 WebView2 panels
   MessageBroker.cs (5.5K LOC) - Central hub, routes messages, fires events
   SQLite (TaskDatabase.cs 4.6K LOC) - 21+ tables: tasks, sessions, knowledge, profiles
   CodeGraph (Roslyn) - CodeGraphDatabase + CSharpCodeGraphIndexer, cg_ tables in same SQLite
-  MCP Server (Node.js) - 90 tools at %APPDATA%/multiterminal/mcp
+  MCP Server (Node.js) - 91 tools at %APPDATA%/multiterminal/mcp
 ```
 
 ## Code Graph Auto-Indexing

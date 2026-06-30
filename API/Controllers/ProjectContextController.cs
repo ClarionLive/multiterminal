@@ -125,6 +125,29 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// DELETE /api/projects/{projectId} — Unregister/delete a project.
+        /// Query: deleteLocalConfig (default false — also delete the on-disk .claude/project.json),
+        ///        deletedBy (default "api" — attributed in the activity feed).
+        /// Routes through MessageBroker.DeleteProject (canonical path): unregisters the project
+        /// (fires ProjectRemoved so CodeGraphWatcher drops its watcher), evicts its code-graph rows,
+        /// and records activity. Associated tasks are NOT deleted.
+        /// Returns 200 { success, projectId } on success, 404 on unknown id.
+        /// </summary>
+        [HttpDelete("{projectId}")]
+        public IActionResult DeleteProject(string projectId, [FromQuery] bool deleteLocalConfig = false, [FromQuery] string deletedBy = null)
+        {
+            var result = _broker.DeleteProject(
+                projectId,
+                string.IsNullOrWhiteSpace(deletedBy) ? "api" : deletedBy,
+                deleteLocalConfig);
+
+            if (!result.Success)
+                return NotFound(new { error = result.Error ?? $"Project '{projectId}' not found" });
+
+            return Ok(new { success = true, projectId });
+        }
+
+        /// <summary>
         /// GET /api/projects/{projectId}/context — Full context with all associations.
         /// </summary>
         [HttpGet("{projectId}/context")]
