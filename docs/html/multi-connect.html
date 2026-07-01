@@ -85,7 +85,6 @@
             <li><a href="#security">Security model</a></li>
             <li><a href="#rest">REST endpoints</a></li>
             <li><a href="#troubleshooting">Troubleshooting</a></li>
-            <li><a href="#legacy">Relationship to ClaudeRemote (legacy)</a></li>
           </ol>
         </div>
 
@@ -202,12 +201,7 @@
         </table>
         <p>For the broader FAQ, see <a href="troubleshooting.html">Troubleshooting / FAQ</a>.</p>
 
-        <h2 id="legacy">10. Relationship to ClaudeRemote (legacy)</h2>
-        <p>Multi-Connect <strong>supersedes</strong> the older approach, in which a standalone <code>ClaudeRemote</code> ASP.NET process was fronted by Caddy for HTTPS. That gateway has been folded into the MultiTerminal process: the phone PWA + API now run in-process, and TLS is handled by Tailscale serve rather than Caddy.</p>
-        <div class="card">
-          <p>If you are migrating from the standalone setup: the old <code>ClaudeRemote</code> companion is quarantined (its <code>companion-processes.json</code> entry is set to <code>autoStart:false</code>), not deleted, so a rollback stays cheap until end-to-end sign-off. Both the standalone and the in-process gateway bind port <code>5100</code>, so stop one before running the other. To preserve push identity, copy the standalone's <code>push-config.json</code> (VAPID keys + subscriptions) into the gateway's data path so phones don't have to re-subscribe.</p>
-        </div>
-        <p>For the deep configuration reference, hosting model, and migration runbook, see <code>docs/multiremote-gateway.md</code>.</p>
+        <p>For the deep configuration reference and hosting model, see <code>docs/multiremote-gateway.md</code>.</p>
 
       </div>
     </main>

@@ -165,7 +165,7 @@
           </div>
           <div class="card">
             <h3>notification-hook</h3>
-            <p>Notification event. Captures permission prompts, idle prompts, auth-success, and elicitation dialogs and POSTs them to the REST API for storage, a UI toast, and phone push via ClaudeRemote. Async, fails silently.</p>
+            <p>Notification event. Captures permission prompts, idle prompts, auth-success, and elicitation dialogs and POSTs them to the REST API for storage, a UI toast, and phone push via Multi-Connect. Async, fails silently.</p>
           </div>
           <div class="card" id="context-threshold-hook">
             <h3>context-threshold-hook</h3>
@@ -190,7 +190,7 @@
         </div>
 
         <h2 id="remote">Remote &amp; presence relays</h2>
-        <p>These bridge a desktop Claude session to the phone (ClaudeRemote / Multi-Connect), so prompts and questions can be answered remotely.</p>
+        <p>These bridge a desktop Claude session to the phone (Multi-Connect), so prompts and questions can be answered remotely.</p>
         <div class="card-grid">
           <div class="card">
             <h3>desktop-presence-hook</h3>
@@ -198,15 +198,15 @@
           </div>
           <div class="card">
             <h3>ask-user-relay-hook</h3>
-            <p>PreToolUse on AskUserQuestion. In remote mode, converts the question + options into a form, sends it to ClaudeRemote, polls for the answer, and blocks the tool call with the answer as the reason. Falls back to the normal terminal prompt when off or on timeout.</p>
+            <p>PreToolUse on AskUserQuestion. In remote mode, converts the question + options into a form, sends it to the phone, polls for the answer, and blocks the tool call with the answer as the reason. Falls back to the normal terminal prompt when off or on timeout.</p>
           </div>
           <div class="card">
             <h3>elicitation-relay-hook</h3>
-            <p>Elicitation event. Forwards an MCP server's structured-input form to ClaudeRemote, polls for the response, and returns it to Claude Code. Falls back to the default terminal dialog on timeout.</p>
+            <p>Elicitation event. Forwards an MCP server's structured-input form to the phone, polls for the response, and returns it to Claude Code. Falls back to the default terminal dialog on timeout.</p>
           </div>
           <div class="card">
             <h3>stop-relay-hook <em>(dormant)</em></h3>
-            <p><strong>Ships in the folder but is not wired in <code>hooks.json</code>.</strong> When registered against <code>Stop</code> it would notify ClaudeRemote that the agent has stopped and is waiting for input, so the phone user knows it's their turn to reply via the channel. Today the <code>Stop</code> event only fires <code>session-save-hook</code> and <code>inbox-check-hook</code>, so this script stays inert unless added to the registry — like <code>pool-context.js</code> and <code>profile-status-hook.js</code> above.</p>
+            <p><strong>Ships in the folder but is not wired in <code>hooks.json</code>.</strong> When registered against <code>Stop</code> it would notify the phone that the agent has stopped and is waiting for input, so the phone user knows it's their turn to reply via the channel. Today the <code>Stop</code> event only fires <code>session-save-hook</code> and <code>inbox-check-hook</code>, so this script stays inert unless added to the registry — like <code>pool-context.js</code> and <code>profile-status-hook.js</code> above.</p>
           </div>
         </div>
 

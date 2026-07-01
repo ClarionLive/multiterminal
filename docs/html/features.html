@@ -700,13 +700,6 @@
         </div>
         <p class="lead" style="font-size:0.95rem;">Mobile features include a kanban task board, terminal management, an interactive console, chat with voice input, and Web-Push notifications.</p>
 
-        <h3>ClaudeRemote (legacy companion)</h3>
-        <div class="card">
-          <p>Earlier builds shipped <strong>ClaudeRemote</strong>, a separate ASP.NET companion (port 5100) fronted by Caddy for HTTPS:</p>
-          <pre><code>Phone (PWA) &rarr; Caddy (HTTPS) &rarr; ClaudeRemote :5100 &rarr; MultiTerminal :5050</code></pre>
-          <p>It is managed as a <strong>companion process</strong> via <code>CompanionProcessManager</code> (<code>%AppData%\MultiTerminal\companion-processes.json</code>). New setups should prefer Multi-Connect/Tailscale above; ClaudeRemote remains for existing deployments.</p>
-        </div>
-
         <h3>Mobile Features (Phone PWA)</h3>
         <table>
           <thead>

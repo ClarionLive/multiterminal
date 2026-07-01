@@ -198,6 +198,20 @@
   </ItemGroup>
 
   <!--
+    Bundled HTML help site (docs/html). Copied to build output preserving folder
+    structure so the in-app "Documentation" menu (DashboardHeader -> DocsRequested ->
+    MainForm.OpenHelpDocs) can open Application.StartupPath\docs\html\index.html; from
+    there CopyToStaged mirrors it to staged/Deploy for John. The None Remove strips the
+    SDK's default None glob first so the Content Include can't collide with it (NETSDK1022).
+  -->
+  <ItemGroup>
+    <None Remove="docs\html\**\*" />
+    <Content Include="docs\html\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
     Shared staged folder: every worktree's build mirrors output here so John can
     run MultiTerminal\deploy.ps1 from his usual folder regardless of which
     worktree did the build. Override via env var MULTITERMINAL_STAGED_PATH (or

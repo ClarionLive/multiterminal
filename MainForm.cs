@@ -2044,18 +2044,10 @@ namespace MultiTerminal
             _dashboardHeader.ShowChatHistoryRequested += () => ShowChatHistoryDialog();
             _dashboardHeader.ExitRequested += () => Close();
 
-            _dashboardHeader.DocsRequested += () =>
-            {
-                var docsPath = System.IO.Path.Combine(Application.StartupPath, "docs", "html", "index.html");
-                if (System.IO.File.Exists(docsPath))
-                {
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = docsPath,
-                        UseShellExecute = true
-                    });
-                }
-            };
+            // Route through OpenHelpDocs() (same path the legacy help button uses) so a
+            // missing docs/html/index.html surfaces a MessageBox instead of silently
+            // no-op'ing, and the open logic lives in one place.
+            _dashboardHeader.DocsRequested += () => OpenHelpDocs();
 
             _dashboardHeader.TogglePanelRequested += (panel) =>
             {

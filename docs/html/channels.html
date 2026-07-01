@@ -116,7 +116,7 @@
   { "server": "multiterminal-channel" }
 ]</code></pre>
         <p>It runs as an MCP server (stdio) for the session, and in parallel opens a small HTTP listener that the broker delivers messages to. If its preferred port is busy it walks forward through the allowed range (<code>8800</code>&ndash;<code>8899</code>) until it finds a free one, then re-registers the actual port with the broker, so multiple terminals on one machine don't collide.</p>
-        <p>The same channel also carries tool-permission prompts to the phone: when Claude needs approval to run a tool, the server forwards the request to <strong>ClaudeRemote</strong> so you can answer remotely &mdash; reply <code>yes</code>, <code>no</code>, or <code>always</code> with the short request id to approve, deny, or auto-approve that tool for the session.</p>
+        <p>The same channel also carries tool-permission prompts to the phone: when Claude needs approval to run a tool, the server forwards the request to your phone (via <strong>Multi-Connect</strong>) so you can answer remotely &mdash; reply <code>yes</code>, <code>no</code>, or <code>always</code> with the short request id to approve, deny, or auto-approve that tool for the session.</p>
 
         <h2 id="setting">Enabling channels (the required setting)</h2>
         <p>The channel server ships <em>inside</em> the plugin rather than from a published marketplace, so Claude Code treats it as a <strong>development (inline) channel</strong>. Development channels must be explicitly authorized &mdash; otherwise Claude Code will not load the channel server. MultiTerminal launches every terminal with two flags:</p>
