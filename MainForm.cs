@@ -2899,6 +2899,45 @@ namespace MultiTerminal
             doc.StartScreenOpenPowerShellRequested += OnStartScreenOpenPowerShell;
             doc.StartScreenJustClaudeRequested += OnStartScreenJustClaude;
             doc.StartScreenNewProjectRequested += OnStartScreenNewProject;
+            doc.StartScreenProjectDeleteRequested += OnStartScreenProjectDeleteRequested;
+        }
+
+        /// <summary>
+        /// Handles a project delete from a Home/start-screen card. Confirms (native MessageBox),
+        /// routes through the canonical broker delete (unregisters the project — firing
+        /// ProjectRemoved so the code-graph watcher drops it — evicts its cg rows, records activity),
+        /// then refreshes the start-screen card grid. Unregister only: .claude/project.json is kept.
+        /// </summary>
+        private void OnStartScreenProjectDeleteRequested(object sender, string projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return;
+
+            var broker = _mcpServer?.Broker;
+            if (broker == null) return;
+
+            string name = broker.GetProjectsList()?.FirstOrDefault(p => p.Id == projectId)?.Name ?? projectId;
+
+            var confirm = MessageBox.Show(
+                this,
+                $"Delete project '{name}' from MultiTerminal?\n\nThe project is unregistered and its code-graph data removed. The .claude/project.json file on disk is kept, and tasks are not deleted.",
+                "Delete Project",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes) return;
+
+            var result = broker.DeleteProject(projectId, "ui", deleteLocalConfig: false);
+            if (!result.Success)
+            {
+                MessageBox.Show(
+                    this,
+                    result.Error ?? "Failed to delete project.",
+                    "Delete Project",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            (sender as TerminalDocument)?.RefreshStartScreenProjects();
         }
 
         /// <summary>

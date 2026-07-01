@@ -195,6 +195,13 @@ namespace MultiTerminal.Docking
         public event EventHandler StartScreenJustClaudeRequested;
 
         /// <summary>
+        /// Forwarded from StartScreenControl: user clicked a project card's trash button.
+        /// Carries the project ID. MainForm confirms and runs the canonical broker delete,
+        /// then calls <see cref="RefreshStartScreenProjects"/> to update the card grid.
+        /// </summary>
+        public event EventHandler<string> StartScreenProjectDeleteRequested;
+
+        /// <summary>
         /// Function to retrieve available identity names for the "Launch as..." menu.
         /// Set by MainForm to provide identity list.
         /// </summary>
@@ -769,6 +776,7 @@ namespace MultiTerminal.Docking
             _startScreen.OpenPowerShellRequested += (s, e) => StartScreenOpenPowerShellRequested?.Invoke(this, e);
             _startScreen.NewProjectRequested += (s, e) => StartScreenNewProjectRequested?.Invoke(this, e);
             _startScreen.JustClaudeRequested += (s, e) => StartScreenJustClaudeRequested?.Invoke(this, e);
+            _startScreen.ProjectDeleteRequested += (s, id) => StartScreenProjectDeleteRequested?.Invoke(this, id);
             Controls.Add(_startScreen);
             _startScreen.BringToFront();
             _isStartScreenVisible = true;
@@ -2118,6 +2126,15 @@ namespace MultiTerminal.Docking
         public void SetProjectDatabase(ProjectDatabase projectDatabase, ProjectService projectService = null)
         {
             _startScreen?.Initialize(projectDatabase, projectService);
+        }
+
+        /// <summary>
+        /// Re-fetches the project list and re-renders the start-screen card grid. Called by
+        /// MainForm after a project is deleted from a card so the removed project disappears.
+        /// </summary>
+        public void RefreshStartScreenProjects()
+        {
+            _startScreen?.RefreshProjects();
         }
 
         /// <summary>

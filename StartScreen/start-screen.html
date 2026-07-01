@@ -208,6 +208,15 @@
             transform: scale(0.99);
         }
 
+        /* While a card's launch dropdown is open, raise the whole card above its
+           later siblings. Each card is its own stacking context (the cardFadeIn
+           animation leaves a lingering transform), so the popup's own z-index
+           can't escape — elevating the card is what lets the popup overlay the
+           card below it instead of rendering behind it. */
+        .project-card.popup-open {
+            z-index: 50;
+        }
+
         /* Card top row: icon + info + pin */
         .card-top {
             display: flex;
@@ -348,6 +357,36 @@
         .card-launch-caret:hover {
             color: var(--text-primary);
             background-color: var(--badge-bg);
+        }
+
+        /* Per-card delete (trash) — hidden until the card is hovered to avoid
+           accidental clicks; deletion is still confirmed host-side. */
+        .card-delete {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px 4px;
+            font-size: 13px;
+            line-height: 1;
+            color: var(--text-muted);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s, color 0.15s, transform 0.15s;
+            display: flex;
+            align-items: center;
+            border-radius: 4px;
+        }
+
+        .project-card:hover .card-delete {
+            opacity: 0.65;
+            pointer-events: auto;
+        }
+
+        .card-delete:hover {
+            opacity: 1;
+            color: #e5484d;
+            background-color: var(--badge-bg);
+            transform: scale(1.15);
         }
 
         /* Popup menu for per-launch terminal override */
@@ -1101,6 +1140,10 @@
                     '<div class="card-description" title="' + esc(project.description) + '">' + esc(project.description || '') + '</div>' +
                 '</div>' +
                 '<div class="card-controls">' +
+                    '<button class="card-delete" ' +
+                        'data-id="' + esc(project.id) + '" ' +
+                        'title="Delete project from MultiTerminal" ' +
+                        'aria-label="Delete project">&#128465;</button>' +
                     '<button class="card-pin' + (pinned ? ' pinned' : '') + '" ' +
                         'data-id="' + esc(project.id) + '" ' +
                         'aria-label="' + (pinned ? 'Unpin' : 'Pin') + '">' +
@@ -1157,6 +1200,15 @@
             renderGrid();
         });
 
+        // Delete (trash) — host-side confirmation + canonical broker delete.
+        var delBtn = card.querySelector('.card-delete');
+        if (delBtn) {
+            delBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                postMsg({ type: 'delete_project', projectId: project.id, projectName: project.name });
+            });
+        }
+
         wireLaunchPopup(card, '.card-launch-caret', '.card-launch-popup', project);
         return card;
     }
@@ -1166,7 +1218,12 @@
     function closeAllLaunchPopups(except) {
         var open = document.querySelectorAll('.card-launch-popup.open, .list-launch-popup.open');
         for (var i = 0; i < open.length; i++) {
-            if (open[i] !== except) open[i].classList.remove('open');
+            if (open[i] !== except) {
+                open[i].classList.remove('open');
+                // Drop the z-index elevation on the card/row that owned this popup.
+                var host = open[i].closest('.project-card, .list-row');
+                if (host) host.classList.remove('popup-open');
+            }
         }
     }
 
@@ -1183,7 +1240,10 @@
         caret.addEventListener('click', function(e) {
             e.stopPropagation();
             closeAllLaunchPopups(popup);
-            popup.classList.toggle('open');
+            var nowOpen = popup.classList.toggle('open');
+            // Elevate the owning card/row while its popup is open so the popup
+            // overlays the next card instead of hiding behind it.
+            root.classList.toggle('popup-open', nowOpen);
         });
 
         var items = popup.querySelectorAll('.launch-popup-item');
@@ -1192,6 +1252,7 @@
                 e.stopPropagation();
                 var kind = this.getAttribute('data-kind');
                 popup.classList.remove('open');
+                root.classList.remove('popup-open');
                 postMsg({ type: 'launch_project', projectId: project.id, projectName: project.name, terminal: kind });
             });
         }

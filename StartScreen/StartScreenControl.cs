@@ -76,6 +76,13 @@ namespace MultiTerminal.StartScreen
         public event EventHandler NewProjectRequested;
         public event EventHandler JustClaudeRequested;
 
+        /// <summary>
+        /// Raised when the user clicks a project card's trash button. Carries the project ID.
+        /// TerminalDocument forwards it to MainForm, which confirms (native MessageBox) and runs
+        /// the canonical <c>MessageBroker.DeleteProject</c>, then refreshes the start screen.
+        /// </summary>
+        public event EventHandler<string> ProjectDeleteRequested;
+
         // ── Constructor ───────────────────────────────────────────────────────
 
         public StartScreenControl()
@@ -283,6 +290,16 @@ namespace MultiTerminal.StartScreen
                             // Validate: non-empty, GUID-length (36 chars max)
                             if (!string.IsNullOrEmpty(pinId) && pinId.Length <= 36)
                                 ToggleProjectPin(pinId);
+                        }
+                        break;
+
+                    case "delete_project":
+                        if (root.TryGetProperty("projectId", out var delIdEl))
+                        {
+                            var delId = delIdEl.GetString();
+                            // Validate: non-empty, GUID-length (36 chars max) — mirrors launch/pin.
+                            if (!string.IsNullOrEmpty(delId) && delId.Length <= 36)
+                                ProjectDeleteRequested?.Invoke(this, delId);
                         }
                         break;
 
