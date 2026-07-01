@@ -486,7 +486,7 @@
         <p>MultiTerminal indexes your C# codebase so agents can reason about it structurally instead of grepping blindly.</p>
         <div class="card">
           <h3>Code Graph</h3>
-          <p>A Roslyn-based two-pass indexer extracts symbols (classes, methods, properties, constructors) and relationships (calls, inherits, implements, overrides, references). Agents query it to find callers/callees, walk inheritance trees, run impact analysis before a change, and surface dead code.</p>
+          <p>A Roslyn-based two-pass indexer extracts symbols (classes, methods, properties, constructors) and relationships (calls, inherits, implements, overrides, references). Agents query it to find callers/callees, walk inheritance trees, run impact analysis before a change, and surface dead code. A background watcher keeps the graph fresh automatically &mdash; it heals stale graphs on startup and re-indexes projects as their <code>.cs</code> files change, so queries reflect current code without a manual re-index.</p>
           <p>Guide: <a href="code-graph.html">Code Graph</a>.</p>
         </div>
         <div class="card">

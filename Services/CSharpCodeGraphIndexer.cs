@@ -59,7 +59,7 @@ namespace MultiTerminal.Services
             string csprojPath = Directory.GetFiles(directory, "*.csproj", SearchOption.TopDirectoryOnly).FirstOrDefault();
             int projectId = _db.InsertProject(projectName, csprojPath);
 
-            // Discover .cs files (exclude obj/, bin/, and generated files)
+            // Discover .cs files (exclude obj/, bin/, .claude/worktrees/, and generated files)
             var csFiles = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories)
                 .Where(f => !IsExcludedPath(f))
                 .ToList();
@@ -178,6 +178,12 @@ namespace MultiTerminal.Services
             return normalized.Contains("/obj/")
                 || normalized.Contains("/bin/")
                 || normalized.Contains("/node_modules/")
+                // MT git worktrees nest under <repoRoot>/.claude/worktrees/<id>. When a project's
+                // registered root IS the repo root, those worktrees are inside the watched tree, so
+                // without this exclusion every worktree's .cs is indexed as a DUPLICATE symbol and any
+                // worktree edit triggers a spurious full reindex. Exclude them so the graph tracks only
+                // the main working tree (updates on merge-back), not ephemeral per-task worktrees.
+                || normalized.Contains("/.claude/worktrees/", StringComparison.OrdinalIgnoreCase)
                 || normalized.Contains(".g.cs")
                 || normalized.Contains(".designer.cs", StringComparison.OrdinalIgnoreCase)
                 || normalized.Contains(".AssemblyInfo.cs");

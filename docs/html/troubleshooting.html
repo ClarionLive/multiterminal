@@ -172,8 +172,13 @@ Copy-Item "$src\messages.db" $dst</code></pre>
         </ul>
 
         <h2 id="code-graph">Code-graph search returns 503 "CodeGraph not available"</h2>
-        <p>The code-graph endpoints (<code>/api/code-graph/search</code>, <code>/callers</code>, <code>/callees</code>, <code>/impact</code>, <code>/inheritance</code>) and the matching MCP tools return <code>503 {"error":"CodeGraph not available"}</code> when the project has not been indexed yet &mdash; the Roslyn symbol/relationship graph is built on demand, not at startup.</p>
-        <p><strong>Fix:</strong> index the project once with the <code>index_code_graph</code> MCP tool (or <code>POST /api/code-graph/index</code> with the project directory). After indexing, searches resolve normally; re-run it after large refactors to refresh the graph.</p>
+        <p>The code-graph endpoints (<code>/api/code-graph/search</code>, <code>/callers</code>, <code>/callees</code>, <code>/impact</code>, <code>/inheritance</code>) and the matching MCP tools return <code>503 {"error":"CodeGraph not available"}</code> when the project hasn't been indexed yet. The <code>CodeGraphWatcher</code> background service normally indexes every registered C# project automatically &mdash; it sweeps and refreshes stale graphs shortly after app startup, and re-indexes on edit &mdash; so a 503 usually means one of:</p>
+        <ul>
+          <li><strong>The startup sweep hasn't finished.</strong> Right after launch there's a brief window before the watcher's first index completes. Wait a few seconds and retry; <code>GET /api/code-graph/stats</code> shows the last-indexed time.</li>
+          <li><strong>The directory isn't a watched project.</strong> The watcher only indexes registered projects that have a top-level <code>.csproj</code>. A loose directory (or a <code>src/</code>-style layout with no root <code>.csproj</code>) is never auto-indexed.</li>
+          <li><strong>Auto-indexing is disabled.</strong> <code>MULTITERMINAL_CODEGRAPH_WATCH</code> is set to <code>0</code>/<code>false</code>/<code>off</code>.</li>
+        </ul>
+        <p><strong>Fix:</strong> for a registered project, just wait for the startup sweep (or check it's eligible / not disabled). To index any directory immediately &mdash; including one that isn't a registered project &mdash; run the <code>index_code_graph</code> MCP tool or <code>POST /api/code-graph/index</code> with the project directory. You generally don't need to re-index after edits anymore; the watcher handles that.</p>
 
         <h2 id="logs">Where to see logs</h2>
         <ul>

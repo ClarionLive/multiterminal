@@ -77,7 +77,7 @@
           <h3>On This Page</h3>
           <ol>
             <li><a href="#what">What the index captures</a></li>
-            <li><a href="#building">Building the index</a></li>
+            <li><a href="#building">Building &amp; keeping the index fresh</a></li>
             <li><a href="#workflows">Practical workflows</a></li>
             <li><a href="#mcp-tools">MCP tools</a></li>
             <li><a href="#rest">REST API</a></li>
@@ -115,19 +115,40 @@
         </table>
         <p>Generated and build output is skipped: <code>obj/</code>, <code>bin/</code>, <code>node_modules/</code>, and <code>.g.cs</code> / <code>.designer.cs</code> / <code>.AssemblyInfo.cs</code> files.</p>
 
-        <h2 id="building">2. Building the index</h2>
-        <p>Indexing is triggered per directory. The indexer registers (or clears and rebuilds) a project, parses every non-excluded <code>.cs</code> file into a Roslyn compilation, runs the two passes inside a transaction, and records statistics (file count, symbol count, relationship count, duration). Re-running re-indexes that project in place.</p>
-        <p>Use the MCP tool <code>index_code_graph</code> or <code>POST /api/code-graph/index</code> (see below). After indexing, <code>GET /api/code-graph/stats</code> reports per-kind counts and the last-indexed timestamp.</p>
+        <h2 id="building">2. Building &amp; keeping the index fresh</h2>
+        <p>Indexing runs per directory. The indexer registers (or clears and rebuilds) a project, parses every non-excluded <code>.cs</code> file into a Roslyn compilation, runs the two passes inside a transaction, and records statistics (file count, symbol count, relationship count, duration). Re-running re-indexes that project in place. After any index, <code>GET /api/code-graph/stats</code> reports per-kind counts and the last-indexed timestamp.</p>
         <div class="card">
-          <h3>Indexing is manual &mdash; re-index after edits</h3>
-          <p>Indexing only runs when you trigger it (the <code>index_code_graph</code> tool or the <code>POST</code> endpoint). There is <strong>no file watcher and no automatic re-index</strong> on save. Every query therefore answers from the <strong>last index</strong>: after you edit code, the graph is stale until you re-run indexing for that directory (re-running clears and rebuilds the project in place). The key gotcha &mdash; if callers/callees look wrong after a refactor, re-index before trusting the result. <code>GET /api/code-graph/stats</code> shows the last-indexed time so you can tell how fresh it is.</p>
+          <h3>Indexing is automatic &mdash; the graph keeps itself fresh</h3>
+          <p>A background service, <code>CodeGraphWatcher</code>, keeps the graph current so you don't have to remember to re-index. It does three things:</p>
+          <ul>
+            <li><strong>Heals on startup.</strong> When the app launches it sweeps every registered C# project and re-indexes any whose graph is stale &mdash; so a graph that sat untouched for weeks is brought up to date automatically.</li>
+            <li><strong>Re-indexes on edit.</strong> While the app runs it watches each registered project's <code>.cs</code> files. After a short quiet window (a <strong>debounce</strong>, ~12s by default) it re-indexes the project that changed. Rapid saves coalesce into a single re-index; build output (<code>obj/</code>, <code>bin/</code>) and generated files are ignored, so a build doesn't trigger churn.</li>
+            <li><strong>Picks up new projects mid-session.</strong> A project created or registered while the app is running (new-project wizard, <code>create_project</code>, or <code>POST /api/projects</code>) is indexed straight away &mdash; no restart needed.</li>
+          </ul>
+          <p>A per-project <strong>freshness floor</strong> (5&nbsp;min by default) suppresses redundant re-indexes, and a single <strong>coordinator</strong> (<code>CodeGraphIndexCoordinator</code>) serializes every index &mdash; automatic and manual alike &mdash; so two runs can never overlap and corrupt the graph.</p>
+        </div>
+        <div class="card">
+          <h3>Manual indexing (still available)</h3>
+          <p>You rarely need to index by hand now, but you can force a refresh on demand with the <code>index_code_graph</code> MCP tool or <code>POST /api/code-graph/index</code> (see below) &mdash; useful to index a directory that isn't a registered project, or to refresh immediately rather than waiting for the debounce. Both paths run through the same coordinator as the watcher.</p>
+        </div>
+        <div class="card">
+          <h3>Configuration</h3>
+          <p>The watcher is on by default and tuned with environment variables:</p>
+          <table>
+            <thead><tr><th>Variable</th><th>Default</th><th>Effect</th></tr></thead>
+            <tbody>
+              <tr><td><code>MULTITERMINAL_CODEGRAPH_WATCH</code></td><td><code>on</code></td><td>Set to <code>0</code>/<code>false</code>/<code>off</code> to disable auto-indexing entirely (manual indexing still works).</td></tr>
+              <tr><td><code>MULTITERMINAL_CODEGRAPH_DEBOUNCE_MS</code></td><td><code>12000</code></td><td>Quiet window after the last <code>.cs</code> change before a re-index fires (clamped to a 3&ndash;600s range).</td></tr>
+              <tr><td><code>MULTITERMINAL_CODEGRAPH_MIN_INTERVAL_MS</code></td><td><code>300000</code></td><td>Per-project freshness floor &mdash; a project re-indexed more recently than this is skipped.</td></tr>
+            </tbody>
+          </table>
         </div>
 
         <h2 id="workflows">3. Practical workflows</h2>
         <div class="card">
           <h3>Worked example: who creates the MessageBroker?</h3>
-          <p>Index the repo, find a symbol, then trace its callers. The MCP calls and representative (elided) results:</p>
-          <pre><code>// 1. Index the repository
+          <p>Find a symbol, then trace its callers. The watcher keeps the graph fresh, so step&nbsp;1 (an explicit index) is usually unnecessary &mdash; it's shown here to force an immediate refresh and to demonstrate the tool. The MCP calls and representative (elided) results:</p>
+          <pre><code>// 1. (optional) Force an immediate index — normally the watcher handles this
 index_code_graph(directory: "H:\\DevLaptop\\...\\MultiTerminal",
                  projectName: "MultiTerminal")
    &rarr; { "success": true, "projectName": "MultiTerminal",
@@ -176,7 +197,7 @@ get_symbol_callers(symbolName: "MessageBroker")   // or symbolId: 1422
         <table>
           <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
           <tbody>
-            <tr><td><code>index_code_graph</code></td><td>Index (or re-index) a directory.</td></tr>
+            <tr><td><code>index_code_graph</code></td><td>Force an index (or re-index) of a directory on demand. Registered projects are also indexed automatically by the watcher (see &sect;2).</td></tr>
             <tr><td><code>search_code_graph</code></td><td>Find symbols by name, with an optional kind filter.</td></tr>
             <tr><td><code>get_symbol_callers</code></td><td>Direct callers of a symbol.</td></tr>
             <tr><td><code>get_symbol_callees</code></td><td>Direct callees of a symbol.</td></tr>
