@@ -106,6 +106,15 @@ namespace MultiTerminal.Docking
         public string DocId => _docId;
 
         /// <summary>
+        /// The broker-confirmed, stable agent identity for this terminal (set once via
+        /// <see cref="PromoteOriginalAgentName"/> from an authoritative source). Empty
+        /// until the terminal's identity is confirmed. Exposed so the registration
+        /// handler can detect a cross-wire — a registration resolving to a document
+        /// already bound to a different identity — and refuse to clobber it.
+        /// </summary>
+        public string OriginalAgentName => _originalAgentName;
+
+        /// <summary>
         /// Gets the underlying terminal control.
         /// </summary>
         public TerminalControl Terminal => _terminal;
@@ -328,16 +337,6 @@ namespace MultiTerminal.Docking
             System.Diagnostics.Trace.WriteLine(
                 $"[TerminalDocument.PromoteOriginalAgentName] DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
         }
-
-        /// <summary>
-        /// The launch-time / first-broker-confirmed agent identity for this
-        /// document (see <see cref="PromoteOriginalAgentName"/>). Read-only —
-        /// exposes <c>_originalAgentName</c> for the SWAPDIAG cross detector in
-        /// MainForm.OnMcpTerminalRegistered, which compares this against the
-        /// incoming registration name to flag a doc↔identity cross. Returns
-        /// null/empty until the first authoritative promotion. (task ab32897c)
-        /// </summary>
-        public string OriginalAgentName => _originalAgentName;
 
         private void UpdateTabTitle()
         {

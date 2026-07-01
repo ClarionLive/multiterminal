@@ -1298,6 +1298,12 @@ namespace MultiTerminal
             // Strategy: try DocId first, then name match, then last active as final fallback
             TerminalDocument targetDoc = null;
 
+            // Local helper: case-insensitive match of a document by its displayed title
+            // (CustomTitle, falling back to TabText). Both are nullable, so null-safe.
+            static bool MatchesByName(TerminalDocument t, string name) =>
+                (t.CustomTitle?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (t.TabText?.Equals(name, StringComparison.OrdinalIgnoreCase) ?? false);
+
             if (!string.IsNullOrEmpty(e.DocId))
             {
                 // Find terminal by DocId - most reliable mapping
@@ -1312,9 +1318,7 @@ namespace MultiTerminal
             {
                 targetDoc = _dockPanel.Documents
                     .OfType<TerminalDocument>()
-                    .FirstOrDefault(t =>
-                        (t.CustomTitle?.Equals(e.Name, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        t.TabText.Equals(e.Name, StringComparison.OrdinalIgnoreCase));
+                    .FirstOrDefault(t => MatchesByName(t, e.Name));
             }
 
             // No last-resort fallback — DocId and name-match are the only reliable mapping paths.
@@ -1363,6 +1367,42 @@ namespace MultiTerminal
                 }
             }
             catch { /* diagnostic only */ }
+
+            // 1:1 binding guard: if the resolved document is already confirmed-bound to a
+            // DIFFERENT agent identity, this registration belongs to another terminal — do
+            // NOT overwrite its title/identity. That cross-wire is what makes a second
+            // terminal's name clobber the first's tab, and it also strands the first
+            // terminal's HUD Git rebind (which is filtered by _originalAgentName). Re-resolve
+            // to an as-yet unclaimed document matching this name so the registering terminal
+            // still binds to its OWN tab; if none exists, skip the tab/identity update
+            // (channel/inbox delivery still works via e.Id / e.Name).
+            if (targetDoc != null
+                && !string.IsNullOrEmpty(e.Name)
+                && !string.IsNullOrEmpty(targetDoc.OriginalAgentName)
+                && !targetDoc.OriginalAgentName.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[MainForm] Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) resolved to a document already bound to '{targetDoc.OriginalAgentName}' (docId={targetDoc.DocId}, title='{targetDoc.CustomTitle}'). Refusing to clobber it; re-resolving to this terminal's own document.");
+
+                // Re-resolve to THIS terminal's OWN document, keyed by the un-clobberable
+                // stable identity FIRST: a freshly-launched terminal's own doc is already
+                // claimed under its own name (StartTerminal promotes _originalAgentName at
+                // launch), so prefer the doc whose OriginalAgentName == e.Name. Only if no
+                // such doc exists (e.g. an identity not yet promoted) fall back to an
+                // as-yet unclaimed doc matching by displayed title. Without the identity-first
+                // step, the legitimate target — already self-claimed — would be skipped by
+                // the unclaimed filter and the terminal would never bind to its own tab.
+                var docs = _dockPanel.Documents.OfType<TerminalDocument>().ToList();
+                targetDoc =
+                    docs.FirstOrDefault(t => t.OriginalAgentName?.Equals(e.Name, StringComparison.OrdinalIgnoreCase) ?? false)
+                    ?? docs.FirstOrDefault(t => string.IsNullOrEmpty(t.OriginalAgentName) && MatchesByName(t, e.Name));
+
+                if (targetDoc == null)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[MainForm] No document matches '{e.Name}' — skipping tab/identity update to avoid clobbering another terminal.");
+                }
+            }
 
             if (targetDoc != null)
             {
