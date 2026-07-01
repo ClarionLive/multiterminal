@@ -83,6 +83,8 @@ namespace MultiTerminal
         // Phase 4 Track 3 worktree janitor — periodic 5-min sweep with 30-sec
         // startup delay. Disposed in OnFormClosing.
         private System.Threading.Timer _worktreeJanitorTimer;
+        // fa1101db R2b idle-auto-on watcher — periodic 60s check. Disposed in OnFormClosing.
+        private System.Threading.Timer _idleRemoteModeTimer;
         private ProfilePanel.ProfilePanelDocument _profilePanel;
         private ToolStripButton _profilePanelButton;
         private InboxPanelDocument _inboxPanel;
@@ -179,6 +181,7 @@ namespace MultiTerminal
                 ShowOwnerProfileDialogIfNeeded();
                 RestoreSession();
                 StartWorktreeJanitor();
+                StartIdleRemoteModeWatcher();
             };
         }
 
@@ -232,6 +235,36 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[MainForm] Failed to start worktree janitor: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// fa1101db R2b — idle auto-on watcher. Every 60s (first fire 60s after startup) checks
+        /// whether the desk has been quiet long enough (broker setting "idleRemoteOnMinutes",
+        /// default 30 min) to flip remote mode ON so phone notifications/permission prompts flow
+        /// while the user is away. Auto-ON only; a desktop signal turns it back off instantly.
+        /// Disposed in OnFormClosing.
+        /// </summary>
+        private void StartIdleRemoteModeWatcher()
+        {
+            try
+            {
+                var broker = _mcpServer?.Broker;
+                if (broker == null) return;
+                _idleRemoteModeTimer = new System.Threading.Timer(
+                    _ =>
+                    {
+                        try { broker.CheckIdleRemoteAutoOn(); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[IdleRemote] check threw: {ex.Message}"); }
+                    },
+                    state: null,
+                    dueTime: TimeSpan.FromSeconds(60),
+                    period: TimeSpan.FromSeconds(60));
+                System.Diagnostics.Trace.WriteLine("[MainForm] Idle remote-mode watcher started (60s cadence, default 30m threshold).");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[MainForm] Failed to start idle remote-mode watcher: {ex.Message}");
             }
         }
 
@@ -4273,6 +4306,9 @@ namespace MultiTerminal
             // timer thread should not fire mid-shutdown.
             try { _worktreeJanitorTimer?.Dispose(); _worktreeJanitorTimer = null; }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Janitor timer dispose: {ex.Message}"); }
+
+            try { _idleRemoteModeTimer?.Dispose(); _idleRemoteModeTimer = null; }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Idle remote-mode timer dispose: {ex.Message}"); }
 
             // Close any live Code Review popups so their bounds/zoom get flushed
             // to SettingsService. The CloseAll call is idempotent \u2014 safe even if

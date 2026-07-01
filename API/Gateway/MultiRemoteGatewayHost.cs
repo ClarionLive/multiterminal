@@ -65,6 +65,11 @@ namespace MultiTerminal.API.Gateway
         private readonly ProjectDatabase _projectDb;
         private readonly bool _servicesAvailable;
 
+        // fa1101db R4 — handler bridging the shared broker's PermissionRelayPushRequested event to
+        // THIS host's PushNotificationService. Held so Stop/Dispose can detach it: the broker
+        // outlives this host, so a Stop→Start cycle must not leave a stale (or doubled) subscription.
+        private EventHandler<PermissionRelayPushEventArgs> _relayPushHandler;
+
         /// <summary>
         /// The port the gateway listens on. Resolved from MultiRemote:Port (config wins)
         /// once StartAsync runs; until then it reflects the constructor fallback (5100).
@@ -227,6 +232,9 @@ namespace MultiTerminal.API.Gateway
 
                     // HttpClient for the off-box Cloudflare permission relay (item [5]) — the
                     // one remaining outbound hop (everything else is a direct service call).
+                    // Relay BaseUrl resolves Multi-Connect settings-first → appsettings fallback (task
+                    // 642c14e3), which already achieves fa1101db R3's single-source-of-truth goal;
+                    // R3's separate "permissionRelay.baseUrl" read was dropped as superseded on merge.
                     var relayUrl = MultiConnectConfig.Resolve(
                             SettingsService.Default.GetMultiConnectRelayBaseUrl(),
                             gatewayConfig.GetValue<string>("PermissionRelay:BaseUrl"))
@@ -336,6 +344,39 @@ namespace MultiTerminal.API.Gateway
                     // receiver/history/settings.
                     _app.MapMultiRemotePushEndpoints();
                     _app.MapMultiRemoteNotificationEndpoints();
+
+                    // fa1101db R4 — wake the phone with a web-push the moment the Cloudflare Worker
+                    // confirms a permission-relay request was stored. PermissionRelayService raises
+                    // PermissionRelayPushRequested on the SHARED broker (from the :5050 OR the gateway
+                    // relay instance — same broker singleton); we resolve THIS host's
+                    // PushNotificationService (the one holding the VAPID subscriptions) and fire it.
+                    var pushForRelay = _app.Services.GetService<PushNotificationService>();
+                    if (pushForRelay != null && _broker != null)
+                    {
+                        _relayPushHandler = (s, e) =>
+                        {
+                            // Offload + swallow: the broker invokes this on the relay's round-trip
+                            // path, so a slow/failed send must never throw back or block it.
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var result = await pushForRelay
+                                        .SendToAllWithResult(e.Title, e.Body, e.RequestType, e.AgentName)
+                                        .ConfigureAwait(false);
+                                    System.Diagnostics.Debug.WriteLine(
+                                        "[MultiRemoteGatewayHost] R4 relay push (" + e.RequestType +
+                                        "): delivered=" + result.SuccessCount + "/" + result.SubscriptionCount);
+                                }
+                                catch (Exception ex)
+                                {
+                                    System.Diagnostics.Debug.WriteLine(
+                                        "[MultiRemoteGatewayHost] R4 relay push failed: " + ex.Message);
+                                }
+                            });
+                        };
+                        _broker.PermissionRelayPushRequested += _relayPushHandler;
+                    }
                 }
 
                 // Liveness probe (kept public; the standalone gateway exposed the same).
@@ -384,6 +425,15 @@ namespace MultiTerminal.API.Gateway
                 app = _app;
             }
 
+            // fa1101db R4 — detach the broker push bridge before the host stops; the broker
+            // outlives this host, so leaving it attached would keep a dead PushNotificationService
+            // wired (and a subsequent Start would add a second handler).
+            if (_relayPushHandler != null && _broker != null)
+            {
+                _broker.PermissionRelayPushRequested -= _relayPushHandler;
+                _relayPushHandler = null;
+            }
+
             if (app != null)
             {
                 try
@@ -410,6 +460,13 @@ namespace MultiTerminal.API.Gateway
                 return;
             if (disposing)
             {
+                // fa1101db R4 — detach the broker push bridge (idempotent if StopAsync already did).
+                if (_relayPushHandler != null && _broker != null)
+                {
+                    _broker.PermissionRelayPushRequested -= _relayPushHandler;
+                    _relayPushHandler = null;
+                }
+
                 try
                 {
                     if (_app != null)

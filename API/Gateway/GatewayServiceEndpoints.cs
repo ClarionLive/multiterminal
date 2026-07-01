@@ -203,9 +203,16 @@ namespace MultiTerminal.API.Gateway
         }
 
         // ----------------------------- helpers -----------------------------
+        // Settings keys owned by PermissionRelayService (the POSTING side). Kept in sync here
+        // deliberately — see TryGetApiKey.
+        private const string SettingRelayApiKey = "permissionRelay.apiKey";
+
         private static bool TryGetApiKey(IConfiguration config, out string apiKey, out string error)
         {
             // Relay ApiKey resolves Multi-Connect settings-first → appsettings fallback (task 642c14e3).
+            // NOTE: task 642c14e3 (MultiConnectConfig.Resolve + GetMultiConnectRelayApiKey) already
+            // achieves fa1101db R3's "single source of truth so the two sides can't drift" goal, so
+            // R3's separate SettingRelayApiKey plumbing was dropped as superseded on merge.
             var configured = MultiConnectConfig.Resolve(
                 SettingsService.Default.GetMultiConnectRelayApiKey(),
                 config["MultiRemote:PermissionRelay:ApiKey"]);

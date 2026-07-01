@@ -94,7 +94,12 @@ namespace MultiTerminal.API.Controllers
             if (string.Equals(src, "phone", StringComparison.OrdinalIgnoreCase))
                 intended = true;
             else if (string.Equals(src, "desktop", StringComparison.OrdinalIgnoreCase))
+            {
+                // fa1101db R2a — stamp desktop activity BEFORE the idempotent short-circuit so the
+                // idle watcher's clock stays fresh even when remote mode is already off.
+                _broker.RecordDesktopActivity();
                 intended = false;
+            }
             else
                 return;
 
