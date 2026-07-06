@@ -1,0 +1,99 @@
+name: CI
+
+# Build + test + lint on every push to the trunk/integration branches and on
+# every PR. windows-latest because the app is WinForms/WebView2 targeting
+# net8.0-windows -- it cannot build on a Linux runner. See the "CI" paragraph in
+# .claude/CLAUDE.md (Linting section) for how to reproduce each step locally.
+on:
+  push:
+    branches:
+      - main
+      - 'integration/**'
+  pull_request:
+  workflow_dispatch:
+
+# Read-only token is all CI needs (checkout). No deploy/write here.
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-lint:
+    name: build · test · lint (windows-latest)
+    runs-on: windows-latest
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+      # The build fires dev-only AfterTargets=Build steps. Neutralize them on CI:
+      #  * CopyToStaged mirrors output to a "shared staged" folder that defaults
+      #    to H:\...\staged (a dev machine path). Redirect it to a throwaway
+      #    runner path so robocopy isn't chasing a nonexistent H: drive.
+      #  * SyncMcpServer skips itself when CI=true (scripts/sync-mcp-server.ps1)
+      #    -- there is no live %APPDATA% MultiTerminal install to keep fresh here.
+      #    GitHub Actions sets CI=true automatically; this line documents intent.
+      MULTITERMINAL_STAGED_PATH: ${{ runner.temp }}\mt-staged
+      CI: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Node 22 (LTS): its built-in test runner supports glob patterns in
+      # `--test <glob>` (added in Node 21). Node 20 does NOT, so the mcp test
+      # step below would fail there. Caches ~/.npm keyed on both lockfiles.
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            mcp/package-lock.json
+
+      # ---- C# build: TreatWarningsAsErrors (Directory.Build.props) makes this
+      #      the C# lint gate too, per CLAUDE.md. ----
+      - name: dotnet restore
+        run: dotnet restore MultiTerminal.csproj
+
+      - name: dotnet build (Debug)
+        run: dotnet build MultiTerminal.csproj -c Debug --no-restore
+
+      # ---- .NET tests: MultiTerminal.Tests is the only xUnit project.
+      #      AgentProcessTest is OutputType=Exe (a self-contained console
+      #      harness with no test SDK) -- deliberately NOT a `dotnet test`
+      #      target, so it is excluded here. ----
+      - name: dotnet test (MultiTerminal.Tests)
+        run: >-
+          dotnet test MultiTerminal.Tests/MultiTerminal.Tests.csproj -c Debug
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory ${{ runner.temp }}\testresults
+
+      # ---- JS lint: hooks/ + scripts/ (ESLint v9 flat config). ----
+      - name: npm ci (root tooling)
+        run: npm ci
+
+      - name: eslint (hooks + scripts)
+        run: npm run lint
+
+      # ---- MCP server node tests (no deps; node builtins only):
+      #      projectId traversal fixtures + tool-def<->handler consistency.
+      #      Mirrors the local invocation documented in the handoff. ----
+      - name: mcp node tests
+        run: node --test "mcp/test/*.test.mjs"
+
+      - name: Upload .NET test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-results
+          path: ${{ runner.temp }}\testresults\*.trx
+          if-no-files-found: ignore

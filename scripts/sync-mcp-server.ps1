@@ -43,6 +43,19 @@ $ErrorActionPreference = "Continue"
 
 if (-not $FailOnError -and $env:SMS_FAIL_ON_ERROR -eq "true") { $FailOnError = $true }
 
+# --- CI skip (ticket 9fec5c5f) ---------------------------------------------
+# On a CI runner (GitHub Actions sets CI=true) the AfterTargets=Build dev-live
+# sync has no purpose: there is no live MultiTerminal install under %APPDATA% to
+# keep fresh, and running `npm ci` into a throwaway %APPDATA% copy just burns
+# runner minutes and floods every build log. Skip it -- but ONLY the non-fatal
+# dev sync. The fatal installer-staging path (-FailOnError / SMS_FAIL_ON_ERROR,
+# used by the Release StageMcpForInstaller target) must still run everywhere so
+# a Release build on CI never ships an unstaged/stale server.
+if (-not $FailOnError -and $env:CI -eq "true") {
+    Write-Host "SyncMcpServer: skipped on CI (no live %APPDATA% install to sync; installer staging path is unaffected)."
+    exit 0
+}
+
 # Accumulates across copy / verify / npm so a single end-of-run decision can fail
 # the build under -FailOnError while a normal Debug sync only warns.
 $script:hadError = $false
