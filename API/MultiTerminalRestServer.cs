@@ -196,14 +196,45 @@ namespace MultiTerminal.API
                         options.JsonSerializerOptions.Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
                     });
 
-                // Add CORS for local development
+                // Global exception handling (Eval P2 item 1, task c522764d): give the :5050
+                // surface a safety net so all controllers emit consistent RFC 7807 ProblemDetails
+                // 500s (via IProblemDetailsService) instead of bare stack-trace 500s. The handler
+                // logs the unhandled exception to DebugLogService, then returns false so the
+                // framework writes the ProblemDetails body. Invoked by app.UseExceptionHandler() below.
+                builder.Services.AddProblemDetails();
+                builder.Services.AddExceptionHandler<RestApiExceptionHandler>();
+
+                // CORS (Eval P2 item 3, task c522764d): replace AllowAnyOrigin with a two-tier
+                // allowlist (see RestCorsOriginPolicy for the full rationale + retirement path f9697aac).
+                //  - DEFAULT policy (all controllers): loopback origins ONLY, no "null". Blocks the
+                //    drive-by remote-web-page CSRF/exfil READ threat AllowAnyOrigin left open —
+                //    including a hostile sandboxed iframe whose opaque origin serializes to "null".
+                //  - NAMED policy (FilePanelPolicyName): loopback + "null", applied via [EnableCors]
+                //    to TaskReportsController only — the one controller the file:// tasks-panel.html
+                //    actually fetches. Scoping "null" to that controller (PM ruling A) shrinks the
+                //    interim null-origin read-window from the whole API to a single controller.
+                // NOTE: intentionally NO AllowCredentials on either policy — the panels are
+                // credential-less, and null-origin + credentials is a CORS footgun.
                 builder.Services.AddCors(options =>
                 {
                     options.AddDefaultPolicy(policy =>
-                        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsLoopbackOrigin)
+                              .AllowAnyHeader()
+                              .AllowAnyMethod());
+
+                    options.AddPolicy(RestCorsOriginPolicy.FilePanelPolicyName, policy =>
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsAllowedOrigin)
+                              .AllowAnyHeader()
+                              .AllowAnyMethod());
                 });
 
                 var app = builder.Build();
+
+                // Exception handler must be first so it catches exceptions from all downstream
+                // middleware and controllers (Eval P2 item 1, task c522764d). Produces RFC 7807
+                // ProblemDetails 500s via the registered ProblemDetails service; RestApiExceptionHandler
+                // logs the error to DebugLogService.
+                app.UseExceptionHandler();
 
                 // Enable WebSockets for terminal streaming
                 app.UseWebSockets();
