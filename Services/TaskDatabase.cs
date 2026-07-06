@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
+using System.Threading;
 using MultiTerminal.MCPServer.Models;
 
 namespace MultiTerminal.Services
@@ -15,15 +16,103 @@ namespace MultiTerminal.Services
         private readonly string _databasePath;
         private SQLiteConnection _connection;
 
-        // Scoped lock for the new GitAttribution-related methods only — TaskDatabase
-        // overall has not been hardened for concurrent connection access and broader
-        // protection is filed as a follow-up. Item [11]'s FileSystemWatcher-debounced
-        // refresh on background threads is the first call site to need this.
+        // THE gate for the single shared SQLiteConnection.
+        //
+        // ONE GATE, ONE IDIOM: every runtime access to _connection MUST begin its method
+        // with `using var gate = LockConn();` (the scope-guard below) as the FIRST
+        // statement — that Monitor.Enter/Exit on this lock serializes the whole
+        // command+reader+transaction lifecycle (a live SQLiteDataReader keeps the
+        // connection busy, so the lock must span iteration, not just command creation).
+        // TaskDatabase serves concurrent callers — REST controllers on thread-pool
+        // threads, the janitor timer, session-import Task.Run threads, and HUD
+        // FileSystemWatcher-debounced refreshes — over ONE connection handle, and
+        // ADO.NET's SQLiteConnection is not safe for concurrent commands (overlapping
+        // readers corrupt reader state).
+        //
+        // WHY Monitor, NOT SemaphoreSlim: Monitor is REENTRANT, so a locked method that
+        // nests into another locked method (or a transaction method that calls a helper)
+        // can't self-deadlock; the whole API is synchronous so no async path needs
+        // SemaphoreSlim. If TaskDatabase is ever async-ified, do NOT blindly swap in
+        // SemaphoreSlim without re-auditing the nesting call graph first.
+        //
+        // DEADLOCK-SAFE: TaskDatabase is a leaf — it never raises broker events or invokes
+        // callbacks while holding the lock (audited: task ad08caac, item 0). Keep it that
+        // way: capture data under the lock and raise any event AFTER LockConn() disposes.
+        //
+        // EXEMPT from the gate (the ONLY methods allowed to touch _connection directly):
+        // InitializeDatabase, CreateSchema, the Migrate* chain, and Dispose — all run
+        // single-threaded at construction/teardown before the connection is shared. The
+        // item-5 verification enforces exactly this exemption by NAME PATTERN
+        // (Migrate*|CreateSchema|InitializeDatabase|Dispose) — not by an in-code sentinel —
+        // so a new method cannot quietly opt itself out of the gate.
         private readonly object _dbLock = new object();
         private bool _isDisposed;
 
         // FTS5 availability flag — checked once at init, falls back to LIKE queries if unavailable
         private bool _fts5Available;
+
+        /// <summary>
+        /// THE one idiom for touching the shared <see cref="_connection"/> at runtime.
+        /// Enters the <see cref="_dbLock"/> Monitor and returns a scope-guard whose
+        /// disposal exits it. Use it as the FIRST statement of every method that touches
+        /// <see cref="_connection"/>:
+        /// <code>using var gate = LockConn();</code>
+        /// This serializes the whole command+reader+transaction lifecycle over the single
+        /// connection handle (a live SQLiteDataReader keeps the connection busy, so the
+        /// lock must span iteration, not just command creation).
+        ///
+        /// <para><b>FOOTGUN — always `using`:</b> a bare <c>LockConn();</c> (no
+        /// <c>using</c>) enters the Monitor and discards the handle, so <c>Monitor.Exit</c>
+        /// NEVER runs — a silent, permanent lock hold that hangs every other DB caller.
+        /// Always write <c>using var gate = LockConn();</c>. The item-5 verification
+        /// matches that full <c>using var … = LockConn()</c> pattern, so a missing-`using`
+        /// misuse FAILS the check rather than shipping.</para>
+        ///
+        /// <para><b>Never in an iterator or async method:</b> a <c>using var</c> in a
+        /// <c>yield return</c> iterator or <c>async</c> method acquires late / holds across
+        /// suspension. TaskDatabase's API is fully synchronous with no iterators (item-5
+        /// verification asserts this stays true); keep it that way.</para>
+        ///
+        /// <para><b>Why Monitor, not SemaphoreSlim:</b> Monitor is reentrant on the same
+        /// thread, so a locked method that nests into another locked method (or a
+        /// transaction method that calls a helper) can't self-deadlock; a
+        /// SemaphoreSlim(1,1) would self-deadlock on the second acquire. The whole API is
+        /// synchronous, so no async path needs SemaphoreSlim. If TaskDatabase is ever
+        /// async-ified, do NOT blindly swap in SemaphoreSlim without re-auditing the
+        /// nesting call graph first.</para>
+        ///
+        /// <para><b>Deadlock-safety:</b> the guarded body must NOT raise MessageBroker
+        /// events or invoke external callbacks while the lock is held (the broker has its
+        /// own locks → lock-ordering hazard). TaskDatabase is a leaf and does none of this
+        /// today (audited: task ad08caac). If a future method needs to fire an event,
+        /// capture the data under the lock and raise the event AFTER the guard disposes.</para>
+        /// </summary>
+        private LockHandle LockConn()
+        {
+            Monitor.Enter(_dbLock);
+            return new LockHandle(_dbLock);
+        }
+
+        /// <summary>
+        /// Scope-guard returned by <see cref="LockConn"/>. A readonly struct so
+        /// <c>using var gate = LockConn();</c> disposes without boxing; disposal exits the
+        /// Monitor entered by <see cref="LockConn"/>. One Enter ↔ one Dispose, so nested
+        /// (reentrant) LockConn calls stay balanced.
+        /// </summary>
+        private readonly struct LockHandle : IDisposable
+        {
+            private readonly object _gate;
+
+            public LockHandle(object gate)
+            {
+                _gate = gate;
+            }
+
+            public void Dispose()
+            {
+                Monitor.Exit(_gate);
+            }
+        }
 
         /// <summary>
         /// Gets the path to the tasks database.
@@ -69,6 +158,14 @@ namespace MultiTerminal.Services
 
             _connection = new SQLiteConnection(connectionString);
             _connection.Open();
+
+            // Belt-and-braces for cross-PROCESS contention on the shared multiterminal.db
+            // file. The in-process LockConn() gate serializes THIS process's threads, but
+            // mcp-session-history's better-sqlite3 indexer is a separate OS process that
+            // opens its own handle on the same DB family — no in-process lock can serialize
+            // against it. busy_timeout makes SQLite wait/retry a locked DB for up to 5s
+            // rather than throwing SQLITE_BUSY immediately.
+            _connection.BusyTimeout = 5000;
 
             // Always run CreateSchema - all statements use IF NOT EXISTS so it's idempotent
             CreateSchema();
@@ -1176,6 +1273,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<KanbanTask> LoadAllTasks()
         {
+            using var gate = LockConn();
             var tasks = new List<KanbanTask>();
 
             // ORDER BY: sort_order is the manual rank (lower first) within a status
@@ -1250,6 +1348,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveTask(KanbanTask task)
         {
+            using var gate = LockConn();
             // sort_order in the UPDATE clause uses COALESCE so that a SaveTask call
             // with task.SortOrder=null does NOT overwrite an existing non-null DB
             // value. UpdateSortOrder() is the single source of truth for changing
@@ -1322,6 +1421,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public double GetNextSortOrderForStatus(string status)
         {
+            using var gate = LockConn();
             const string sql = "SELECT MAX(sort_order) FROM tasks WHERE status = @status";
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@status", status ?? "todo");
@@ -1338,6 +1438,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool UpdateSortOrder(string taskId, double newSortOrder)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE tasks
                 SET sort_order = @sortOrder,
@@ -1362,7 +1463,9 @@ namespace MultiTerminal.Services
             // CTE assigns 1000, 2000, 3000... in the current visible order
             // (sort_order asc, created_at asc — matches LoadAllTasks). The
             // UPDATE then writes the new rank back. Wrapped in a transaction so
-            // a partial write can't leave the column half-rebalanced.
+            // a partial write can't leave the column half-rebalanced. Whole
+            // transaction is serialized on _dbLock (runtime site: MessageBroker.ReorderTask).
+            using var gate = LockConn();
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -1397,6 +1500,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteTask(string taskId)
         {
+            using var gate = LockConn();
             // Cascade-delete any relationships and file links involving this task
             DeleteRelationshipsForTask(taskId);
             DeleteFileLinksForTask(taskId);
@@ -1412,6 +1516,7 @@ namespace MultiTerminal.Services
 
         public void AddRelationship(string id, string sourceTaskId, string targetTaskId, string type, string createdBy)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT OR IGNORE INTO task_relationships (id, source_task_id, target_task_id, type, created_by, created_at)
                 VALUES (@id, @sourceTaskId, @targetTaskId, @type, @createdBy, @createdAt)
@@ -1428,6 +1533,7 @@ namespace MultiTerminal.Services
 
         public void RemoveRelationshipsBetween(string taskId1, string taskId2)
         {
+            using var gate = LockConn();
             const string sql = @"
                 DELETE FROM task_relationships
                 WHERE (source_task_id = @id1 AND target_task_id = @id2)
@@ -1441,6 +1547,7 @@ namespace MultiTerminal.Services
 
         public List<MCPServer.Models.TaskRelationship> GetRelationshipsForTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, source_task_id, target_task_id, type, created_by, created_at
                 FROM task_relationships
@@ -1468,6 +1575,7 @@ namespace MultiTerminal.Services
 
         public void DeleteRelationshipsForTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_relationships WHERE source_task_id = @taskId OR target_task_id = @taskId";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
@@ -1480,6 +1588,7 @@ namespace MultiTerminal.Services
 
         public void AddFileLink(string id, string taskId, string filePath, string description, int? lineStart, int? lineEnd, string addedBy, int? checklistItemIndex = null)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT OR IGNORE INTO task_file_links (id, task_id, file_path, description, line_start, line_end, added_by, checklist_item_index, created_at)
                 VALUES (@id, @taskId, @filePath, @description, @lineStart, @lineEnd, @addedBy, @checklistItemIndex, @createdAt)
@@ -1499,6 +1608,7 @@ namespace MultiTerminal.Services
 
         public void RemoveFileLink(string taskId, string filePath)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_file_links WHERE task_id = @taskId AND file_path = @filePath";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
@@ -1508,6 +1618,7 @@ namespace MultiTerminal.Services
 
         public List<MCPServer.Models.TaskFileLink> GetFileLinksForTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, task_id, file_path, description, line_start, line_end, added_by, created_at, checklist_item_index
                 FROM task_file_links
@@ -1550,6 +1661,7 @@ namespace MultiTerminal.Services
         // because reviewer comments and link_task_file callers don't always agree.
         public HashSet<int> GetItemsLinkedToFile(string taskId, string filePath)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(taskId) || string.IsNullOrEmpty(filePath))
                 return new HashSet<int>();
 
@@ -1591,6 +1703,7 @@ namespace MultiTerminal.Services
 
         public void DeleteFileLinksForTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_file_links WHERE task_id = @taskId";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
@@ -1611,57 +1724,53 @@ namespace MultiTerminal.Services
         public Dictionary<string, (string TaskId, string Title, string Assignee)> GetActiveTaskLinkageForFiles(
             System.Collections.Generic.IReadOnlyList<string> absolutePaths)
         {
+            using var gate = LockConn();
             var result = new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
             if (absolutePaths == null || absolutePaths.Count == 0) return result;
 
-            // Lock the shared SQLiteConnection — TaskDatabase doesn't have a
-            // global lock today, but this method runs on Task.Run threads from
-            // HudGitRenderer's FileSystemWatcher-debounced refresh. Without the
-            // lock concurrent commands on the same connection produce undefined
-            // reader state (debugger BLOCKER finding from item [11]).
-            // Broader TaskDatabase concurrency hardening filed as follow-up.
-            lock (_dbLock)
+            // Runs on Task.Run threads from HudGitRenderer's FileSystemWatcher-debounced
+            // refresh; the LockConn() gate above serializes it with all other DB access.
+            // Originally a debugger BLOCKER (item [11]): concurrent commands on the shared
+            // connection produced undefined reader state.
+            var sb = new System.Text.StringBuilder();
+            sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, f.created_at ");
+            sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
+            sb.Append("WHERE t.status = 'in_progress' AND f.file_path IN (");
+            for (int i = 0; i < absolutePaths.Count; i++)
             {
-                var sb = new System.Text.StringBuilder();
-                sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, f.created_at ");
-                sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
-                sb.Append("WHERE t.status = 'in_progress' AND f.file_path IN (");
-                for (int i = 0; i < absolutePaths.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    sb.Append("@p").Append(i);
-                }
-                // Deterministic tie-break via rowid so chip selection doesn't flicker
-                // between agents when two links share a created_at second.
-                sb.Append(") ORDER BY f.created_at DESC, f.rowid DESC");
-
-                // Only the parameter name suffixes (@p0, @p1, ...) are concatenated;
-                // file path VALUES bind via SQLiteParameter below, so no injection.
-#pragma warning disable CA2100
-                using var cmd = new SQLiteCommand(sb.ToString(), _connection);
-#pragma warning restore CA2100
-                for (int i = 0; i < absolutePaths.Count; i++)
-                {
-                    cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
-                }
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    string filePath = reader.GetString(0);
-                    // First row per file_path wins (most recent + deterministic
-                    // tie-break). When the same file is claimed by multiple
-                    // active tasks, only the primary chip is shown — the
-                    // contamination banner uses GetDistinctActiveTaskIdsForFiles
-                    // (separate query) to detect the multi-claim case, since
-                    // this dedup would otherwise hide it.
-                    if (result.ContainsKey(filePath)) continue;
-                    string taskId = reader.GetString(1);
-                    string title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
-                    string assignee = reader.IsDBNull(3) ? null : reader.GetString(3);
-                    result[filePath] = (taskId, title, assignee);
-                }
-                return result;
+                if (i > 0) sb.Append(',');
+                sb.Append("@p").Append(i);
             }
+            // Deterministic tie-break via rowid so chip selection doesn't flicker
+            // between agents when two links share a created_at second.
+            sb.Append(") ORDER BY f.created_at DESC, f.rowid DESC");
+
+            // Only the parameter name suffixes (@p0, @p1, ...) are concatenated;
+            // file path VALUES bind via SQLiteParameter below, so no injection.
+#pragma warning disable CA2100
+            using var cmd = new SQLiteCommand(sb.ToString(), _connection);
+#pragma warning restore CA2100
+            for (int i = 0; i < absolutePaths.Count; i++)
+            {
+                cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
+            }
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string filePath = reader.GetString(0);
+                // First row per file_path wins (most recent + deterministic
+                // tie-break). When the same file is claimed by multiple
+                // active tasks, only the primary chip is shown — the
+                // contamination banner uses GetDistinctActiveTaskIdsForFiles
+                // (separate query) to detect the multi-claim case, since
+                // this dedup would otherwise hide it.
+                if (result.ContainsKey(filePath)) continue;
+                string taskId = reader.GetString(1);
+                string title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
+                string assignee = reader.IsDBNull(3) ? null : reader.GetString(3);
+                result[filePath] = (taskId, title, assignee);
+            }
+            return result;
         }
 
         /// <summary>
@@ -1687,103 +1796,101 @@ namespace MultiTerminal.Services
         public Dictionary<string, (string TaskId, string Title, string Assignee)> GetCompletedTaskLinkageForFiles(
             System.Collections.Generic.IReadOnlyList<string> absolutePaths)
         {
+            using var gate = LockConn();
             var result = new Dictionary<string, (string, string, string)>(StringComparer.OrdinalIgnoreCase);
             if (absolutePaths == null || absolutePaths.Count == 0) return result;
 
-            lock (_dbLock)
+            var sb = new System.Text.StringBuilder();
+            // Order by tasks.updated_at, NOT task_file_links.created_at:
+            // a task linked 6 months ago and shipped yesterday must outrank
+            // a task linked yesterday and shipped 6 months ago. The link's
+            // created_at reflects when the agent first attached the file
+            // to the task, which can predate completion by an arbitrary
+            // amount.
+            //
+            // Caveat: tasks.updated_at is a proxy for completion time, not
+            // the completion time itself — the schema doesn't have a
+            // dedicated completed_at column on the tasks table (see the
+            // CREATE TABLE at TaskDatabase.cs:120 and the ALTER TABLE
+            // chain through ~line 1063 — none add completed_at). Any edit
+            // to a done task after completion bumps updated_at, so a task
+            // completed long ago but recently edited will outrank one
+            // completed yesterday and untouched. This is still strictly
+            // better than f.created_at (which is link-creation time, not
+            // completion-related at all). Wiring up a real CompletedAt
+            // through KanbanTask + MessageBroker + SaveTask + migration is
+            // a separate ticket. Adversary CRITICAL Run 2 fix.
+            //
+            // f.created_at + f.rowid kept as secondary tie-breaks for
+            // tasks updated in the same second.
+            //
+            // Recency cutoff: only surface done-tasks updated within the
+            // last 3 days. Without this, any stale task_file_links row
+            // from a months-old done task whose file is currently
+            // uncommitted in trunk would render as a phantom "shipped"
+            // group in the HUD Git tab — anchored to today's working
+            // tree even though the task shipped half a year ago. The
+            // intent of the shipped chip is "I just marked this done
+            // minutes/hours ago and the files are still uncommitted",
+            // which 3 days covers comfortably (weekend-safe: a task
+            // done Friday afternoon and committed Monday still
+            // surfaces).
+            //
+            // CAVEAT — phantom resurrection: this window does NOT
+            // permanently suppress phantoms. Because t.updated_at
+            // bumps on EVERY task edit via SaveTask (including
+            // system-driven writes — pipeline reports, review_notes,
+            // checklist transitions, summary edits, continuation
+            // notes), any touch of a long-shipped task whose files
+            // are still uncommitted in trunk will re-surface its
+            // shipped chip until 3 more days of quiescence pass. A
+            // real fix needs a dedicated `completed_at` column (see
+            // separate-ticket TODO at lines 1454-1465 above); the
+            // window narrows the surface, but only completed_at
+            // closes the foot-gun. Cross-model adversary Run 1 on
+            // 57a7326f.
+            //
+            // Hardcoded constant rather than a setting: bounded scope,
+            // promote to settings only if users start asking. Ticket
+            // 57a7326f filed by cross-model adversary on a401e082
+            // pipeline Run 1.
+            sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, t.updated_at ");
+            sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
+            // Wrap row side in datetime(t.updated_at) so SQLite parses
+            // the timestamp semantically rather than relying on string
+            // lexical compare. Works today via the System.Data.SQLite
+            // ISO8601 default, but a future connection-string change
+            // (e.g. DateTimeFormat=Ticks at TaskDatabase.cs:60-66)
+            // would silently break a raw-string comparison without a
+            // build error. Adversary LOW Run 1 fix.
+            sb.Append("WHERE t.status = 'done' AND datetime(t.updated_at) > datetime('now', '-3 days') AND f.file_path IN (");
+            for (int i = 0; i < absolutePaths.Count; i++)
             {
-                var sb = new System.Text.StringBuilder();
-                // Order by tasks.updated_at, NOT task_file_links.created_at:
-                // a task linked 6 months ago and shipped yesterday must outrank
-                // a task linked yesterday and shipped 6 months ago. The link's
-                // created_at reflects when the agent first attached the file
-                // to the task, which can predate completion by an arbitrary
-                // amount.
-                //
-                // Caveat: tasks.updated_at is a proxy for completion time, not
-                // the completion time itself — the schema doesn't have a
-                // dedicated completed_at column on the tasks table (see the
-                // CREATE TABLE at TaskDatabase.cs:120 and the ALTER TABLE
-                // chain through ~line 1063 — none add completed_at). Any edit
-                // to a done task after completion bumps updated_at, so a task
-                // completed long ago but recently edited will outrank one
-                // completed yesterday and untouched. This is still strictly
-                // better than f.created_at (which is link-creation time, not
-                // completion-related at all). Wiring up a real CompletedAt
-                // through KanbanTask + MessageBroker + SaveTask + migration is
-                // a separate ticket. Adversary CRITICAL Run 2 fix.
-                //
-                // f.created_at + f.rowid kept as secondary tie-breaks for
-                // tasks updated in the same second.
-                //
-                // Recency cutoff: only surface done-tasks updated within the
-                // last 3 days. Without this, any stale task_file_links row
-                // from a months-old done task whose file is currently
-                // uncommitted in trunk would render as a phantom "shipped"
-                // group in the HUD Git tab — anchored to today's working
-                // tree even though the task shipped half a year ago. The
-                // intent of the shipped chip is "I just marked this done
-                // minutes/hours ago and the files are still uncommitted",
-                // which 3 days covers comfortably (weekend-safe: a task
-                // done Friday afternoon and committed Monday still
-                // surfaces).
-                //
-                // CAVEAT — phantom resurrection: this window does NOT
-                // permanently suppress phantoms. Because t.updated_at
-                // bumps on EVERY task edit via SaveTask (including
-                // system-driven writes — pipeline reports, review_notes,
-                // checklist transitions, summary edits, continuation
-                // notes), any touch of a long-shipped task whose files
-                // are still uncommitted in trunk will re-surface its
-                // shipped chip until 3 more days of quiescence pass. A
-                // real fix needs a dedicated `completed_at` column (see
-                // separate-ticket TODO at lines 1454-1465 above); the
-                // window narrows the surface, but only completed_at
-                // closes the foot-gun. Cross-model adversary Run 1 on
-                // 57a7326f.
-                //
-                // Hardcoded constant rather than a setting: bounded scope,
-                // promote to settings only if users start asking. Ticket
-                // 57a7326f filed by cross-model adversary on a401e082
-                // pipeline Run 1.
-                sb.Append("SELECT f.file_path, t.id, t.title, t.assignee, t.updated_at ");
-                sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
-                // Wrap row side in datetime(t.updated_at) so SQLite parses
-                // the timestamp semantically rather than relying on string
-                // lexical compare. Works today via the System.Data.SQLite
-                // ISO8601 default, but a future connection-string change
-                // (e.g. DateTimeFormat=Ticks at TaskDatabase.cs:60-66)
-                // would silently break a raw-string comparison without a
-                // build error. Adversary LOW Run 1 fix.
-                sb.Append("WHERE t.status = 'done' AND datetime(t.updated_at) > datetime('now', '-3 days') AND f.file_path IN (");
-                for (int i = 0; i < absolutePaths.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    sb.Append("@p").Append(i);
-                }
-                sb.Append(") ORDER BY t.updated_at DESC, f.created_at DESC, f.rowid DESC");
-
-                // Only the parameter name suffixes (@p0, @p1, ...) are concatenated;
-                // file path VALUES bind via SQLiteParameter below, so no injection.
-#pragma warning disable CA2100
-                using var cmd = new SQLiteCommand(sb.ToString(), _connection);
-#pragma warning restore CA2100
-                for (int i = 0; i < absolutePaths.Count; i++)
-                {
-                    cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
-                }
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    string filePath = reader.GetString(0);
-                    if (result.ContainsKey(filePath)) continue;
-                    string taskId = reader.GetString(1);
-                    string title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
-                    string assignee = reader.IsDBNull(3) ? null : reader.GetString(3);
-                    result[filePath] = (taskId, title, assignee);
-                }
-                return result;
+                if (i > 0) sb.Append(',');
+                sb.Append("@p").Append(i);
             }
+            sb.Append(") ORDER BY t.updated_at DESC, f.created_at DESC, f.rowid DESC");
+
+            // Only the parameter name suffixes (@p0, @p1, ...) are concatenated;
+            // file path VALUES bind via SQLiteParameter below, so no injection.
+#pragma warning disable CA2100
+            using var cmd = new SQLiteCommand(sb.ToString(), _connection);
+#pragma warning restore CA2100
+            for (int i = 0; i < absolutePaths.Count; i++)
+            {
+                cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
+            }
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string filePath = reader.GetString(0);
+                if (result.ContainsKey(filePath)) continue;
+                string taskId = reader.GetString(1);
+                string title = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
+                string assignee = reader.IsDBNull(3) ? null : reader.GetString(3);
+                result[filePath] = (taskId, title, assignee);
+            }
+            return result;
         }
 
         /// <summary>
@@ -1801,36 +1908,34 @@ namespace MultiTerminal.Services
         public System.Collections.Generic.IReadOnlyList<string> GetDistinctActiveTaskIdsForFiles(
             System.Collections.Generic.IReadOnlyList<string> absolutePaths)
         {
+            using var gate = LockConn();
             var result = new System.Collections.Generic.List<string>();
             if (absolutePaths == null || absolutePaths.Count == 0) return result;
 
-            lock (_dbLock)
+            var sb = new System.Text.StringBuilder();
+            sb.Append("SELECT DISTINCT t.id ");
+            sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
+            sb.Append("WHERE t.status = 'in_progress' AND f.file_path IN (");
+            for (int i = 0; i < absolutePaths.Count; i++)
             {
-                var sb = new System.Text.StringBuilder();
-                sb.Append("SELECT DISTINCT t.id ");
-                sb.Append("FROM task_file_links f JOIN tasks t ON t.id = f.task_id ");
-                sb.Append("WHERE t.status = 'in_progress' AND f.file_path IN (");
-                for (int i = 0; i < absolutePaths.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    sb.Append("@p").Append(i);
-                }
-                sb.Append(")");
+                if (i > 0) sb.Append(',');
+                sb.Append("@p").Append(i);
+            }
+            sb.Append(")");
 
 #pragma warning disable CA2100
-                using var cmd = new SQLiteCommand(sb.ToString(), _connection);
+            using var cmd = new SQLiteCommand(sb.ToString(), _connection);
 #pragma warning restore CA2100
-                for (int i = 0; i < absolutePaths.Count; i++)
-                {
-                    cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
-                }
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    result.Add(reader.GetString(0));
-                }
-                return result;
+            for (int i = 0; i < absolutePaths.Count; i++)
+            {
+                cmd.Parameters.AddWithValue("@p" + i, absolutePaths[i] ?? string.Empty);
             }
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(reader.GetString(0));
+            }
+            return result;
         }
 
         /// <summary>
@@ -1844,6 +1949,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public string GetLatestVerdictForTask(string taskId, string requiredStatus = "in_progress")
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(taskId)) return null;
 
             // Coerce requiredStatus to a known closed set. Anything else
@@ -1874,13 +1980,10 @@ namespace MultiTerminal.Services
                   AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = @taskId AND t.status = @requiredStatus)
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                cmd.Parameters.AddWithValue("@requiredStatus", requiredStatus);
-                return cmd.ExecuteScalar() as string;
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@requiredStatus", requiredStatus);
+            return cmd.ExecuteScalar() as string;
         }
 
         #endregion
@@ -1895,30 +1998,26 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveWorktreeRecord(string taskId, string agentName, string worktreePath, string branchName, bool isCanonical)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT OR REPLACE INTO task_worktrees
                     (task_id, agent_name, worktree_path, branch_name, created_at, status, is_canonical)
                 VALUES (@taskId, @agentName, @worktreePath, @branchName, @createdAt, 'active', @isCanonical)
             ";
-            // Serialize on the shared _dbLock: the janitor timer thread reads these
-            // task_worktrees rows concurrently with REST/MCP request threads writing
-            // them, all on one SQLiteConnection. Matches GetTasksLinkedToBranch (below)
-            // and the HUD-linkage readers (the existing lock(_dbLock) sites in this file).
-            // NOTE: _dbLock only serializes callers that take it. Other unlocked
-            // _connection users in this class (e.g. SaveTask/UpdateTask) are NOT yet
-            // covered, so the shared connection is not GLOBALLY serialized — closing
-            // that is tracked as a separate follow-up. Task 7bbaf13a.
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
-                cmd.Parameters.AddWithValue("@worktreePath", worktreePath);
-                cmd.Parameters.AddWithValue("@branchName", branchName);
-                cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
-                cmd.Parameters.AddWithValue("@isCanonical", isCanonical ? 1 : 0);
-                cmd.ExecuteNonQuery();
-            }
+            // The LockConn() gate (method top) serializes this with all other DB access:
+            // the janitor timer thread reads these task_worktrees rows concurrently with
+            // REST/MCP request threads writing them, all on one SQLiteConnection. As of
+            // task ad08caac every runtime _connection user in this class takes this same
+            // gate, so the shared connection IS now globally serialized — the earlier
+            // "SaveTask/UpdateTask not yet covered" caveat no longer applies.
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+            cmd.Parameters.AddWithValue("@worktreePath", worktreePath);
+            cmd.Parameters.AddWithValue("@branchName", branchName);
+            cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("o"));
+            cmd.Parameters.AddWithValue("@isCanonical", isCanonical ? 1 : 0);
+            cmd.ExecuteNonQuery();
         }
 
         /// <summary>
@@ -1948,6 +2047,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public MCPServer.Models.TaskWorktree GetWorktreeForTask(string taskId)
         {
+            using var gate = LockConn();
             // Per-agent isolation: a task can now have multiple worktree rows
             // (assignee canonical + N helpers). This task-scoped overload returns
             // the canonical (assignee) row — the representative worktree that all
@@ -1961,14 +2061,11 @@ namespace MultiTerminal.Services
                 ORDER BY is_canonical DESC, created_at DESC
                 LIMIT 1
             ";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                using var reader = cmd.ExecuteReader();
-                if (!reader.Read()) return null;
-                return MapWorktree(reader);
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return MapWorktree(reader);
         }
 
         /// <summary>
@@ -1978,20 +2075,18 @@ namespace MultiTerminal.Services
         /// </summary>
         public MCPServer.Models.TaskWorktree GetWorktreeForTask(string taskId, string agentName)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
                 FROM task_worktrees
                 WHERE task_id = @taskId AND agent_name = @agentName
             ";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
-                using var reader = cmd.ExecuteReader();
-                if (!reader.Read()) return null;
-                return MapWorktree(reader);
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return MapWorktree(reader);
         }
 
         /// <summary>
@@ -2007,6 +2102,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public MCPServer.Models.TaskWorktree GetActiveWorktreeForAgent(string agentName)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(agentName)) return null;
             const string sql = @"
                 SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
@@ -2015,14 +2111,11 @@ namespace MultiTerminal.Services
                 ORDER BY created_at DESC
                 LIMIT 1
             ";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@agentName", agentName);
-                using var reader = cmd.ExecuteReader();
-                if (!reader.Read()) return null;
-                return MapWorktree(reader);
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@agentName", agentName);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            return MapWorktree(reader);
         }
 
         /// <summary>
@@ -2033,6 +2126,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<MCPServer.Models.TaskWorktree> ListWorktreesForTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
                 FROM task_worktrees
@@ -2040,15 +2134,12 @@ namespace MultiTerminal.Services
                 ORDER BY is_canonical DESC, created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            lock (_dbLock)
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    results.Add(MapWorktree(reader));
-                }
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -2061,17 +2152,15 @@ namespace MultiTerminal.Services
         /// </summary>
         public void MarkWorktreePruned(string taskId)
         {
+            using var gate = LockConn();
             // Task-scoped: marks EVERY worktree row for the task pruned. With
             // per-agent isolation this is the prune-all form used by the task-done
             // teardown. To prune a single agent's row, use the (taskId, agentName)
             // overload below.
             const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                cmd.ExecuteNonQuery();
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.ExecuteNonQuery();
         }
 
         /// <summary>
@@ -2080,14 +2169,12 @@ namespace MultiTerminal.Services
         /// </summary>
         public void MarkWorktreePruned(string taskId, string agentName)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE task_worktrees SET status = 'pruned' WHERE task_id = @taskId AND agent_name = @agentName";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
-                cmd.ExecuteNonQuery();
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
+            cmd.ExecuteNonQuery();
         }
 
         /// <summary>
@@ -2097,14 +2184,12 @@ namespace MultiTerminal.Services
         /// </summary>
         public void UpdateWorktreePath(string taskId, string newWorktreePath)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE task_worktrees SET worktree_path = @path WHERE task_id = @taskId";
-            lock (_dbLock)
-            {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@taskId", taskId);
-                cmd.Parameters.AddWithValue("@path", newWorktreePath);
-                cmd.ExecuteNonQuery();
-            }
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@taskId", taskId);
+            cmd.Parameters.AddWithValue("@path", newWorktreePath);
+            cmd.ExecuteNonQuery();
         }
 
         /// <summary>
@@ -2113,6 +2198,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<MCPServer.Models.TaskWorktree> ListActiveWorktrees()
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT task_id, worktree_path, branch_name, created_at, status, agent_name, is_canonical
                 FROM task_worktrees
@@ -2120,14 +2206,11 @@ namespace MultiTerminal.Services
                 ORDER BY created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            lock (_dbLock)
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    results.Add(MapWorktree(reader));
-                }
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -2141,16 +2224,14 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<string> ListAllWorktreePaths()
         {
+            using var gate = LockConn();
             const string sql = "SELECT worktree_path FROM task_worktrees WHERE worktree_path IS NOT NULL AND worktree_path <> ''";
             var results = new List<string>();
-            lock (_dbLock)
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    results.Add(reader.GetString(0));
-                }
+                results.Add(reader.GetString(0));
             }
             return results;
         }
@@ -2165,6 +2246,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<MCPServer.Models.TaskWorktree> ListActiveWorktreesForDoneTasks()
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status, w.agent_name, w.is_canonical
                 FROM task_worktrees w
@@ -2173,14 +2255,11 @@ namespace MultiTerminal.Services
                 ORDER BY w.created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            lock (_dbLock)
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    results.Add(MapWorktree(reader));
-                }
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -2193,6 +2272,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<MCPServer.Models.TaskWorktree> ListPrunedWorktreesForDoneTasks()
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT w.task_id, w.worktree_path, w.branch_name, w.created_at, w.status, w.agent_name, w.is_canonical
                 FROM task_worktrees w
@@ -2201,14 +2281,11 @@ namespace MultiTerminal.Services
                 ORDER BY w.created_at DESC
             ";
             var results = new List<MCPServer.Models.TaskWorktree>();
-            lock (_dbLock)
+            using var cmd = new SQLiteCommand(sql, _connection);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    results.Add(MapWorktree(reader));
-                }
+                results.Add(MapWorktree(reader));
             }
             return results;
         }
@@ -2228,16 +2305,16 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<(string Id, string Title)> GetTasksLinkedToBranch(string projectId, string branchName)
         {
+            using var gate = LockConn();
             var results = new List<(string, string)>();
             if (string.IsNullOrWhiteSpace(projectId)) return results;
             if (string.IsNullOrWhiteSpace(branchName)) return results;
 
-            // Pipeline Run 5 finding (Codex adversary MEDIUM): take the shared
-            // _dbLock that other TaskDatabase methods use. Without it, the new
-            // helper races against concurrent TaskDatabase operations (called
-            // from HudGitRenderer.RefreshAsync background pass + REST controllers)
-            // on the same SQLiteConnection. Matches the pattern at lines 1435,
-            // 1505, 1619, 1689.
+            // Pipeline Run 5 finding (Codex adversary MEDIUM): without serialization this
+            // helper races against concurrent TaskDatabase operations (called from
+            // HudGitRenderer.RefreshAsync background pass + REST controllers) on the same
+            // SQLiteConnection. The LockConn() gate above closes that — the same one-idiom
+            // gate every runtime method in this class now takes (task ad08caac).
             const string sql = @"
                 SELECT t.id, t.title
                 FROM tasks t
@@ -2245,16 +2322,13 @@ namespace MultiTerminal.Services
                 WHERE w.branch_name = @branchName AND t.project_id = @projectId
                 ORDER BY w.created_at DESC
             ";
-            lock (_dbLock)
+            using var cmd = new SQLiteCommand(sql, _connection);
+            cmd.Parameters.AddWithValue("@projectId", projectId);
+            cmd.Parameters.AddWithValue("@branchName", branchName);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
             {
-                using var cmd = new SQLiteCommand(sql, _connection);
-                cmd.Parameters.AddWithValue("@projectId", projectId);
-                cmd.Parameters.AddWithValue("@branchName", branchName);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    results.Add((reader.GetString(0), reader.IsDBNull(1) ? "" : reader.GetString(1)));
-                }
+                results.Add((reader.GetString(0), reader.IsDBNull(1) ? "" : reader.GetString(1)));
             }
             return results;
         }
@@ -2267,6 +2341,7 @@ namespace MultiTerminal.Services
         /// <returns>True if a task was updated, false if task not found.</returns>
         public bool UpdateTask(string taskId, string title, string description)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE tasks
                 SET title = @title, description = @description, updated_at = @updatedAt
@@ -2288,6 +2363,7 @@ namespace MultiTerminal.Services
         /// <returns>True if a task was updated, false if task not found.</returns>
         public bool UpdateTaskAssignee(string taskId, string assignee)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE tasks
                 SET assignee = @assignee, updated_at = @updatedAt
@@ -2307,6 +2383,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteAllTasks()
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM tasks";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -2320,6 +2397,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<Project> LoadAllProjects()
         {
+            using var gate = LockConn();
             var projects = new List<Project>();
 
             const string sql = @"
@@ -2352,6 +2430,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProject(Project project)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO projects (id, name, description, created_by, created_at, updated_at)
                 VALUES (@id, @name, @description, @createdBy, @createdAt, @updatedAt)
@@ -2378,6 +2457,7 @@ namespace MultiTerminal.Services
         /// <returns>True if a project was updated, false if project not found.</returns>
         public bool UpdateProject(string projectId, string name, string description)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE projects
                 SET name = @name, description = @description, updated_at = @updatedAt
@@ -2398,6 +2478,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteProject(string projectId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM projects WHERE id = @id";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -2410,6 +2491,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteAllProjects()
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM projects";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -2425,6 +2507,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int SaveTaskSummary(TaskSummary summary)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO task_summaries (task_id, summary_at, triggered_by, previous_status, new_status,
                     work_completed, next_steps, blockers, notes, author, is_auto_generated, pending_enhancement)
@@ -2455,6 +2538,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TaskSummary> GetTaskSummaries(string taskId, int limit = 10)
         {
+            using var gate = LockConn();
             var summaries = new List<TaskSummary>();
 
             const string sql = @"
@@ -2484,6 +2568,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public TaskSummary GetLatestSummary(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, task_id, summary_at, triggered_by, previous_status, new_status,
                     work_completed, next_steps, blockers, notes, author, is_auto_generated, pending_enhancement
@@ -2510,6 +2595,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TaskSummary> GetAllRecentSummaries(int limit = 20)
         {
+            using var gate = LockConn();
             var summaries = new List<TaskSummary>();
 
             const string sql = @"
@@ -2537,6 +2623,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TaskSummary> GetPendingSummaries(string taskId)
         {
+            using var gate = LockConn();
             var summaries = new List<TaskSummary>();
 
             const string sql = @"
@@ -2565,6 +2652,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void FinalizePendingSummaries(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE task_summaries
                 SET pending_enhancement = 0
@@ -2608,6 +2696,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveTaskHelper(TaskHelper helper)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT OR REPLACE INTO task_helpers (id, task_id, helper_name, added_by, added_at)
                 VALUES (@id, @taskId, @helperName, @addedBy, @addedAt)
@@ -2628,6 +2717,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TaskHelper> LoadTaskHelpers(string taskId)
         {
+            using var gate = LockConn();
             var helpers = new List<TaskHelper>();
 
             const string sql = @"
@@ -2661,6 +2751,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TaskHelper> LoadTasksWhereHelper(string helperName)
         {
+            using var gate = LockConn();
             var helpers = new List<TaskHelper>();
 
             const string sql = @"
@@ -2695,6 +2786,7 @@ namespace MultiTerminal.Services
         /// <returns>True if a helper was removed, false if not found.</returns>
         public bool RemoveTaskHelper(string taskId, string helperName)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_helpers WHERE task_id = @taskId AND helper_name = @helperName";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -2709,6 +2801,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool IsHelper(string taskId, string helperName)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT COUNT(1)
                 FROM task_helpers
@@ -2728,6 +2821,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteTaskHelpers(string taskId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_helpers WHERE task_id = @taskId";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -2744,6 +2838,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveTerminalActivity(TerminalActivity activity)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO terminal_activity (terminal, status, activity, blocked_by, task_id, plan_id, updated_at,
                                                in_critical_section, critical_section_until)
@@ -2779,6 +2874,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TerminalActivity> GetAllTerminalActivities()
         {
+            using var gate = LockConn();
             var activities = new List<TerminalActivity>();
 
             const string sql = @"
@@ -2872,6 +2968,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public TerminalActivity GetTerminalActivity(string terminal)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT terminal, status, activity, blocked_by, task_id, plan_id, updated_at,
                        in_critical_section, critical_section_until
@@ -2912,6 +3009,7 @@ namespace MultiTerminal.Services
         /// <returns>The helper assignment if successful, null if helper already exists or task not found.</returns>
         public TaskHelper AddTaskHelper(string taskId, string helperName, string addedBy)
         {
+            using var gate = LockConn();
             // First verify the task exists
             const string checkTaskSql = "SELECT COUNT(*) FROM tasks WHERE id = @taskId";
             using (var checkCmd = new SQLiteCommand(checkTaskSql, _connection))
@@ -2950,6 +3048,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TaskHelper> GetTaskHelpers(string taskId)
         {
+            using var gate = LockConn();
             var helpers = new List<TaskHelper>();
 
             const string sql = @"
@@ -2983,6 +3082,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool IsTaskHelper(string taskId, string helperName)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT COUNT(*) FROM task_helpers
                 WHERE task_id = @taskId AND helper_name = @helperName
@@ -3000,6 +3100,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<string> GetTasksWhereHelper(string helperName)
         {
+            using var gate = LockConn();
             var taskIds = new List<string>();
 
             const string sql = @"
@@ -3024,6 +3125,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public KanbanTask GetTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
@@ -3048,6 +3150,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public KanbanTask GetActiveTaskForAgent(string agentName)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
@@ -3079,6 +3182,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<KanbanTask> GetStaleTasks()
         {
+            using var gate = LockConn();
             var tasks = new List<KanbanTask>();
             var sevenDaysAgo = DateTime.UtcNow.AddDays(-7);
 
@@ -3109,6 +3213,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<KanbanTask> GetCriticalStaleTasks()
         {
+            using var gate = LockConn();
             var tasks = new List<KanbanTask>();
             var fourteenDaysAgo = DateTime.UtcNow.AddDays(-14);
 
@@ -3142,6 +3247,7 @@ namespace MultiTerminal.Services
         /// <returns>True if task was updated, false if task not found.</returns>
         public bool UpdateStaleLevel(string taskId, int level)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE tasks
                 SET stale_level = @level,
@@ -3169,6 +3275,7 @@ namespace MultiTerminal.Services
         /// <returns>True if task was updated, false if task not found.</returns>
         public bool RecordStaleResponse(string taskId, string response)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE tasks
                 SET stale_response = @response,
@@ -3192,6 +3299,7 @@ namespace MultiTerminal.Services
         /// <returns>True if task was updated, false if task not found.</returns>
         public bool ClearStaleTracking(string taskId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE tasks
                 SET stale_level = 0,
@@ -3217,6 +3325,7 @@ namespace MultiTerminal.Services
         /// <returns>List of stale paused tasks.</returns>
         public List<KanbanTask> GetStalePausedTasks(int minDaysPaused)
         {
+            using var gate = LockConn();
             var tasks = new List<KanbanTask>();
             var cutoffDate = DateTime.UtcNow.AddDays(-minDaysPaused);
 
@@ -3247,6 +3356,7 @@ namespace MultiTerminal.Services
         /// <returns>List of stale tasks assigned to this terminal.</returns>
         public List<KanbanTask> GetStaleTasksForTerminal(string terminalName)
         {
+            using var gate = LockConn();
             var tasks = new List<KanbanTask>();
 
             const string sql = @"
@@ -3287,6 +3397,7 @@ namespace MultiTerminal.Services
         /// <param name="taskId">The task ID to clear.</param>
         public void ClearStaleFlag(string taskId)
         {
+            using var gate = LockConn();
             var now = DateTime.UtcNow;
 
             const string sql = @"
@@ -3318,6 +3429,7 @@ namespace MultiTerminal.Services
         /// <param name="suggestedPlan">Whether the system suggested creating a plan.</param>
         public void RecordComplexityAnalysis(string taskId, int score, List<string> signals, bool suggestedPlan)
         {
+            using var gate = LockConn();
             var signalsJson = signals != null && signals.Count > 0
                 ? System.Text.Json.JsonSerializer.Serialize(signals)
                 : null;
@@ -3346,6 +3458,7 @@ namespace MultiTerminal.Services
         /// <returns>True if a pending decision was found and updated, false otherwise.</returns>
         public bool RecordComplexityDecision(string taskId, bool accepted)
         {
+            using var gate = LockConn();
             // Find the most recent pending decision for this task
             const string sql = @"
                 UPDATE complexity_decisions
@@ -3372,6 +3485,7 @@ namespace MultiTerminal.Services
         /// <returns>Statistics about complexity analysis decisions.</returns>
         public ComplexityStats GetComplexityStats()
         {
+            using var gate = LockConn();
             var stats = new ComplexityStats();
 
             const string sql = @"
@@ -3406,6 +3520,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProfile(TeamMemberProfile profile)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO team_member_profiles (id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, agent_instructions, preferred_model, created_at, updated_at, is_team_lead)
                 VALUES (@id, @displayName, @avatarUrl, @role, @bio, @skillsJson, @interestsJson, @projectIdsJson, @isOnline, @agentInstructions, @preferredModel, @createdAt, @updatedAt, @isTeamLead)
@@ -3550,6 +3665,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public TeamMemberProfile GetProfile(string profileId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, display_name, avatar_url, role, bio, skills_json, interests_json, project_ids_json, is_online, created_at, updated_at, agent_instructions, preferred_model, is_team_lead
                 FROM team_member_profiles
@@ -3573,6 +3689,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<TeamMemberProfile> LoadAllProfiles()
         {
+            using var gate = LockConn();
             var profiles = new List<TeamMemberProfile>();
 
             const string sql = @"
@@ -3597,6 +3714,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteProfile(string profileId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM team_member_profiles WHERE id = @id";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -3610,6 +3728,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SetProfileOnline(string profileId)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE team_member_profiles SET is_online = 1, updated_at = @updatedAt WHERE id = @id";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -3624,6 +3743,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SetProfileOffline(string profileId)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE team_member_profiles SET is_online = 0, updated_at = @updatedAt WHERE id = @id";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -3638,6 +3758,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SetAllProfilesOffline()
         {
+            using var gate = LockConn();
             const string sql = "UPDATE team_member_profiles SET is_online = 0, updated_at = @updatedAt";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -3680,6 +3801,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveHelperSession(HelperSession session)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO helper_sessions (id, task_id, prompt, spawned_by, spawned_at, completed_at, status)
                 VALUES (@id, @taskId, @prompt, @spawnedBy, @spawnedAt, @completedAt, @status)
@@ -3705,6 +3827,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public HelperSession GetHelperSession(string helperId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, task_id, prompt, spawned_by, spawned_at, completed_at, status
                 FROM helper_sessions
@@ -3728,6 +3851,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<HelperSession> GetActiveHelperSessions()
         {
+            using var gate = LockConn();
             var sessions = new List<HelperSession>();
 
             const string sql = @"
@@ -3753,6 +3877,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool UpdateHelperStatus(string helperId, string status, DateTime? completedAt = null)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE helper_sessions
                 SET status = @status, completed_at = @completedAt
@@ -3772,6 +3897,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveHelperMessage(HelperMessage message)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO helper_messages (id, helper_id, message, timestamp)
                 VALUES (@id, @helperId, @message, @timestamp)
@@ -3791,6 +3917,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<HelperMessage> GetHelperMessages(string helperId)
         {
+            using var gate = LockConn();
             var messages = new List<HelperMessage>();
 
             const string sql = @"
@@ -4022,6 +4149,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveInboxMessage(InboxMessage message)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO user_inbox (id, user_id, task_id, task_title, checklist_item_index,
                     checklist_item_name, type, summary, created_at, created_by, read_at, reply_text, replied_at)
@@ -4056,6 +4184,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<InboxMessage> GetInboxMessages(string userId, bool unreadOnly = false, int limit = 50)
         {
+            using var gate = LockConn();
             var messages = new List<InboxMessage>();
 
             var sql = @"
@@ -4090,6 +4219,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int GetInboxUnreadCount(string userId)
         {
+            using var gate = LockConn();
             const string sql = "SELECT COUNT(*) FROM user_inbox WHERE user_id = @userId AND read_at IS NULL";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4102,6 +4232,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public InboxMessage GetInboxMessage(string messageId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, user_id, task_id, task_title, checklist_item_index,
                     checklist_item_name, type, summary, created_at, created_by, read_at, reply_text, replied_at
@@ -4125,6 +4256,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool MarkInboxRead(string messageId)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE user_inbox SET read_at = @readAt WHERE id = @id AND read_at IS NULL";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4139,6 +4271,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int MarkAllInboxRead(string userId)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE user_inbox SET read_at = @readAt WHERE user_id = @userId AND read_at IS NULL";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4153,6 +4286,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool ReplyToInboxMessage(string messageId, string replyText)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE user_inbox
                 SET reply_text = @replyText, replied_at = @repliedAt, read_at = COALESCE(read_at, @readAt)
@@ -4200,6 +4334,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveAttachment(TaskAttachment attachment)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO task_attachments (id, task_id, checklist_item_index, file_name, stored_file_name, mime_type, file_size_bytes, added_by, created_at)
                 VALUES (@id, @taskId, @checklistItemIndex, @fileName, @storedFileName, @mimeType, @fileSizeBytes, @addedBy, @createdAt)
@@ -4226,6 +4361,7 @@ namespace MultiTerminal.Services
         /// <param name="checklistItemIndex">If provided, only return attachments for this checklist item index. If null, returns all attachments for the task.</param>
         public List<TaskAttachment> GetAttachments(string taskId, int? checklistItemIndex = null)
         {
+            using var gate = LockConn();
             var attachments = new List<TaskAttachment>();
 
             string sql;
@@ -4269,6 +4405,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public TaskAttachment GetAttachmentById(string attachmentId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, task_id, checklist_item_index, file_name, stored_file_name, mime_type, file_size_bytes, added_by, created_at
                 FROM task_attachments
@@ -4292,6 +4429,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteAttachment(string attachmentId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_attachments WHERE id = @id";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4305,6 +4443,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteAttachmentsForTask(string taskId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_attachments WHERE task_id = @taskId";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4318,6 +4457,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteAttachmentsForChecklistItem(string taskId, int itemIndex)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM task_attachments WHERE task_id = @taskId AND checklist_item_index = @itemIndex";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4333,6 +4473,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void UpdateAttachmentIndexes(string taskId, int deletedIndex)
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE task_attachments
                 SET checklist_item_index = checklist_item_index - 1
@@ -4425,6 +4566,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private bool CheckFts5Available()
         {
+            using var gate = LockConn();
             try
             {
                 const string sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='session_messages_fts'";
@@ -4443,6 +4585,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveSessionLineage(SessionLineageRecord record)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO session_lineage
                     (session_id, parent_session_id, task_id, agent_name, session_type, summary, session_file_path, started_at, ended_at, created_at,
@@ -4490,6 +4633,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public HashSet<string> GetImportedSessionIds()
         {
+            using var gate = LockConn();
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             const string sql = "SELECT session_id FROM session_lineage";
 
@@ -4508,6 +4652,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public string GetSessionAgentName(string sessionId)
         {
+            using var gate = LockConn();
             const string sql = "SELECT agent_name FROM session_agent_map WHERE session_id = @sessionId";
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@sessionId", sessionId);
@@ -4521,6 +4666,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public HashSet<string> GetActiveSessionIds()
         {
+            using var gate = LockConn();
             var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             const string sql = "SELECT session_id FROM session_agent_map WHERE is_active = 1";
             using var command = new SQLiteCommand(sql, _connection);
@@ -4539,6 +4685,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int CleanupStaleActiveSessions()
         {
+            using var gate = LockConn();
             const string sql = @"
                 UPDATE session_agent_map
                 SET is_active = 0
@@ -4554,6 +4701,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByTask(string taskId)
         {
+            using var gate = LockConn();
             var results = new List<SessionLineageRecord>();
 
             const string sql = @"
@@ -4583,6 +4731,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionLineageRecord> GetSessionLineage(string sessionId)
         {
+            using var gate = LockConn();
             // Walk parent links using a recursive CTE
             const string sql = @"
                 WITH RECURSIVE chain(id, session_id, parent_session_id, task_id, agent_name,
@@ -4628,6 +4777,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveSessionMessages(string sessionId, List<SessionMessageRecord> messages)
         {
+            // Whole transaction serialized on _dbLock (runtime site: session-import Task.Run threads).
+            using var gate = LockConn();
             using var transaction = _connection.BeginTransaction();
             try
             {
@@ -4679,6 +4830,7 @@ namespace MultiTerminal.Services
             string agentName = null,
             int limit = 100)
         {
+            using var gate = LockConn();
             var results = new List<SessionMessageRecord>();
 
             var sql = @"
@@ -4746,6 +4898,7 @@ namespace MultiTerminal.Services
         private List<SessionMessageRecord> ExecuteFts5Search(
             string query, string sessionId, string taskId, string role, string agentName, int limit)
         {
+            using var gate = LockConn();
             var results = new List<SessionMessageRecord>();
 
             var sql = @"
@@ -4786,6 +4939,7 @@ namespace MultiTerminal.Services
         private List<SessionMessageRecord> ExecuteLikeSearch(
             string query, string sessionId, string taskId, string role, string agentName, int limit)
         {
+            using var gate = LockConn();
             var results = new List<SessionMessageRecord>();
 
             var sql = @"
@@ -4865,6 +5019,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public SessionLineageRecord GetMostRecentSessionByFolder(string claudeProjectFolder, string agentName = null, string excludeSessionId = null, int skip = 0)
         {
+            using var gate = LockConn();
             // Normalize: ensure trailing separator so we don't match sibling folders sharing a prefix
             string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
 
@@ -4909,6 +5064,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionLineageRecord> GetUnsummarizedSessions(string claudeProjectFolder, int limit = 10)
         {
+            using var gate = LockConn();
             var results = new List<SessionLineageRecord>();
 
             string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
@@ -4947,6 +5103,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int UpdateSessionSummary(string sessionId, string summary)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE session_lineage SET summary = @summary WHERE session_id = @sessionId";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -4960,6 +5117,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int UpdateSessionProcessingStatus(string sessionId, string status, string timestampColumn = null)
         {
+            using var gate = LockConn();
             string sql = "UPDATE session_lineage SET processing_status = @status";
             if (!string.IsNullOrEmpty(timestampColumn))
             {
@@ -4990,6 +5148,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public SessionLineageRecord GetSessionById(string sessionId)
         {
+            using var gate = LockConn();
             const string sql = @"
                 SELECT id, session_id, parent_session_id, task_id, agent_name, session_type,
                        summary, session_file_path, started_at, ended_at, created_at,
@@ -5011,6 +5170,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int CloseOpenSessions(string agentName, string projectPath, string excludeSessionId = null)
         {
+            using var gate = LockConn();
             string sql = @"
                 UPDATE session_lineage
                 SET processing_status = 'closed',
@@ -5040,6 +5200,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<string> GetAllUnsummarizedSessionIds()
         {
+            using var gate = LockConn();
             var results = new List<string>();
             const string sql = "SELECT session_id FROM session_lineage WHERE summary IS NULL OR summary = ''";
             using var cmd = new SQLiteCommand(sql, _connection);
@@ -5056,6 +5217,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<string> GetJunkSummarizedSessionIds()
         {
+            using var gate = LockConn();
             var results = new List<string>();
             const string sql = @"
                 SELECT session_id FROM session_lineage
@@ -5158,6 +5320,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionMessageRecord> GetRecentSessionMessages(string sessionId, string role, int limit)
         {
+            using var gate = LockConn();
             var results = new List<SessionMessageRecord>();
 
             const string sql = @"
@@ -5188,6 +5351,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionMessageRecord> GetSessionMessagesBySessionId(string sessionId, int limit = 500)
         {
+            using var gate = LockConn();
             var results = new List<SessionMessageRecord>();
 
             const string sql = @"
@@ -5214,6 +5378,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void DeleteSessionMessages(string sessionId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM session_messages WHERE session_id = @sessionId";
 
             using var command = new SQLiteCommand(sql, _connection);
@@ -5813,6 +5978,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public string GetProjectNotes(string projectPath)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath)) return "";
             const string sql = "SELECT content FROM project_notes WHERE project_path = @path";
             using var cmd = new SQLiteCommand(sql, _connection);
@@ -5826,6 +5992,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveProjectNotes(string projectPath, string content, string updatedBy = null)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath)) return;
             const string sql = @"
                 INSERT INTO project_notes (id, project_path, content, updated_at, updated_by)
@@ -5850,6 +6017,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<(string Name, string Content, bool IsDefault)> GetProjectNoteTabs(string projectPath)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath)) return new List<(string, string, bool)>();
             string rawPath = projectPath;                    // pre-normalization spelling (for legacy fallback)
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
@@ -5931,6 +6099,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveNoteTab(string projectPath, string tabName, string content, int? tabOrder = null, bool? isDefault = null)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
 
@@ -5964,6 +6133,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteNoteTab(string projectPath, string tabName)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(tabName)) return false;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
             const string sql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND is_default = 0";
@@ -5978,6 +6148,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool RenameNoteTab(string projectPath, string oldName, string newName)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath) || string.IsNullOrEmpty(oldName) || string.IsNullOrEmpty(newName)) return false;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
             const string sql = "UPDATE project_note_tabs SET tab_name = @newName, updated_at = datetime('now') WHERE project_path = @path AND tab_name = @oldName";
@@ -5993,6 +6164,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void ReorderNoteTabs(string projectPath, List<string> tabNames)
         {
+            using var gate = LockConn();
             if (string.IsNullOrEmpty(projectPath) || tabNames == null) return;
             projectPath = NormalizeNoteTabPath(projectPath); // canonical key — stable across path-spelling
             const string sql = "UPDATE project_note_tabs SET tab_order = @order WHERE project_path = @path AND tab_name = @name";
@@ -6015,6 +6187,10 @@ namespace MultiTerminal.Services
         /// </summary>
         public int PurgeOrphanEmptyNoteTabs(IEnumerable<string> registeredProjectPaths)
         {
+            // Whole method serialized on _dbLock (runtime site: startup orphan cleanup).
+            // Holding the gate across SELECT → build orphans → DELETE also keeps the
+            // emptiness re-check atomic with the delete (reinforces the TOCTOU note below).
+            using var gate = LockConn();
             var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (registeredProjectPaths != null)
             {
@@ -6236,6 +6412,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public string SaveMessageImages(List<MessageImageInput> images)
         {
+            using var gate = LockConn();
             string batchId = Guid.NewGuid().ToString("N").Substring(0, 12);
 
             const string sql = @"
@@ -6263,6 +6440,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<MessageImage> GetMessageImages(string batchId)
         {
+            using var gate = LockConn();
             var images = new List<MessageImage>();
 
             const string sql = @"
@@ -6297,6 +6475,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteMessageImageBatch(string batchId)
         {
+            using var gate = LockConn();
             const string sql = "DELETE FROM message_images WHERE batch_id = @batchId";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@batchId", batchId);
@@ -6310,6 +6489,7 @@ namespace MultiTerminal.Services
         public string SaveNotificationEvent(string notificationType, string title, string message,
             string sessionId, string agentName, string cwd)
         {
+            using var gate = LockConn();
             string id = Guid.NewGuid().ToString("N").Substring(0, 8);
             const string sql = @"
                 INSERT INTO notification_events (id, notification_type, title, message, session_id, agent_name, cwd, created_at)
@@ -6329,6 +6509,7 @@ namespace MultiTerminal.Services
 
         public List<Dictionary<string, object>> GetNotificationEvents(int limit = 50, bool unreadOnly = false)
         {
+            using var gate = LockConn();
             string sql = unreadOnly
                 ? "SELECT * FROM notification_events WHERE read_at IS NULL ORDER BY created_at DESC LIMIT @limit"
                 : "SELECT * FROM notification_events ORDER BY created_at DESC LIMIT @limit";
@@ -6352,6 +6533,7 @@ namespace MultiTerminal.Services
 
         public void MarkNotificationRead(string id)
         {
+            using var gate = LockConn();
             const string sql = "UPDATE notification_events SET read_at = datetime('now') WHERE id = @id";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", id);
@@ -6360,6 +6542,7 @@ namespace MultiTerminal.Services
 
         public int GetUnreadNotificationCount()
         {
+            using var gate = LockConn();
             const string sql = "SELECT COUNT(*) FROM notification_events WHERE read_at IS NULL";
             using var cmd = new SQLiteCommand(sql, _connection);
             return Convert.ToInt32(cmd.ExecuteScalar());
@@ -6373,6 +6556,7 @@ namespace MultiTerminal.Services
             string modelUsed, string verdict, int? score, int findingsCount, long? durationMs,
             DateTime invokedAt, DateTime? completedAt, string reportSummary)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO agent_invocations (id, agent_name, task_id, invoked_by, model_used, verdict, score, findings_count, duration_ms, invoked_at, completed_at, report_summary)
                 VALUES (@id, @agentName, @taskId, @invokedBy, @modelUsed, @verdict, @score, @findingsCount, @durationMs, @invokedAt, @completedAt, @reportSummary)
@@ -6402,6 +6586,7 @@ namespace MultiTerminal.Services
 
         public List<Dictionary<string, object>> GetAgentInvocations(string agentName = null, string taskId = null, int limit = 50)
         {
+            using var gate = LockConn();
             var results = new List<Dictionary<string, object>>();
             var conditions = new List<string>();
             if (!string.IsNullOrEmpty(agentName))
@@ -6435,6 +6620,7 @@ namespace MultiTerminal.Services
 
         public List<Dictionary<string, object>> GetAgentStats()
         {
+            using var gate = LockConn();
             var results = new List<Dictionary<string, object>>();
             const string sql = @"
                 SELECT
@@ -6473,6 +6659,7 @@ namespace MultiTerminal.Services
         public void SaveTaskReport(string id, string taskId, string invocationId, string agentName,
             string reportType, string reportContent, string verdict, int? score, string createdBy)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT INTO task_reports (id, task_id, invocation_id, agent_name, report_type, report_content, verdict, score, created_by)
                 VALUES (@id, @taskId, @invocationId, @agentName, @reportType, @reportContent, @verdict, @score, @createdBy)
@@ -6499,6 +6686,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<Dictionary<string, object>> GetTaskReports(string taskId, string agentName = null, int limit = 50)
         {
+            using var gate = LockConn();
             var results = new List<Dictionary<string, object>>();
             var conditions = new List<string> { "task_id = @taskId" };
             if (!string.IsNullOrEmpty(agentName))
@@ -6532,6 +6720,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public Dictionary<string, object> GetTaskReport(string reportId)
         {
+            using var gate = LockConn();
             const string sql = "SELECT * FROM task_reports WHERE id = @id";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@id", reportId);
@@ -6552,6 +6741,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int GetTaskReportCount(string taskId)
         {
+            using var gate = LockConn();
             const string sql = "SELECT COUNT(*) FROM task_reports WHERE task_id = @taskId";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
@@ -6561,8 +6751,20 @@ namespace MultiTerminal.Services
         #endregion
 
         /// <summary>
-        /// Exposes the shared SQLite connection so that KnowledgeDatabase can share the
-        /// same connection without opening a second WAL handle on the same file.
+        /// Exposes the shared SQLite connection so sibling databases (KnowledgeDatabase,
+        /// CodeGraphDatabase, SessionMemoryDatabase, BranchMetadataService,
+        /// OwnerProfileService, SourceControlAccountService) can reuse it instead of
+        /// opening a second WAL handle on the same file.
+        ///
+        /// <para>⚠️ CONCURRENCY: this hands out the RAW handle. TaskDatabase's own methods
+        /// serialize their access via <see cref="LockConn"/> (task ad08caac), but any
+        /// external consumer that runs commands on this connection MUST hold the SAME gate
+        /// or it races against TaskDatabase (and every other consumer) on one handle —
+        /// undefined reader state. The shared handle is therefore NOT yet globally
+        /// race-free; routing all consumers through one gate (and deleting the private
+        /// locks two of them currently hold) is tracked in ticket bb2b0104. The
+        /// verifier (scripts/verify-taskdb-gate.mjs, ALLOW_CONNECTION_EXPOSURE) flags this
+        /// property as the standing tripwire until bb2b0104 closes it.</para>
         /// </summary>
         internal SQLiteConnection Connection => _connection;
 
@@ -6575,6 +6777,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveChatMessage(string messageId, string fromTerminal, string toTerminal, string content, DateTime timestamp, bool isBroadcast)
         {
+            using var gate = LockConn();
             const string sql = @"
                 INSERT OR IGNORE INTO chat_messages (message_id, from_terminal, to_terminal, content, timestamp, is_broadcast)
                 VALUES (@messageId, @from, @to, @content, @timestamp, @isBroadcast)";
@@ -6594,6 +6797,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<ChatMessageRecord> GetChatMessages(int limit = 1000)
         {
+            using var gate = LockConn();
             var results = new List<ChatMessageRecord>();
             string sql = "SELECT message_id, from_terminal, to_terminal, content, timestamp, is_broadcast FROM chat_messages ORDER BY timestamp DESC LIMIT @limit";
 
@@ -6625,6 +6829,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SessionLineageRecord> GetSessionsByFolder(string claudeProjectFolder, int limit = 20)
         {
+            using var gate = LockConn();
             var results = new List<SessionLineageRecord>();
             string folderPrefix = claudeProjectFolder.TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
 
