@@ -232,6 +232,21 @@ namespace MultiTerminal.MCPServer.Services
             return id;
         }
 
+        // Notification-history pass-throughs (task 7ce19175: REST controllers route DB access
+        // through the broker per API/CONVENTIONS.md). Thin wrappers over TaskDb — callers are
+        // REST endpoints that only run after full init, so no TaskDb-null guard is needed here
+        // (unlike RecordNotification, which the hook can hit during startup).
+
+        /// <summary>Query notification history.</summary>
+        public List<Dictionary<string, object>> GetNotificationEvents(int limit = 50, bool unreadOnly = false)
+            => _taskDb.GetNotificationEvents(limit, unreadOnly);
+
+        /// <summary>Mark a notification as read.</summary>
+        public void MarkNotificationRead(string id) => _taskDb.MarkNotificationRead(id);
+
+        /// <summary>Count unread notifications.</summary>
+        public int GetUnreadNotificationCount() => _taskDb.GetUnreadNotificationCount();
+
         /// <summary>
         /// Callback for push delivery to terminal UI.
         /// Parameters: messageId, recipientId, senderName, messageContent
@@ -3468,6 +3483,30 @@ namespace MultiTerminal.MCPServer.Services
                 return null;
             }
         }
+
+        // REST data-access pass-throughs (task 7ce19175: TaskReportsController routes DB access
+        // through the broker per API/CONVENTIONS.md). Thin wrappers over TaskDb.
+
+        /// <summary>
+        /// Persist an agent report with a caller-supplied id (+ optional invocationId) and fire
+        /// ReportSaved so kanban badges refresh. Overload for the REST TaskReportsController, which
+        /// owns id generation; the id-less overload above auto-generates the id for in-app callers.
+        /// </summary>
+        public void SaveTaskReport(string id, string taskId, string invocationId, string agentName, string reportType, string reportContent, string verdict, int? score, string createdBy)
+        {
+            _taskDb.SaveTaskReport(id, taskId, invocationId, agentName, reportType, reportContent, verdict, score, createdBy);
+            NotifyReportSaved(taskId, id, agentName, verdict);
+        }
+
+        /// <summary>List agent reports for a task (metadata only, no content).</summary>
+        public List<Dictionary<string, object>> GetTaskReports(string taskId, string agentName = null, int limit = 50)
+            => _taskDb.GetTaskReports(taskId, agentName, limit);
+
+        /// <summary>Get a single agent report by id (full content).</summary>
+        public Dictionary<string, object> GetTaskReport(string reportId) => _taskDb.GetTaskReport(reportId);
+
+        /// <summary>Load helper assignments for a task.</summary>
+        public List<TaskHelper> LoadTaskHelpers(string taskId) => _taskDb.LoadTaskHelpers(taskId);
 
         /// <summary>
         /// Resolve a caller-supplied project id to the canonical key stored in

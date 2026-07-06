@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
-using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Controllers
 {
@@ -15,7 +14,6 @@ namespace MultiTerminal.API.Controllers
     public class NotificationsController : ControllerBase
     {
         private readonly MessageBroker _broker;
-        private readonly TaskDatabase _taskDb;
         // 30s (was 3s): the forward to the in-process gateway awaits the REAL synchronous Web Push
         // — GatewayNotificationEndpoints awaits PushNotificationService.SendToAllWithResult, which
         // does sequential outbound VAPID round-trips per subscription. A live delivery routinely
@@ -29,10 +27,9 @@ namespace MultiTerminal.API.Controllers
         private static readonly ConcurrentQueue<DateTime> _rateLimitWindow = new();
         private const int MaxNotificationsPerMinute = 100;
 
-        public NotificationsController(MessageBroker broker, TaskDatabase taskDb)
+        public NotificationsController(MessageBroker broker)
         {
             _broker = broker;
-            _taskDb = taskDb;
         }
 
         /// <summary>
@@ -121,7 +118,7 @@ namespace MultiTerminal.API.Controllers
         {
             if (limit < 1) limit = 50;
             if (limit > 500) limit = 500;
-            var notifications = _taskDb.GetNotificationEvents(limit, unreadOnly);
+            var notifications = _broker.GetNotificationEvents(limit, unreadOnly);
             return Ok(notifications);
         }
 
@@ -131,7 +128,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("{id}/read")]
         public IActionResult MarkRead(string id)
         {
-            _taskDb.MarkNotificationRead(id);
+            _broker.MarkNotificationRead(id);
             return Ok();
         }
 
@@ -141,7 +138,7 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("unread-count")]
         public IActionResult GetUnreadCount()
         {
-            int count = _taskDb.GetUnreadNotificationCount();
+            int count = _broker.GetUnreadNotificationCount();
             return Ok(new { count });
         }
 

@@ -14,12 +14,10 @@ namespace MultiTerminal.API.Controllers
     public class TasksController : ControllerBase
     {
         private readonly MessageBroker _broker;
-        private readonly TaskDatabase _taskDb;
 
-        public TasksController(MessageBroker broker, TaskDatabase taskDb)
+        public TasksController(MessageBroker broker)
         {
             _broker = broker;
-            _taskDb = taskDb;
         }
 
         /// <summary>
@@ -49,7 +47,7 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("{taskId}")]
         public IActionResult GetTask(string taskId)
         {
-            var task = _taskDb.GetTask(taskId);
+            var task = _broker.GetTask(taskId);
             if (task == null)
                 return NotFound(new { error = $"Task {taskId} not found" });
 
@@ -71,7 +69,7 @@ namespace MultiTerminal.API.Controllers
                 return Ok(new { task = (object)null, message = $"No active task for {agentName}" });
 
             // Load helpers
-            var helpers = _taskDb.LoadTaskHelpers(task.Id);
+            var helpers = _broker.LoadTaskHelpers(task.Id);
             task.Helpers = helpers.ConvertAll(h => h.HelperName);
 
             // Parse and normalize checklist
@@ -117,7 +115,7 @@ namespace MultiTerminal.API.Controllers
             if (!result.Success)
                 return BadRequest(new { error = result.Error });
 
-            var task = _taskDb.GetTask(result.TaskId);
+            var task = _broker.GetTask(result.TaskId);
             return Ok(new { taskId = result.TaskId, task });
         }
 
@@ -181,7 +179,7 @@ namespace MultiTerminal.API.Controllers
                 return BadRequest(new { error = $"{linkError}. Quick-task rolled back." });
             }
 
-            var task = _taskDb.GetTask(taskId);
+            var task = _broker.GetTask(taskId);
             return Ok(new { taskId, task, linkedFiles });
         }
 
@@ -548,12 +546,12 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("{taskId}/detail")]
         public IActionResult GetTaskDetail(string taskId)
         {
-            var task = _taskDb.GetTask(taskId);
+            var task = _broker.GetTask(taskId);
             if (task == null)
                 return NotFound(new { error = $"Task {taskId} not found" });
 
             // Load helpers
-            var helpers = _taskDb.LoadTaskHelpers(taskId);
+            var helpers = _broker.LoadTaskHelpers(taskId);
             task.Helpers = helpers.ConvertAll(h => h.HelperName);
 
             // Parse and normalize checklist

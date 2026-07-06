@@ -1,7 +1,6 @@
 using System;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
-using MultiTerminal.Services;
 using MultiTerminal.MCPServer.Services;
 
 namespace MultiTerminal.API.Controllers
@@ -16,12 +15,10 @@ namespace MultiTerminal.API.Controllers
     // the strict default. See RestCorsOriginPolicy.
     public class TaskReportsController : ControllerBase
     {
-        private readonly TaskDatabase _taskDb;
         private readonly MessageBroker _broker;
 
-        public TaskReportsController(TaskDatabase taskDb, MessageBroker broker)
+        public TaskReportsController(MessageBroker broker)
         {
-            _taskDb = taskDb;
             _broker = broker;
         }
 
@@ -32,7 +29,7 @@ namespace MultiTerminal.API.Controllers
         [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)] // file:// tasks-panel reads this (Origin: null)
         public IActionResult GetReports(string taskId, [FromQuery] string agentName = null, [FromQuery] int limit = 50)
         {
-            var reports = _taskDb.GetTaskReports(taskId, agentName, limit);
+            var reports = _broker.GetTaskReports(taskId, agentName, limit);
             return Ok(new { taskId, count = reports.Count, reports });
         }
 
@@ -43,7 +40,7 @@ namespace MultiTerminal.API.Controllers
         [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)] // file:// tasks-panel reads this (Origin: null)
         public IActionResult GetReport(string taskId, string reportId)
         {
-            var report = _taskDb.GetTaskReport(reportId);
+            var report = _broker.GetTaskReport(reportId);
             if (report == null)
                 return NotFound(new { error = "Report not found" });
 
@@ -70,7 +67,8 @@ namespace MultiTerminal.API.Controllers
 
             var id = request.Id ?? Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            _taskDb.SaveTaskReport(
+            // Broker persists AND fires ReportSaved so kanban card badges refresh.
+            _broker.SaveTaskReport(
                 id,
                 taskId,
                 request.InvocationId,
@@ -80,9 +78,6 @@ namespace MultiTerminal.API.Controllers
                 request.Verdict,
                 request.Score,
                 request.CreatedBy);
-
-            // Notify UI so kanban card badges refresh
-            _broker.NotifyReportSaved(taskId, id, request.AgentName, request.Verdict);
 
             return Ok(new { success = true, reportId = id });
         }
