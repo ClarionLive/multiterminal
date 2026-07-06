@@ -51,23 +51,23 @@ namespace MultiTerminal.API.Controllers
         public async System.Threading.Tasks.Task<IActionResult> PostNotification([FromBody] NotificationRequest request, [FromQuery] bool skipPush = false, [FromQuery] bool forcePush = false)
         {
             if (string.IsNullOrWhiteSpace(request.NotificationType))
-                return BadRequest(new { error = "notification_type is required" });
+                return Problem(detail: "notification_type is required", statusCode: 400);
 
             // Input length validation
             if (request.NotificationType?.Length > 100)
-                return BadRequest(new { error = "notification_type exceeds 100 characters" });
+                return Problem(detail: "notification_type exceeds 100 characters", statusCode: 400);
             if (request.Title?.Length > 500)
-                return BadRequest(new { error = "title exceeds 500 characters" });
+                return Problem(detail: "title exceeds 500 characters", statusCode: 400);
             if (request.Message?.Length > 10000)
-                return BadRequest(new { error = "message exceeds 10000 characters" });
+                return Problem(detail: "message exceeds 10000 characters", statusCode: 400);
             if (request.SessionId?.Length > 100)
-                return BadRequest(new { error = "session_id exceeds 100 characters" });
+                return Problem(detail: "session_id exceeds 100 characters", statusCode: 400);
             if (request.AgentName?.Length > 200)
-                return BadRequest(new { error = "agent_name exceeds 200 characters" });
+                return Problem(detail: "agent_name exceeds 200 characters", statusCode: 400);
             if (request.Cwd?.Length > 1000)
-                return BadRequest(new { error = "cwd exceeds 1000 characters" });
+                return Problem(detail: "cwd exceeds 1000 characters", statusCode: 400);
             if (request.ProjectName?.Length > 200)
-                return BadRequest(new { error = "project_name exceeds 200 characters" });
+                return Problem(detail: "project_name exceeds 200 characters", statusCode: 400);
 
             // Rate limiting: sliding window, 100 per minute (locked for atomic check-and-enqueue)
             var now = DateTime.UtcNow;
@@ -77,7 +77,7 @@ namespace MultiTerminal.API.Controllers
                 while (_rateLimitWindow.TryPeek(out var oldest) && oldest < cutoff)
                     _rateLimitWindow.TryDequeue(out _);
                 if (_rateLimitWindow.Count >= MaxNotificationsPerMinute)
-                    return StatusCode(429, new { error = "Rate limit exceeded (100 notifications/minute)" });
+                    return Problem(detail: "Rate limit exceeded (100 notifications/minute)", statusCode: 429);
                 _rateLimitWindow.Enqueue(now);
             }
 
@@ -96,7 +96,6 @@ namespace MultiTerminal.API.Controllers
                 var outcome = await ForwardToGatewayAsync(request, id, bypassRemoteModeGate: true);
                 return Ok(new
                 {
-                    success = true,
                     id,
                     forwarded = outcome.Forwarded,
                     delivered = outcome.Delivered,
@@ -109,7 +108,7 @@ namespace MultiTerminal.API.Controllers
             if (!skipPush)
                 _ = ForwardToGatewayAsync(request, id, bypassRemoteModeGate: false);
 
-            return Ok(new { success = true, id });
+            return Ok(new { id });
         }
 
         /// <summary>
@@ -133,7 +132,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult MarkRead(string id)
         {
             _taskDb.MarkNotificationRead(id);
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>

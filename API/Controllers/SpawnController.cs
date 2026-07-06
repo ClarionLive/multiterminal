@@ -27,7 +27,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> SpawnAgent([FromBody] SpawnAgentProcessRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.AgentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             var (success, agent, error) = await _spawnService.SpawnAgentAsync(
                 request.AgentName,
@@ -39,11 +39,10 @@ namespace MultiTerminal.API.Controllers
                 request.SubagentType);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
             return Ok(new
             {
-                success = true,
                 agentName = request.AgentName,
                 processId = agent?.ProcessId ?? -1,
                 sessionId = agent?.SessionId
@@ -59,11 +58,11 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> SpawnTerminal([FromBody] SpawnTerminalRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.AgentName))
-                return BadRequest(new { success = false, error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             // Oracle is always-on — managed by OracleService, not spawnable via API
             if (request.AgentName.Equals(OracleService.OracleName, System.StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { success = false, error = "Oracle is always-on and managed by OracleService. Send messages to Oracle directly." });
+                return Problem(detail: "Oracle is always-on and managed by OracleService. Send messages to Oracle directly.", statusCode: 400);
 
             string workingDir = request.WorkingDir;
 
@@ -72,10 +71,10 @@ namespace MultiTerminal.API.Controllers
             {
                 var project = _projectDatabase.GetRichProject(request.ProjectId);
                 if (project == null)
-                    return NotFound(new { success = false, error = $"Project '{request.ProjectId}' not found" });
+                    return Problem(detail: $"Project '{request.ProjectId}' not found", statusCode: 404);
 
                 if (string.IsNullOrWhiteSpace(project.SourcePath))
-                    return BadRequest(new { success = false, error = $"Project '{project.Name}' has no source path configured" });
+                    return Problem(detail: $"Project '{project.Name}' has no source path configured", statusCode: 400);
 
                 workingDir = project.SourcePath;
             }
@@ -88,11 +87,10 @@ namespace MultiTerminal.API.Controllers
                 spawnerName: "ClaudeRemote");
 
             if (!success)
-                return BadRequest(new { success = false, error });
+                return Problem(detail: error, statusCode: 400);
 
             return Ok(new
             {
-                success = true,
                 terminalName = request.AgentName,
                 docId
             });
