@@ -45,15 +45,24 @@ namespace MultiTerminal.Services
             }.ToString();
 
             var connection = new SQLiteConnection(connectionString);
-            connection.Open();
+            try
+            {
+                connection.Open();
 
-            // Cross-PROCESS contention on the shared multiterminal.db file: the in-process gate each
-            // owner holds serializes only THIS process's threads on THIS connection. mcp-session-history's
-            // better-sqlite3 indexer is a separate OS process opening its own handle on the same DB
-            // family — no in-process lock can serialize against it. busy_timeout makes SQLite wait/retry
-            // a locked DB for up to 5s rather than throwing SQLITE_BUSY immediately. Set uniformly here
-            // so no owner can forget it (ad08caac item 4 set it on TaskDatabase; bb2b0104 centralizes it).
-            connection.BusyTimeout = 5000;
+                // Cross-PROCESS contention on the shared multiterminal.db file: the in-process gate each
+                // owner holds serializes only THIS process's threads on THIS connection. mcp-session-history's
+                // better-sqlite3 indexer is a separate OS process opening its own handle on the same DB
+                // family — no in-process lock can serialize against it. busy_timeout makes SQLite wait/retry
+                // a locked DB for up to 5s rather than throwing SQLITE_BUSY immediately. Set uniformly here
+                // so no owner can forget it (ad08caac item 4 set it on TaskDatabase; bb2b0104 centralizes it).
+                connection.BusyTimeout = 5000;
+            }
+            catch
+            {
+                // Don't leak a half-open handle to the finalizer if Open()/BusyTimeout throws.
+                connection.Dispose();
+                throw;
+            }
 
             return connection;
         }

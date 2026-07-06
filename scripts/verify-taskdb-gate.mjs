@@ -107,7 +107,35 @@ const MANIFEST = [
     gates: [GATE.gateEnter],
     allow: name => initNames(name) || name === 'SourceControlAccountService',
   },
+  {
+    // Census straggler #1 (bb2b0104 pipeline Run 1): held a long-lived ungated connection, opened direct.
+    file: 'Services/PlanDatabase.cs',
+    gates: [GATE.gateEnter],
+    allow: name => initNames(name) || name === 'PlanDatabase',
+  },
+  {
+    // Census straggler #2 (bb2b0104 pipeline Run 1): 10th owner, in MCPServer/Services; same conformance.
+    file: 'MCPServer/Services/ActivityFeedService.cs',
+    gates: [GATE.gateEnter],
+    allow: name => initNames(name) || name === 'ActivityFeedService',
+  },
 ];
+
+// The ONLY sanctioned direct-open site: the factory. Every other `new SQLiteConnection(` must
+// target a DIFFERENT database family (allowlisted below with the reason) — never multiterminal.db.
+const FACTORY_FILE = 'Services/MultiterminalDb.cs';
+
+// Separate DB families that legitimately open their own connection directly (NOT multiterminal.db,
+// so the one-owner-per-multiterminal.db invariant does not apply). One line each so the allowlist
+// is self-explaining (bb2b0104 census, condition 3).
+const SEPARATE_DB = {
+  'Services/MessageQueueDatabase.cs': 'messages.db — the inter-terminal message queue, a separate DB file.',
+  'Services/GatewayIntegrationService.cs': 'McpGateway DB (_gatewayDbPath) — a separate process/DB owned by the gateway.',
+};
+
+// Files allowed to call MultiterminalDb.Open() without being a manifest owner (none today; the
+// factory itself does not call Open). Kept as an explicit, reviewable seam.
+const FACTORY_CALLER_ALLOW = new Set([]);
 
 // Blank the CONTENTS of // and /* */ comments and of string / char literals (replace with
 // spaces, preserving length and newlines) so gate/_connection/new-SQLiteConnection detection
@@ -288,6 +316,62 @@ function analyzeFile(absPath, cfg) {
   };
 }
 
+// ---- CENSUS (bb2b0104, Alice's named deliverable) -----------------------------------
+// The manifest is only trustworthy if it can't silently omit an owner (that is exactly how
+// PlanDatabase / ActivityFeedService hid — they were never TaskDatabase.Connection borrowers,
+// so the original frame missed them). The census closes that: it walks the WHOLE solution for
+// every SQLite open path and asserts each is accounted for. Two open paths exist:
+//   • a direct `new SQLiteConnection(` — must be the factory OR an allowlisted separate-DB family;
+//   • a `MultiterminalDb.Open()` call — its caller file MUST be a manifest owner.
+// A new straggler on either path FAILS the check loudly instead of passing as green.
+
+// Pure classifier so the self-test can pressure-test it with synthetic sites (no disk needed).
+// sites: [{ file, directOpen: bool, factoryCall: bool }]  (file = repo-relative, forward slashes)
+function censusViolations(sites, manifestFiles) {
+  const owners = new Set(manifestFiles);
+  const viol = [];
+  for (const s of sites) {
+    const f = s.file.replace(/\\/g, '/');
+    if (s.directOpen && f !== FACTORY_FILE && !(f in SEPARATE_DB)) {
+      viol.push({ file: f, kind: 'unsanctioned-direct-open',
+        why: 'opens a SQLiteConnection directly but is neither the factory nor an allowlisted separate-DB family' });
+    }
+    if (s.factoryCall && f !== FACTORY_FILE && !owners.has(f) && !FACTORY_CALLER_ALLOW.has(f)) {
+      viol.push({ file: f, kind: 'factory-open-by-non-owner',
+        why: 'calls MultiterminalDb.Open() but is not a manifest owner (add it to MANIFEST so its gating is checked)' });
+    }
+  }
+  return viol;
+}
+
+// Walk the solution and record, per file, whether it opens directly and/or calls the factory.
+const SKIP_DIRS = new Set(['node_modules', 'bin', 'obj', '.git', '.claude', 'staged', 'Deploy', 'packages', 'TestResults', '.vs']);
+function scanOpenSites(root) {
+  const sites = [];
+  function walk(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) continue;
+        walk(path.join(dir, e.name));
+      } else if (e.isFile() && e.name.endsWith('.cs')) {
+        const abs = path.join(dir, e.name);
+        let code;
+        try { code = maskCodeOnly(fs.readFileSync(abs, 'utf8')); } catch { continue; }
+        const directOpen = /new\s+SQLiteConnection\s*\(/.test(code);
+        const factoryCall = /MultiterminalDb\.Open\s*\(/.test(code);
+        if (directOpen || factoryCall) {
+          const rel = path.relative(root, abs).replace(/\\/g, '/');
+          sites.push({ file: rel, directOpen, factoryCall });
+        }
+      }
+    }
+  }
+  walk(root);
+  return sites;
+}
+
 // ---- self-test: PROVE every check falsifies (bb2b0104 carries ad08caac's falsifiability bar)
 // Each negative fixture MUST be flagged; each positive control MUST pass. If any behaves the
 // wrong way the check itself is broken → exit non-zero. Falsifiability is proven by fixtures,
@@ -340,8 +424,27 @@ function selfTest() {
     const flagged = findDirectOpens(c.code.split('\n')).length > 0;
     report('factory', flagged, c.expectFlagged, c.name);
   }
+  // Census fixtures: a synthetic 11th open-site must FAIL (Alice's negative-fixture requirement).
+  const manifestFiles = MANIFEST.map(c => c.file);
+  const censusCases = [
+    { name: 'census: synthetic 11th class opens SQLiteConnection directly', expectFlagged: true,
+      sites: [{ file: 'Services/RogueDatabase.cs', directOpen: true, factoryCall: false }] },
+    { name: 'census: synthetic class calls MultiterminalDb.Open() but is not a manifest owner', expectFlagged: true,
+      sites: [{ file: 'Services/SneakyOwner.cs', directOpen: false, factoryCall: true }] },
+    { name: 'census-ok: the factory itself opens directly', expectFlagged: false,
+      sites: [{ file: FACTORY_FILE, directOpen: true, factoryCall: false }] },
+    { name: 'census-ok: an allowlisted separate-DB family opens directly', expectFlagged: false,
+      sites: [{ file: 'Services/MessageQueueDatabase.cs', directOpen: true, factoryCall: false }] },
+    { name: 'census-ok: a manifest owner calls the factory', expectFlagged: false,
+      sites: [{ file: manifestFiles[0], directOpen: false, factoryCall: true }] },
+  ];
+  for (const c of censusCases) {
+    const flagged = censusViolations(c.sites, manifestFiles).length > 0;
+    report('census', flagged, c.expectFlagged, c.name);
+  }
+
   console.log(allOk
-    ? '\n✅ Self-test OK — gate / exposure / factory checks provably reject the bad shapes and accept the good ones.'
+    ? '\n✅ Self-test OK — gate / exposure / factory / census checks provably reject the bad shapes and accept the good ones.'
     : '\n❌ Self-test FAILED — a check does not falsify correctly.');
   process.exit(allOk ? 0 : 1);
 }
@@ -369,7 +472,22 @@ for (const cfg of MANIFEST) {
     console.log(`✅ ${cfg.file} — ${r.connMethods.length} _connection method(s) all gated; no exposure; factory-only open.`);
   }
 }
+
+// Solution-wide census: every SQLite open path must be accounted for (Alice's named deliverable).
+const manifestFiles = MANIFEST.map(c => c.file);
+const sites = scanOpenSites(REPO_ROOT);
+const censusViols = censusViolations(sites, manifestFiles);
+if (censusViols.length) {
+  failed = true;
+  console.log(`\n❌ CENSUS — ${censusViols.length} unaccounted SQLite open-site(s):`);
+  for (const v of censusViols) console.log(`   - ${v.file} [${v.kind}]: ${v.why}`);
+} else {
+  const directCount = sites.filter(s => s.directOpen).length;
+  const factoryCount = sites.filter(s => s.factoryCall).length;
+  console.log(`✅ CENSUS — ${sites.length} open-site file(s) all accounted for (${directCount} direct: factory + ${Object.keys(SEPARATE_DB).length} separate-DB families; ${factoryCount} factory-callers, all manifest owners).`);
+}
+
 console.log(failed
   ? '\n❌ Connection-ownership invariant VIOLATED (see above).'
-  : `\n✅ Invariant holds across ${MANIFEST.length} owners (${totalConn} _connection methods): one owner per connection, each gated, none exposes or hand-opens a handle.`);
+  : `\n✅ Invariant holds across ${MANIFEST.length} owners (${totalConn} _connection methods): one owner per connection, each gated, none exposes or hand-opens a handle, and the census finds no unaccounted open-site.`);
 process.exit(failed ? 1 : 0);

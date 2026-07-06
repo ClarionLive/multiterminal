@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using MultiTerminal.MCPServer.Models;
+using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 using Xunit;
 
@@ -34,6 +35,8 @@ namespace MultiTerminal.Tests
         private readonly TaskDatabase _taskDb;
         private readonly KnowledgeDatabase _knowledgeDb;
         private readonly CodeGraphDatabase _codeGraphDb;
+        private readonly PlanDatabase _planDb;
+        private readonly ActivityFeedService _activityDb;
 
         public CrossConnectionConcurrencyTests()
         {
@@ -41,14 +44,20 @@ namespace MultiTerminal.Tests
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", _testDbPath);
 
             // Each of these opens its OWN connection to the SAME test DB via MultiterminalDb.Open()
-            // (honors MULTITERMINAL_TEST_DB). TaskDatabase creates the schema all four rely on.
+            // (honors MULTITERMINAL_TEST_DB). TaskDatabase creates the schema they rely on.
+            // _planDb and _activityDb are the two census stragglers conformed in bb2b0104 (the 9th/10th
+            // owners) — included here so the concurrent workload proves them WAL-safe alongside the rest.
             _taskDb = new TaskDatabase();
             _knowledgeDb = new KnowledgeDatabase(_taskDb);   // reads IsFts5Available (a bool), owns its own connection
             _codeGraphDb = new CodeGraphDatabase();          // owns its own connection
+            _planDb = new PlanDatabase();                    // owns its own connection (census straggler #1)
+            _activityDb = new ActivityFeedService();         // owns its own connection (census straggler #2)
         }
 
         public void Dispose()
         {
+            _activityDb?.Dispose();
+            _planDb?.Dispose();
             _codeGraphDb?.Dispose();
             _knowledgeDb?.Dispose();
             _taskDb?.Dispose();
@@ -146,6 +155,23 @@ namespace MultiTerminal.Tests
                         });
                         symbolIds.Add(sid);
                         Assert.NotNull(_codeGraphDb.LoadSymbolLookup()); // reader while symbols are being written
+
+                        // --- PlanDatabase connection (census straggler #1): writer + read-back ---
+                        // status "draft" avoids DeactivateAllPlans so counts stay deterministic.
+                        _planDb.SavePlan(new Plan
+                        {
+                            Id = $"plan-{w}-{op}",
+                            Title = $"p{w}-{op}",
+                            Status = "draft",
+                            CurrentPhase = "design",
+                            CreatedAt = DateTime.UtcNow
+                        });
+
+                        // --- ActivityFeedService connection (census straggler #2, 10th owner): writer ---
+                        // activity_feed is written ONLY by ActivityFeedService; the cross-connection
+                        // contention here is its connection vs the task/knowledge/code-graph connections
+                        // on the same WAL file (the race bb2b0104 closes for this owner too).
+                        _activityDb.RecordGeneralActivity("XCONN", $"w{w}", $"act-{w}-{op}");
                     }
                 }
                 catch (Exception ex)
@@ -175,6 +201,15 @@ namespace MultiTerminal.Tests
             Assert.Equal(expectedSymbols, symbolIds.Count);
             Assert.Equal(symbolIds.Count, symbolIds.Distinct().Count());
             Assert.Equal(expectedSymbols, _codeGraphDb.LoadSymbolLookup().Count);
+
+            // plans (census straggler #1) — one draft plan per (worker>0, op), all distinct ids, exact count
+            var finalPlans = _planDb.GetAllPlans();
+            Assert.Equal(nonReindexWorkers * opsPerWorker, finalPlans.Count);
+            Assert.Equal(finalPlans.Count, finalPlans.Select(p => p.Id).Distinct().Count());
+
+            // activity_feed (census straggler #2, 10th owner) — one "XCONN" row per (worker>0, op), exact count
+            var xconnActivities = _activityDb.GetActivitiesByType("XCONN", int.MaxValue);
+            Assert.Equal(nonReindexWorkers * opsPerWorker, xconnActivities.Count);
         }
     }
 }

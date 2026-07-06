@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
-using System.IO;
 using System.Linq;
 using MultiTerminal.MCPServer.Models;
 
@@ -14,6 +13,7 @@ namespace MultiTerminal.Services
     public class PlanDatabase : IDisposable
     {
         private readonly string _databasePath;
+        private readonly DbGate _gate = new DbGate();
         private SQLiteConnection _connection;
         private bool _isDisposed;
 
@@ -28,22 +28,7 @@ namespace MultiTerminal.Services
 
         private void InitializeDatabase()
         {
-            string folder = Path.GetDirectoryName(_databasePath);
-            if (!Directory.Exists(folder))
-            {
-                Directory.CreateDirectory(folder);
-            }
-
-            var connectionString = new SQLiteConnectionStringBuilder
-            {
-                DataSource = _databasePath,
-                Version = 3,
-                JournalMode = SQLiteJournalModeEnum.Wal,
-                Pooling = true
-            }.ToString();
-
-            _connection = new SQLiteConnection(connectionString);
-            _connection.Open();
+            _connection = MultiterminalDb.Open();
 
             CreateSchema();
         }
@@ -124,6 +109,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public Plan GetActivePlan()
         {
+            using var gate = _gate.Enter();
+
             const string sql = @"
                 SELECT id, title, description, content, current_phase, status, leader_id, created_at, updated_at
                 FROM plans
@@ -147,6 +134,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public Plan GetPlan(string planId)
         {
+            using var gate = _gate.Enter();
+
             const string sql = @"
                 SELECT id, title, description, content, current_phase, status, leader_id, created_at, updated_at
                 FROM plans
@@ -170,6 +159,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<Plan> GetAllPlans()
         {
+            using var gate = _gate.Enter();
+
             var plans = new List<Plan>();
 
             const string sql = @"
@@ -194,6 +185,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SavePlan(Plan plan)
         {
+            using var gate = _gate.Enter();
+
             // If setting to active, ensure no other plan is active
             if (plan.Status == "active")
             {
@@ -232,6 +225,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SetActivePlan(string planId)
         {
+            using var gate = _gate.Enter();
+
             DeactivateAllPlans();
 
             const string sql = "UPDATE plans SET status = 'active', updated_at = @now WHERE id = @id";
@@ -243,6 +238,8 @@ namespace MultiTerminal.Services
 
         private void DeactivateAllPlans()
         {
+            using var gate = _gate.Enter();
+
             const string sql = "UPDATE plans SET status = 'paused', updated_at = @now WHERE status = 'active'";
             using var command = new SQLiteCommand(sql, _connection);
             command.Parameters.AddWithValue("@now", DateTime.UtcNow);
@@ -274,6 +271,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<PlanPhase> GetPlanPhases(string planId)
         {
+            using var gate = _gate.Enter();
+
             var phases = new List<PlanPhase>();
 
             const string sql = @"
@@ -309,6 +308,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SavePhase(PlanPhase phase)
         {
+            using var gate = _gate.Enter();
+
             const string sql = @"
                 INSERT INTO plan_phases (id, plan_id, phase_name, phase_order, checklist_json, started_at, completed_at)
                 VALUES (@id, @planId, @phaseName, @phaseOrder, @checklistJson, @startedAt, @completedAt)
@@ -367,6 +368,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<PlanAssignment> GetPlanAssignments(string planId)
         {
+            using var gate = _gate.Enter();
+
             var assignments = new List<PlanAssignment>();
 
             const string sql = @"
@@ -393,6 +396,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public PlanAssignment GetAssignmentForTerminal(string planId, string terminalName)
         {
+            using var gate = _gate.Enter();
+
             const string sql = @"
                 SELECT id, plan_id, terminal_name, role, assigned_task_summary, status, blocked_by, created_at
                 FROM plan_assignments
@@ -417,6 +422,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveAssignment(PlanAssignment assignment)
         {
+            using var gate = _gate.Enter();
+
             const string sql = @"
                 INSERT INTO plan_assignments (id, plan_id, terminal_name, role, assigned_task_summary, status, blocked_by, created_at)
                 VALUES (@id, @planId, @terminalName, @role, @assignedTaskSummary, @status, @blockedBy, @createdAt)
@@ -465,6 +472,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<PlanDecision> GetPlanDecisions(string planId)
         {
+            using var gate = _gate.Enter();
+
             var decisions = new List<PlanDecision>();
 
             const string sql = @"
@@ -500,6 +509,8 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveDecision(PlanDecision decision)
         {
+            using var gate = _gate.Enter();
+
             const string sql = @"
                 INSERT INTO plan_decisions (id, plan_id, phase, decision_text, rationale, decided_by, created_at)
                 VALUES (@id, @planId, @phase, @decisionText, @rationale, @decidedBy, @createdAt)
