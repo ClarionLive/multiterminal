@@ -43,7 +43,7 @@ Interactive pass/fail testing via checklist items:
 
 - Running app is at `H:\DevLaptop\ClarionPowerShell\Deploy\MultiTerminal.exe`.
 - We are running what we're working on — Deploy folder has the live binary.
-- You CAN run `build_project` to compile. You CANNOT copy to Deploy.
+- You CAN run `mcp__windows-build-runner__build_project` to compile. You CANNOT copy to Deploy.
 - Deploy workflow (John only): exit app -> run `deploy.ps1` -> relaunch.
 - After a successful build, tell John it's ready and he needs to deploy.
 

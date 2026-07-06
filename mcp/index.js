@@ -6,14 +6,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { exec, spawn } from "child_process";
-import { promisify } from "util";
-import { access, readFile, readdir, stat } from "fs/promises";
-import { constants, readFileSync } from "fs";
+import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-
-const execAsync = promisify(exec);
 
 const API_BASE = "http://localhost:5050";
 
