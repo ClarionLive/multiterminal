@@ -10,7 +10,14 @@
 
 ; Source directories - adjust these for your build machine
 #define PublishDir "..\bin\Release\net8.0-windows\win-x64\publish"
-#define McpServerDir GetEnv("APPDATA") + "\multiterminal\mcp"
+; MCP server ships from the git-canonical repo copy staged by the build's
+; StageMcpForInstaller target (mcp-dist = repo mcp/ + freshly `npm install`ed
+; deps), NOT the build machine's %APPDATA% profile. This removes the silent
+; dependency on whatever happened to be hand-edited into the build machine's
+; APPDATA\multiterminal\mcp (ticket ec97c446) and ships only the real declared
+; deps instead of accumulated profile cruft. Run a Release build before compiling
+; this installer so installer\mcp-dist exists and is current.
+#define McpServerDir "mcp-dist"
 #define McpGatewayPublishDir "..\..\McpGateway\bin\publish\win-x64"
 ; Claude Code plugin marketplace (hooks, agents, skills, CLAUDE.md, channel MCP)
 #define PluginMarketplaceDir GetEnv("USERPROFILE") + "\.claude\plugins\marketplaces\multiterminal-marketplace"
