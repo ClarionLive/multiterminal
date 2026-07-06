@@ -104,22 +104,45 @@ try {
         }
     }
 
-    # --- Decide whether npm install is needed (BEFORE we overwrite package.json) ---
+    # --- Decide whether a dependency (re)install is needed (BEFORE the copy) -----
+    # Reinstall when: node_modules is missing, OR the lockfile is missing/changed
+    # at the dest, OR (no-lock fallback) package.json changed. The lockfile check
+    # is load-bearing: an EXISTING dest from the old pipeline can have
+    # node_modules + an unchanged package.json yet deps that don't match the
+    # committed lock (produced by an old floating `npm install`). Without keying
+    # on the lock, npm ci would never run there and the installer would keep
+    # shipping the non-reproducible deps this fix is meant to close
+    # (ticket ec97c446 F2 re-review). All comparisons normalize CRLF/LF + trim so
+    # a pure line-ending difference never triggers a spurious reinstall.
+    $sourceLock = Join-Path $SourceDir "package-lock.json"
+    $destLock   = Join-Path $DestDir "package-lock.json"
     $needsInstall = $false
     if (-not (Test-Path -LiteralPath $destModules)) {
         $needsInstall = $true
-        Write-Host "SyncMcpServer: dest node_modules missing -- will npm install."
+        Write-Host "SyncMcpServer: dest node_modules missing -- will install."
     }
-    elseif ((Test-Path -LiteralPath $sourcePkg) -and (Test-Path -LiteralPath $destPkg)) {
-        # Content compare (not Get-FileHash -- that cmdlet is absent in some
-        # minimal PS 5.1 hosts). Normalize line endings + trim so a pure CRLF/LF
-        # difference (git checks out mcp/ CRLF; the dest copy may be LF) doesn't
-        # trigger a spurious npm install. Only a real dependency edit should.
+    elseif ((Test-Path -LiteralPath $sourceLock) -and -not (Test-Path -LiteralPath $destLock)) {
+        # Source ships a lock but the dest has none => existing deps were produced
+        # without it (old floating install). Force a reproducible reinstall.
+        $needsInstall = $true
+        Write-Host "SyncMcpServer: dest lockfile missing (source has one) -- will install for reproducibility."
+    }
+    elseif ((Test-Path -LiteralPath $sourceLock) -and (Test-Path -LiteralPath $destLock)) {
+        $srcLockTxt  = ([System.IO.File]::ReadAllText($sourceLock)).Replace("`r`n", "`n").Trim()
+        $destLockTxt = ([System.IO.File]::ReadAllText($destLock)).Replace("`r`n", "`n").Trim()
+        if ($srcLockTxt -ne $destLockTxt) {
+            $needsInstall = $true
+            Write-Host "SyncMcpServer: package-lock.json changed -- will install."
+        }
+    }
+    if (-not $needsInstall -and (Test-Path -LiteralPath $sourcePkg) -and (Test-Path -LiteralPath $destPkg)) {
+        # No-lock fallback: compare package.json content when there is no lockfile
+        # to key on (so the sync still detects a dep change in a lock-less setup).
         $srcText  = ([System.IO.File]::ReadAllText($sourcePkg)).Replace("`r`n", "`n").Trim()
         $destText = ([System.IO.File]::ReadAllText($destPkg)).Replace("`r`n", "`n").Trim()
         if ($srcText -ne $destText) {
             $needsInstall = $true
-            Write-Host "SyncMcpServer: package.json changed -- will npm install."
+            Write-Host "SyncMcpServer: package.json changed -- will install."
         }
     }
 
@@ -145,7 +168,7 @@ try {
     # Catches a silent copy failure (dest read-only, disk full, AV lock) that a
     # non-throwing Copy-Item could otherwise mask. Content compare (normalized)
     # not Get-FileHash, for the same PS 5.1-host reason as the package.json check.
-    foreach ($name in @("index.js", "package.json")) {
+    foreach ($name in @("index.js", "package.json", "package-lock.json")) {
         $s = Join-Path $SourceDir $name
         $d = Join-Path $DestDir $name
         if (Test-Path -LiteralPath $s) {
