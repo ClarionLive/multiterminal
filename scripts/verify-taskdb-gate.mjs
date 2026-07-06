@@ -17,8 +17,9 @@
 // MigrateNormalizeNoteTabPaths — both init-only helpers.
 //
 // Usage:
-//   node scripts/verify-taskdb-gate.mjs           # --check (default): exit 1 on any violation
-//   node scripts/verify-taskdb-gate.mjs --fix     # one-time codemod: insert gates + converge lock(_dbLock)
+//   node scripts/verify-taskdb-gate.mjs             # --check (default): exit 1 on any violation
+//   node scripts/verify-taskdb-gate.mjs --fix       # one-time codemod: insert gates + converge lock(_dbLock)
+//   node scripts/verify-taskdb-gate.mjs --self-test # prove the gate check falsifies (negative fixtures)
 //
 // Checks (all must pass):
 //   1. Every method that references `_connection`, is not allowlisted, contains the gate.
@@ -34,6 +35,7 @@ import path from 'path';
 
 const args = process.argv.slice(2);
 const fix = args.includes('--fix');
+const doSelfTest = args.includes('--self-test');
 const fileArg = args.find(a => a.endsWith('.cs'));
 const csPath = fileArg
   ? fileArg
@@ -48,6 +50,59 @@ const ALLOWLIST = name =>
   name === 'UniqueNoteTabName';
 
 const GATE_LINE = '            using var gate = LockConn();';
+
+// The gate is only satisfied by a REAL scope-guard STATEMENT — `using var <id> = LockConn();`
+// — not by a bare `LockConn();` call (the documented permanent-lock-hold footgun) and not by
+// a comment that merely mentions "LockConn()". Matching this anchored shape (on code-only
+// text, see maskCodeOnly) is what makes the missing-`using` misuse FAIL the check, per the
+// verifier's own contract and task ad08caac condition 1. Proven by --self-test fixtures.
+const GATE_RE = /using\s+var\s+\w+\s*=\s*LockConn\s*\(\s*\)/;
+
+// Blank the CONTENTS of // and /* */ comments and of string / char literals (replace with
+// spaces, preserving length and newlines) so gate/_connection detection sees CODE only.
+// A real `using var … = LockConn();` gate and a real `_connection` identifier only ever live
+// in code — never inside a string or comment — so blanking those removes every false match
+// (e.g. a doc comment mentioning "LockConn()" or "_connection", or a URL literal with "//").
+function maskCodeOnly(src) {
+  let out = '';
+  let state = 'code'; // code | line | block | str | verq | chr
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    const c2 = i + 1 < src.length ? src[i + 1] : '';
+    if (state === 'code') {
+      if (c === '/' && c2 === '/') { state = 'line'; out += '  '; i++; continue; }
+      if (c === '/' && c2 === '*') { state = 'block'; out += '  '; i++; continue; }
+      if (c === '@' && c2 === '"') { state = 'verq'; out += '  '; i++; continue; }
+      if (c === '"') { state = 'str'; out += ' '; continue; }
+      if (c === '\'') { state = 'chr'; out += ' '; continue; }
+      out += c; continue;
+    }
+    if (state === 'line') {
+      if (c === '\n') { state = 'code'; out += '\n'; continue; }
+      out += (c === '\r' ? '\r' : ' '); continue;
+    }
+    if (state === 'block') {
+      if (c === '*' && c2 === '/') { state = 'code'; out += '  '; i++; continue; }
+      out += (c === '\n' ? '\n' : c === '\r' ? '\r' : ' '); continue;
+    }
+    if (state === 'str') {
+      if (c === '\\') { out += '  '; i++; continue; }
+      if (c === '"') { state = 'code'; out += ' '; continue; }
+      out += (c === '\n' ? '\n' : ' '); continue;
+    }
+    if (state === 'verq') {
+      if (c === '"' && c2 === '"') { out += '  '; i++; continue; }
+      if (c === '"') { state = 'code'; out += ' '; continue; }
+      out += (c === '\n' ? '\n' : ' '); continue;
+    }
+    if (state === 'chr') {
+      if (c === '\\') { out += '  '; i++; continue; }
+      if (c === '\'') { state = 'code'; out += ' '; continue; }
+      out += ' '; continue;
+    }
+  }
+  return out;
+}
 
 function stripAngleBrackets(s) {
   let prev;
@@ -132,24 +187,27 @@ function analyze(lines) {
   const gatedMethods = [];
 
   for (const m of methods) {
-    const body = bodyText(lines, m);
+    // Detect on CODE ONLY — comment/string mentions of `_connection` or "LockConn()" must
+    // not count as a real use or a real gate.
+    const body = maskCodeOnly(bodyText(lines, m));
     const refsConn = /\b_connection\b/.test(body);
     if (!refsConn) continue;
     gatedMethods.push(m);
     const allow = ALLOWLIST(m.name);
-    const gateIdx = body.indexOf('LockConn(');
+    const gateMatch = body.match(GATE_RE);           // real `using var … = LockConn();` statement
+    const gateIdx = gateMatch ? gateMatch.index : -1;
     const connIdx = body.search(/\b_connection\b/);
-    const isAsync = / async /.test(lines[m.sigStart]) || /\basync\b/.test(bodyText(lines, m));
+    const isAsync = /\basync\b/.test(maskCodeOnly(lines[m.sigStart])) || /\basync\b/.test(body);
     const isIterator = /\byield\s+(return|break)\b/.test(body);
 
     if (allow) continue; // exempt: init/dispose/migrate
     if (gateIdx === -1) {
-      violations.push({ m, why: 'references _connection but has no LockConn() gate' });
+      violations.push({ m, kind: 'missing-gate', why: 'references _connection but has no `using var … = LockConn();` gate (bare LockConn(); or a comment mention does NOT count)' });
     } else if (connIdx !== -1 && connIdx < gateIdx) {
-      violations.push({ m, why: `touches _connection (offset ${connIdx}) BEFORE acquiring the gate (offset ${gateIdx})` });
+      violations.push({ m, kind: 'gate-order', why: `touches _connection (offset ${connIdx}) BEFORE the gate statement (offset ${gateIdx})` });
     }
-    if (isAsync) violations.push({ m, why: 'is async — a using-var guard holds across suspension' });
-    if (isIterator) violations.push({ m, why: 'is an iterator (yield) — a using-var guard acquires lazily' });
+    if (isAsync) violations.push({ m, kind: 'async', why: 'is async — a using-var guard holds across suspension' });
+    if (isIterator) violations.push({ m, kind: 'iterator', why: 'is an iterator (yield) — a using-var guard acquires lazily' });
   }
 
   // Check 4: no unattributed _connection line (besides the field declaration).
@@ -175,6 +233,72 @@ function analyze(lines) {
   return { methods, gatedMethods, violations, unattributed, exposesConnection };
 }
 
+// ---- self-test: PROVE the check falsifies (task ad08caac condition 1) ---------------
+// Each negative fixture MUST be flagged; the positive control MUST pass. If any fixture
+// behaves the wrong way, the check itself is broken — exit non-zero. This is the
+// falsifiability proof (fixtures), not an assertion in prose.
+function runFixtureViolations(code) {
+  return analyze(code.split('\n')).violations;
+}
+
+function selfTest() {
+  const cases = [
+    {
+      name: 'positive control — real `using var gate = LockConn();`',
+      expectFlagged: false,
+      code:
+`        public void Good()
+        {
+            using var gate = LockConn();
+            using var cmd = new SQLiteCommand("SELECT 1", _connection);
+        }`,
+    },
+    {
+      name: '(a) bare LockConn(); without using — permanent-lock footgun',
+      expectFlagged: true,
+      code:
+`        public void BareCall()
+        {
+            LockConn();
+            using var cmd = new SQLiteCommand("SELECT 1", _connection);
+        }`,
+    },
+    {
+      name: '(b) comment-only mention of LockConn(), no real gate',
+      expectFlagged: true,
+      code:
+`        public void CommentOnly()
+        {
+            // remember to call LockConn() before touching the db
+            using var cmd = new SQLiteCommand("SELECT 1", _connection);
+        }`,
+    },
+    {
+      name: '(c) gated method with the gate line deleted',
+      expectFlagged: true,
+      code:
+`        public void GateDeleted()
+        {
+            using var cmd = new SQLiteCommand("SELECT 1", _connection);
+        }`,
+    },
+  ];
+  let allOk = true;
+  console.log('Self-test — negative fixtures must FAIL the check, positive control must PASS:');
+  for (const c of cases) {
+    const flagged = runFixtureViolations(c.code).length > 0;
+    const ok = flagged === c.expectFlagged;
+    allOk = allOk && ok;
+    console.log(`  ${ok ? '✅' : '❌'} ${c.name} → ${flagged ? 'FLAGGED' : 'passed'} (expected ${c.expectFlagged ? 'FLAGGED' : 'passed'})`);
+  }
+  console.log(allOk
+    ? '\n✅ Self-test OK — the check provably rejects bare/comment/absent gates and accepts the real scope-guard.'
+    : '\n❌ Self-test FAILED — the gate check does not falsify correctly.');
+  process.exit(allOk ? 0 : 1);
+}
+
+if (doSelfTest) selfTest();
+
 // -------------------------------------------------------------------------------------
 let src = fs.readFileSync(csPath, 'utf8');
 const nl = src.includes('\r\n') ? '\r\n' : '\n';
@@ -187,7 +311,7 @@ if (fix) {
   const { violations } = analyze(lines);
   // apply bottom-up so indices stay valid
   const inserts = violations
-    .filter(v => /no LockConn/.test(v.why))
+    .filter(v => v.kind === 'missing-gate')
     .map(v => v.m.bodyOpen)
     .sort((a, b) => b - a);
   for (const openIdx of inserts) {

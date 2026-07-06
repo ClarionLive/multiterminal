@@ -2004,12 +2004,16 @@ namespace MultiTerminal.Services
                     (task_id, agent_name, worktree_path, branch_name, created_at, status, is_canonical)
                 VALUES (@taskId, @agentName, @worktreePath, @branchName, @createdAt, 'active', @isCanonical)
             ";
-            // The LockConn() gate (method top) serializes this with all other DB access:
-            // the janitor timer thread reads these task_worktrees rows concurrently with
-            // REST/MCP request threads writing them, all on one SQLiteConnection. As of
-            // task ad08caac every runtime _connection user in this class takes this same
-            // gate, so the shared connection IS now globally serialized — the earlier
-            // "SaveTask/UpdateTask not yet covered" caveat no longer applies.
+            // The LockConn() gate (method top) serializes this with all other DB access on
+            // THIS TaskDatabase instance's connection: the janitor timer thread reads these
+            // task_worktrees rows concurrently with REST/MCP request threads writing them,
+            // all on one SQLiteConnection. As of task ad08caac every runtime _connection user
+            // in this class takes this same gate, so the earlier "SaveTask/UpdateTask not yet
+            // covered" caveat no longer applies WITHIN this instance.
+            // Scope caveat: this serializes one instance's handle, NOT the whole
+            // multiterminal.db file — a second TaskDatabase instance (MainForm._chatTaskDatabase)
+            // has its own connection + _dbLock, and 6 sibling classes share this handle
+            // ungated. Global race-freedom across all users is ticket bb2b0104.
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@taskId", taskId);
             cmd.Parameters.AddWithValue("@agentName", string.IsNullOrEmpty(agentName) ? WorktreeNaming.LegacyAgent : agentName);
