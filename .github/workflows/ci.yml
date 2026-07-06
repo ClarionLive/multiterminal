@@ -37,7 +37,10 @@ jobs:
       #  * SyncMcpServer skips itself when CI=true (scripts/sync-mcp-server.ps1)
       #    -- there is no live %APPDATA% MultiTerminal install to keep fresh here.
       #    GitHub Actions sets CI=true automatically; this line documents intent.
-      MULTITERMINAL_STAGED_PATH: ${{ runner.temp }}\mt-staged
+      # NB: job-level env can use the `github` context but NOT `runner` (runner
+      # is only available inside steps) — so this is github.workspace, not
+      # runner.temp. A workspace-local throwaway dir is all CopyToStaged needs.
+      MULTITERMINAL_STAGED_PATH: ${{ github.workspace }}\mt-staged
       CI: 'true'
     steps:
       - name: Checkout
