@@ -19,6 +19,13 @@ namespace MultiTerminal.API.Controllers
     // see the real reason instead of a misleading "sent: true" / "answered: false".
     // GET /status and POST /toggle let test scripts flip the enabled flag without
     // restarting the app.
+    //
+    // SECURITY (Eval P2 item 2, task c522764d): this controller is test-only surface with
+    // state-mutating POST /toggle + prompt injectors, so it is gated behind #if DEBUG. In
+    // Release builds (the shipped installer) the class is not compiled, so AddControllers()
+    // assembly scanning never discovers it and none of its routes exist. It remains available
+    // in local Debug builds for integration testing.
+#if DEBUG
     [ApiController]
     [Route("api/permission-relay/test")]
     public class PermissionRelayTestController : ControllerBase
@@ -192,4 +199,5 @@ namespace MultiTerminal.API.Controllers
             public string Description { get; set; }
         }
     }
+#endif
 }
