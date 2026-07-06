@@ -1,3 +1,8 @@
+// SECURITY (Eval P2 item 2, task c522764d): this whole file is gated behind #if DEBUG — the
+// controller is test-only surface (state-mutating POST /toggle + prompt injectors). In Release
+// builds (the shipped installer) nothing here is compiled, so AddControllers() assembly scanning
+// never discovers it and none of its routes exist. Available in local Debug builds for testing.
+#if DEBUG
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -18,14 +23,7 @@ namespace MultiTerminal.API.Controllers
     // All 4 test endpoints bail with HTTP 503 when the relay is disabled so callers
     // see the real reason instead of a misleading "sent: true" / "answered: false".
     // GET /status and POST /toggle let test scripts flip the enabled flag without
-    // restarting the app.
-    //
-    // SECURITY (Eval P2 item 2, task c522764d): this controller is test-only surface with
-    // state-mutating POST /toggle + prompt injectors, so it is gated behind #if DEBUG. In
-    // Release builds (the shipped installer) the class is not compiled, so AddControllers()
-    // assembly scanning never discovers it and none of its routes exist. It remains available
-    // in local Debug builds for integration testing.
-#if DEBUG
+    // restarting the app. (Whole file is #if DEBUG-gated — see the header comment.)
     [ApiController]
     [Route("api/permission-relay/test")]
     public class PermissionRelayTestController : ControllerBase
@@ -199,5 +197,5 @@ namespace MultiTerminal.API.Controllers
             public string Description { get; set; }
         }
     }
-#endif
 }
+#endif

@@ -204,17 +204,25 @@ namespace MultiTerminal.API
                 builder.Services.AddProblemDetails();
                 builder.Services.AddExceptionHandler<RestApiExceptionHandler>();
 
-                // CORS (Eval P2 item 3, task c522764d): replace AllowAnyOrigin with a loopback
-                // allowlist that also tolerates the "null" origin. This blocks the drive-by
-                // remote-web-page CSRF/exfil threat that AllowAnyOrigin left open (a page at
-                // https://evil.example sends its real Origin and is rejected) while keeping the
-                // one legitimate browser caller working. See IsAllowedRestOrigin for the full
-                // rationale, and ticket f9697aac for retirement of the "null" tolerance.
-                // NOTE: intentionally NO AllowCredentials — the panels are credential-less, and
-                // combining AllowCredentials with a null-origin tolerance is a CORS footgun.
+                // CORS (Eval P2 item 3, task c522764d): replace AllowAnyOrigin with a two-tier
+                // allowlist (see RestCorsOriginPolicy for the full rationale + retirement path f9697aac).
+                //  - DEFAULT policy (all controllers): loopback origins ONLY, no "null". Blocks the
+                //    drive-by remote-web-page CSRF/exfil READ threat AllowAnyOrigin left open —
+                //    including a hostile sandboxed iframe whose opaque origin serializes to "null".
+                //  - NAMED policy (FilePanelPolicyName): loopback + "null", applied via [EnableCors]
+                //    to TaskReportsController only — the one controller the file:// tasks-panel.html
+                //    actually fetches. Scoping "null" to that controller (PM ruling A) shrinks the
+                //    interim null-origin read-window from the whole API to a single controller.
+                // NOTE: intentionally NO AllowCredentials on either policy — the panels are
+                // credential-less, and null-origin + credentials is a CORS footgun.
                 builder.Services.AddCors(options =>
                 {
                     options.AddDefaultPolicy(policy =>
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsLoopbackOrigin)
+                              .AllowAnyHeader()
+                              .AllowAnyMethod());
+
+                    options.AddPolicy(RestCorsOriginPolicy.FilePanelPolicyName, policy =>
                         policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsAllowedOrigin)
                               .AllowAnyHeader()
                               .AllowAnyMethod());

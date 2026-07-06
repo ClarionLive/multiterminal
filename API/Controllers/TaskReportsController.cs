@@ -1,4 +1,5 @@
 using System;
+using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.Services;
 using MultiTerminal.MCPServer.Services;
@@ -7,6 +8,10 @@ namespace MultiTerminal.API.Controllers
 {
     [ApiController]
     [Route("api/tasks/{taskId}/reports")]
+    // Eval P2 item 3 (task c522764d): this is the ONLY controller the file:// tasks-panel.html
+    // fetch()es, so it gets the scoped null-tolerant CORS policy (Origin: null from file://).
+    // Every other controller uses the strict loopback-only default policy. See RestCorsOriginPolicy.
+    [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)]
     public class TaskReportsController : ControllerBase
     {
         private readonly TaskDatabase _taskDb;
