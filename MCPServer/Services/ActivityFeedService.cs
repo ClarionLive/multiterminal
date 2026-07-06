@@ -13,6 +13,7 @@ namespace MultiTerminal.MCPServer.Services
     public class ActivityFeedService : IDisposable
     {
         private readonly string _databasePath;
+        private readonly DbGate _gate = new DbGate();
         private SQLiteConnection _connection;
         private bool _isDisposed;
 
@@ -55,16 +56,7 @@ namespace MultiTerminal.MCPServer.Services
 
         private void InitializeDatabase()
         {
-            var connectionString = new SQLiteConnectionStringBuilder
-            {
-                DataSource = _databasePath,
-                Version = 3,
-                JournalMode = SQLiteJournalModeEnum.Wal,
-                Pooling = true
-            }.ToString();
-
-            _connection = new SQLiteConnection(connectionString);
-            _connection.Open();
+            _connection = MultiterminalDb.Open();
 
             CreateSchema();
         }
@@ -188,20 +180,27 @@ namespace MultiTerminal.MCPServer.Services
                 SELECT last_insert_rowid();
             ";
 
-            using var command = new SQLiteCommand(sql, _connection);
-            command.Parameters.AddWithValue("@timestamp", timestamp);
-            command.Parameters.AddWithValue("@activityType", activityType);
-            command.Parameters.AddWithValue("@planId", (object)planId ?? DBNull.Value);
-            command.Parameters.AddWithValue("@phaseId", (object)phaseId ?? DBNull.Value);
-            command.Parameters.AddWithValue("@actor", (object)actor ?? DBNull.Value);
-            command.Parameters.AddWithValue("@summary", summary);
-            command.Parameters.AddWithValue("@severity", severity);
-            command.Parameters.AddWithValue("@detailsJson", (object)detailsJson ?? DBNull.Value);
-            command.Parameters.AddWithValue("@projectId", (object)projectId ?? DBNull.Value);
+            // Gate ONLY the DB write. The ActivityRecorded event fires OUTSIDE the gate below —
+            // a subscriber's UI/refresh handler must not run while the connection gate is held
+            // (mirrors BranchMetadataService.SetOutcome; bb2b0104 pipeline Run 1).
+            long id;
+            using (var gate = _gate.Enter())
+            {
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@timestamp", timestamp);
+                command.Parameters.AddWithValue("@activityType", activityType);
+                command.Parameters.AddWithValue("@planId", (object)planId ?? DBNull.Value);
+                command.Parameters.AddWithValue("@phaseId", (object)phaseId ?? DBNull.Value);
+                command.Parameters.AddWithValue("@actor", (object)actor ?? DBNull.Value);
+                command.Parameters.AddWithValue("@summary", summary);
+                command.Parameters.AddWithValue("@severity", severity);
+                command.Parameters.AddWithValue("@detailsJson", (object)detailsJson ?? DBNull.Value);
+                command.Parameters.AddWithValue("@projectId", (object)projectId ?? DBNull.Value);
 
-            var id = Convert.ToInt64(command.ExecuteScalar());
+                id = Convert.ToInt64(command.ExecuteScalar());
+            }
 
-            // Raise event for UI refresh
+            // Raise event for UI refresh (outside the gate — see above)
             var entry = new ActivityFeedEntry
             {
                 Id = id,
@@ -240,6 +239,8 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public List<ActivityFeedEntry> GetRecentActivities(int limit = 50, string planId = null, string projectId = null)
         {
+            using var gate = _gate.Enter();
+
             var entries = new List<ActivityFeedEntry>();
 
             var conditions = new List<string>();
@@ -276,6 +277,8 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public List<ActivityFeedEntry> GetActivitiesSince(DateTime since, int limit = 100)
         {
+            using var gate = _gate.Enter();
+
             var entries = new List<ActivityFeedEntry>();
 
             const string sql = @"
@@ -303,6 +306,8 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public List<ActivityFeedEntry> GetActivitiesByType(string activityType, int limit = 50)
         {
+            using var gate = _gate.Enter();
+
             var entries = new List<ActivityFeedEntry>();
 
             const string sql = @"

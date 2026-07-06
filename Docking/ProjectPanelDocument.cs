@@ -425,15 +425,15 @@ namespace MultiTerminal.Docking
         /// Fetches the configured source control accounts and sends them to the panel's
         /// Git-section dropdown. Returns the fetched options so the caller can re-send them
         /// after a stats re-render without re-querying. Returns null if unavailable.
-        /// Reuses the ProjectDatabase connection (same multiterminal.db file as
-        /// source_control_accounts) rather than opening a second connection.
+        /// SourceControlAccountService opens and owns its own connection to multiterminal.db
+        /// (bb2b0104 — one owner per connection); disposed via `using` when this method returns.
         /// </summary>
         private List<(string Id, string DisplayName)> SendSourceAccountOptions()
         {
-            if (_renderer == null || _projectDatabase?.Connection == null) return null;
+            if (_renderer == null || _projectDatabase == null) return null;
             try
             {
-                var service = new SourceControlAccountService(_projectDatabase.Connection);
+                using var service = new SourceControlAccountService();
                 var options = new List<(string Id, string DisplayName)>();
                 foreach (var account in service.GetAll())
                     options.Add((account.Id, account.DisplayName));

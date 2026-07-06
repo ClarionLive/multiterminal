@@ -148,24 +148,11 @@ namespace MultiTerminal.Services
 
         private void InitializeDatabase()
         {
-            var connectionString = new SQLiteConnectionStringBuilder
-            {
-                DataSource = _databasePath,
-                Version = 3,
-                JournalMode = SQLiteJournalModeEnum.Wal,
-                Pooling = true
-            }.ToString();
-
-            _connection = new SQLiteConnection(connectionString);
-            _connection.Open();
-
-            // Belt-and-braces for cross-PROCESS contention on the shared multiterminal.db
-            // file. The in-process LockConn() gate serializes THIS process's threads, but
-            // mcp-session-history's better-sqlite3 indexer is a separate OS process that
-            // opens its own handle on the same DB family — no in-process lock can serialize
-            // against it. busy_timeout makes SQLite wait/retry a locked DB for up to 5s
-            // rather than throwing SQLITE_BUSY immediately.
-            _connection.BusyTimeout = 5000;
+            // Open through the one factory (bb2b0104 condition 2) so WAL / pooling / busy_timeout
+            // can't drift from what every other connection owner uses. TaskDatabase owns this
+            // connection and serializes its own access via LockConn() (ad08caac); no other class
+            // touches this handle (the Connection escape hatch was deleted in bb2b0104).
+            _connection = MultiterminalDb.Open();
 
             // Always run CreateSchema - all statements use IF NOT EXISTS so it's idempotent
             CreateSchema();
@@ -6754,23 +6741,14 @@ namespace MultiTerminal.Services
 
         #endregion
 
-        /// <summary>
-        /// Exposes the shared SQLite connection so sibling databases (KnowledgeDatabase,
-        /// CodeGraphDatabase, SessionMemoryDatabase, BranchMetadataService,
-        /// OwnerProfileService, SourceControlAccountService) can reuse it instead of
-        /// opening a second WAL handle on the same file.
-        ///
-        /// <para>⚠️ CONCURRENCY: this hands out the RAW handle. TaskDatabase's own methods
-        /// serialize their access via <see cref="LockConn"/> (task ad08caac), but any
-        /// external consumer that runs commands on this connection MUST hold the SAME gate
-        /// or it races against TaskDatabase (and every other consumer) on one handle —
-        /// undefined reader state. The shared handle is therefore NOT yet globally
-        /// race-free; routing all consumers through one gate (and deleting the private
-        /// locks two of them currently hold) is tracked in ticket bb2b0104. The
-        /// verifier (scripts/verify-taskdb-gate.mjs, ALLOW_CONNECTION_EXPOSURE) flags this
-        /// property as the standing tripwire until bb2b0104 closes it.</para>
-        /// </summary>
-        internal SQLiteConnection Connection => _connection;
+        // The Connection property was DELETED in ticket bb2b0104. Exposing the raw handle let
+        // sibling classes run ungated commands on TaskDatabase's connection — the cross-class
+        // race this program set out to kill. The invariant now: every SQLite connection has
+        // exactly ONE owner class; each owner opens its OWN connection via MultiterminalDb.Open()
+        // and serializes its own access. No class touches another's handle. If a new feature needs
+        // multiterminal.db, it opens its own connection through the factory — it does NOT get a
+        // handle from here. The verifier (scripts/verify-taskdb-gate.mjs, ALLOW_CONNECTION_EXPOSURE=false)
+        // fails the build if a Connection property reappears on any connection-owning class.
 
         #endregion
 

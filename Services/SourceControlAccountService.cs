@@ -10,15 +10,16 @@ namespace MultiTerminal.Services
     /// with auth tokens secured via Windows Credential Manager (DPAPI) rather than the database.
     /// Tokens are namespaced under "MultiTerminal:SourceAccount:&lt;id&gt;".
     /// </summary>
-    public class SourceControlAccountService
+    public sealed class SourceControlAccountService : IDisposable
     {
         private const string CredentialTargetPrefix = "MultiTerminal:SourceAccount:";
 
         private readonly SQLiteConnection _connection;
+        private readonly DbGate _gate = new DbGate();
 
-        public SourceControlAccountService(SQLiteConnection connection)
+        public SourceControlAccountService()
         {
-            _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+            _connection = MultiterminalDb.Open();
         }
 
         /// <summary>
@@ -26,6 +27,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<SourceControlAccount> GetAll()
         {
+            using var gate = _gate.Enter();
             var accounts = new List<SourceControlAccount>();
 
             using var cmd = new SQLiteCommand(
@@ -46,6 +48,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public SourceControlAccount Get(string id)
         {
+            using var gate = _gate.Enter();
             if (string.IsNullOrEmpty(id)) return null;
 
             using var cmd = new SQLiteCommand(
@@ -65,6 +68,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public SourceControlAccount Add(SourceControlAccount account)
         {
+            using var gate = _gate.Enter();
             if (account == null) throw new ArgumentNullException(nameof(account));
 
             if (string.IsNullOrEmpty(account.Id))
@@ -99,6 +103,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void Update(SourceControlAccount account)
         {
+            using var gate = _gate.Enter();
             if (account == null) throw new ArgumentNullException(nameof(account));
             if (string.IsNullOrEmpty(account.Id)) throw new ArgumentException("Account id is required.", nameof(account));
 
@@ -127,6 +132,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void Delete(string id)
         {
+            using var gate = _gate.Enter();
             if (string.IsNullOrEmpty(id)) return;
 
             // Best-effort cleanup of the stored token; the DB row is the source of truth.
@@ -189,6 +195,7 @@ namespace MultiTerminal.Services
 
         private void SetHasToken(string id, bool hasToken)
         {
+            using var gate = _gate.Enter();
             using var cmd = new SQLiteCommand(
                 "UPDATE source_control_accounts SET has_token = @hasToken, updated_at = @now WHERE id = @id",
                 _connection);
@@ -216,6 +223,13 @@ namespace MultiTerminal.Services
                     System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.RoundtripKind)
             };
+        }
+
+        public void Dispose()
+        {
+            _connection?.Close();
+            _connection?.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 }

@@ -16,11 +16,14 @@ namespace MultiTerminal.Services
     /// filters noise, chunks text, embeds with SmartComponents.LocalEmbeddings (bge-micro-v2),
     /// stores in SQLite with FTS5 index, and provides hybrid search (FTS5 + vector similarity).
     ///
-    /// Follows the KnowledgeDatabase pattern: shares the SQLite connection from TaskDatabase.
+    /// Owns its own SQLite connection to multiterminal.db via MultiterminalDb.Open() and
+    /// serializes access with a per-connection DbGate (bb2b0104). No connection handle is
+    /// shared with or borrowed from another class.
     /// </summary>
     public class SessionMemoryDatabase : IDisposable
     {
         private readonly SQLiteConnection _connection;
+        private readonly DbGate _gate = new DbGate();
         private readonly bool _fts5Available;
         private LocalEmbedder _embedder;
         private readonly object _embedderLock = new object();
@@ -36,7 +39,7 @@ namespace MultiTerminal.Services
         public SessionMemoryDatabase(TaskDatabase db)
         {
             if (db == null) throw new ArgumentNullException(nameof(db));
-            _connection = db.Connection;
+            _connection = MultiterminalDb.Open();
             _fts5Available = db.IsFts5Available;
             EnsureSchema();
             BackfillTerminalNames();
@@ -153,6 +156,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool IsSessionIndexed(string sessionId)
         {
+            using var gate = _gate.Enter();
             const string sql = "SELECT COUNT(1) FROM session_chunks_index WHERE session_id = @sessionId";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@sessionId", sessionId);
@@ -165,6 +169,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int IndexSessionFile(string jsonlPath, string terminalName = null, string projectPath = null)
         {
+            using var gate = _gate.Enter();
             // CA3003: jsonlPath reaches this sink only through sanitized flows — SessionMemoryController.
             // IndexSession canonicalizes with Path.GetFullPath and rejects anything outside %USERPROFILE%/
             // .claude, and IndexProjectSessions walks files enumerated from Directory.GetFiles under a
@@ -683,6 +688,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private List<SessionChunkResult> SearchFts5(string query, string projectPath, int limit, string agentName = null)
         {
+            using var gate = _gate.Enter();
             var results = new List<SessionChunkResult>();
 
             if (!_fts5Available) return SearchLike(query, projectPath, limit, agentName);
@@ -751,6 +757,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private List<SessionChunkResult> SearchLike(string query, string projectPath, int limit, string agentName = null)
         {
+            using var gate = _gate.Enter();
             var results = new List<SessionChunkResult>();
 
             // Extract keywords using same noise-word filtering as FTS5
@@ -849,6 +856,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private List<SessionChunkResult> SearchVector(string query, string projectPath, int limit, string agentName = null)
         {
+            using var gate = _gate.Enter();
             var results = new List<SessionChunkResult>();
 
             try
@@ -1039,6 +1047,7 @@ namespace MultiTerminal.Services
         /// <summary>Check if a chunk with this content hash already exists.</summary>
         private bool IsChunkDuplicate(string contentHash)
         {
+            using var gate = _gate.Enter();
             const string sql = "SELECT 1 FROM session_chunk_hashes WHERE content_hash = @hash LIMIT 1";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@hash", contentHash);
@@ -1048,6 +1057,7 @@ namespace MultiTerminal.Services
         /// <summary>Record a content hash to prevent future duplicates.</summary>
         private void RecordChunkHash(string contentHash, string sessionId)
         {
+            using var gate = _gate.Enter();
             const string sql = "INSERT OR IGNORE INTO session_chunk_hashes (content_hash, first_session_id) VALUES (@hash, @sid)";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@hash", contentHash);
@@ -1088,6 +1098,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void BackfillTerminalNames()
         {
+            using var gate = _gate.Enter();
             try
             {
                 // Count NULLs first to see if backfill is needed
@@ -1181,6 +1192,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public SessionMemoryStats GetStats(string projectPath = null)
         {
+            using var gate = _gate.Enter();
             var stats = new SessionMemoryStats();
 
             string countSql = "SELECT COUNT(1) FROM session_chunks";
@@ -1264,6 +1276,8 @@ namespace MultiTerminal.Services
             {
                 _embedder?.Dispose();
                 _embedder = null;
+                _connection?.Close();
+                _connection?.Dispose();
             }
         }
 
