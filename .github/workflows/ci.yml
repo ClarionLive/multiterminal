@@ -43,11 +43,15 @@ jobs:
       MULTITERMINAL_STAGED_PATH: ${{ github.workspace }}\mt-staged
       CI: 'true'
     steps:
+      # Third-party actions are pinned to full commit SHAs (not the mutable @v4
+      # tag) so a retargeted tag / compromised maintainer can't inject code into
+      # CI (OWASP A08). The trailing comment records the human-readable version;
+      # bump SHA + comment together when intentionally updating.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '8.0.x'
 
@@ -55,13 +59,54 @@ jobs:
       # `--test <glob>` (added in Node 21). Node 20 does NOT, so the mcp test
       # step below would fail there. Caches ~/.npm keyed on both lockfiles.
       - name: Setup Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: 'npm'
           cache-dependency-path: |
             package-lock.json
             mcp/package-lock.json
+
+      # Observability: the project targets net8.0-windows (framework pinned by
+      # the TFM) and pins its analyzers via NuGet packages, so it builds cleanly
+      # under any SDK >= 8 (dev machines here run SDK 9; this runner ships 10).
+      # There is deliberately no global.json pin — pinning to 8.0.x would break
+      # local builds that only have a newer SDK installed. Logging the resolved
+      # SDK keeps that non-determinism visible instead of silent.
+      - name: Log toolchain versions
+        shell: pwsh
+        run: |
+          dotnet --info
+          node --version
+          npm --version
+
+      # tools/rg.exe is a committed binary (ripgrep). Anchor its integrity: hash
+      # it and fail if it drifts from the SHA256 recorded in its provenance
+      # manifest, so a swapped/corrupted binary can't slip through (OWASP A08).
+      - name: Verify bundled rg.exe integrity
+        shell: pwsh
+        run: |
+          $line = Get-Content tools/rg.provenance.txt | Where-Object { $_ -match '^SHA256=' } | Select-Object -First 1
+          if (-not $line) { Write-Error 'No SHA256= line in tools/rg.provenance.txt'; exit 1 }
+          $expected = ($line -split '=', 2)[1].Trim().ToLower()
+          $actual = (Get-FileHash tools/rg.exe -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            Write-Error "tools/rg.exe SHA256 mismatch: expected $expected but got $actual (update tools/rg.provenance.txt if the binary was changed intentionally)"
+            exit 1
+          }
+          Write-Host "rg.exe integrity OK: $actual"
+
+      # Cache the NuGet package store across runs. setup-dotnet's built-in cache
+      # needs a packages.lock.json (this repo has none), so cache ~/.nuget
+      # directly, keyed on the project + Directory.*.props files that drive the
+      # restore graph.
+      - name: Cache NuGet packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'Directory.Packages.props', 'nuget.config') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
 
       # ---- C# build: TreatWarningsAsErrors (Directory.Build.props) makes this
       #      the C# lint gate too, per CLAUDE.md. ----
@@ -71,10 +116,20 @@ jobs:
       - name: dotnet build (Debug)
         run: dotnet build MultiTerminal.csproj -c Debug --no-restore
 
-      # ---- .NET tests: MultiTerminal.Tests is the only xUnit project.
-      #      AgentProcessTest is OutputType=Exe (a self-contained console
-      #      harness with no test SDK) -- deliberately NOT a `dotnet test`
-      #      target, so it is excluded here. ----
+      # Release build gates the deployment path: it runs the Release-only,
+      # FATAL StageMcpForInstaller target (stages the MCP server into
+      # installer/mcp-dist via npm ci from the committed lock). A Debug-only CI
+      # would let a Release/installer-staging regression ship unnoticed.
+      - name: dotnet build (Release — exercises installer staging)
+        run: dotnet build MultiTerminal.csproj -c Release --no-restore
+
+      # AgentProcessTest is a console harness (not a dotnet test target) but it
+      # ProjectReferences MultiTerminal, so an API change can break it. Build it
+      # so that breakage fails CI instead of rotting silently.
+      - name: dotnet build (AgentProcessTest harness)
+        run: dotnet build AgentProcessTest/AgentProcessTest.csproj -c Debug
+
+      # ---- .NET tests: MultiTerminal.Tests is the only xUnit project. ----
       - name: dotnet test (MultiTerminal.Tests)
         run: >-
           dotnet test MultiTerminal.Tests/MultiTerminal.Tests.csproj -c Debug
@@ -96,7 +151,7 @@ jobs:
 
       - name: Upload .NET test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dotnet-test-results
           path: ${{ runner.temp }}\testresults\*.trx

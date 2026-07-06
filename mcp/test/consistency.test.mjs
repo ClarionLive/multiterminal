@@ -29,6 +29,16 @@ const CALL_MARKER = 'server.setRequestHandler(CallToolRequestSchema';
 const DEF_RE_SRC = '/\\bname:\\s*"([^"]+)"/g';
 const HANDLER_RE_SRC = '/^      case\\s+"([^"]+)":/gm';
 
+// Reconstruct a RegExp from its `/pattern/flags` source literal so the live
+// matchers below are derived from the SAME pinned strings the drift guard
+// checks — one source of truth, no second hand-copied regex to keep in sync.
+function reFromLiteral(literal) {
+  const lastSlash = literal.lastIndexOf("/");
+  return new RegExp(literal.slice(1, lastSlash), literal.slice(lastSlash + 1));
+}
+const DEF_RE = reFromLiteral(DEF_RE_SRC);
+const HANDLER_RE = reFromLiteral(HANDLER_RE_SRC);
+
 test("consistency check literals still present in index.js (drift guard)", () => {
   assert.ok(src.includes(LIST_MARKER), `ListTools marker missing — did the handler move? (${LIST_MARKER})`);
   assert.ok(src.includes(CALL_MARKER), `CallTool marker missing — did the handler move? (${CALL_MARKER})`);
@@ -50,8 +60,8 @@ test("every tool definition has a dispatch handler and vice versa", () => {
   const defsRegion = src.slice(listIdx, callIdx);
   const handlersRegion = src.slice(callIdx);
   // Mirror index.js:assertToolDefHandlerConsistency exactly.
-  const defs = new Set([...defsRegion.matchAll(/\bname:\s*"([^"]+)"/g)].map((m) => m[1]));
-  const handlers = new Set([...handlersRegion.matchAll(/^      case\s+"([^"]+)":/gm)].map((m) => m[1]));
+  const defs = new Set([...defsRegion.matchAll(DEF_RE)].map((m) => m[1]));
+  const handlers = new Set([...handlersRegion.matchAll(HANDLER_RE)].map((m) => m[1]));
 
   const defsNoHandler = [...defs].filter((d) => !handlers.has(d)).sort();
   const handlersNoDef = [...handlers].filter((h) => !defs.has(h)).sort();
