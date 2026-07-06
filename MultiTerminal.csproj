@@ -282,7 +282,7 @@
     Safe w.r.t. the "build does not affect the running app" contract: the Node
     MCP server is a per-terminal CHILD process that reads index.js at spawn, so
     overwriting APPDATA never disturbs the running MultiTerminal.exe or any
-    already-running MCP server -- only NEWLY spawned terminals pick up the change
+    already-running MCP server — only NEWLY spawned terminals pick up the change
     (i.e. changes require a terminal restart, not an MT restart).
 
     Path is passed via EnvironmentVariables (not the shell) so it can't inject
@@ -305,7 +305,7 @@
     McpServerDir="mcp-dist") ships from git bits, NOT the build machine's
     %APPDATA%\multiterminal\mcp profile (ticket ec97c446). Reuses the same sync
     script pointed at the dist dir: on first build node_modules is missing so it
-    runs `npm install --omit=dev` from the clean sdk-only package.json (minimal,
+    runs `npm install` (omit dev) from the clean sdk-only package.json (minimal,
     no profile cruft); later builds skip it when package.json is unchanged.
 
     Release-only: the installer is built from Release/publish output, so there's

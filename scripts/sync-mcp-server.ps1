@@ -93,9 +93,11 @@ try {
     }
     elseif ((Test-Path -LiteralPath $sourcePkg) -and (Test-Path -LiteralPath $destPkg)) {
         # Content compare (not Get-FileHash -- that cmdlet is absent in some
-        # minimal PS 5.1 hosts). Raw-text equality is enough to detect a dep change.
-        $srcText  = [System.IO.File]::ReadAllText($sourcePkg)
-        $destText = [System.IO.File]::ReadAllText($destPkg)
+        # minimal PS 5.1 hosts). Normalize line endings + trim so a pure CRLF/LF
+        # difference (git checks out mcp/ CRLF; the dest copy may be LF) doesn't
+        # trigger a spurious npm install. Only a real dependency edit should.
+        $srcText  = ([System.IO.File]::ReadAllText($sourcePkg)).Replace("`r`n", "`n").Trim()
+        $destText = ([System.IO.File]::ReadAllText($destPkg)).Replace("`r`n", "`n").Trim()
         if ($srcText -ne $destText) {
             $needsInstall = $true
             Write-Host "SyncMcpServer: package.json changed -- will npm install."
