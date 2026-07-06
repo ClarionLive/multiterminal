@@ -145,6 +145,14 @@ try {
             Write-Host "SyncMcpServer: package.json changed -- will install."
         }
     }
+    # Installer/Release staging (-FailOnError) has NO runtime backstop, so always
+    # reinstall from the committed lock -- this guarantees the shipped deps are
+    # exactly the lockfile even if a dest's node_modules drifted from a matching
+    # lock (ticket ec97c446 F2, belt-and-braces). Cheap: installers build rarely.
+    if ($FailOnError -and -not $needsInstall) {
+        $needsInstall = $true
+        Write-Host "SyncMcpServer: installer staging (FailOnError) -- forcing reproducible reinstall from lock."
+    }
 
     # --- Copy the git-tracked files only (never touch node_modules / *.db) -----
     # package-lock.json is included so `npm ci` can run reproducibly at the dest.
