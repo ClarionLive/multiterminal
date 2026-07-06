@@ -1163,6 +1163,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "delete_project",
+        description: "Unregister/delete a project from MultiTerminal. Routes through the canonical delete path: removes the SQLite row, fires the registry event so the code-graph watcher drops the project, evicts its code-graph (cg_) rows, and records an activity-feed entry. Associated tasks are NOT deleted. By default the on-disk .claude/project.json is left intact (set deleteLocalConfig:true to also delete it). Unknown projectId returns a clean not-found error.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            projectId: {
+              type: "string",
+              description: "8-char project ID to delete (from list_projects / create_project).",
+            },
+            deleteLocalConfig: {
+              type: "boolean",
+              description: "When true, also delete the project's on-disk .claude/project.json. Default false (unregister only).",
+            },
+            deletedBy: {
+              type: "string",
+              description: "Agent name attributed in the activity feed. Defaults to 'api'.",
+            },
+          },
+          required: ["projectId"],
+        },
+      },
+      {
         name: "get_project",
         description: "Get a project with all associations (agents, MCP servers, specialists, paths, prompts, skills). Returns the full project context.",
         inputSchema: {
@@ -3628,6 +3650,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         text += `  ID: ${result.projectId}\n`;
         text += `  Name: ${result.name}\n`;
         text += `  Path: ${result.path}`;
+        return {
+          content: [{ type: "text", text }],
+        };
+      }
+
+      case "delete_project": {
+        const qs = new URLSearchParams();
+        if (args.deleteLocalConfig) qs.set("deleteLocalConfig", "true");
+        if (args.deletedBy) qs.set("deletedBy", args.deletedBy);
+        const suffix = qs.toString() ? `?${qs.toString()}` : "";
+        const result = await apiCall(`/api/projects/${args.projectId}${suffix}`, "DELETE");
+        let text = `✅ Project deleted.\n`;
+        text += `  ID: ${result.projectId ?? args.projectId}`;
+        if (args.deleteLocalConfig) text += `\n  (.claude/project.json also deleted)`;
         return {
           content: [{ type: "text", text }],
         };
