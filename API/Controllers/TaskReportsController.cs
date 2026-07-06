@@ -8,10 +8,12 @@ namespace MultiTerminal.API.Controllers
 {
     [ApiController]
     [Route("api/tasks/{taskId}/reports")]
-    // Eval P2 item 3 (task c522764d): this is the ONLY controller the file:// tasks-panel.html
-    // fetch()es, so it gets the scoped null-tolerant CORS policy (Origin: null from file://).
-    // Every other controller uses the strict loopback-only default policy. See RestCorsOriginPolicy.
-    [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)]
+    // Eval P2 item 3 (task c522764d): the file:// tasks-panel.html fetch()es ONLY the two GET
+    // report endpoints below, so the scoped null-tolerant CORS policy is applied at the ACTION
+    // level to those GETs only — NOT the controller. SaveReport (POST) is agent-only (HttpClient,
+    // no Origin header → CORS N/A) and stays on the strict loopback-only default policy, so a
+    // null-origin browser POST (report injection) is rejected. Every other controller also uses
+    // the strict default. See RestCorsOriginPolicy.
     public class TaskReportsController : ControllerBase
     {
         private readonly TaskDatabase _taskDb;
@@ -27,6 +29,7 @@ namespace MultiTerminal.API.Controllers
         /// GET /api/tasks/{taskId}/reports — List reports for a task (metadata only, no content)
         /// </summary>
         [HttpGet]
+        [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)] // file:// tasks-panel reads this (Origin: null)
         public IActionResult GetReports(string taskId, [FromQuery] string agentName = null, [FromQuery] int limit = 50)
         {
             var reports = _taskDb.GetTaskReports(taskId, agentName, limit);
@@ -37,6 +40,7 @@ namespace MultiTerminal.API.Controllers
         /// GET /api/tasks/{taskId}/reports/{reportId} — Get full report content
         /// </summary>
         [HttpGet("{reportId}")]
+        [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)] // file:// tasks-panel reads this (Origin: null)
         public IActionResult GetReport(string taskId, string reportId)
         {
             var report = _taskDb.GetTaskReport(reportId);
