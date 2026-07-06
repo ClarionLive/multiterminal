@@ -174,7 +174,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void RequestAgentPanelClose(string transcriptPath)
         {
-            AgentPanelCloseRequested?.Invoke(this, transcriptPath);
+            RaiseSafe(AgentPanelCloseRequested, transcriptPath);
         }
 
         /// <summary>
@@ -189,7 +189,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void NotifyReportSaved(string taskId, string reportId, string agentName, string verdict)
         {
-            ReportSaved?.Invoke(this, new ReportSavedEventArgs
+            RaiseSafe(ReportSaved, new ReportSavedEventArgs
             {
                 TaskId = taskId,
                 ReportId = reportId,
@@ -228,7 +228,7 @@ namespace MultiTerminal.MCPServer.Services
                 ["cwd"] = cwd,
                 ["created_at"] = DateTime.UtcNow.ToString("o")
             };
-            NotificationReceived?.Invoke(this, payload);
+            RaiseSafe(NotificationReceived, payload);
             return id;
         }
 
@@ -305,7 +305,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void FireSessionLineageUpdated(string sessionId)
         {
-            SessionLineageUpdated?.Invoke(this, sessionId);
+            RaiseSafe(SessionLineageUpdated, sessionId);
         }
 
         /// <summary>
@@ -580,7 +580,7 @@ namespace MultiTerminal.MCPServer.Services
             };
             try
             {
-                WorktreePruning?.Invoke(this, args);
+                RaiseSafe(WorktreePruning, args);
             }
             catch (Exception ex)
             {
@@ -598,7 +598,7 @@ namespace MultiTerminal.MCPServer.Services
             var args = new WorktreeReadyEventArgs(taskId, worktreePath, repoRoot, agentName);
             try
             {
-                WorktreeReady?.Invoke(this, args);
+                RaiseSafe(WorktreeReady, args);
             }
             catch (Exception ex)
             {
@@ -923,7 +923,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void FireBranchOutcomeUpdated(string projectId, string branchName)
         {
-            BranchOutcomeUpdated?.Invoke(this, new BranchOutcomeUpdatedEventArgs
+            RaiseSafe(BranchOutcomeUpdated, new BranchOutcomeUpdatedEventArgs
             {
                 ProjectId = projectId,
                 BranchName = branchName
@@ -1487,6 +1487,44 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Resilient event dispatch (P5 / ticket 1df2a534). Snapshots the event's invocation list and
+        /// invokes each subscriber inside its OWN try/catch, so a single throwing subscriber can no
+        /// longer abort delivery to the remaining subscribers — nor bubble its exception back into the
+        /// REST/MCP call that happened to raise the event. Every bare event-raise in this class routes
+        /// through here instead of calling the delegate directly.
+        ///
+        /// <para><b>Snapshot semantics:</b> <see cref="System.Delegate.GetInvocationList"/> is captured
+        /// once up front, so a subscriber that unsubscribes mid-dispatch still receives this raise and a
+        /// subscriber added mid-dispatch does not — the standard, race-free raise contract. Passing the
+        /// event field by value also means a later handler cannot see a delegate mutated by an earlier
+        /// one.</para>
+        /// </summary>
+        /// <typeparam name="T">The event args type (all MessageBroker events are <c>EventHandler&lt;T&gt;</c>).</typeparam>
+        /// <param name="handler">The event delegate — pass the event field directly; null means no subscribers.</param>
+        /// <param name="args">The event args forwarded to every subscriber.</param>
+        /// <param name="source">Auto-filled with the raising member's name for diagnostics; do not pass explicitly.</param>
+        private void RaiseSafe<T>(EventHandler<T> handler, T args, [System.Runtime.CompilerServices.CallerMemberName] string source = "")
+        {
+            if (handler == null)
+            {
+                return;
+            }
+
+            foreach (EventHandler<T> subscriber in handler.GetInvocationList())
+            {
+                try
+                {
+                    subscriber(this, args);
+                }
+                catch (Exception ex)
+                {
+                    // One bad subscriber must not starve the others (P5). Log and keep dispatching.
+                    LogError($"RaiseSafe: subscriber threw dispatching {typeof(T).Name} from {source}: {ex}");
+                }
+            }
+        }
+
+        /// <summary>
         /// Load tasks from the database into memory.
         /// </summary>
         private void LoadPersistedTasks()
@@ -1747,7 +1785,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
 
                 // Re-raise event so MainForm updates tab title
-                TerminalRegistered?.Invoke(this, existingByDocId);
+                RaiseSafe(TerminalRegistered, existingByDocId);
 
                 return new RegisterResult
                 {
@@ -1782,7 +1820,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // Always re-raise event so MainForm updates its mapping
-                TerminalRegistered?.Invoke(this, existingByName);
+                RaiseSafe(TerminalRegistered, existingByName);
 
                 // Auto-create profile if it doesn't exist, then set online
                 // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
@@ -1851,7 +1889,7 @@ namespace MultiTerminal.MCPServer.Services
             if (_terminals.TryAdd(id, terminal))
             {
                 _messageQueues.TryAdd(id, new BlockingCollection<Message>());
-                TerminalRegistered?.Invoke(this, terminal);
+                RaiseSafe(TerminalRegistered, terminal);
 
                 // Auto-create profile if it doesn't exist, then set online
                 // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
@@ -1977,7 +2015,7 @@ namespace MultiTerminal.MCPServer.Services
             if (terminal != null)
             {
                 terminal.IsConnected = false;
-                TerminalDisconnected?.Invoke(this, terminal);
+                RaiseSafe(TerminalDisconnected, terminal);
 
                 // Set profile offline
                 try
@@ -2013,7 +2051,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 terminal.IsConnected = false;
                 terminal.ChannelPort = null; // Clear stale port to prevent delivery to dead channel server
-                TerminalDisconnected?.Invoke(this, terminal);
+                RaiseSafe(TerminalDisconnected, terminal);
             }
 
             // Always update profile status (even if terminal not found in memory)
@@ -2156,7 +2194,7 @@ namespace MultiTerminal.MCPServer.Services
             // settings.txt on every UserPromptSubmit hook fire + every phone X-Source ping.
             if (IsRemoteMode == enabled) return;
             SettingsService.Default.Set(SettingRemoteMode, enabled ? "1" : "0");
-            RemoteModeChanged?.Invoke(this, enabled);
+            RaiseSafe(RemoteModeChanged, enabled);
         }
 
         /// <summary>
@@ -2172,20 +2210,13 @@ namespace MultiTerminal.MCPServer.Services
         /// fa1101db R4 — raise <see cref="PermissionRelayPushRequested"/>. Called by
         /// PermissionRelayService right after PostCreateAsync confirms the Worker stored the request.
         /// Fire-and-forget: never throws into the caller's relay path (a push failure must not block
-        /// the round-trip), so subscriber exceptions are swallowed here.
+        /// the round-trip). Routed through <see cref="RaiseSafe{T}"/> (P5 / 1df2a534) so subscriber
+        /// exceptions are isolated PER subscriber — the R4 idiom snapshotted the delegate but a single
+        /// throwing handler still aborted the rest; RaiseSafe finishes that.
         /// </summary>
         public void NotifyPermissionRelayPush(string requestType, string agentName, string title, string body)
         {
-            var handler = PermissionRelayPushRequested;
-            if (handler == null) return;
-            try
-            {
-                handler.Invoke(this, new PermissionRelayPushEventArgs(requestType, agentName, title, body));
-            }
-            catch (Exception ex)
-            {
-                DebugLogService?.Error("PermissionRelayPush", $"NotifyPermissionRelayPush subscriber threw: {ex.Message}");
-            }
+            RaiseSafe(PermissionRelayPushRequested, new PermissionRelayPushEventArgs(requestType, agentName, title, body));
         }
 
         // fa1101db R2 — idle auto-on for remote mode. The relay (PermissionRelayService.Bridge*/
@@ -2319,7 +2350,7 @@ namespace MultiTerminal.MCPServer.Services
             ActivityService?.UpdateActivity(fromTerminal.Name, "working", $"Chatting with {toTerminal.Name}");
 
             // Notify listeners
-            MessageSent?.Invoke(this, message);
+            RaiseSafe(MessageSent, message);
 
             // Push notification to owner's phone for all incoming messages
             _ = ForwardMessagePushAsync(fromTerminal.Name, content);
@@ -2644,7 +2675,7 @@ namespace MultiTerminal.MCPServer.Services
             fromTerminal.LastActiveAt = DateTime.UtcNow;
 
             // Notify listeners
-            MessageSent?.Invoke(this, message);
+            RaiseSafe(MessageSent, message);
 
             // Mark as delivering to prevent retry race condition
             if (queuedMessageId > 0)
@@ -2885,7 +2916,7 @@ namespace MultiTerminal.MCPServer.Services
                         _messageHistory.RemoveAt(0);
                 }
 
-                MessageSent?.Invoke(this, message);
+                RaiseSafe(MessageSent, message);
 
                 // Notify for push delivery to terminal UI
                 if (OnMessageDelivery != null)
@@ -2938,7 +2969,7 @@ namespace MultiTerminal.MCPServer.Services
                         _messageHistory.RemoveAt(0);
                 }
 
-                MessageSent?.Invoke(this, message);
+                RaiseSafe(MessageSent, message);
 
                 // Notify for push delivery to terminal UI
                 if (OnMessageDelivery != null)
@@ -3016,7 +3047,7 @@ namespace MultiTerminal.MCPServer.Services
                     _messageHistory.RemoveAt(0);
             }
 
-            MessageSent?.Invoke(this, message);
+            RaiseSafe(MessageSent, message);
 
             // Mark as delivering to prevent retry race condition
             if (queuedMessageId > 0)
@@ -3144,7 +3175,7 @@ namespace MultiTerminal.MCPServer.Services
                     _messageHistory.RemoveAt(0);
             }
 
-            MessageSent?.Invoke(this, message);
+            RaiseSafe(MessageSent, message);
 
             // Mark as delivering to prevent retry race condition
             if (queuedMessageId > 0)
@@ -3293,7 +3324,7 @@ namespace MultiTerminal.MCPServer.Services
                     _messageHistory.RemoveAt(0);
             }
 
-            MessageSent?.Invoke(this, message);
+            RaiseSafe(MessageSent, message);
 
             // Mark as delivering to prevent retry race condition
             if (queuedMessageId > 0)
@@ -3998,7 +4029,7 @@ namespace MultiTerminal.MCPServer.Services
             BroadcastTaskUpdate();
 
             // Raise TaskClaimed event for toast notification
-            TaskClaimed?.Invoke(this, new TaskClaimedEventArgs
+            RaiseSafe(TaskClaimed, new TaskClaimedEventArgs
             {
                 TaskId = taskId,
                 TaskTitle = task.Title,
@@ -5694,7 +5725,7 @@ namespace MultiTerminal.MCPServer.Services
                                      ?? _worktrees?.GetWorktreePathForTask(taskId);
             try
             {
-                TaskActiveChanged?.Invoke(this, new TaskActiveChangedEventArgs(
+                RaiseSafe(TaskActiveChanged, new TaskActiveChangedEventArgs(
                     agentName: actingAgent,
                     oldTaskId: oldTaskId,
                     oldWorktreePath: oldWorktreePath,
@@ -6045,7 +6076,7 @@ namespace MultiTerminal.MCPServer.Services
         private void BroadcastTaskUpdate()
         {
             var tasks = GetTasks();
-            TasksUpdated?.Invoke(this, tasks);
+            RaiseSafe(TasksUpdated, tasks);
         }
 
         /// <summary>
@@ -6778,7 +6809,7 @@ namespace MultiTerminal.MCPServer.Services
         private void BroadcastProjectUpdate()
         {
             var projects = GetProjectsList();
-            ProjectsUpdated?.Invoke(this, projects);
+            RaiseSafe(ProjectsUpdated, projects);
         }
 
         #endregion
@@ -6988,7 +7019,7 @@ namespace MultiTerminal.MCPServer.Services
         private void BroadcastProfileUpdate()
         {
             var profiles = _profiles.Values.OrderBy(p => p.DisplayName ?? p.Id).ToList();
-            ProfilesUpdated?.Invoke(this, profiles);
+            RaiseSafe(ProfilesUpdated, profiles);
         }
 
         #endregion
@@ -7156,7 +7187,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             // Broadcast helper message (for chat panel display)
-            HelperMessageLogged?.Invoke(this, helperMessage);
+            RaiseSafe(HelperMessageLogged, helperMessage);
 
             return new LogHelperMessageResult
             {
@@ -7195,7 +7226,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private void BroadcastHelperUpdate(HelperSession session)
         {
-            HelperSessionUpdated?.Invoke(this, session);
+            RaiseSafe(HelperSessionUpdated, session);
         }
 
         #endregion
@@ -7231,7 +7262,7 @@ namespace MultiTerminal.MCPServer.Services
             _officeAgents[uniqueName] = agent;
             System.Diagnostics.Debug.WriteLine($"[MessageBroker] Office agent spawned: {uniqueName} (by {spawnedBy})");
 
-            OfficeAgentSpawned?.Invoke(this, agent);
+            RaiseSafe(OfficeAgentSpawned, agent);
 
             return new OfficeAgentResult { Success = true, AgentName = uniqueName };
         }
@@ -7249,7 +7280,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 agent.Status = "completed";
                 System.Diagnostics.Debug.WriteLine($"[MessageBroker] Office agent departed: {name}");
-                OfficeAgentDeparted?.Invoke(this, agent);
+                RaiseSafe(OfficeAgentDeparted, agent);
                 return new OfficeAgentResult { Success = true, AgentName = name };
             }
 
@@ -7263,7 +7294,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 matchedAgent.Status = "completed";
                 System.Diagnostics.Debug.WriteLine($"[MessageBroker] Office agent departed: {match.Key} (fuzzy match from {name})");
-                OfficeAgentDeparted?.Invoke(this, matchedAgent);
+                RaiseSafe(OfficeAgentDeparted, matchedAgent);
                 return new OfficeAgentResult { Success = true, AgentName = match.Key };
             }
 
@@ -7342,7 +7373,7 @@ namespace MultiTerminal.MCPServer.Services
                     activity.ProjectId = task.ProjectId;
             }
 
-            ActivityRecorded?.Invoke(this, activity);
+            RaiseSafe(ActivityRecorded, activity);
 
             // Persist to activity_feed table for dashboard (skip if caller already persisted, e.g. RecordBuildActivity)
             if (!alreadyPersisted)
@@ -7422,7 +7453,7 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             LogInfo($"TEAM MSG [{teamName ?? "?"}] {sender} → {recipient}: {content.Substring(0, Math.Min(50, content.Length))}...");
-            MessageSent?.Invoke(this, message);
+            RaiseSafe(MessageSent, message);
         }
 
         #endregion
@@ -7481,7 +7512,7 @@ namespace MultiTerminal.MCPServer.Services
                 TriggeredBy = triggeredBy
             };
 
-            PlanUpdated?.Invoke(this, args);
+            RaiseSafe(PlanUpdated, args);
 
             // Record activity for the feed
             RecordActivity(new ActivityEvent
@@ -7535,7 +7566,7 @@ namespace MultiTerminal.MCPServer.Services
                 _taskDb.SaveInboxMessage(message);
 
                 // Raise event for UI updates
-                InboxUpdated?.Invoke(this, new InboxUpdatedEventArgs
+                RaiseSafe(InboxUpdated, new InboxUpdatedEventArgs
                 {
                     UserId = userId,
                     Message = message,
@@ -7590,7 +7621,7 @@ namespace MultiTerminal.MCPServer.Services
                 _taskDb.MarkInboxRead(messageId);
 
                 // Raise event for UI updates
-                InboxUpdated?.Invoke(this, new InboxUpdatedEventArgs
+                RaiseSafe(InboxUpdated, new InboxUpdatedEventArgs
                 {
                     UserId = message.UserId,
                     Message = message,
@@ -7614,7 +7645,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 var count = _taskDb.MarkAllInboxRead(userId);
 
-                InboxUpdated?.Invoke(this, new InboxUpdatedEventArgs
+                RaiseSafe(InboxUpdated, new InboxUpdatedEventArgs
                 {
                     UserId = userId,
                     Message = null,
@@ -7642,7 +7673,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 _taskDb.ReplyToInboxMessage(messageId, replyText);
 
-                InboxUpdated?.Invoke(this, new InboxUpdatedEventArgs
+                RaiseSafe(InboxUpdated, new InboxUpdatedEventArgs
                 {
                     UserId = message.UserId,
                     Message = message,
@@ -7677,7 +7708,7 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(text))
                 return (false, "text is required");
 
-            TerminalInjectRequested?.Invoke(this, new TerminalInjectEventArgs
+            RaiseSafe(TerminalInjectRequested, new TerminalInjectEventArgs
             {
                 AgentName = agentName,
                 SessionId = sessionId,
@@ -7703,7 +7734,7 @@ namespace MultiTerminal.MCPServer.Services
 
             var tabId = Guid.NewGuid().ToString("N").Substring(0, 8);
 
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "open",
                 TerminalId = terminalId,
@@ -7725,7 +7756,7 @@ namespace MultiTerminal.MCPServer.Services
             if (terminal == null)
                 return (false, $"Terminal not found: {terminalId}");
 
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "update",
                 TerminalId = terminalId,
@@ -7747,7 +7778,7 @@ namespace MultiTerminal.MCPServer.Services
             if (terminal == null)
                 return (false, $"Terminal not found: {terminalId}");
 
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "close",
                 TerminalId = terminalId,
@@ -7767,7 +7798,7 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, null, $"Terminal not found: {terminalId}");
 
             var tcs = new TaskCompletionSource<string>();
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "execute_script",
                 TerminalId = terminalId,
@@ -7797,7 +7828,7 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, null, $"Terminal not found: {terminalId}");
 
             var tcs = new TaskCompletionSource<string>();
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "get_console_logs",
                 TerminalId = terminalId,
@@ -7827,7 +7858,7 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, null, $"Terminal not found: {terminalId}");
 
             var tcs = new TaskCompletionSource<string>();
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "get_element_content",
                 TerminalId = terminalId,
@@ -7858,7 +7889,7 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, null, $"Terminal not found: {terminalId}");
 
             var tcs = new TaskCompletionSource<string>();
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "capture_screenshot",
                 TerminalId = terminalId,
@@ -7888,7 +7919,7 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, $"Terminal not found: {terminalId}");
 
             var tcs = new TaskCompletionSource<string>();
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "post_message",
                 TerminalId = terminalId,
@@ -7918,7 +7949,7 @@ namespace MultiTerminal.MCPServer.Services
                 return (false, null, $"Terminal not found: {terminalId}");
 
             var tcs = new TaskCompletionSource<string>();
-            BrowserTabRequested?.Invoke(this, new BrowserTabEventArgs
+            RaiseSafe(BrowserTabRequested, new BrowserTabEventArgs
             {
                 Action = "get_messages",
                 TerminalId = terminalId,
