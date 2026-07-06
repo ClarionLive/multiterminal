@@ -9,7 +9,8 @@ import {
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { access, readFile, readdir, stat } from "fs/promises";
-import { constants } from "fs";
+import { constants, readFileSync } from "fs";
+import { fileURLToPath } from "url";
 import path from "path";
 
 const execAsync = promisify(exec);
@@ -17,6 +18,25 @@ const execAsync = promisify(exec);
 const API_BASE = "http://localhost:5050";
 
 // Helper to make REST API calls
+// Default per-request timeout. MT runs locally on :5050 so requests are normally
+// sub-second; 15s is a generous ceiling that still guarantees a tool call can't
+// hang forever if the app is wedged or unreachable.
+const API_TIMEOUT_MS = 15000;
+
+// Recognize a "connection refused" failure across Node/undici's shapes. When MT
+// isn't listening on :5050, global fetch rejects with a TypeError ("fetch
+// failed") whose .cause carries code ECONNREFUSED. We normalize all of those to
+// one signal so the caller gets a clear "is the app running?" message instead of
+// an opaque "fetch failed".
+function isConnectionRefused(err) {
+  if (!err) return false;
+  const cause = err.cause;
+  const code = (cause && cause.code) || err.code;
+  if (code === "ECONNREFUSED") return true;
+  const msg = `${err.message || ""} ${(cause && cause.message) || ""}`.toLowerCase();
+  return msg.includes("econnrefused");
+}
+
 async function apiCall(endpoint, method = "GET", body = null) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -28,14 +48,46 @@ async function apiCall(endpoint, method = "GET", body = null) {
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetch(url, options);
-
-  if (!response.ok) {
-    throw new Error(`API error: ${response.status} ${response.statusText}`);
+  // Up to 2 attempts, but the retry fires ONLY on connection-refused. That's
+  // safe even for POST/DELETE: ECONNREFUSED means the TCP connection was never
+  // established, so the server never saw the request — no double-execute risk.
+  // A timeout (AbortError) is deliberately NOT retried, because the request may
+  // already have been received and acted upon.
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status} ${response.statusText}`);
+      }
+      const text = await response.text();
+      return text ? JSON.parse(text) : null;
+    } catch (err) {
+      lastErr = err;
+      if (err.name === "AbortError") {
+        throw new Error(
+          `MultiTerminal API timed out after ${API_TIMEOUT_MS / 1000}s (${method} ${endpoint}). ` +
+          `The app may be busy or wedged on ${API_BASE}.`
+        );
+      }
+      if (isConnectionRefused(err)) {
+        if (attempt === 0) {
+          // Brief backoff, then one retry — covers a mid-restart window.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+        throw new Error(
+          `MultiTerminal isn't running on ${API_BASE} — start the app, then retry (${method} ${endpoint}).`
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
-
-  const text = await response.text();
-  return text ? JSON.parse(text) : null;
+  throw lastErr;
 }
 
 // Resolve and cache the active project id for this MCP server process.
@@ -3542,42 +3594,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: imgContent };
       }
 
-      // Office Agent Animation Handlers
-      case "notify_agent_spawn": {
-        const result = await apiCall("/api/office/agents", "POST", {
-          name: args.name,
-          spawnedBy: args.spawnedBy,
-        });
-        return {
-          content: [{ type: "text", text: `✅ Agent ${args.name} spawned (walk-in animation triggered)` }],
-        };
-      }
-
-      case "notify_agent_complete": {
-        const result = await apiCall(`/api/office/agents/${encodeURIComponent(args.name)}`, "DELETE");
-        return {
-          content: [{ type: "text", text: `✅ Agent ${args.name} departed (exit animation triggered)` }],
-        };
-      }
-
-      // Headless Agent Process Handler
-      case "spawn_agent": {
-        const result = await apiCall("/api/spawn/agent", "POST", {
-          agentName: args.agentName,
-          initialPrompt: args.initialPrompt,
-          workingDir: args.workingDir,
-          spawnerName: args.spawnerName,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `✅ Agent "${args.agentName}" spawned!\n\nPID: ${result.processId}\nSession: ${result.sessionId || "pending"}\n\nThe agent's conversation is now visible in the Agent Panel. The user can observe and interact with it.`,
-            },
-          ],
-        };
-      }
-
       // Team Assembly Handler
       case "get_team_roster": {
         const result = await apiCall(`/api/team/roster?projectPath=${encodeURIComponent(args.projectPath)}`);
@@ -5087,9 +5103,58 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// Startup consistency check (ticket ec97c446): every tool DEFINITION must have a
+// top-level dispatch handler and vice-versa. This catches the exact drift class
+// that let delete_project ship in the deployed copy while missing from git, and
+// let 3 dead handlers (spawn_agent / notify_agent_*) linger with no tool def.
+//
+// Implementation: source-scans this very file rather than refactoring the
+// ~2000-line inline tool-definitions array. Tool names come from `name: "x"` in
+// the region between the ListTools and CallTool handlers (so nested inputSchema
+// props can't leak in). Dispatch handlers are the top-level switch cases, which
+// in this file are indented exactly 6 spaces (`      case "x":`); nested
+// switch(args.type) cases are indented deeper (10 spaces) and are correctly
+// excluded. Non-fatal: any failure logs a warning and never blocks startup.
+// Logs to stderr only (stdout is the JSON-RPC channel for a stdio server).
+function assertToolDefHandlerConsistency() {
+  try {
+    const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const listIdx = src.indexOf("server.setRequestHandler(ListToolsRequestSchema");
+    const callIdx = src.indexOf("server.setRequestHandler(CallToolRequestSchema");
+    if (listIdx < 0 || callIdx < 0 || callIdx <= listIdx) {
+      console.error("[consistency] WARNING: could not locate ListTools/CallTool handlers; skipping def<->handler check.");
+      return;
+    }
+    const defsRegion = src.slice(listIdx, callIdx);
+    const handlersRegion = src.slice(callIdx);
+    const defs = new Set([...defsRegion.matchAll(/\bname:\s*"([^"]+)"/g)].map((m) => m[1]));
+    const handlers = new Set([...handlersRegion.matchAll(/^      case\s+"([^"]+)":/gm)].map((m) => m[1]));
+
+    const defsNoHandler = [...defs].filter((d) => !handlers.has(d)).sort();
+    const handlersNoDef = [...handlers].filter((h) => !defs.has(h)).sort();
+
+    if (defsNoHandler.length === 0 && handlersNoDef.length === 0) {
+      console.error(`[consistency] OK: ${defs.size} tool definitions all match ${handlers.size} dispatch handlers.`);
+    } else {
+      console.error("[consistency] ====== TOOL DEF/HANDLER MISMATCH (ticket ec97c446) ======");
+      if (defsNoHandler.length) {
+        console.error(`[consistency] ${defsNoHandler.length} tool DEF(S) with NO handler (would error at call time): ${defsNoHandler.join(", ")}`);
+      }
+      if (handlersNoDef.length) {
+        console.error(`[consistency] ${handlersNoDef.length} HANDLER(S) with NO tool def (dead / unreachable): ${handlersNoDef.join(", ")}`);
+      }
+      console.error("[consistency] Fix: add the missing tool definition or dispatch case, or delete the dead one.");
+      console.error("[consistency] =========================================================");
+    }
+  } catch (e) {
+    console.error(`[consistency] WARNING: def<->handler check failed (non-fatal): ${e.message}`);
+  }
+}
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  assertToolDefHandlerConsistency();
   console.error("MultiTerminal MCP server running on stdio");
   console.error(
     `  env: CLAUDE_PROJECT_DIR=${process.env.CLAUDE_PROJECT_DIR || "(unset)"}` +
