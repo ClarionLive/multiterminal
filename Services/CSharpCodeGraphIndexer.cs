@@ -119,8 +119,11 @@ namespace MultiTerminal.Services
             }
             finally
             {
-                txn.Dispose();
-                _db.EndTransaction();
+                // Nest so a throwing rollback in txn.Dispose() can never skip EndTransaction —
+                // otherwise _syncLock's Monitor.Exit is missed and every future CodeGraph op deadlocks
+                // (pipeline Run 2 debugger LOW).
+                try { txn.Dispose(); }
+                finally { _db.EndTransaction(); }
             }
             Report($"  {symbolCount} symbols extracted");
 
@@ -147,8 +150,10 @@ namespace MultiTerminal.Services
             }
             finally
             {
-                relTxn.Dispose();
-                _db.EndTransaction();
+                // Nest so a throwing rollback can't skip EndTransaction and leak _syncLock
+                // (pipeline Run 2 debugger LOW; same as Pass 1).
+                try { relTxn.Dispose(); }
+                finally { _db.EndTransaction(); }
             }
             Report($"  {relCount} relationships extracted");
 

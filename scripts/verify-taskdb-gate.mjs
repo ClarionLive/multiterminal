@@ -295,12 +295,21 @@ function findConnectionProperty(lines) {
   return hits;
 }
 
+// Detects a DIRECT SQLite connection open in any realistic C# shape the census must not miss:
+// a plain OR fully-qualified `new [Namespace.]SQLiteConnection(` constructor, and the factory
+// route via `SQLiteFactory` (e.g. SQLiteFactory.Instance.CreateConnection()). Broadened after
+// pipeline Run 2 adversary HIGH — the literal-only `new SQLiteConnection(` regex could be bypassed
+// by a fully-qualified constructor or a SQLiteFactory-created connection, letting an 11th owner
+// pass green. `new SQLiteConnectionStringBuilder(...)` is NOT matched (no `(` directly after the
+// SQLiteConnection token), so building a connection string does not count as an open.
+const SQLITE_OPEN_RE = /new\s+(?:[A-Za-z_][\w.]*\.)?SQLiteConnection\s*\(|\bSQLiteFactory\b/;
+
 // (3) FACTORY-ONLY OPEN: only MultiterminalDb.Open() may open a connection.
 function findDirectOpens(lines) {
   const hits = [];
   for (let i = 0; i < lines.length; i++) {
     const t = maskCodeOnly(lines[i]);
-    if (/new\s+SQLiteConnection\s*\(/.test(t)) hits.push(i + 1);
+    if (SQLITE_OPEN_RE.test(t)) hits.push(i + 1);
   }
   return hits;
 }
@@ -332,7 +341,7 @@ function censusViolations(sites, manifestFiles) {
   const viol = [];
   for (const s of sites) {
     const f = s.file.replace(/\\/g, '/');
-    if (s.directOpen && f !== FACTORY_FILE && !(f in SEPARATE_DB)) {
+    if (s.directOpen && f !== FACTORY_FILE && !Object.hasOwn(SEPARATE_DB, f)) {
       viol.push({ file: f, kind: 'unsanctioned-direct-open',
         why: 'opens a SQLiteConnection directly but is neither the factory nor an allowlisted separate-DB family' });
     }
@@ -359,7 +368,7 @@ function scanOpenSites(root) {
         const abs = path.join(dir, e.name);
         let code;
         try { code = maskCodeOnly(fs.readFileSync(abs, 'utf8')); } catch { continue; }
-        const directOpen = /new\s+SQLiteConnection\s*\(/.test(code);
+        const directOpen = SQLITE_OPEN_RE.test(code);
         const factoryCall = /MultiterminalDb\.Open\s*\(/.test(code);
         if (directOpen || factoryCall) {
           const rel = path.relative(root, abs).replace(/\\/g, '/');
@@ -441,6 +450,21 @@ function selfTest() {
   for (const c of censusCases) {
     const flagged = censusViolations(c.sites, manifestFiles).length > 0;
     report('census', flagged, c.expectFlagged, c.name);
+  }
+
+  // Detection fixtures: the open-site regex must catch every realistic open shape (Run 2 adversary
+  // HIGH — a fully-qualified ctor or SQLiteFactory route must not slip past) and must NOT count a
+  // SQLiteCommand or a connection-string builder as an open.
+  const detectCases = [
+    { name: 'detect: plain new SQLiteConnection(', code: '_connection = new SQLiteConnection(cs);', expectFlagged: true },
+    { name: 'detect: fully-qualified new System.Data.SQLite.SQLiteConnection(', code: '_connection = new System.Data.SQLite.SQLiteConnection(cs);', expectFlagged: true },
+    { name: 'detect: SQLiteFactory-created connection', code: 'var c = SQLiteFactory.Instance.CreateConnection();', expectFlagged: true },
+    { name: 'detect-negative: new SQLiteCommand( is not an open', code: 'using var cmd = new SQLiteCommand(sql, _connection);', expectFlagged: false },
+    { name: 'detect-negative: new SQLiteConnectionStringBuilder is not an open', code: 'var b = new SQLiteConnectionStringBuilder { DataSource = p };', expectFlagged: false },
+  ];
+  for (const c of detectCases) {
+    const flagged = SQLITE_OPEN_RE.test(maskCodeOnly(c.code));
+    report('detect', flagged, c.expectFlagged, c.name);
   }
 
   console.log(allOk
