@@ -295,14 +295,23 @@ function findConnectionProperty(lines) {
   return hits;
 }
 
-// Detects a DIRECT SQLite connection open in any realistic C# shape the census must not miss:
-// a plain OR fully-qualified `new [Namespace.]SQLiteConnection(` constructor, and the factory
-// route via `SQLiteFactory` (e.g. SQLiteFactory.Instance.CreateConnection()). Broadened after
-// pipeline Run 2 adversary HIGH — the literal-only `new SQLiteConnection(` regex could be bypassed
-// by a fully-qualified constructor or a SQLiteFactory-created connection, letting an 11th owner
-// pass green. `new SQLiteConnectionStringBuilder(...)` is NOT matched (no `(` directly after the
-// SQLiteConnection token), so building a connection string does not count as an open.
-const SQLITE_OPEN_RE = /new\s+(?:[A-Za-z_][\w.]*\.)?SQLiteConnection\s*\(|\bSQLiteFactory\b/;
+// Detects a DIRECT SQLite connection open in every realistic C# shape the census must not miss.
+// Matched shapes (each has a --self-test fixture):
+//   • plain OR fully-qualified `new [Namespace.]SQLiteConnection(` constructor;
+//   • the ADO provider-factory `SQLiteFactory` (e.g. SQLiteFactory.Instance.CreateConnection());
+//   • a `using`-alias TO SQLiteConnection (`using X = ...SQLiteConnection;` — then `new X(...)` opens);
+//   • the generic ADO provider route `DbProviderFactories.GetFactory(...)` (matched string-independently
+//     because maskCodeOnly blanks the "System.Data.SQLite" argument; there is zero DbProviderFactories
+//     usage in this codebase, so flagging any occurrence for census accounting is safe and conservative).
+// NOT matched (negative fixtures): `new SQLiteCommand(`, `new SQLiteConnectionStringBuilder(...)`.
+// Broadened across pipeline Runs 2–3 as the adversary named each bypass.
+//
+// SCOPE (honest limit): this is a STATIC textual guard, not a formal proof. A connection obtained
+// by reflection / dynamic assembly loading / Activator.CreateInstance is deliberately OUT OF SCOPE
+// — closing those would require a Roslyn semantic pass, disproportionate for a lint script, and no
+// such pattern exists in this codebase. The guard's job is to make the next STRAIGHTFORWARD
+// straggler (the PlanDatabase/ActivityFeedService shape) fail loudly, which it does.
+const SQLITE_OPEN_RE = /new\s+(?:[A-Za-z_][\w.]*\.)?SQLiteConnection\s*\(|\bSQLiteFactory\b|using\s+[A-Za-z_]\w*\s*=\s*(?:[A-Za-z_][\w.]*\.)?SQLiteConnection\b|DbProviderFactories\.GetFactory\s*\(/;
 
 // (3) FACTORY-ONLY OPEN: only MultiterminalDb.Open() may open a connection.
 function findDirectOpens(lines) {
@@ -459,8 +468,11 @@ function selfTest() {
     { name: 'detect: plain new SQLiteConnection(', code: '_connection = new SQLiteConnection(cs);', expectFlagged: true },
     { name: 'detect: fully-qualified new System.Data.SQLite.SQLiteConnection(', code: '_connection = new System.Data.SQLite.SQLiteConnection(cs);', expectFlagged: true },
     { name: 'detect: SQLiteFactory-created connection', code: 'var c = SQLiteFactory.Instance.CreateConnection();', expectFlagged: true },
+    { name: 'detect: using-alias to SQLiteConnection', code: 'using SqlConn = System.Data.SQLite.SQLiteConnection;', expectFlagged: true },
+    { name: 'detect: DbProviderFactories SQLite provider route', code: 'var f = DbProviderFactories.GetFactory("System.Data.SQLite");', expectFlagged: true },
     { name: 'detect-negative: new SQLiteCommand( is not an open', code: 'using var cmd = new SQLiteCommand(sql, _connection);', expectFlagged: false },
     { name: 'detect-negative: new SQLiteConnectionStringBuilder is not an open', code: 'var b = new SQLiteConnectionStringBuilder { DataSource = p };', expectFlagged: false },
+    { name: 'detect-negative: plain namespace using is not an alias-open', code: 'using System.Data.SQLite;', expectFlagged: false },
   ];
   for (const c of detectCases) {
     const flagged = SQLITE_OPEN_RE.test(maskCodeOnly(c.code));
