@@ -37,6 +37,18 @@ function isConnectionRefused(err) {
   return msg.includes("econnrefused");
 }
 
+// Project ids are either an 8-char hex short id or a full canonical GUID (both
+// hex-only, no path metacharacters). Validate the shape before interpolating an
+// id into a REST path: a hostile MCP caller could otherwise pass "../tasks/<id>",
+// which the URL parser normalizes into a DELETE against a sibling route, escaping
+// the intended resource (ticket ec97c446). This guards the destructive
+// delete_project handler specifically; the systemic sweep of every ${args.*}
+// path parameter across this file is tracked in 6dcf3fa2.
+const PROJECT_ID_RE = /^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$/;
+function isValidProjectId(id) {
+  return typeof id === "string" && PROJECT_ID_RE.test(id);
+}
+
 async function apiCall(endpoint, method = "GET", body = null) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -3672,11 +3684,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "delete_project": {
+        if (!isValidProjectId(args.projectId)) {
+          throw new Error(
+            `Invalid projectId "${args.projectId}" — expected an 8-char hex id or a full GUID (from list_projects / create_project).`
+          );
+        }
         const qs = new URLSearchParams();
         if (args.deleteLocalConfig) qs.set("deleteLocalConfig", "true");
         if (args.deletedBy) qs.set("deletedBy", args.deletedBy);
-        const suffix = qs.toString() ? `?${qs.toString()}` : "";
-        const result = await apiCall(`/api/projects/${args.projectId}${suffix}`, "DELETE");
+        const query = qs.toString();
+        const suffix = query ? `?${query}` : "";
+        const result = await apiCall(`/api/projects/${encodeURIComponent(args.projectId)}${suffix}`, "DELETE");
         let text = `✅ Project deleted.\n`;
         text += `  ID: ${result.projectId ?? args.projectId}`;
         if (args.deleteLocalConfig) text += `\n  (.claude/project.json also deleted)`;
