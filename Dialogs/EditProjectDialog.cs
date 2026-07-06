@@ -988,11 +988,11 @@ namespace MultiTerminal.Dialogs
             this.sourceControlAccountComboBox.Items.Clear();
             this.sourceControlAccountComboBox.Items.Add(SourceAccountItem.None);
 
-            if (_projectDb?.Connection == null) return;
+            if (_projectDb == null) return;
 
             try
             {
-                var service = new SourceControlAccountService(_projectDb.Connection);
+                using var service = new SourceControlAccountService();
                 foreach (var account in service.GetAll())
                     this.sourceControlAccountComboBox.Items.Add(new SourceAccountItem(account.Id, account.DisplayName));
             }

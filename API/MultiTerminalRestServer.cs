@@ -164,12 +164,11 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton(SettingsService.Default);
                 builder.Services.AddSingleton<PermissionRelayService>();
                 builder.Services.AddSingleton(_companionProcessManager);
-                builder.Services.AddSingleton(sp =>
-                    new MultiTerminal.Services.OwnerProfileService(
-                        sp.GetRequiredService<TaskDatabase>().Connection));
-                builder.Services.AddSingleton(sp =>
-                    new MultiTerminal.Services.SourceControlAccountService(
-                        sp.GetRequiredService<TaskDatabase>().Connection));
+                // bb2b0104: these services own their OWN connection to multiterminal.db (one owner per
+                // connection — no borrowed handle). Registered by type so the DI container constructs them
+                // via their parameterless ctor and disposes these IDisposable singletons at shutdown.
+                builder.Services.AddSingleton<MultiTerminal.Services.OwnerProfileService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.SourceControlAccountService>();
                 // Pipeline Run 5 finding (Codex security HIGH): the DI factory
                 // previously constructed a SECOND BranchMetadataService instance
                 // separate from the one MainForm wires onto broker.BranchMetadata

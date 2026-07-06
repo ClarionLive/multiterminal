@@ -8,15 +8,16 @@ namespace MultiTerminal.Services
     /// Manages the owner profile (human user identity) stored in SQLite,
     /// with GitHub token secured via Windows Credential Manager (DPAPI).
     /// </summary>
-    public class OwnerProfileService
+    public sealed class OwnerProfileService : IDisposable
     {
         private const string CredentialTargetName = "MultiTerminal:GitHubToken";
 
         private readonly SQLiteConnection _connection;
+        private readonly DbGate _gate = new DbGate();
 
-        public OwnerProfileService(SQLiteConnection connection)
+        public OwnerProfileService()
         {
-            _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+            _connection = MultiterminalDb.Open();
         }
 
         /// <summary>
@@ -24,6 +25,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public OwnerProfile GetProfile()
         {
+            using var gate = _gate.Enter();
             using var cmd = new SQLiteCommand(
                 "SELECT id, full_name, email, github_username, has_github_token, created_at, updated_at " +
                 "FROM owner_profile WHERE id = 'owner'", _connection);
@@ -50,6 +52,7 @@ namespace MultiTerminal.Services
         {
             if (profile == null) throw new ArgumentNullException(nameof(profile));
 
+            using var gate = _gate.Enter();
             var now = DateTime.UtcNow.ToString("o");
             using var cmd = new SQLiteCommand(@"
                 INSERT INTO owner_profile (id, full_name, email, github_username, has_github_token, created_at, updated_at)
@@ -88,6 +91,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void ClearGitHubUsername()
         {
+            using var gate = _gate.Enter();
             using var cmd = new SQLiteCommand(
                 "UPDATE owner_profile SET github_username = NULL, updated_at = @now WHERE id = 'owner'",
                 _connection);
@@ -103,6 +107,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool SaveGitHubToken(string token)
         {
+            using var gate = _gate.Enter();
             if (string.IsNullOrEmpty(token)) return false;
 
             bool saved = WindowsCredentialStore.Write(CredentialTargetName, token);
@@ -132,6 +137,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool RemoveGitHubToken()
         {
+            using var gate = _gate.Enter();
             bool deleted = WindowsCredentialStore.Delete(CredentialTargetName);
             using var cmd = new SQLiteCommand(
                 "UPDATE owner_profile SET has_github_token = 0, updated_at = @now WHERE id = 'owner'",
@@ -142,5 +148,12 @@ namespace MultiTerminal.Services
         }
 
         #endregion
+
+        public void Dispose()
+        {
+            _connection?.Close();
+            _connection?.Dispose();
+            GC.SuppressFinalize(this);
+        }
     }
 }
