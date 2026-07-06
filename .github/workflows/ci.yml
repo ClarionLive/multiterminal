@@ -7,7 +7,8 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - main       # program's eventual trunk name
+      - master     # this repo's current trunk
       - 'integration/**'
   pull_request:
   workflow_dispatch:
