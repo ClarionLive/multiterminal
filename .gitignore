@@ -17,6 +17,10 @@ packages/
 # Node.js
 node_modules/
 
+# Build-staged MCP server for the installer (git-sourced index.js + npm-installed
+# deps, populated by the StageMcpForInstaller csproj target; ticket ec97c446)
+installer/mcp-dist/
+
 # Sensitive files
 .mcp.json
 .env

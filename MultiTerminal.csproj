@@ -298,4 +298,24 @@
           IgnoreExitCode="true"
           WorkingDirectory="$(ProjectDir)" />
   </Target>
+
+  <!--
+    Stage the git-canonical MCP server (+ freshly installed production deps) into
+    installer\mcp-dist so the Inno Setup script (installer\MultiTerminal.iss,
+    McpServerDir="mcp-dist") ships from git bits, NOT the build machine's
+    %APPDATA%\multiterminal\mcp profile (ticket ec97c446). Reuses the same sync
+    script pointed at the dist dir: on first build node_modules is missing so it
+    runs `npm install --omit=dev` from the clean sdk-only package.json (minimal,
+    no profile cruft); later builds skip it when package.json is unchanged.
+
+    Release-only: the installer is built from Release/publish output, so there's
+    no need to pay the staging cost on Debug error-checking builds.
+  -->
+  <Target Name="StageMcpForInstaller" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Message Importance="high" Text="Staging canonical mcp/ to installer\mcp-dist for the installer ..." />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)scripts\sync-mcp-server.ps1&quot;"
+          EnvironmentVariables="SMS_SOURCE_DIR=$(ProjectDir)mcp;SMS_DEST_DIR=$(ProjectDir)installer\mcp-dist"
+          IgnoreExitCode="true"
+          WorkingDirectory="$(ProjectDir)" />
+  </Target>
 </Project>
