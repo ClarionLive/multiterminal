@@ -22,11 +22,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult ClosePanel([FromBody] ClosePanelRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.TranscriptPath))
-                return BadRequest(new { error = "transcriptPath is required" });
+                return Problem(detail: "transcriptPath is required", statusCode: 400);
 
             _broker.RequestAgentPanelClose(request.TranscriptPath);
 
-            return Ok(new { success = true, transcriptPath = request.TranscriptPath });
+            return Ok(new { transcriptPath = request.TranscriptPath });
         }
     }
 

@@ -27,7 +27,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult PostElicitation([FromBody] ElicitationPostRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.ElicitationId))
-                return BadRequest(new { error = "elicitationId is required" });
+                return Problem(detail: "elicitationId is required", statusCode: 400);
 
             var elicitation = new ElicitationRequest
             {
@@ -44,7 +44,7 @@ namespace MultiTerminal.API.Controllers
             // No-op if the relay is disabled or not configured (see PermissionRelayService).
             _permissionRelay?.Bridge(elicitation);
 
-            return Ok(new { success = true, elicitationId = request.ElicitationId });
+            return Ok(new { elicitationId = request.ElicitationId });
         }
 
         /// <summary>
@@ -54,11 +54,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SubmitResponse(string id, [FromBody] ElicitationRespondRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.Action))
-                return BadRequest(new { error = "action is required" });
+                return Problem(detail: "action is required", statusCode: 400);
 
             var validActions = new[] { "accept", "decline", "cancel" };
             if (!validActions.Contains(request.Action))
-                return BadRequest(new { error = "action must be accept, decline, or cancel" });
+                return Problem(detail: "action must be accept, decline, or cancel", statusCode: 400);
 
             InferRemoteModeFromSource();
 
@@ -70,12 +70,12 @@ namespace MultiTerminal.API.Controllers
 
             var success = _broker.SubmitElicitationResponse(id, response);
             if (!success)
-                return NotFound(new { error = "Elicitation not found or expired" });
+                return Problem(detail: "Elicitation not found or expired", statusCode: 404);
 
             // Cancel any in-flight Worker poll for this elicitation — we already have the answer
             _permissionRelay?.Cancel(id);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         // X-Source header presence-inference. The signal must be EXPLICIT so ambient

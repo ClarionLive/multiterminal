@@ -54,9 +54,9 @@ namespace MultiTerminal.API.Controllers
         public IActionResult RecordInvocation([FromBody] RecordInvocationRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "Request body is required" });
+                return Problem(detail: "Request body is required", statusCode: 400);
             if (string.IsNullOrWhiteSpace(request.AgentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             var id = request.Id ?? Guid.NewGuid().ToString("N").Substring(0, 8);
             var invokedAt = request.InvokedAt ?? DateTime.UtcNow;
@@ -75,7 +75,7 @@ namespace MultiTerminal.API.Controllers
                 request.CompletedAt,
                 request.ReportSummary);
 
-            return Ok(new { success = true, invocationId = id });
+            return Ok(new { invocationId = id });
         }
     }
 

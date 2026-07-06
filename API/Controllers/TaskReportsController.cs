@@ -42,10 +42,10 @@ namespace MultiTerminal.API.Controllers
         {
             var report = _broker.GetTaskReport(reportId);
             if (report == null)
-                return NotFound(new { error = "Report not found" });
+                return Problem(detail: "Report not found", statusCode: 404);
 
             if (report["task_id"]?.ToString() != taskId)
-                return NotFound(new { error = "Report not found for this task" });
+                return Problem(detail: "Report not found for this task", statusCode: 404);
 
             return Ok(report);
         }
@@ -57,13 +57,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SaveReport(string taskId, [FromBody] SaveReportRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "Request body is required" });
+                return Problem(detail: "Request body is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(request.AgentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(request.ReportContent))
-                return BadRequest(new { error = "reportContent is required" });
+                return Problem(detail: "reportContent is required", statusCode: 400);
 
             var id = request.Id ?? Guid.NewGuid().ToString("N").Substring(0, 8);
 
@@ -79,7 +79,7 @@ namespace MultiTerminal.API.Controllers
                 request.Score,
                 request.CreatedBy);
 
-            return Ok(new { success = true, reportId = id });
+            return Ok(new { reportId = id });
         }
     }
 

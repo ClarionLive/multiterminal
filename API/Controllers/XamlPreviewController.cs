@@ -18,7 +18,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> RenderXaml([FromBody] RenderXamlRequest request)
         {
             if (string.IsNullOrWhiteSpace(request?.Xaml))
-                return BadRequest(new { error = "XAML content is required." });
+                return Problem(detail: "XAML content is required.", statusCode: 400);
 
             int width = request.Width > 0 ? request.Width : 520;
             int height = request.Height > 0 ? request.Height : 400;
@@ -26,15 +26,15 @@ namespace MultiTerminal.API.Controllers
             try
             {
                 var imageBase64 = await RenderXamlToBase64(request.Xaml, width, height);
-                return Ok(new { success = true, imageBase64, width, height });
+                return Ok(new { imageBase64, width, height });
             }
             catch (XamlParseException ex)
             {
-                return BadRequest(new { error = $"XAML parse error: {ex.Message}" });
+                return Problem(detail: $"XAML parse error: {ex.Message}", statusCode: 400);
             }
             catch (Exception ex)
             {
-                return BadRequest(new { error = $"Render error: {ex.Message}" });
+                return Problem(detail: $"Render error: {ex.Message}", statusCode: 400);
             }
         }
 

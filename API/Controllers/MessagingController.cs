@@ -27,7 +27,7 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new { terminalId = result.TerminalId });
         }
@@ -114,10 +114,10 @@ namespace MultiTerminal.API.Controllers
         public IActionResult DisconnectTerminal([FromBody] DisconnectTerminalRequest request)
         {
             if (string.IsNullOrEmpty(request?.Name))
-                return BadRequest(new { error = "Name is required" });
+                return Problem(detail: "Name is required", statusCode: 400);
 
             _broker.DisconnectTerminalByName(request.Name);
-            return Ok(new { success = true, name = request.Name });
+            return Ok(new { name = request.Name });
         }
 
         /// <summary>
@@ -128,19 +128,19 @@ namespace MultiTerminal.API.Controllers
         public IActionResult UploadMessageImages([FromBody] UploadMessageImagesRequest request)
         {
             if (request?.Images == null || request.Images.Count == 0)
-                return BadRequest(new { error = "At least one image is required." });
+                return Problem(detail: "At least one image is required.", statusCode: 400);
 
             if (request.Images.Count > 10)
-                return BadRequest(new { error = "Maximum 10 images per batch." });
+                return Problem(detail: "Maximum 10 images per batch.", statusCode: 400);
 
             var inputs = new List<MessageImageInput>();
             foreach (var img in request.Images)
             {
                 if (string.IsNullOrEmpty(img.Base64Data))
-                    return BadRequest(new { error = $"Image '{img.FileName}' has no data." });
+                    return Problem(detail: $"Image '{img.FileName}' has no data.", statusCode: 400);
 
                 if (string.IsNullOrEmpty(img.MimeType) || !img.MimeType.StartsWith("image/"))
-                    return BadRequest(new { error = $"Invalid MIME type for '{img.FileName}': {img.MimeType}" });
+                    return Problem(detail: $"Invalid MIME type for '{img.FileName}': {img.MimeType}", statusCode: 400);
 
                 inputs.Add(new MessageImageInput
                 {
@@ -163,7 +163,7 @@ namespace MultiTerminal.API.Controllers
         {
             var images = _broker.GetMessageImages(batchId);
             if (images == null || images.Count == 0)
-                return NotFound(new { error = $"No images found for batch '{batchId}'." });
+                return Problem(detail: $"No images found for batch '{batchId}'.", statusCode: 404);
 
             return Ok(images.Select(i => new
             {

@@ -23,9 +23,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.NotifyAgentSpawned(request.Name, request.SpawnedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, agentName = result.AgentName });
+            return Ok(new { agentName = result.AgentName });
         }
 
         /// <summary>
@@ -36,9 +36,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.NotifyAgentDeparted(name);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, agentName = result.AgentName });
+            return Ok(new { agentName = result.AgentName });
         }
 
         /// <summary>
@@ -60,7 +60,6 @@ namespace MultiTerminal.API.Controllers
             var removed = _broker.CleanupStaleOfficeAgents(olderThanMinutes ?? 30);
             return Ok(new
             {
-                success = true,
                 removedCount = removed.Count,
                 removedAgents = removed.Select(a => a.Name).ToList()
             });
@@ -75,7 +74,6 @@ namespace MultiTerminal.API.Controllers
             var removed = _broker.ClearAllOfficeAgents();
             return Ok(new
             {
-                success = true,
                 removedCount = removed.Count,
                 removedAgents = removed.Select(a => a.Name).ToList()
             });

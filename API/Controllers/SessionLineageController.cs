@@ -27,7 +27,7 @@ namespace MultiTerminal.API.Controllers
         private SessionLineageService GetService() => _broker.SessionLineageService;
 
         private IActionResult ServiceUnavailable()
-            => StatusCode(503, new { error = "SessionLineageService is not available" });
+            => Problem(detail: "SessionLineageService is not available", statusCode: 503);
 
         /// <summary>
         /// Import a Claude Code session JSONL file and link it to a kanban task.
@@ -36,13 +36,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult ImportSession([FromBody] ImportSessionRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.SessionFilePath))
-                return BadRequest(new { error = "sessionFilePath is required" });
+                return Problem(detail: "sessionFilePath is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(request.TaskId))
-                return BadRequest(new { error = "taskId is required" });
+                return Problem(detail: "taskId is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(request.AgentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             // Guard against path traversal — only allow files within the user's .claude/projects directory
             string allowedRoot = Path.Combine(
@@ -50,7 +50,7 @@ namespace MultiTerminal.API.Controllers
                 ".claude", "projects");
             string fullPath = Path.GetFullPath(request.SessionFilePath);
             if (!fullPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { error = "sessionFilePath must be within the Claude projects directory" });
+                return Problem(detail: "sessionFilePath must be within the Claude projects directory", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -65,11 +65,10 @@ namespace MultiTerminal.API.Controllers
             );
 
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new
             {
-                success = true,
                 sessionId = result.SessionId,
                 messageCount = result.MessageCount
             });
@@ -112,7 +111,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SyncSessions([FromBody] SyncSessionsRequest request)
         {
             if (string.IsNullOrWhiteSpace(request?.ClaudeProjectPath))
-                return BadRequest(new { error = "claudeProjectPath is required" });
+                return Problem(detail: "claudeProjectPath is required", statusCode: 400);
 
             // Guard against path traversal
             string allowedRoot = Path.Combine(
@@ -120,7 +119,7 @@ namespace MultiTerminal.API.Controllers
                 ".claude", "projects");
             string fullPath = Path.GetFullPath(request.ClaudeProjectPath);
             if (!fullPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { error = "claudeProjectPath must be within the Claude projects directory" });
+                return Problem(detail: "claudeProjectPath must be within the Claude projects directory", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -134,7 +133,6 @@ namespace MultiTerminal.API.Controllers
 
             return Ok(new
             {
-                success = true,
                 imported = result.Imported,
                 skipped = result.Skipped,
                 failed = result.Failed,
@@ -151,7 +149,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SyncProject([FromBody] SyncProjectRequest request)
         {
             if (string.IsNullOrWhiteSpace(request?.ProjectPath))
-                return BadRequest(new { error = "projectPath is required" });
+                return Problem(detail: "projectPath is required", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -159,12 +157,11 @@ namespace MultiTerminal.API.Controllers
 
             string claudeFolder = SessionLineageService.GetClaudeProjectFolder(request.ProjectPath);
             if (claudeFolder == null)
-                return NotFound(new { error = "Claude project folder not found for the given path" });
+                return Problem(detail: "Claude project folder not found for the given path", statusCode: 404);
 
             var result = service.SyncNewSessions(claudeFolder, request.TerminalName ?? "Unknown");
             return Ok(new
             {
-                success = true,
                 imported = result.Imported,
                 skipped = result.Skipped,
                 failed = result.Failed,
@@ -185,7 +182,7 @@ namespace MultiTerminal.API.Controllers
             [FromQuery] int skip = 0)
         {
             if (string.IsNullOrWhiteSpace(projectPath))
-                return BadRequest(new { error = "projectPath is required" });
+                return Problem(detail: "projectPath is required", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -193,7 +190,7 @@ namespace MultiTerminal.API.Controllers
 
             var session = service.GetMostRecentSessionForProject(projectPath, agentName, excludeSessionId, skip);
             if (session == null)
-                return NotFound(new { error = "No session found for the given project path" });
+                return Problem(detail: "No session found for the given project path", statusCode: 404);
 
             // Only fetch recent messages when there is no cached summary
             IList<object> recentMessages = null;
@@ -221,7 +218,7 @@ namespace MultiTerminal.API.Controllers
             [FromQuery] int limit = 10)
         {
             if (string.IsNullOrWhiteSpace(projectPath))
-                return BadRequest(new { error = "projectPath is required" });
+                return Problem(detail: "projectPath is required", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -242,7 +239,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult UpdateSessionSummary(string sessionId, [FromBody] UpdateSessionSummaryRequest request)
         {
             if (string.IsNullOrWhiteSpace(request?.Summary))
-                return BadRequest(new { error = "summary is required" });
+                return Problem(detail: "summary is required", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -250,9 +247,9 @@ namespace MultiTerminal.API.Controllers
 
             int rows = service.UpdateSessionSummary(sessionId, request.Summary);
             if (rows == 0)
-                return NotFound(new { error = $"Session '{sessionId}' not found" });
+                return Problem(detail: $"Session '{sessionId}' not found", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -268,7 +265,7 @@ namespace MultiTerminal.API.Controllers
             [FromQuery] int limit = 50)
         {
             if (string.IsNullOrWhiteSpace(taskId) && string.IsNullOrWhiteSpace(query))
-                return BadRequest(new { error = "At least one of taskId or query is required" });
+                return Problem(detail: "At least one of taskId or query is required", statusCode: 400);
 
             if (limit <= 0 || limit > 1000) limit = 1000;
 
@@ -304,7 +301,7 @@ namespace MultiTerminal.API.Controllers
                 return ServiceUnavailable();
 
             int updated = service.BackfillSummaries(regenerate);
-            return Ok(new { success = true, updated, regenerate });
+            return Ok(new { updated, regenerate });
         }
 
         /// <summary>
@@ -316,9 +313,9 @@ namespace MultiTerminal.API.Controllers
         public IActionResult RegisterSession([FromBody] RegisterSessionRequest request)
         {
             if (string.IsNullOrWhiteSpace(request?.SessionId))
-                return BadRequest(new { error = "sessionId is required" });
+                return Problem(detail: "sessionId is required", statusCode: 400);
             if (string.IsNullOrWhiteSpace(request?.AgentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             var service = GetService();
             if (service == null)
@@ -326,11 +323,10 @@ namespace MultiTerminal.API.Controllers
 
             var record = service.RegisterSession(request.SessionId, request.AgentName, request.ProjectPath);
             if (record == null)
-                return StatusCode(500, new { error = "Failed to register session" });
+                return Problem(detail: "Failed to register session", statusCode: 500);
 
             return Ok(new
             {
-                success = true,
                 sessionId = record.SessionId,
                 processingStatus = record.ProcessingStatus,
                 message = "Session registered as 'open'. Previous sessions for this agent closed."
@@ -351,7 +347,7 @@ namespace MultiTerminal.API.Controllers
 
             var record = service.EnsureSessionReady(sessionId, _broker.SessionMemoryDb);
             if (record == null)
-                return NotFound(new { error = $"Session '{sessionId}' not found" });
+                return Problem(detail: $"Session '{sessionId}' not found", statusCode: 404);
 
             return Ok(new
             {

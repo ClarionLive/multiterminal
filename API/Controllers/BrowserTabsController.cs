@@ -22,9 +22,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.Title, request.Url, request.Content);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true, tabId });
+            return Ok(new { tabId });
         }
 
         [HttpPost("update")]
@@ -34,9 +34,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId, request.Title, request.Url, request.Content);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         [HttpPost("close")]
@@ -45,9 +45,9 @@ namespace MultiTerminal.API.Controllers
             var (success, error) = _broker.CloseBrowserTab(request.TerminalId, request.TabId);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         [HttpPost("execute-script")]
@@ -57,9 +57,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId, request.Script);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true, result });
+            return Ok(new { result });
         }
 
         [HttpPost("console-logs")]
@@ -69,9 +69,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId, request.Limit);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true, logs = result });
+            return Ok(new { logs = result });
         }
 
         [HttpPost("element-content")]
@@ -81,9 +81,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId, request.Selector, request.Property);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true, content = result });
+            return Ok(new { content = result });
         }
 
         [HttpPost("capture-screenshot")]
@@ -93,9 +93,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true, imageBase64 = result });
+            return Ok(new { imageBase64 = result });
         }
 
         [HttpPost("post-message")]
@@ -105,9 +105,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId, request.Data);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         [HttpPost("get-messages")]
@@ -117,9 +117,9 @@ namespace MultiTerminal.API.Controllers
                 request.TerminalId, request.TabId, request.Limit);
 
             if (!success)
-                return BadRequest(new { error });
+                return Problem(detail: error, statusCode: 400);
 
-            return Ok(new { success = true, messages = result });
+            return Ok(new { messages = result });
         }
     }
 
