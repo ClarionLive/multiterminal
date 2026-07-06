@@ -100,19 +100,29 @@ namespace MultiTerminal.Services
             // Pass 1: Extract symbols
             Report("Pass 1: Extracting symbols...");
             int symbolCount = 0;
-            using (var txn = _db.BeginTransaction())
+            // bb2b0104 (pipeline Run 1, debugger HIGH): dispose the transaction — whose Dispose
+            // rolls back on the non-committed/exception path — BEFORE EndTransaction releases
+            // CodeGraphDatabase._syncLock. Otherwise the rollback would run on the shared connection
+            // with the gate already released, racing a CodeGraph reader that was queued on _syncLock
+            // for the whole reindex (two threads on one System.Data.SQLite handle).
+            var txn = _db.BeginTransaction();
+            try
             {
-                try
+                foreach (var tree in syntaxTrees)
                 {
-                    foreach (var tree in syntaxTrees)
-                    {
-                        var model = compilation.GetSemanticModel(tree);
-                        var walker = new SymbolExtractor(_db, projectId, model);
-                        walker.Visit(tree.GetRoot());
-                        symbolCount += walker.SymbolCount;
-                    }
-                    txn.Commit();
+                    var model = compilation.GetSemanticModel(tree);
+                    var walker = new SymbolExtractor(_db, projectId, model);
+                    walker.Visit(tree.GetRoot());
+                    symbolCount += walker.SymbolCount;
                 }
+                txn.Commit();
+            }
+            finally
+            {
+                // Nest so a throwing rollback in txn.Dispose() can never skip EndTransaction —
+                // otherwise _syncLock's Monitor.Exit is missed and every future CodeGraph op deadlocks
+                // (pipeline Run 2 debugger LOW).
+                try { txn.Dispose(); }
                 finally { _db.EndTransaction(); }
             }
             Report($"  {symbolCount} symbols extracted");
@@ -124,19 +134,25 @@ namespace MultiTerminal.Services
             int relCount = 0;
             var dedupSet = new HashSet<string>();
 
-            using (var txn = _db.BeginTransaction())
+            // bb2b0104 (pipeline Run 1, debugger HIGH): same ordering fix as Pass 1 — dispose the
+            // transaction (rollback on the error path) BEFORE EndTransaction releases _syncLock.
+            var relTxn = _db.BeginTransaction();
+            try
             {
-                try
+                foreach (var tree in syntaxTrees)
                 {
-                    foreach (var tree in syntaxTrees)
-                    {
-                        var model = compilation.GetSemanticModel(tree);
-                        var walker = new RelationshipExtractor(_db, projectId, model, symbolLookup, dedupSet);
-                        walker.Visit(tree.GetRoot());
-                        relCount += walker.RelationshipCount;
-                    }
-                    txn.Commit();
+                    var model = compilation.GetSemanticModel(tree);
+                    var walker = new RelationshipExtractor(_db, projectId, model, symbolLookup, dedupSet);
+                    walker.Visit(tree.GetRoot());
+                    relCount += walker.RelationshipCount;
                 }
+                relTxn.Commit();
+            }
+            finally
+            {
+                // Nest so a throwing rollback can't skip EndTransaction and leak _syncLock
+                // (pipeline Run 2 debugger LOW; same as Pass 1).
+                try { relTxn.Dispose(); }
                 finally { _db.EndTransaction(); }
             }
             Report($"  {relCount} relationships extracted");

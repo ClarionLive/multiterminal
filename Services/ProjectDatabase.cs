@@ -34,15 +34,10 @@ namespace MultiTerminal.Services
         // TaskDatabase). Closing that hole is a separate cross-service-serialization concern.
         private readonly object _dbLock = new object();
 
-        /// <summary>
-        /// The open SQLite connection to multiterminal.db. Exposed so callers that need to
-        /// read sibling tables in the same file (e.g. source_control_accounts) can reuse it
-        /// rather than opening a second connection — mirrors TaskDatabase.Connection.
-        /// WARNING: commands run on this borrowed connection do NOT take <see cref="_dbLock"/>, so
-        /// they are not serialized against this class's methods. Callers sharing it must coordinate
-        /// their own access to avoid 'database is locked'/busy under concurrency.
-        /// </summary>
-        public SQLiteConnection Connection => _connection;
+        // The Connection property was DELETED in ticket bb2b0104 (same close-out as TaskDatabase.Connection).
+        // Callers that used to borrow this handle to read sibling tables (e.g. source_control_accounts via
+        // SourceControlAccountService) now open their OWN connection through MultiterminalDb.Open(). Invariant:
+        // one owner per connection; no class touches another's handle.
 
         /// <summary>
         /// Creates a new ProjectDatabase instance.
@@ -55,22 +50,10 @@ namespace MultiTerminal.Services
 
         private void InitializeDatabase()
         {
-            string folder = Path.GetDirectoryName(_databasePath);
-            if (!Directory.Exists(folder))
-            {
-                Directory.CreateDirectory(folder);
-            }
-
-            var connectionString = new SQLiteConnectionStringBuilder
-            {
-                DataSource = _databasePath,
-                Version = 3,
-                JournalMode = SQLiteJournalModeEnum.Wal,
-                Pooling = true
-            }.ToString();
-
-            _connection = new SQLiteConnection(connectionString);
-            _connection.Open();
+            // Open through the one factory (bb2b0104 condition 2) — same WAL / pooling / busy_timeout
+            // as every other owner. ProjectDatabase owns this connection and serializes its own access
+            // via _dbLock; no other class touches this handle (the Connection escape hatch was deleted).
+            _connection = MultiterminalDb.Open();
 
             CreateSchema();
 

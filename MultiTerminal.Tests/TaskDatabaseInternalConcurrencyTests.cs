@@ -17,13 +17,13 @@ namespace MultiTerminal.Tests
     /// no exception and no corrupted row count — the runtime complement to the static gate
     /// verifier (scripts/verify-taskdb-gate.mjs).
     ///
-    /// SCOPE LIMITATION (deliberate): this proves TaskDatabase-INTERNAL concurrency only —
-    /// i.e. that TaskDatabase's own methods, all routed through LockConn(), don't corrupt the
-    /// single shared SQLiteConnection when called concurrently. It does NOT and cannot prove
-    /// the shared connection HANDLE is globally race-free: six sibling classes
-    /// (KnowledgeDatabase, CodeGraphDatabase, SessionMemoryDatabase, BranchMetadataService,
-    /// OwnerProfileService, SourceControlAccountService) run their own commands on the same
-    /// handle outside this gate. Routing all of them through one gate is ticket bb2b0104.
+    /// SCOPE: this proves TaskDatabase-INTERNAL concurrency — that TaskDatabase's own methods,
+    /// all routed through LockConn(), don't corrupt its connection under concurrent calls. As of
+    /// ticket bb2b0104 the sibling classes (KnowledgeDatabase, CodeGraphDatabase,
+    /// SessionMemoryDatabase, BranchMetadataService, OwnerProfileService, SourceControlAccountService)
+    /// each own their OWN connection instead of borrowing this one, so the old cross-class race on a
+    /// shared handle is gone; <see cref="CrossConnectionConcurrencyTests"/> exercises those separate
+    /// connections running concurrently.
     /// </summary>
     public sealed class TaskDatabaseInternalConcurrencyTests : IDisposable
     {

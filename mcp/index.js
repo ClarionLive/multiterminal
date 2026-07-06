@@ -6,14 +6,9 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { exec, spawn } from "child_process";
-import { promisify } from "util";
-import { access, readFile, readdir, stat } from "fs/promises";
-import { constants, readFileSync } from "fs";
+import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-
-const execAsync = promisify(exec);
 
 const API_BASE = "http://localhost:5050";
 
@@ -299,173 +294,6 @@ function renderReviewNotesBlock(reviewNotesField) {
   });
   block += "</review_notes>";
   return block;
-}
-
-// ============================================================
-// Windows Build Runner helpers (merged from windows-build-runner MCP)
-// ============================================================
-
-function gitBashPathToWindows(p) {
-  if (p.match(/^\/[a-zA-Z]\//)) {
-    const drive = p[1].toUpperCase();
-    const remaining = p.slice(3).replace(/\//g, '\\');
-    return `${drive}:\\${remaining}`;
-  }
-  if (p.startsWith('/mnt/')) {
-    const parts = p.split('/');
-    if (parts.length >= 3) {
-      const drive = parts[2].toUpperCase();
-      const remaining = parts.slice(3).join('\\');
-      return `${drive}:\\${remaining}`;
-    }
-  }
-  if (p.match(/^[A-Za-z]:\\/)) return p;
-  return p.replace(/\//g, '\\');
-}
-
-async function executeCommandSpawn(executable, args, workingDirectory, timeout = 300000) {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    const child = spawn(executable, args, { cwd: workingDirectory, windowsHide: true, shell: false });
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve({ stdout, stderr: stderr + "\nProcess timed out after " + (timeout / 1000) + " seconds", exitCode: -1 });
-    }, timeout);
-    child.stdout.on('data', (data) => { stdout += data.toString(); });
-    child.stderr.on('data', (data) => { stderr += data.toString(); });
-    child.on('error', (error) => { clearTimeout(timer); resolve({ stdout, stderr: error.message, exitCode: -1 }); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, exitCode: code || 0 }); });
-  });
-}
-
-async function executeBuildCommand(command, workingDirectory, timeout = 300000, processToKill) {
-  try {
-    if (processToKill) {
-      const processName = processToKill.endsWith('.exe') ? processToKill : `${processToKill}.exe`;
-      // Guard: never kill MultiTerminal itself - it's the host process
-      const blocked = ['multiterminal.exe'];
-      if (blocked.includes(processName.toLowerCase())) {
-        // Skip the kill but continue with the build (output goes to staged/ or a different config)
-        console.error(`[build] Skipping processToKill "${processName}" - cannot kill the host application`);
-      } else {
-        try {
-          await execAsync(`cmd.exe /c "taskkill /F /IM "${processName}""`, { timeout: 5000 });
-        } catch (e) { /* process may not be running */ }
-      }
-    }
-    if (workingDirectory) {
-      try { await access(workingDirectory, constants.F_OK); }
-      catch { throw new Error(`Working directory does not exist: ${workingDirectory}`); }
-    }
-    if (command.startsWith('"') && command.includes('.exe')) {
-      const match = command.match(/^"([^"]+)"\s*(.*)$/);
-      if (match) {
-        const [, executable, argsString] = match;
-        const args = argsString.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-        const cleanArgs = args.map(arg => arg.replace(/^"|"$/g, ''));
-        return await executeCommandSpawn(executable, cleanArgs, workingDirectory, timeout);
-      }
-    }
-    let execOptions = { timeout, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
-    if (workingDirectory) execOptions.cwd = workingDirectory;
-    let fullCommand;
-    if (command.includes('&&') || command.includes('|') || command.includes('>')) {
-      fullCommand = `cmd.exe /c ${command}`;
-    } else {
-      fullCommand = command;
-    }
-    const { stdout, stderr } = await execAsync(fullCommand, execOptions);
-    return { stdout: stdout?.toString() || "", stderr: stderr?.toString() || "", exitCode: 0 };
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      return { stdout: "", stderr: `Command execution failed: ${error.message}`, exitCode: error.code || 1 };
-    }
-    return { stdout: error.stdout?.toString() || "", stderr: error.stderr?.toString() || error.message || "Unknown error", exitCode: error.code || 1 };
-  }
-}
-
-async function copyFileAfterBuild(sourcePath, destinationPath, workingDirectory) {
-  try {
-    const windowsSource = gitBashPathToWindows(sourcePath);
-    const windowsDestination = gitBashPathToWindows(destinationPath);
-    const copyCommand = `copy "${windowsSource}" "${windowsDestination}" /Y`;
-    await execAsync(`cmd.exe /c ${copyCommand}`, { timeout: 30000, ...(workingDirectory ? { cwd: workingDirectory } : {}) });
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.stderr?.toString() || error.message || "Copy failed" };
-  }
-}
-
-async function findBuildTools() {
-  const tools = {};
-  const msbuildPaths = [
-    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2019\\Professional\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2019\\Enterprise\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe",
-    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\BuildTools\\MSBuild\\15.0\\Bin\\MSBuild.exe",
-  ];
-  for (const p of msbuildPaths) {
-    try { await access(p, constants.F_OK); tools.msbuild = p; break; } catch {}
-  }
-  try {
-    const { stdout } = await execAsync('where dotnet', { windowsHide: true });
-    if (stdout.trim()) tools.dotnet = stdout.trim().split('\n')[0];
-  } catch {}
-  const devenvPaths = [
-    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\Common7\\IDE\\devenv.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\Common7\\IDE\\devenv.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2019\\Professional\\Common7\\IDE\\devenv.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2019\\Enterprise\\Common7\\IDE\\devenv.exe",
-    "C:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe",
-  ];
-  for (const p of devenvPaths) {
-    try { await access(p, constants.F_OK); tools.devenv = p; break; } catch {}
-  }
-  return tools;
-}
-
-async function detectProjectType(projectPath) {
-  try {
-    const stats = await stat(projectPath);
-    if (stats.isFile()) {
-      const ext = path.extname(projectPath).toLowerCase();
-      if (ext === '.sln') return { type: 'solution', projectFile: projectPath, buildTool: 'msbuild' };
-      if (ext === '.csproj') return { type: 'csproj', projectFile: projectPath, buildTool: 'dotnet' };
-      if (ext === '.vbproj') return { type: 'vbproj', projectFile: projectPath, buildTool: 'msbuild' };
-      if (ext === '.fsproj') return { type: 'fsproj', projectFile: projectPath, buildTool: 'dotnet' };
-    } else if (stats.isDirectory()) {
-      const files = await readdir(projectPath);
-      const slnFile = files.find(f => f.endsWith('.sln'));
-      if (slnFile) return { type: 'solution', projectFile: path.join(projectPath, slnFile), buildTool: 'msbuild' };
-      const projFile = files.find(f => f.endsWith('.csproj') || f.endsWith('.vbproj') || f.endsWith('.fsproj'));
-      if (projFile) {
-        const ext = path.extname(projFile).toLowerCase();
-        const type = ext === '.csproj' ? 'csproj' : ext === '.vbproj' ? 'vbproj' : ext === '.fsproj' ? 'fsproj' : 'unknown';
-        const bt = (ext === '.csproj' || ext === '.fsproj') ? 'dotnet' : 'msbuild';
-        return { type, projectFile: path.join(projectPath, projFile), buildTool: bt };
-      }
-    }
-  } catch {}
-  return { type: 'unknown' };
-}
-
-async function checkBuildFileExists(filePath, workingDirectory) {
-  if (filePath.startsWith('/') || filePath.match(/^[A-Za-z]:\\/)) {
-    try { await access(filePath, constants.F_OK); return filePath; }
-    catch { throw new Error(`File not found: ${filePath}`); }
-  }
-  if (workingDirectory) {
-    const fullPath = path.join(workingDirectory, filePath);
-    try { await access(fullPath, constants.F_OK); return fullPath; } catch {}
-  }
-  try { await access(filePath, constants.F_OK); return filePath; }
-  catch { throw new Error(`File not found: ${filePath}${workingDirectory ? ` (checked in ${workingDirectory} and current directory)` : ''}`); }
 }
 
 // List available tools
@@ -779,7 +607,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "assign_checklist_item",
-        description: "Assign a checklist item to a specific team agent. Set assignee to null to unassign.",
+        description: "Assign a checklist item to a specific team agent. Set assignee to null to unassign. This is the ONLY tool that sets assignedTo — append_checklist_items and update_task_checklist ignore assignedTo by design.",
         inputSchema: {
           type: "object",
           properties: {
@@ -979,7 +807,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_checklist",
-        description: "Replace all checklist items on a task. Use this to set up or edit the checklist items (not for transitioning status - use update_task_checklist for that).",
+        description: "DEPRECATED — prefer append_checklist_items to add items (no fetch-and-resend, no risk of mangling existing items) and update_task_checklist to transition status. Retained for back-compat: full-array replace of ALL checklist items. Avoid in new code.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1585,7 +1413,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_session_history",
-        description: "Full-text search across imported session messages for a task. Uses SQLite FTS5 when available, falls back to LIKE search. Filter by role (user/assistant), agent name, or free-text query.",
+        description: "Full-text (EXACT/keyword) search across imported session messages for a task. Uses SQLite FTS5 (falls back to LIKE). Filter by role (user/assistant), agent name, or free-text query. WHEN TO USE: you know the exact words/identifiers to match — a symbol, error string, filename. To recall by MEANING when you don't know the exact words, use search_session_memory instead.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1732,7 +1560,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_session_memory",
-        description: "Semantic search over session transcript chunks using vector embeddings + FTS5. Finds relevant context from past sessions by meaning, not just keywords. Use this to recall what was discussed, decided, or worked on in previous sessions.",
+        description: "Semantic (MEANING-based) search over session transcript chunks using vector embeddings + FTS5. Recalls what was discussed/decided/worked on in past sessions by meaning, not exact keywords. WHEN TO USE: you don't know the exact words — describe what you're after in natural language. If you DO know the exact term/identifier to match, use search_session_history (exact/FTS) instead.",
         inputSchema: {
           type: "object",
           properties: {
@@ -2506,79 +2334,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["taskId"],
-        },
-      },
-      // ---- Windows Build Runner tools ----
-      {
-        name: "build_project",
-        description: "Auto-detect and build a project (.sln, .csproj, .vbproj, etc.)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            projectPath: { type: "string", description: "Path to project file or directory containing the project" },
-            configuration: { type: "string", description: "Build configuration (default: Release)", default: "Release" },
-            platform: { type: "string", description: "Platform to build for (default: Any CPU)", default: "Any CPU" },
-            additionalArgs: { type: "string", description: "Additional MSBuild/dotnet arguments" },
-            processToKill: { type: "string", description: "Name of process to terminate before execution" },
-            copyOutputTo: { type: "string", description: "Destination path to copy build output to after successful execution" },
-            timeout: { type: "number", description: "Timeout in milliseconds (default: 600000 - 10 minutes)", default: 600000 },
-          },
-          required: ["projectPath"],
-        },
-      },
-      {
-        name: "find_build_tools",
-        description: "Find installed build tools (MSBuild, dotnet, etc.)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            tool: { type: "string", description: "Specific tool to find (msbuild, dotnet, all)", default: "all" },
-          },
-        },
-      },
-      {
-        name: "run_batch_file",
-        description: "Execute a Windows batch file and return its output",
-        inputSchema: {
-          type: "object",
-          properties: {
-            batchFile: { type: "string", description: "Path to the batch file to execute" },
-            workingDirectory: { type: "string", description: "Working directory for execution (optional)" },
-            timeout: { type: "number", description: "Timeout in milliseconds (default: 300000 - 5 minutes)", default: 300000 },
-            processToKill: { type: "string", description: "Name of process to terminate before execution" },
-            copyOutputTo: { type: "string", description: "Destination path to copy build output to after successful execution" },
-          },
-          required: ["batchFile"],
-        },
-      },
-      {
-        name: "run_powershell_script",
-        description: "Execute a PowerShell script and return its output",
-        inputSchema: {
-          type: "object",
-          properties: {
-            scriptFile: { type: "string", description: "Path to the PowerShell script to execute" },
-            workingDirectory: { type: "string", description: "Working directory for execution (optional)" },
-            timeout: { type: "number", description: "Timeout in milliseconds (default: 300000 - 5 minutes)", default: 300000 },
-            processToKill: { type: "string", description: "Name of process to terminate before execution" },
-            copyOutputTo: { type: "string", description: "Destination path to copy build output to after successful execution" },
-          },
-          required: ["scriptFile"],
-        },
-      },
-      {
-        name: "run_command",
-        description: "Execute a Windows command directly and return its output",
-        inputSchema: {
-          type: "object",
-          properties: {
-            command: { type: "string", description: "Windows command to execute" },
-            workingDirectory: { type: "string", description: "Working directory for execution (optional)" },
-            timeout: { type: "number", description: "Timeout in milliseconds (default: 300000 - 5 minutes)", default: 300000 },
-            processToKill: { type: "string", description: "Name of process to terminate before execution" },
-            copyOutputTo: { type: "string", description: "Destination path to copy build output to after successful execution" },
-          },
-          required: ["command"],
         },
       },
       {
@@ -4843,92 +4598,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           output += ` (by ${f.addedBy || "unknown"})\n`;
         });
         return { content: [{ type: "text", text: output.trim() }] };
-      }
-
-      // ---- Windows Build Runner tool handlers ----
-      case "build_project": {
-        const { projectPath, configuration = "Release", platform = "Any CPU", additionalArgs, processToKill, copyOutputTo, timeout = 600000 } = args;
-        const projectInfo = await detectProjectType(projectPath);
-        if (projectInfo.type === 'unknown' || !projectInfo.projectFile) throw new Error(`Could not find a valid project file in: ${projectPath}`);
-        const tools = await findBuildTools();
-        let buildCommand, buildTool;
-        if (projectInfo.buildTool === 'dotnet' && tools.dotnet) {
-          buildTool = tools.dotnet;
-          buildCommand = `"${buildTool}" build "${gitBashPathToWindows(projectInfo.projectFile)}" -c ${configuration}`;
-          if (projectInfo.type === 'solution' && platform !== "Any CPU") buildCommand += ` -p:Platform=${platform}`;
-        } else if (tools.msbuild) {
-          buildTool = tools.msbuild;
-          buildCommand = `"${buildTool}" "${gitBashPathToWindows(projectInfo.projectFile)}" /p:Configuration=${configuration}`;
-          if (platform !== "Any CPU") buildCommand += ` /p:Platform=${platform}`;
-        } else {
-          throw new Error("No build tools found. Please install Visual Studio or .NET SDK.");
-        }
-        if (additionalArgs) buildCommand += ` ${additionalArgs}`;
-        const workDir = path.dirname(projectInfo.projectFile);
-        const result = await executeBuildCommand(buildCommand, workDir, timeout, processToKill);
-        let copyResult;
-        if (result.exitCode === 0 && copyOutputTo) {
-          const parts = copyOutputTo.split('|');
-          copyResult = await copyFileAfterBuild(parts.length > 1 ? parts[0] : copyOutputTo, parts.length > 1 ? parts[1] : copyOutputTo, workDir);
-        }
-        return { content: [{ type: "text", text: JSON.stringify({ success: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout || "(no output captured)", stderr: result.stderr || "(no error output captured)", projectType: projectInfo.type, projectFile: projectInfo.projectFile, buildTool, command: buildCommand, workingDirectory: workDir, processKilled: processToKill, copyResult }, null, 2) }] };
-      }
-
-      case "find_build_tools": {
-        const { tool = "all" } = args;
-        const tools = await findBuildTools();
-        if (tool === "all") return { content: [{ type: "text", text: JSON.stringify(tools, null, 2) }] };
-        if (tool in tools) return { content: [{ type: "text", text: JSON.stringify({ [tool]: tools[tool] }, null, 2) }] };
-        return { content: [{ type: "text", text: JSON.stringify({ [tool]: null, message: `${tool} not found` }, null, 2) }] };
-      }
-
-      case "run_batch_file": {
-        const { batchFile, workingDirectory, timeout, processToKill, copyOutputTo } = args;
-        const resolvedPath = await checkBuildFileExists(batchFile, workingDirectory);
-        const windowsBatchPath = gitBashPathToWindows(resolvedPath);
-        let command;
-        if (workingDirectory && !batchFile.startsWith('/') && !batchFile.match(/^[A-Za-z]:\\/)) {
-          command = `"${batchFile}"`;
-        } else {
-          command = `"${windowsBatchPath}"`;
-        }
-        const result = await executeBuildCommand(command, workingDirectory, timeout, processToKill);
-        let copyResult;
-        if (result.exitCode === 0 && copyOutputTo) {
-          const parts = copyOutputTo.split('|');
-          copyResult = await copyFileAfterBuild(parts.length > 1 ? parts[0] : copyOutputTo, parts.length > 1 ? parts[1] : copyOutputTo, workingDirectory);
-        }
-        return { content: [{ type: "text", text: JSON.stringify({ success: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, command, workingDirectory, processKilled: processToKill, copyResult }, null, 2) }] };
-      }
-
-      case "run_powershell_script": {
-        const { scriptFile, workingDirectory, timeout, processToKill, copyOutputTo } = args;
-        const resolvedPath = await checkBuildFileExists(scriptFile, workingDirectory);
-        const windowsScriptPath = gitBashPathToWindows(resolvedPath);
-        let command;
-        if (workingDirectory && !scriptFile.startsWith('/') && !scriptFile.match(/^[A-Za-z]:\\/)) {
-          command = `powershell.exe -ExecutionPolicy Bypass -File "${scriptFile}"`;
-        } else {
-          command = `powershell.exe -ExecutionPolicy Bypass -File "${windowsScriptPath}"`;
-        }
-        const result = await executeBuildCommand(command, workingDirectory, timeout, processToKill);
-        let copyResult;
-        if (result.exitCode === 0 && copyOutputTo) {
-          const parts = copyOutputTo.split('|');
-          copyResult = await copyFileAfterBuild(parts.length > 1 ? parts[0] : copyOutputTo, parts.length > 1 ? parts[1] : copyOutputTo, workingDirectory);
-        }
-        return { content: [{ type: "text", text: JSON.stringify({ success: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, command, workingDirectory, processKilled: processToKill, copyResult }, null, 2) }] };
-      }
-
-      case "run_command": {
-        const { command, workingDirectory, timeout, processToKill, copyOutputTo } = args;
-        const result = await executeBuildCommand(command, workingDirectory, timeout, processToKill);
-        let copyResult;
-        if (result.exitCode === 0 && copyOutputTo) {
-          const parts = copyOutputTo.split('|');
-          copyResult = await copyFileAfterBuild(parts.length > 1 ? parts[0] : copyOutputTo, parts.length > 1 ? parts[1] : copyOutputTo, workingDirectory);
-        }
-        return { content: [{ type: "text", text: JSON.stringify({ success: result.exitCode === 0, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, command, workingDirectory, processKilled: processToKill, copyResult }, null, 2) }] };
       }
 
       case "save_task_report": {

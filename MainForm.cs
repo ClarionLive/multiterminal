@@ -330,8 +330,11 @@ namespace MultiTerminal
             _sessionIndexingService = new SessionIndexingService();
             System.Diagnostics.Trace.WriteLine("[MainForm] Creating TaskDatabase for chat persistence...");
             _chatTaskDatabase = new TaskDatabase();
-            _ownerProfileService = new OwnerProfileService(_chatTaskDatabase.Connection);
-            _sourceControlAccountService = new SourceControlAccountService(_chatTaskDatabase.Connection);
+            // bb2b0104: these services now open and own their OWN connection to multiterminal.db
+            // (one owner per connection) instead of borrowing _chatTaskDatabase's handle. Disposed
+            // in Dispose(bool). _chatTaskDatabase remains solely the chat-message persistence instance.
+            _ownerProfileService = new OwnerProfileService();
+            _sourceControlAccountService = new SourceControlAccountService();
             System.Diagnostics.Trace.WriteLine("[MainForm] TaskDatabase created successfully");
 
             // One-time migration: seed the legacy single GitHub account into the new
@@ -510,14 +513,15 @@ namespace MultiTerminal
                     _mcpServer.Broker.DefaultInboxRecipient = ownerProfile.FullName.Split(' ')[0]; // First name
                 }
 
-                // Wire up KnowledgeDatabase — institutional memory (shares multiterminal.db via TaskDatabase)
+                // Wire up KnowledgeDatabase — institutional memory (owns its own multiterminal.db connection; bb2b0104).
+                // Still takes TaskDb to read the IsFts5Available flag (a bool, not the handle).
                 _mcpServer.Broker.KnowledgeDb = new Services.KnowledgeDatabase(_mcpServer.Broker.TaskDb);
 
-                // Wire up SessionMemoryDatabase — vector-embedded session chunks for semantic search
+                // Wire up SessionMemoryDatabase — vector-embedded session chunks (owns its own connection; bb2b0104).
                 _mcpServer.Broker.SessionMemoryDb = new Services.SessionMemoryDatabase(_mcpServer.Broker.TaskDb);
 
-                // Wire up CodeGraphDatabase — Roslyn-based C# code indexer
-                var codeGraphDb = new Services.CodeGraphDatabase(_mcpServer.Broker.TaskDb);
+                // Wire up CodeGraphDatabase — Roslyn-based C# code indexer (owns its own connection; bb2b0104).
+                var codeGraphDb = new Services.CodeGraphDatabase();
                 _mcpServer.Broker.CodeGraphDb = codeGraphDb;
                 _mcpServer.Broker.CodeGraphQuery = new Services.CodeGraphQuery(codeGraphDb);
 
@@ -554,7 +558,7 @@ namespace MultiTerminal
                 _mcpServer.Broker.GitAttribution = new Services.GitAttributionService(_mcpServer.Broker.TaskDb);
 
                 // Wire up BranchMetadataService — per-branch outcome strings for the HUD Git tree (HudGitRenderer reads via broker; REST controllers get their own DI instance)
-                _mcpServer.Broker.BranchMetadata = new Services.BranchMetadataService(_mcpServer.Broker.TaskDb.Connection, _mcpServer.Broker);
+                _mcpServer.Broker.BranchMetadata = new Services.BranchMetadataService(_mcpServer.Broker);
 
                 // Wire up ChangelogAttributionService (Phase 4b, task d42423e3 D3) — drives the HUD Git
                 // auto-link pass that routes .claude/project.json changelog edits to the right kanban
@@ -6382,7 +6386,14 @@ namespace MultiTerminal
                 _sharedProjectDatabase?.Dispose();
                 _gatewayService?.Dispose();
                 _debugLogService?.Dispose();
+                // bb2b0104: each of these now owns its own multiterminal.db connection — dispose them.
+                // CodeGraphDb is disposed after its watcher (_codeGraphWatcher) and coordinator above.
                 _mcpServer?.Broker?.SessionMemoryDb?.Dispose();
+                _mcpServer?.Broker?.KnowledgeDb?.Dispose();
+                _mcpServer?.Broker?.CodeGraphDb?.Dispose();
+                _mcpServer?.Broker?.BranchMetadata?.Dispose();
+                _ownerProfileService?.Dispose();
+                _sourceControlAccountService?.Dispose();
                 // MCP server already stopped in OnFormClosing (fire-and-forget StopAsync).
                 // Calling Dispose here would invoke StopAsync().GetAwaiter().GetResult()
                 // a second time, risking a UI-thread deadlock. Skip it — the process is exiting.

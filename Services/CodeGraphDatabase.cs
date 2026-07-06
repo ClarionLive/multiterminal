@@ -10,17 +10,38 @@ namespace MultiTerminal.Services
     /// <summary>
     /// SQLite storage for the C# code graph. Schema, CRUD, and low-level data access
     /// for symbols, relationships, and projects. Adapted from Frank's Clarion CodeGraph.
-    /// Shares the SQLite connection from TaskDatabase (same multiterminal.db, same WAL handle).
+    /// Owns its OWN WAL connection to multiterminal.db (bb2b0104 — one owner per connection,
+    /// no borrowed handle); serializes its own multithreaded access via <c>_syncLock</c>.
     /// </summary>
-    public class CodeGraphDatabase
+    public sealed class CodeGraphDatabase : IDisposable
     {
         private readonly SQLiteConnection _connection;
         private readonly object _syncLock = new object();
 
-        public CodeGraphDatabase(TaskDatabase db)
+        // bb2b0104: single-line reentrant gate over _syncLock. Every connection-touching method
+        // starts with `using var gate = Locked();` so concurrent callers (the CodeGraphWatcher
+        // background reindex, REST queries) serialize on this class's OWN connection instead of
+        // racing overlapping commands. BeginTransaction/EndTransaction hold the SAME _syncLock across
+        // a transaction span; Monitor is reentrant, so a gated Insert*/Find* invoked inside a
+        // transaction on the same thread re-enters without deadlock.
+        private LockScope Locked()
         {
-            if (db == null) throw new ArgumentNullException(nameof(db));
-            _connection = db.Connection;
+            Monitor.Enter(_syncLock);
+            return new LockScope(_syncLock);
+        }
+        private readonly struct LockScope : IDisposable
+        {
+            private readonly object _sync;
+            public LockScope(object sync) { _sync = sync; }
+            public void Dispose() { Monitor.Exit(_sync); }
+        }
+
+        public CodeGraphDatabase()
+        {
+            // Owns its own WAL connection (bb2b0104) — no borrowed handle. Serializes its own
+            // access via _syncLock so the CodeGraphWatcher background reindex and REST reads
+            // can't overlap commands on this connection.
+            _connection = MultiterminalDb.Open();
             CreateSchema();
         }
 
@@ -93,6 +114,7 @@ namespace MultiTerminal.Services
 
         public int InsertProject(string name, string csprojPath, string outputType = null, string slnPath = null)
         {
+            using var gate = Locked();
             const string sql = @"INSERT INTO cg_projects (name, csproj_path, output_type, sln_path)
                                  VALUES (@name, @csproj, @output, @sln);
                                  SELECT last_insert_rowid();";
@@ -106,6 +128,7 @@ namespace MultiTerminal.Services
 
         public int FindProjectIdByName(string name)
         {
+            using var gate = Locked();
             const string sql = "SELECT id FROM cg_projects WHERE name = @name COLLATE NOCASE LIMIT 1";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@name", name);
@@ -115,6 +138,7 @@ namespace MultiTerminal.Services
 
         public void InsertProjectDependency(int projectId, int dependsOnId)
         {
+            using var gate = Locked();
             const string sql = "INSERT OR IGNORE INTO cg_project_dependencies (project_id, depends_on_id) VALUES (@pid, @did)";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@pid", projectId);
@@ -126,6 +150,7 @@ namespace MultiTerminal.Services
 
         public long InsertSymbol(CodeSymbol symbol)
         {
+            using var gate = Locked();
             const string sql = @"INSERT INTO cg_symbols
                 (name, type, file_path, line_number, project_id, params, return_type,
                  parent_name, member_of, scope, accessibility, is_static, is_async, is_abstract,
@@ -158,6 +183,7 @@ namespace MultiTerminal.Services
 
         public long FindSymbolId(string name, int projectId)
         {
+            using var gate = Locked();
             const string sql = "SELECT id FROM cg_symbols WHERE name = @name AND project_id = @proj LIMIT 1";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@name", name);
@@ -168,6 +194,7 @@ namespace MultiTerminal.Services
 
         public long FindSymbolIdByName(string name)
         {
+            using var gate = Locked();
             const string sql = @"SELECT s.id FROM cg_symbols s
                                  LEFT JOIN cg_relationships r ON s.id = r.from_id OR s.id = r.to_id
                                  WHERE s.name = @name COLLATE NOCASE
@@ -185,6 +212,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public Dictionary<string, long> LoadSymbolLookup()
         {
+            using var gate = Locked();
             var lookup = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             const string sql = "SELECT id, name, member_of FROM cg_symbols";
             using var cmd = new SQLiteCommand(sql, _connection);
@@ -211,6 +239,7 @@ namespace MultiTerminal.Services
 
         public void InsertRelationship(CodeRelationship rel)
         {
+            using var gate = Locked();
             const string sql = @"INSERT INTO cg_relationships (from_id, to_id, type, file_path, line_number)
                                  VALUES (@from, @to, @type, @file, @line)";
             using var cmd = new SQLiteCommand(sql, _connection);
@@ -287,6 +316,7 @@ namespace MultiTerminal.Services
 
         public void SetMetadata(string key, string value)
         {
+            using var gate = Locked();
             const string sql = "INSERT OR REPLACE INTO cg_index_metadata (key, value) VALUES (@key, @val)";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@key", key);
@@ -296,6 +326,7 @@ namespace MultiTerminal.Services
 
         public string GetMetadata(string key)
         {
+            using var gate = Locked();
             const string sql = "SELECT value FROM cg_index_metadata WHERE key = @key";
             using var cmd = new SQLiteCommand(sql, _connection);
             cmd.Parameters.AddWithValue("@key", key);
@@ -358,6 +389,13 @@ namespace MultiTerminal.Services
                 adapter.Fill(dt);
                 return dt;
             }
+        }
+
+        public void Dispose()
+        {
+            _connection?.Close();
+            _connection?.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 }

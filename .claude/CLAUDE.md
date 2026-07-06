@@ -102,6 +102,25 @@ If a new rule starts firing across many files, the right move is usually: (1) de
 
 **Before downgrading a rule, reason explicitly about whether it can mask a real bug.** Pure style rules (e.g. `SA1503` "braces omitted" — `if (x) foo();` behaves identically with or without braces) are safe to silence. Rules that catch semantic defects (dispose, injection, nullable deref, race conditions) are not — downgrade those only after fixing the existing sites, never as a way to make the build green. If you can't articulate in one sentence why silencing a rule can't hide a defect, keep it loud.
 
+### Continuous Integration (GitHub Actions)
+
+Every push to `main` / `master` / `integration/**` and every PR runs `.github/workflows/ci.yml` on a **windows-latest** runner (the app is WinForms/WebView2 on `net8.0-windows` and cannot build on Linux). One job runs, in order: verify the bundled `tools/rg.exe` matches the SHA256 in `tools/rg.provenance.txt` → `dotnet restore` + `dotnet build MultiTerminal.csproj -c Debug` (with `TreatWarningsAsErrors` this build **is** the C# lint gate) → `dotnet build -c Release` (runs the fatal Release-only `StageMcpForInstaller`, so a broken deploy/installer-staging path fails CI) → `dotnet build AgentProcessTest` (a console harness, not a test target, but it ProjectReferences the app so this catches API-break rot) → `dotnet test MultiTerminal.Tests/MultiTerminal.Tests.csproj` (the only xUnit project) → `npm ci` + `npm run lint` (ESLint over `hooks/` + `scripts/`) → `node --test mcp/test/*.test.mjs` (the MCP server's `projectId` traversal fixtures + the tool-def↔handler consistency gate). NuGet (`~/.nuget/packages`) and npm are cached; third-party actions are pinned to commit SHAs; the token is read-only.
+
+**Reproduce locally** (from the repo root) — these are the exact CI commands:
+
+```
+dotnet build MultiTerminal.csproj -c Debug
+dotnet build MultiTerminal.csproj -c Release            # exercises StageMcpForInstaller
+dotnet build AgentProcessTest/AgentProcessTest.csproj -c Debug
+dotnet test MultiTerminal.Tests/MultiTerminal.Tests.csproj -c Debug
+npm ci && npm run lint
+node --test mcp/test/*.test.mjs          # needs Node >= 21 for the glob
+```
+
+**SDK note:** the runner uses whatever SDK `windows-latest` ships (currently 10.x); there is deliberately **no `global.json`** pinning .NET 8, because dev machines here run SDK 9 and a hard 8.0.x pin would break their local build. The build is SDK-tolerant by design — the framework is fixed by the `net8.0-windows` TFM and analyzers are pinned via NuGet packages — and CI logs the resolved SDK ("Log toolchain versions" step) so drift stays visible.
+
+**CI-specific build behavior:** the dev-only `AfterTargets="Build"` targets are neutralized on the runner so they neither fail nor spam the log. `CopyToStaged`'s mirror (default `H:\...\staged`) is redirected to a runner-workspace dir via the `MULTITERMINAL_STAGED_PATH` env override, and `SyncMcpServer` self-skips when `CI=true` (see `scripts/sync-mcp-server.ps1`) because there is no live `%APPDATA%` install to refresh — the **fatal** Release installer-staging path (`StageMcpForInstaller`, `-FailOnError`) is never skipped, which is exactly why the Release build step above is meaningful CI coverage. If you add a new node test file under `mcp/test/`, the glob picks it up automatically; if you add a new .NET test **project**, add its `dotnet test` invocation to the workflow. If you intentionally update `tools/rg.exe`, update `tools/rg.provenance.txt` (version + SHA256) in the same commit or the integrity step fails.
+
 ## Compaction Instructions
 
 When compacting, always preserve: active task ID and title, list of modified files, current checklist state, any test commands or build commands discussed, and continuation notes for session handoff.

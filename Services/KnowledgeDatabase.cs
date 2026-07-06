@@ -7,23 +7,36 @@ namespace MultiTerminal.Services
 {
     /// <summary>
     /// CRUD and search operations for knowledge_entries and code_digests tables.
-    /// Shares the SQLite connection from TaskDatabase (same multiterminal.db file, same WAL handle).
+    /// Owns its own SQLite connection to multiterminal.db, opened via MultiterminalDb.Open()
+    /// (bb2b0104 — one owner per connection; WAL supports multiple handles to one file).
     /// FTS5 full-text search is used when available; falls back to LIKE queries otherwise.
     /// </summary>
-    public class KnowledgeDatabase
+    public sealed class KnowledgeDatabase : IDisposable
     {
         private readonly SQLiteConnection _connection;
         private readonly bool _fts5Available;
+        private readonly DbGate _gate = new DbGate();
 
         /// <summary>
-        /// Creates a new KnowledgeDatabase using the shared SQLite connection from TaskDatabase.
-        /// This avoids opening a second WAL handle on the same file.
+        /// Creates a new KnowledgeDatabase that owns its own SQLite connection to
+        /// multiterminal.db (opened via MultiterminalDb.Open()). The FTS5 availability
+        /// flag is read from TaskDatabase (a bool, not a shared handle).
         /// </summary>
         public KnowledgeDatabase(TaskDatabase db)
         {
             if (db == null) throw new ArgumentNullException(nameof(db));
-            _connection = db.Connection;
+            _connection = MultiterminalDb.Open();
             _fts5Available = db.IsFts5Available;
+        }
+
+        /// <summary>
+        /// Closes and disposes the owned SQLite connection.
+        /// </summary>
+        public void Dispose()
+        {
+            _connection?.Close();
+            _connection?.Dispose();
+            GC.SuppressFinalize(this);
         }
 
         #region Knowledge Entries
@@ -33,6 +46,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int AddKnowledgeEntry(KnowledgeEntry entry)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 INSERT INTO knowledge_entries
                     (project_id, category, title, content, source_type, source_id,
@@ -67,6 +81,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int UpdateKnowledgeEntry(int id, Dictionary<string, string> fields)
         {
+            using var gate = _gate.Enter();
             if (fields == null || fields.Count == 0)
                 return 0;
 
@@ -117,6 +132,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeprecateKnowledgeEntry(int id, int? supersededById = null)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 UPDATE knowledge_entries
                 SET confidence = 'deprecated',
@@ -135,6 +151,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public KnowledgeEntry GetKnowledgeEntry(int id)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 SELECT id, project_id, category, title, content, source_type, source_id,
                        source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
@@ -155,6 +172,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<KnowledgeEntry> GetKnowledgeBySource(string sourceType, string sourceId)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 SELECT id, project_id, category, title, content, source_type, source_id,
                        source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
@@ -219,6 +237,7 @@ namespace MultiTerminal.Services
             int limit,
             bool includeDeprecated)
         {
+            using var gate = _gate.Enter();
             var sql = @"
                 SELECT ke.id, ke.project_id, ke.category, ke.title, ke.content, ke.source_type,
                        ke.source_id, ke.source_agent, ke.tags, ke.confidence, ke.superseded_by,
@@ -258,6 +277,7 @@ namespace MultiTerminal.Services
             int limit,
             bool includeDeprecated)
         {
+            using var gate = _gate.Enter();
             var sql = @"
                 SELECT id, project_id, category, title, content, source_type, source_id,
                        source_agent, tags, confidence, superseded_by, created_at, updated_at, query_hash,
@@ -291,6 +311,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void BumpReference(int id)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 UPDATE knowledge_entries
                 SET last_referenced = datetime('now'),
@@ -308,6 +329,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public void BumpReferences(IEnumerable<int> ids)
         {
+            using var gate = _gate.Enter();
             using var transaction = _connection.BeginTransaction();
             try
             {
@@ -330,6 +352,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public KnowledgeEntry LookupResearchCache(string queryHash)
         {
+            using var gate = _gate.Enter();
             if (string.IsNullOrEmpty(queryHash)) return null;
 
             const string sql = @"
@@ -354,6 +377,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool ResearchCacheExists(string queryHash)
         {
+            using var gate = _gate.Enter();
             if (string.IsNullOrEmpty(queryHash)) return false;
 
             const string sql = @"
@@ -379,6 +403,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public int SaveCodeDigest(CodeDigest digest)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 INSERT INTO code_digests
                     (project_id, file_path, file_hash, purpose, key_classes, key_methods,
@@ -421,6 +446,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public CodeDigest GetCodeDigest(string projectId, string filePath)
         {
+            using var gate = _gate.Enter();
             string sql;
             if (string.IsNullOrWhiteSpace(projectId))
             {
@@ -459,6 +485,7 @@ namespace MultiTerminal.Services
         /// <param name="currentHashes">Map of filePath → currentHash for all tracked files.</param>
         public List<CodeDigest> GetStaleDigests(string projectId, Dictionary<string, string> currentHashes)
         {
+            using var gate = _gate.Enter();
             // Fetch all digests for the project, then filter in memory.
             // This avoids complex parameterized IN clauses and keeps the query simple.
             const string sql = @"
@@ -492,6 +519,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public bool DeleteCodeDigest(string projectId, string filePath)
         {
+            using var gate = _gate.Enter();
             const string sql = @"
                 DELETE FROM code_digests
                 WHERE project_id = @projectId AND file_path = @filePath";
@@ -581,6 +609,7 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<KnowledgeEntry> GetDecayRanked(int limit = 15)
         {
+            using var gate = _gate.Enter();
             // Check if decay columns exist (migration may not have run)
             bool hasDecay = false;
             using (var pragma = new SQLiteCommand("PRAGMA table_info(knowledge_entries)", _connection))
