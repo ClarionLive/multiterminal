@@ -612,7 +612,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "assign_checklist_item",
-        description: "Assign a checklist item to a specific team agent. Set assignee to null to unassign.",
+        description: "Assign a checklist item to a specific team agent. Set assignee to null to unassign. This is the ONLY tool that sets assignedTo — append_checklist_items and update_task_checklist ignore assignedTo by design.",
         inputSchema: {
           type: "object",
           properties: {
@@ -812,7 +812,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_checklist",
-        description: "Replace all checklist items on a task. Use this to set up or edit the checklist items (not for transitioning status - use update_task_checklist for that).",
+        description: "DEPRECATED — prefer append_checklist_items to add items (no fetch-and-resend, no risk of mangling existing items) and update_task_checklist to transition status. Retained for back-compat: full-array replace of ALL checklist items. Avoid in new code.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1418,7 +1418,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_session_history",
-        description: "Full-text search across imported session messages for a task. Uses SQLite FTS5 when available, falls back to LIKE search. Filter by role (user/assistant), agent name, or free-text query.",
+        description: "Full-text (EXACT/keyword) search across imported session messages for a task. Uses SQLite FTS5 (falls back to LIKE). Filter by role (user/assistant), agent name, or free-text query. WHEN TO USE: you know the exact words/identifiers to match — a symbol, error string, filename. To recall by MEANING when you don't know the exact words, use search_session_memory instead.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1565,7 +1565,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_session_memory",
-        description: "Semantic search over session transcript chunks using vector embeddings + FTS5. Finds relevant context from past sessions by meaning, not just keywords. Use this to recall what was discussed, decided, or worked on in previous sessions.",
+        description: "Semantic (MEANING-based) search over session transcript chunks using vector embeddings + FTS5. Recalls what was discussed/decided/worked on in past sessions by meaning, not exact keywords. WHEN TO USE: you don't know the exact words — describe what you're after in natural language. If you DO know the exact term/identifier to match, use search_session_history (exact/FTS) instead.",
         inputSchema: {
           type: "object",
           properties: {
