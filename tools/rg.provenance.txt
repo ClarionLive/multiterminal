@@ -1,0 +1,17 @@
+# Provenance for the bundled tools/rg.exe (a committed binary — see ticket 9fec5c5f).
+#
+# rg.exe is ripgrep (BurntSushi/ripgrep), used at runtime by RipgrepService for
+# code search and copied to the build output by MultiTerminal.csproj
+# (<Content Include="tools\rg.exe"> PreserveNewest). It is a committed binary,
+# so this manifest is its integrity anchor: the CI "Verify bundled rg.exe
+# integrity" step (.github/workflows/ci.yml) hashes tools/rg.exe and fails the
+# build if it does not match SHA256 below. If you intentionally update ripgrep,
+# update Version/Revision/SHA256/VerifiedDate here in the same commit.
+Name=ripgrep
+Version=15.1.0
+Revision=af60c2de9d
+Features=+pcre2
+Platform=x86_64-pc-windows-msvc
+Source=https://github.com/BurntSushi/ripgrep/releases/tag/15.1.0
+SHA256=decdd4992f3f1b9a5ef9898f1b40ab16886d579d6516b4efd3d5eaa19364e408
+VerifiedDate=2026-07-06

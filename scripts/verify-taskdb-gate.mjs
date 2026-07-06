@@ -201,7 +201,7 @@ function methodName(sig) {
 // string/SQL literals are never a whole-line `        {`/`        }`.
 function parseMethods(lines) {
   const methods = [];
-  const ACCESS = /^        (public|private|internal|protected)\b/;
+  const ACCESS = /^ {8}(public|private|internal|protected)\b/;
   for (let i = 0; i < lines.length; i++) {
     if (!ACCESS.test(lines[i])) continue;
     let j = i;
