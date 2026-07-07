@@ -247,6 +247,13 @@ namespace MultiTerminal.API
                 // Enable CORS
                 app.UseCors();
 
+                // Global CSRF write-guard (Eval P2c, task f9697aac): CORS only gates READS, so this
+                // rejects blind cross-site browser WRITES (unsafe methods) for the whole :5050 surface,
+                // generalizing the retired per-endpoint CrossOriginBrowserGuard. Runs after UseCors so
+                // the CORS preflight (OPTIONS) is handled first; header-absent callers (Node MCP, hooks,
+                // curl, HttpClient) always pass. See SecFetchSiteWriteGuardMiddleware.
+                app.UseSecFetchSiteWriteGuard();
+
                 // Wire up ActivityService to MessageBroker for auto-update hooks
                 var activityService = app.Services.GetRequiredService<ActivityService>();
                 _broker.ActivityService = activityService;
