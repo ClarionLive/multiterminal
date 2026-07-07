@@ -264,6 +264,38 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
+        [Fact]
+        public async System.Threading.Tasks.Task UrgentClaim_ConcurrentReactivateOldActive_NeverZeroActive()
+        {
+            // 7c59c004 Codex CONFIRMATION-round finding: the urgent-claim path used to re-pause the pre-lock
+            // active task via PauseTaskWithSummary AFTER MakeTaskActive released the assignee lock. If a
+            // serialized SetTaskActive re-activated that same task in the window, the stale off-lock re-pause
+            // clobbered it → ZERO durable active for the assignee (a lost activation — the DUAL of two-active,
+            // which the ≤1 tests above don't catch). The fix removes that state write: ActivateExclusively is
+            // the SOLE make-active authority and already paused the sibling atomically; the caller only emits
+            // summary/activity keyed off the returned paused set. So EXACTLY ONE active must survive every
+            // interleaving — never zero (the regression this guards), never two.
+            for (int trial = 0; trial < 40; trial++)
+            {
+                var a = _svc.CreateTask($"A{trial}", "d", "diana").TaskId;
+                var c = _svc.CreateTask($"C{trial}", "d", "diana").TaskId;   // stays todo until the urgent claim
+                _svc.ClaimTask(a, "diana", null);
+                _svc.UpdateTaskStatus(a, "in_progress");
+                _svc.SetTaskActive(a, "diana");   // A active; C todo (prior trials' tasks all paused by single-active)
+
+                // Race: urgent claim of C (pauses A + activates C atomically under the lock, then emits the pause
+                // summary off-lock) vs SetTaskActive(A) (re-activates A). Pre-fix the stale off-lock re-pause of A
+                // could land AFTER the re-activation → zero active. Post-fix: always exactly one.
+                var t1 = System.Threading.Tasks.Task.Run(() => _svc.ClaimTask(c, "diana", "urgent"));
+                var t2 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(a, "diana"));
+                await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+                int active = DbActiveCount("diana");
+                Assert.Equal(1, active);   // EXACTLY one — never zero (stale-pause regression), never two
+            }
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
         // Count DB rows that are active for an assignee (authoritative — asserts the invariant on the durable store).
         private int DbActiveCount(string assignee)
         {

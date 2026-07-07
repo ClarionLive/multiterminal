@@ -145,6 +145,35 @@ const MUTATION_PATTERNS = [
   /_profiles\.(?:TryAdd|TryRemove|Clear)\s*\(/g,
 ];
 
+// ── MAKE-ACTIVE STATE-WRITE AUTHORITY (7c59c004 Codex class-close) ───────────────────────────────────
+// A SECOND invariant, distinct from the write-path/divergence one above. The single-active-per-assignee
+// rule needs EVERY write that makes a task active or paused (SubStatus = "active" | "paused") to run under
+// the per-assignee activation lock; otherwise an off-lock write can clobber a serialized activation — the
+// urgent-ClaimTask stale-pause → durable ZERO-active bug Codex caught (PauseTaskWithSummary re-paused the
+// pre-lock active task after ActivateExclusively released the lock, erasing a concurrent re-activation).
+// "Under the lock" isn't statically provable, so we ENUMERATE the methods permitted to contain such a
+// write, each human-verified:
+//   • ActivateExclusively   — the SOLE authority: pauses sibling(s) + activates the target in one txn,
+//                              under the assignee lock + per-task locks.
+//   • UpdateTaskStatus      — its done→auto-resume writes SubStatus="active" UNDER the same assignee lock
+//                              (the New-1 guard block); verified at that site.
+//   • RecalculateAutoStatus — the ONE Owner-ratified (ii) exception: auto-status derives active from
+//                              checklist progress OFF the lock, without pausing the assignee's current
+//                              active. Ratified as a documented residual → 651105b3.
+// Any OTHER method writing SubStatus="active"/"paused" is a NEW off-lock make-active state write and FAILS
+// loudly — this is what ENDS the whack-a-mole: after ActivateExclusively became the authority, a caller-side
+// re-pause/re-activate can't sneak back in unseen. Scoped to the "active"/"paused" literals: "queued"
+// (QueueTaskForTerminal) and SubStatus=null vacates (done/todo/reprioritize transitions) are NOT activations
+// of the single-active invariant, so they're intentionally out of scope.
+const MAKE_ACTIVE_AUTHORITIES = new Set(['ActivateExclusively', 'UpdateTaskStatus', 'RecalculateAutoStatus']);
+const MAKE_ACTIVE_PATTERNS = [
+  /SubStatus\s*=\s*"active"/g,
+  /SubStatus\s*=\s*"paused"/g,
+];
+// Only TaskService.cs owns the kanban make-active surface (verified by a repo-wide grep — the DB-layer
+// sub_status writes all live inside SetTaskActiveTransactional, which only ActivateExclusively calls).
+const MAKE_ACTIVE_TARGET = 'MCPServer/Services/TaskService.cs';
+
 // Blank comment + string content (offset-preserving). Same state machine as verify-taskdb-gate.mjs.
 function maskCodeOnly(src) {
   let out = '';
@@ -165,6 +194,35 @@ function maskCodeOnly(src) {
     if (state === 'str') { if (c === '\\') { out += '  '; i++; continue; } if (c === '"') { state = 'code'; out += ' '; continue; } out += (c === '\n' ? '\n' : ' '); continue; }
     if (state === 'verq') { if (c === '"' && c2 === '"') { out += '  '; i++; continue; } if (c === '"') { state = 'code'; out += ' '; continue; } out += (c === '\n' ? '\n' : ' '); continue; }
     if (state === 'chr') { if (c === '\\') { out += '  '; i++; continue; } if (c === '\'') { state = 'code'; out += ' '; continue; } out += ' '; continue; }
+  }
+  return out;
+}
+
+// Blank ONLY comments (offset-preserving), PRESERVING string literals. The make-active patterns key on the
+// "active"/"paused" STRING LITERAL, which maskCodeOnly (used for the write-path scan) blanks — so they need
+// this variant instead. We still blank comments (so a doc-comment mention of SubStatus="active" never counts)
+// and still track string state (so a `//` inside a string isn't mistaken for a comment). A real string
+// literal that happened to contain the assignment text is a non-issue: it would over-count in a non-authority
+// method and fail loudly for a human, never a false negative.
+function maskCommentsOnly(src) {
+  let out = '';
+  let state = 'code';
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    const c2 = i + 1 < src.length ? src[i + 1] : '';
+    if (state === 'code') {
+      if (c === '/' && c2 === '/') { state = 'line'; out += '  '; i++; continue; }
+      if (c === '/' && c2 === '*') { state = 'block'; out += '  '; i++; continue; }
+      if (c === '@' && c2 === '"') { state = 'verq'; out += '@"'; i++; continue; }
+      if (c === '"') { state = 'str'; out += '"'; continue; }
+      if (c === '\'') { state = 'chr'; out += '\''; continue; }
+      out += c; continue;
+    }
+    if (state === 'line') { if (c === '\n') { state = 'code'; out += '\n'; continue; } out += (c === '\r' ? '\r' : ' '); continue; }
+    if (state === 'block') { if (c === '*' && c2 === '/') { state = 'code'; out += '  '; i++; continue; } out += (c === '\n' ? '\n' : c === '\r' ? '\r' : ' '); continue; }
+    if (state === 'str') { if (c === '\\') { out += c + c2; i++; continue; } if (c === '"') { state = 'code'; out += '"'; continue; } out += c; continue; }
+    if (state === 'verq') { if (c === '"' && c2 === '"') { out += '""'; i++; continue; } if (c === '"') { state = 'code'; out += '"'; continue; } out += c; continue; }
+    if (state === 'chr') { if (c === '\\') { out += c + c2; i++; continue; } if (c === '\'') { state = 'code'; out += '\''; continue; } out += c; continue; }
   }
   return out;
 }
@@ -220,6 +278,27 @@ function analyze(src) {
     }
   }
   return { violations, mutationCount };
+}
+
+// Analyze make-active state writes (7c59c004): every SubStatus="active"/"paused" must sit inside a
+// MAKE_ACTIVE_AUTHORITIES method. Same masking + enclosing-method machinery as the write-path census.
+function analyzeMakeActive(src) {
+  const codeMasked = maskCodeOnly(src);       // method indexing: strings + comments blanked
+  const strMasked = maskCommentsOnly(src);    // scan: comments blanked, string literals PRESERVED
+  const methods = indexMethods(codeMasked);
+  const violations = [];
+  let writeCount = 0;
+  for (const pat of MAKE_ACTIVE_PATTERNS) {
+    for (const hit of strMasked.matchAll(pat)) {
+      writeCount++;
+      const encl = enclosingMethod(methods, hit.index);
+      const name = encl ? encl.name : '(top-level)';
+      if (!MAKE_ACTIVE_AUTHORITIES.has(name)) {
+        violations.push({ method: name, line: lineOf(src, hit.index), snippet: src.slice(hit.index, hit.index + 40).split('\n')[0].trim() });
+      }
+    }
+  }
+  return { violations, writeCount };
 }
 
 // ---- self-test ------------------------------------------------------------------------------------
@@ -324,11 +403,38 @@ function selfTest() {
       expectOk: true,
       src: `class TaskService {\n        private (List<string> A, string B)\n            ActivateExclusively(string id, KanbanTask t) {\n            _tasks[id] = t;\n            return (null, null);\n        }\n}`,
     },
+    {
+      // 7c59c004 make-active authority census. The bug: an off-lock SubStatus="paused" re-write in a
+      // caller (PauseTaskWithSummary) could clobber a serialized re-activation → durable zero-active. Prove
+      // a make-active state write (active/paused) in a NON-authority method FAILS — the whack-a-mole ender.
+      kind: 'makeactive',
+      name: 'make-active: SubStatus="paused" in a non-authority method FAILS (the off-lock re-pause bug)',
+      expectOk: false,
+      src: `class TaskService {\n        private void EmitPauseSummaries(string id) {\n            MutateTaskInternal(id, t => { t.SubStatus = "paused"; });\n        }\n}`,
+    },
+    {
+      kind: 'makeactive',
+      name: 'make-active: SubStatus="active" in ActivateExclusively (the sole authority) PASSES',
+      expectOk: true,
+      src: `class TaskService {\n        private (List<string> A, string B) ActivateExclusively(string id) {\n            activated.SubStatus = "active";\n            return (null, null);\n        }\n}`,
+    },
+    {
+      kind: 'makeactive',
+      name: 'make-active: SubStatus="active" in RecalculateAutoStatus (Owner-ratified (ii) exception) PASSES',
+      expectOk: true,
+      src: `class TaskService {\n        private void RecalculateAutoStatus(KanbanTask task) {\n            task.SubStatus = "active";\n        }\n}`,
+    },
+    {
+      kind: 'makeactive',
+      name: 'make-active: SubStatus="queued" is NOT an activation of the single-active invariant — PASSES anywhere',
+      expectOk: true,
+      src: `class TaskService {\n        private void QueueTaskForTerminal(string id) {\n            MutateTaskInternal(id, t => { t.SubStatus = "queued"; });\n        }\n}`,
+    },
   ];
 
   let pass = 0;
   for (const f of fixtures) {
-    const r = analyze(f.src);
+    const r = (f.kind === 'makeactive' ? analyzeMakeActive(f.src) : analyze(f.src));
     const ok = r.violations.length === 0;
     const good = ok === f.expectOk;
     if (good) pass++;
@@ -360,6 +466,29 @@ function realCheck() {
       for (const v of violations) console.error(`  - ${v.method} (line ${v.line}): ${v.snippet}`);
     }
   }
+
+  // Second invariant (7c59c004 Codex class-close): make-active state-write authority. Every
+  // SubStatus="active"/"paused" write in the kanban make-active surface must sit in a MAKE_ACTIVE_AUTHORITIES
+  // method (ActivateExclusively / the under-lock UpdateTaskStatus auto-resume / the Owner-ratified
+  // RecalculateAutoStatus) — a new off-lock make-active state write fails here.
+  {
+    const maFile = path.join(REPO_ROOT, MAKE_ACTIVE_TARGET);
+    if (!fs.existsSync(maFile)) {
+      console.error(`verify-writepath: make-active target not found: ${maFile}`);
+      process.exit(2);
+    }
+    const { violations, writeCount } = analyzeMakeActive(fs.readFileSync(maFile, 'utf8'));
+    if (violations.length === 0) {
+      console.log(`PASS  ${MAKE_ACTIVE_TARGET}: ${writeCount} make-active state write(s) (SubStatus=active/paused), all in a make-active authority (${[...MAKE_ACTIVE_AUTHORITIES].join(', ')}).`);
+    } else {
+      anyViolation = true;
+      console.error(`FAIL  ${MAKE_ACTIVE_TARGET}: ${violations.length} make-active state write(s) OFF the assignee-lock authority:`);
+      for (const v of violations) console.error(`  - ${v.method} (line ${v.line}): ${v.snippet}`);
+      console.error(`    Every SubStatus="active"/"paused" write must be inside ActivateExclusively (the sole authority),`);
+      console.error(`    the UpdateTaskStatus auto-resume (under the assignee lock), or the Owner-ratified RecalculateAutoStatus (651105b3).`);
+    }
+  }
+
   if (anyViolation) {
     console.error(`\nRoute the write through a write-path helper (MutateTaskInternal / TryMutateTask / Insert* / Delete*),`);
     console.error(`or, if it is a genuine ratified bypass, add its method name to NAMED_BYPASSES in this file.`);

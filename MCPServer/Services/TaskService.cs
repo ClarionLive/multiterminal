@@ -420,17 +420,21 @@ namespace MultiTerminal.MCPServer.Services
                         }
                         else
                         {
-                            // Claim + EXCLUSIVELY activate the urgent task: MakeTaskActive now pauses the
-                            // current active sibling ATOMICALLY under the assignee lock (7c59c004 class-close),
-                            // so a concurrent claim/activate can't leave a durable two-active. PauseTaskWithSummary
-                            // below is kept only for the paused task's summary side-effect — the pause itself is
-                            // already done (idempotent).
-                            if (!MakeTaskActive(task, assignee, taskId))
+                            // Claim + EXCLUSIVELY activate the urgent task: MakeTaskActive pauses the current
+                            // active sibling ATOMICALLY under the assignee lock (7c59c004 class-close) and RETURNS
+                            // exactly which id(s) it paused. We emit the pause summary/activity for THAT set only —
+                            // never re-writing sub_status here. Re-pausing the pre-lock `currentActiveTask` off the
+                            // lock was a durable-corruption bug (Codex 7c59c004): a serialized SetTaskActive could
+                            // re-activate that task in the window after MakeTaskActive released the lock, and the
+                            // stale re-pause would clobber it → zero active. ActivateExclusively is the SOLE
+                            // make-active state-write authority; this is pure side-effect keyed off its result.
+                            var activation = MakeTaskActive(task, assignee, taskId);
+                            if (!activation.Ok)
                             {
                                 return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
                             }
 
-                            PauseTaskWithSummary(currentActiveTask, assignee);
+                            EmitPauseSummaries(activation.PausedIds, activation.PausedTitles, assignee);
                         }
                         break;
 
@@ -478,8 +482,9 @@ namespace MultiTerminal.MCPServer.Services
             }
             else
             {
-                // No active task - make this task active regardless of priority
-                if (!MakeTaskActive(task, assignee, taskId))
+                // No active task - make this task active regardless of priority. No prior active sibling to
+                // pause, so ActivateExclusively pauses nothing (empty set) and there is no pause side-effect.
+                if (!MakeTaskActive(task, assignee, taskId).Ok)
                 {
                     return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
                 }
@@ -596,56 +601,67 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Pause a task with auto-generated summary.
         /// </summary>
-        private void PauseTaskWithSummary(KanbanTask task, string assignee)
+        /// <summary>
+        /// Emit the summary + activity side-effects for tasks that <see cref="ActivateExclusively"/> ALREADY
+        /// paused (atomically, under the per-assignee activation lock), keyed off its returned paused set.
+        /// Deliberately writes NO task state: re-pausing here (as the old PauseTaskWithSummary did) was an
+        /// off-lock, unconditional sub_status='paused' write that could clobber a concurrent SetTaskActive
+        /// re-activation of the same task in the window after the activation released the lock → durable
+        /// zero-active (7c59c004 Codex class-close). ActivateExclusively is the SOLE make-active state-write
+        /// authority; this is pure side-effect. Indices align (PausedIds[i] ↔ PausedTitles[i]).
+        /// </summary>
+        private void EmitPauseSummaries(IReadOnlyList<string> pausedIds, IReadOnlyList<string> pausedTitles, string assignee)
         {
-            // Write path, no broadcast — the ClaimTask caller broadcasts once after the whole claim.
-            try
+            if (pausedIds == null) return;
+            for (int i = 0; i < pausedIds.Count; i++)
             {
-                MutateTaskInternal(task.Id, t =>
+                var id = pausedIds[i];
+                var title = (pausedTitles != null && i < pausedTitles.Count) ? pausedTitles[i] : id;
+
+                // Auto-generate summary for the paused task
+                if (_host.SummaryService != null)
                 {
-                    t.SubStatus = "paused";
-                    t.PausedAt = DateTime.UtcNow;
+                    try
+                    {
+                        _host.SummaryService.AutoGenerateSummary(
+                            id,
+                            title,
+                            "in_progress",
+                            "paused",
+                            assignee);
+                    }
+                    catch (Exception ex)
+                    {
+                        _host.LogError($"Failed to auto-generate summary for paused task {id}: {ex.Message}");
+                    }
+                }
+
+                // Record activity for pausing
+                _host.RecordActivity(new ActivityEvent
+                {
+                    Terminal = assignee,
+                    Type = "task",
+                    Action = "paused",
+                    Content = $"Paused task: {title}",
+                    RelatedId = id
                 });
             }
-            catch (Exception ex) { _host.LogError($"PauseTaskWithSummary: persist failed for {task.Id}: {ex.Message}"); }
-
-            // Auto-generate summary for the paused task
-            if (_host.SummaryService != null)
-            {
-                try
-                {
-                    _host.SummaryService.AutoGenerateSummary(
-                        task.Id,
-                        task.Title,
-                        "in_progress",
-                        "paused",
-                        assignee);
-                }
-                catch (Exception ex)
-                {
-                    _host.LogError($"Failed to auto-generate summary for paused task: {ex.Message}");
-                }
-            }
-
-            // Record activity for pausing
-            _host.RecordActivity(new ActivityEvent
-            {
-                Terminal = assignee,
-                Type = "task",
-                Action = "paused",
-                Content = $"Paused task: {task.Title}",
-                RelatedId = task.Id
-            });
         }
 
 
         /// <summary>
         /// Make a task active and update activity tracking.
         /// </summary>
-        /// <returns>true if the activation persisted; false (not found OR DB write failed) so ClaimTask
-        /// aborts with Success=false. The core activation persist is FATAL (P5 pipeline A).</returns>
-        private bool MakeTaskActive(KanbanTask task, string assignee, string taskId)
+        /// <returns>Ok=true if the activation persisted; false (not found OR DB write failed) so ClaimTask
+        /// aborts with Success=false. The core activation persist is FATAL (P5 pipeline A). PausedIds/PausedTitles
+        /// are the sibling(s) ActivateExclusively ACTUALLY paused (atomically, under the assignee lock) — the
+        /// caller emits their pause summary/activity side-effects OFF this set, never by re-writing state
+        /// (7c59c004 Codex class-close: an off-lock re-pause can clobber a concurrent serialized re-activation).</returns>
+        private (bool Ok, List<string> PausedIds, List<string> PausedTitles) MakeTaskActive(KanbanTask task, string assignee, string taskId)
         {
+            List<string> pausedIds;
+            List<string> pausedTitles;
+
             // 7c59c004 (Codex class-close): claim the target into in_progress (sub_status stays null — not yet
             // competing for "active"), THEN make it the SINGLE active task via the shared ActivateExclusively
             // primitive — which, under the per-assignee activation lock, pauses the assignee's current active
@@ -660,16 +676,18 @@ namespace MultiTerminal.MCPServer.Services
                     t.Status = "in_progress";
                 }) == null)
                 {
-                    return false;
+                    return (false, null, null);
                 }
 
-                // Acting agent == the claiming assignee. Pauses any current active sibling atomically.
-                ActivateExclusively(taskId, assignee, assignee, DateTime.UtcNow);
+                // Acting agent == the claiming assignee. Pauses any current active sibling atomically and
+                // returns exactly which id(s) it paused — that set (NOT the caller's pre-lock snapshot) is the
+                // authority for any pause side-effects, so the pause is never re-written off the lock.
+                (pausedIds, pausedTitles, _, _) = ActivateExclusively(taskId, assignee, assignee, DateTime.UtcNow);
             }
             catch (Exception ex)
             {
                 _host.LogError($"MakeTaskActive: persist failed for {taskId}: {ex.Message}");
-                return false;
+                return (false, null, null);
             }
 
             // Auto-generate summary when task is claimed
@@ -707,7 +725,7 @@ namespace MultiTerminal.MCPServer.Services
                 RelatedId = taskId
             });
 
-            return true;
+            return (true, pausedIds, pausedTitles);
         }
 
 
