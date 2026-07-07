@@ -1,8 +1,18 @@
 # MessageBroker region-extraction pattern
 
-Proven by ticket **e7e89f4b** (Kanban Tasks → `TaskService`). Use this to peel the remaining regions
-off the ~9K-LOC `MessageBroker` god-file one at a time. It is **refactor-by-relocation**: move method
-bodies, do not redesign. The broker keeps its full public surface, so callers never change.
+Proven by ticket **e7e89f4b** (Kanban Tasks → `TaskService`) and **validated on a second region** by
+**86f3fd21** (Profiles → `ProfileService`). Use this to peel the remaining regions off the ~9K-LOC
+`MessageBroker` god-file one at a time. It is **refactor-by-relocation**: move method bodies, do not redesign.
+The broker keeps its full public surface, so callers never change.
+
+> **Second-region result (86f3fd21):** the Profile extraction built **0/0 on the first compile** (vs
+> TaskService's 23 error-driven iterations) — a smaller region, but the clean first build is the payoff of
+> applying the inventory gotchas below UP FRONT (the cross-region writers were found by census greps before
+> the move, not by the compiler after). The one thing the template did NOT cover was cross-region *writers*
+> of the moved cache; that gap is now closed as step 7. **Log-source retag convention** (both extractions did
+> it, endorsed as "a real fix wearing a MINOR tag"): route the region's log calls through host `Log*` wrappers
+> that stamp the NEW service name (`"ProfileService"`), so a relocated `DebugLogService?.Info("MessageBroker", …)`
+> line stops misattributing to the broker after the move.
 
 ## The recipe
 
@@ -21,6 +31,15 @@ bodies, do not redesign. The broker keeps its full public surface, so callers ne
    are already public broker methods auto-implement; private/new ones get explicit impls.
 6. **Shared state that other regions still read** (e.g. `_tasks` read by the project/attachment regions):
    expose read accessors on the service and rewire those broker-side readers to `_service.GetX(...)`.
+7. **Shared state that other regions still WRITE** (validated by 86f3fd21 — the profile cache is written by
+   the terminal-registration region: auto-create-on-register, mark-offline-on-disconnect, team-lead flag).
+   TaskService never hit this (its cache had only readers), so it was a template GAP. Rule: the cache still
+   moves to the service (single-owner-per-cache is non-negotiable); expose the NARROW write primitives the
+   outside region needs (`TryAddX`, a `TryGetX` returning the cached ref for in-place mutation) and rewire the
+   broker-side writers to them. **Preserve the caller's exact semantics — do NOT redesign the external write
+   into the clean write path** (that's a separate ticket, e.g. e1643ccc for registration); a relocation ticket
+   moves the cache, it doesn't reform every site that touches it. Those rewires are all INSIDE `MessageBroker.cs`,
+   so the zero-external-caller-changes property (git diff outside broker+new == empty) still holds.
 
 ## Inventory gotchas (learned from the TaskService extraction)
 
@@ -59,6 +78,10 @@ region get its own slice. Rejected: raw back-ref (cosmetic, unbounded coupling).
 - `git diff` outside `MessageBroker.cs` + the new files == empty (zero caller changes — the observable form
   of "every broker method is a one-line delegation").
 - Build 0/0. Any invariant verifier that scanned `MessageBroker.cs` for the moved concern (e.g.
-  `scripts/verify-writepath.mjs`) must be **extended to scan the new file too** — else the census goes
-  silently green on an emptied broker. Add a negative fixture proving it still falsifies post-move.
+  `scripts/verify-writepath.mjs`) must be **extended to scan the new file too** (add it to `TARGETS`) — else
+  the census goes silently green on an emptied broker. Add a negative fixture proving it still falsifies
+  post-move. **And (86f3fd21 addendum):** if step 7 introduced a relocated cross-region-writer PRIMITIVE
+  (e.g. `TryAddProfile`), allowlist it in the census (a `NAMED_BYPASS`, noting the ticket that later removes
+  it) — otherwise the census fails on the primitive itself. Extending the census = new-file-in-TARGETS **plus**
+  allowlist-the-relocated-primitive **plus** negative-fixture, not just the first.
 - 3–5 `FooService` unit tests (real temp-SQLite DB + a stub `IFooServiceHost`) — the point of the split.
