@@ -20,6 +20,12 @@
     <ProjectReference Include="..\MultiTerminal.csproj" />
   </ItemGroup>
 
+  <!-- Needed so route-attribute tests (TerminalsControllerRouteTests) can reference
+       ASP.NET Mvc types (HttpGetAttribute) — the app under test is a WinForms + ASP.NET host. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
   <!-- Analyzers: build-time only, not a runtime dependency. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.NetAnalyzers" Version="9.0.0">
