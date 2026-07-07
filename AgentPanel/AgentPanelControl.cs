@@ -28,6 +28,11 @@ namespace MultiTerminal.AgentPanel
         private bool _isTeamAgent; // true for team agents (can receive messages), false for one-off subagents
         private bool _webViewReady; // true after JS sends 'ready'
 
+        /// <summary>
+        /// Set by MainForm for internal debug panel logging.
+        /// </summary>
+        public DebugLogService DebugLogService { get; set; }
+
         public IAgentMessageSource AttachedAgent => _attachedAgent;
 
         /// <summary>
@@ -104,7 +109,7 @@ namespace MultiTerminal.AgentPanel
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[AgentPanel] WebView2 init failed: {ex.Message}");
+                DebugLogService?.Error("AgentPanel", $"WebView2 init failed: {ex.Message}");
                 _isInitializing = false;
             }
         }
@@ -113,7 +118,7 @@ namespace MultiTerminal.AgentPanel
         {
             if (!e.IsSuccess)
             {
-                Debug.WriteLine($"[AgentPanel] WebView2 init error: {e.InitializationException?.Message}");
+                DebugLogService?.Error("AgentPanel", $"WebView2 init error: {e.InitializationException?.Message}");
                 return;
             }
 
@@ -176,13 +181,13 @@ namespace MultiTerminal.AgentPanel
                 {
                     case "ready":
                         _webViewReady = true;
-                        Debug.WriteLine($"[AgentPanel] WebView2 ready signal received, attachedAgent={((_attachedAgent != null) ? _attachedAgent.GetType().Name : "null")}, buffered={_attachedAgent?.Messages.Count ?? 0}");
+                        DebugLogService?.Info("AgentPanel", $"WebView2 ready signal received, attachedAgent={((_attachedAgent != null) ? _attachedAgent.GetType().Name : "null")}, buffered={_attachedAgent?.Messages.Count ?? 0}");
                         // Apply current theme
                         PostMessage(JsonSerializer.Serialize(new { type = "theme", theme = _isDarkTheme ? "dark" : "light" }));
                         // If agent is already attached, replay messages and send status
                         if (_attachedAgent != null)
                         {
-                            Debug.WriteLine($"[AgentPanel] Replaying {_attachedAgent.Messages.Count} buffered messages on WebView2 ready");
+                            DebugLogService?.Info("AgentPanel", $"Replaying {_attachedAgent.Messages.Count} buffered messages on WebView2 ready");
                             SendSessionInfo(_agentName);
                             SendStatusUpdate();
                             ReplayMessages();
@@ -214,7 +219,7 @@ namespace MultiTerminal.AgentPanel
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[AgentPanel] Error processing web message: {ex.Message}");
+                DebugLogService?.Error("AgentPanel", $"Error processing web message: {ex.Message}");
             }
         }
 
@@ -233,7 +238,7 @@ namespace MultiTerminal.AgentPanel
             _subagentType = subagentType;
             _isTeamAgent = isTeamAgent;
 
-            Debug.WriteLine($"[AgentPanel] AttachAgent called: name='{agentName}', agentType={agent.GetType().Name}, webViewReady={_webViewReady}, bufferedMessages={agent.Messages.Count}");
+            DebugLogService?.Info("AgentPanel", $"AttachAgent called: name='{agentName}', agentType={agent.GetType().Name}, webViewReady={_webViewReady}, bufferedMessages={agent.Messages.Count}");
 
             // Subscribe to agent events
             _attachedAgent.MessageReceived += OnAgentMessageReceived;
@@ -241,14 +246,14 @@ namespace MultiTerminal.AgentPanel
 
             if (_webViewReady)
             {
-                Debug.WriteLine($"[AgentPanel] WebView2 already ready - replaying {agent.Messages.Count} messages now");
+                DebugLogService?.Info("AgentPanel", $"WebView2 already ready - replaying {agent.Messages.Count} messages now");
                 SendSessionInfo(_agentName);
                 SendStatusUpdate();
                 ReplayMessages();
             }
             else
             {
-                Debug.WriteLine($"[AgentPanel] WebView2 NOT ready yet - messages will replay when ready");
+                DebugLogService?.Info("AgentPanel", "WebView2 NOT ready yet - messages will replay when ready");
             }
         }
 
@@ -348,10 +353,10 @@ namespace MultiTerminal.AgentPanel
         /// </summary>
         private void ReplayMessages()
         {
-            if (_attachedAgent == null) { Debug.WriteLine("[AgentPanel] ReplayMessages: no attached agent"); return; }
+            if (_attachedAgent == null) { DebugLogService?.Warning("AgentPanel", "ReplayMessages: no attached agent"); return; }
 
             var messages = _attachedAgent.Messages;
-            Debug.WriteLine($"[AgentPanel] ReplayMessages: {messages.Count} messages to replay");
+            DebugLogService?.Info("AgentPanel", $"ReplayMessages: {messages.Count} messages to replay");
             if (messages.Count == 0) return;
 
             var payload = new
@@ -420,7 +425,7 @@ namespace MultiTerminal.AgentPanel
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[AgentPanel] PostMessage error: {ex.Message}");
+                    DebugLogService?.Error("AgentPanel", $"PostMessage error: {ex.Message}");
                 }
             }
         }

@@ -300,7 +300,7 @@ namespace MultiTerminal.Docking
             get => _customTitle;
             set
             {
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.CustomTitle.set] Instance={InstanceId} DocId='{_docId}' old='{_customTitle}' new='{value}' _projectName='{_projectName}'");
+                _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.CustomTitle.set] Instance={InstanceId} DocId='{_docId}' old='{_customTitle}' new='{value}' _projectName='{_projectName}'");
                 _customTitle = value;
                 // NOTE: cycle-7 removed the setter-side promotion of
                 // _originalAgentName — restored sessionInfo.CustomTitle (set
@@ -334,8 +334,7 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(authoritativeAgentName)) return;
             if (!string.IsNullOrEmpty(_originalAgentName)) return;
             _originalAgentName = authoritativeAgentName;
-            System.Diagnostics.Trace.WriteLine(
-                $"[TerminalDocument.PromoteOriginalAgentName] DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
+            _debugLogService?.Trace("TerminalDocument.PromoteOriginalAgentName", $"DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
         }
 
         private void UpdateTabTitle()
@@ -345,7 +344,7 @@ namespace MultiTerminal.Docking
                 var title = !string.IsNullOrEmpty(_projectName)
                     ? $"{_customTitle} - {_projectName}"
                     : _customTitle;
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.UpdateTabTitle] Instance={InstanceId} DocId='{_docId}' setting Text/TabText='{title}' (customTitle='{_customTitle}' projectName='{_projectName}')");
+                _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.UpdateTabTitle] Instance={InstanceId} DocId='{_docId}' setting Text/TabText='{title}' (customTitle='{_customTitle}' projectName='{_projectName}')");
                 Text = title;
                 TabText = title;
             }
@@ -379,7 +378,7 @@ namespace MultiTerminal.Docking
             var taskHud = _hudTabContainer?.TaskHud;
             if (taskHud == null || string.IsNullOrEmpty(_customTitle)) return;
 
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.UpdateTaskHudTerminalName] customTitle='{_customTitle}' IsBrokerInitialized={taskHud.IsBrokerInitialized} brokerSet={_messageBroker != null}");
+            _debugLogService?.Trace("TerminalDocument.UpdateTaskHudTerminalName", $"customTitle='{_customTitle}' IsBrokerInitialized={taskHud.IsBrokerInitialized} brokerSet={_messageBroker != null}");
 
             if (!taskHud.IsBrokerInitialized && _messageBroker != null)
             {
@@ -591,7 +590,7 @@ namespace MultiTerminal.Docking
                 if (!show) return;
 
                 double ratioToApply = _hudSplitRatio;
-                System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}, initialApplied={_initialHudSplitApplied}");
+                _debugLogService?.Trace("HUD-DEBUG", $"VisibilityRequested: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}, initialApplied={_initialHudSplitApplied}");
 
                 _suppressSplitterEvents = true;
 
@@ -599,7 +598,7 @@ namespace MultiTerminal.Docking
                 {
                     BeginInvoke((Action)(() =>
                     {
-                        System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested BeginInvoke: suppress={_suppressSplitterEvents}, ratioToApply={ratioToApply:F4}, currentRatio={_hudSplitRatio:F4}, height={_terminalHudSplitter.Height}, dist={_terminalHudSplitter.SplitterDistance}");
+                        _debugLogService?.Trace("HUD-DEBUG", $"VisibilityRequested BeginInvoke: suppress={_suppressSplitterEvents}, ratioToApply={ratioToApply:F4}, currentRatio={_hudSplitRatio:F4}, height={_terminalHudSplitter.Height}, dist={_terminalHudSplitter.SplitterDistance}");
                         try
                         {
                             int maxDistance = _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize;
@@ -611,7 +610,7 @@ namespace MultiTerminal.Docking
                                 _terminalHudSplitter.SplitterDistance = distance;
                             // Restore in case stray events slipped through
                             _hudSplitRatio = ratioToApply;
-                            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] VisibilityRequested BeginInvoke DONE: distance={distance}, maxDist={maxDistance}, clearing suppress");
+                            _debugLogService?.Trace("HUD-DEBUG", $"VisibilityRequested BeginInvoke DONE: distance={distance}, maxDist={maxDistance}, clearing suppress");
                         }
                         catch { /* bounds during layout */ }
                         finally
@@ -907,12 +906,12 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnHudSplitterMoved(object sender, SplitterEventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] OnHudSplitterMoved: suppress={_suppressSplitterEvents}, collapsed={_terminalHudSplitter?.Panel2Collapsed}, height={_terminalHudSplitter?.Height}, dist={_terminalHudSplitter?.SplitterDistance}, caller={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name}");
+            _debugLogService?.Trace("HUD-DEBUG", $"OnHudSplitterMoved: suppress={_suppressSplitterEvents}, collapsed={_terminalHudSplitter?.Panel2Collapsed}, height={_terminalHudSplitter?.Height}, dist={_terminalHudSplitter?.SplitterDistance}, caller={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name}");
             if (_suppressSplitterEvents || _isDisposing) return;
             if (_terminalHudSplitter == null || _terminalHudSplitter.Panel2Collapsed) return;
             if (_terminalHudSplitter.Height <= 0) return;
             double ratio = (double)_terminalHudSplitter.SplitterDistance / _terminalHudSplitter.Height;
-            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] OnHudSplitterMoved SAVING ratio={ratio:F4} (dist={_terminalHudSplitter.SplitterDistance}, height={_terminalHudSplitter.Height})");
+            _debugLogService?.Trace("HUD-DEBUG", $"OnHudSplitterMoved SAVING ratio={ratio:F4} (dist={_terminalHudSplitter.SplitterDistance}, height={_terminalHudSplitter.Height})");
             _hudSplitRatio = ratio;
             HudSplitRatioChanged?.Invoke(this, ratio);
         }
@@ -1042,14 +1041,14 @@ namespace MultiTerminal.Docking
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
         public void StartTerminal(string workingDirectory = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== START =====");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] terminalName: '{terminalName ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] autoRunCommand: '{autoRunCommand ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] spawnerName: '{spawnerName ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] projectId: '{projectId ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] isTeamLead: '{isTeamLead}'");
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _docId: '{_docId}'");
+            _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== START =====");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"terminalName: '{terminalName ?? "null"}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"spawnerName: '{spawnerName ?? "null"}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"projectId: '{projectId ?? "null"}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"isTeamLead: '{isTeamLead}'");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_docId: '{_docId}'");
 
             // Hide start screen before launching the shell
             HideStartScreen();
@@ -1065,25 +1064,25 @@ namespace MultiTerminal.Docking
                 try
                 {
                     var project = _messageBroker.ProjectDatabase?.GetProject(projectId);
-                    System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] _messageBroker.ProjectDatabase.GetProject('{projectId}') => {(project == null ? "NULL" : $"id='{project.Id}' name='{project.Name}' path='{project.Path}'")}");
+                    _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] _messageBroker.ProjectDatabase.GetProject('{projectId}') => {(project == null ? "NULL" : $"id='{project.Id}' name='{project.Name}' path='{project.Path}'")}");
                     if (project != null && !string.IsNullOrEmpty(project.Name))
                     {
                         if (!string.Equals(project.Id, projectId, StringComparison.Ordinal))
-                            System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] *** BROKER DB ID MISMATCH *** requested='{projectId}' returned='{project.Id}' name='{project.Name}'");
+                            _debugLogService?.Warning("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] *** BROKER DB ID MISMATCH *** requested='{projectId}' returned='{project.Id}' name='{project.Name}'");
                         _projectName = project.Name;
                     }
                 }
                 catch (Exception lookupEx)
                 {
-                    System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] project lookup threw: {lookupEx.Message}");
+                    _debugLogService?.Error("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] project lookup threw: {lookupEx.Message}");
                 }
             }
             if (string.IsNullOrEmpty(_projectName) && !string.IsNullOrEmpty(workingDirectory))
             {
                 _projectName = System.IO.Path.GetFileName(workingDirectory.TrimEnd('\\', '/'));
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] Fell back to folder-name projectName='{_projectName}' from workingDirectory='{workingDirectory}'");
+                _debugLogService?.Warning("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] Fell back to folder-name projectName='{_projectName}' from workingDirectory='{workingDirectory}'");
             }
-            System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StartTerminal] Final _projectName='{_projectName}' for projectId='{projectId}'");
+            _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.StartTerminal] Final _projectName='{_projectName}' for projectId='{projectId}'");
 
             // Set terminal name as custom title if provided. StartTerminal is
             // an AUTHORITATIVE identity source — the terminalName comes from
@@ -1093,7 +1092,7 @@ namespace MultiTerminal.Docking
             // launches (rare) won't clobber.
             if (!string.IsNullOrEmpty(terminalName))
             {
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Setting CustomTitle to '{terminalName}'");
+                _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Setting CustomTitle to '{terminalName}'");
                 CustomTitle = terminalName;
                 PromoteOriginalAgentName(terminalName);
             }
@@ -1104,14 +1103,14 @@ namespace MultiTerminal.Docking
             // script does run, it overwrites this file with full model/git/quota data.
             WriteFallbackStatusline(terminalName, workingDirectory);
 
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] Calling _terminal.Start...");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"Calling _terminal.Start...");
             // SWAPDIAG (task ab32897c): records which TerminalDocument (_docId/instance) sent
             // which docId to its own child shell, plus the launch name/dir. Cross-reference with
             // the SWAPDIAG REGISTER lines to detect a doc↔docId cross. Remove after root cause.
             _debugLogService?.Info("SWAPDIAG",
                 $"LAUNCH inst={InstanceId} docId={_docId} name='{terminalName}' projectId='{projectId}' dir='{workingDirectory}'");
             _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] _terminal.Start returned");
+            _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts
             UpdateStatusBar();
@@ -1146,7 +1145,7 @@ namespace MultiTerminal.Docking
             // in the HUD header strip + Git tab on a slow cadence.
             StartWorkingTreeDirtyPolling();
 
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument.StartTerminal] ===== COMPLETE =====");
+            _debugLogService?.Info("TerminalDocument.StartTerminal", $"===== COMPLETE =====");
         }
 
         /// <summary>
@@ -1360,7 +1359,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[TerminalDocument] ShowDiff failed: {ex.Message}");
+                _debugLogService?.Error("TerminalDocument", $"ShowDiff failed: {ex.Message}");
             }
         }
 
@@ -1444,8 +1443,7 @@ namespace MultiTerminal.Docking
                     }
                     catch (Exception pathEx)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[TerminalDocument] absoluteFilePath resolve failed: {pathEx.Message}");
+                        _debugLogService?.Error("TerminalDocument", $"absoluteFilePath resolve failed: {pathEx.Message}");
                     }
                 }
 
@@ -1459,8 +1457,7 @@ namespace MultiTerminal.Docking
                     // "Wrap in quick task" affordance.
                     if (string.IsNullOrEmpty(repoRoot))
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            "[TerminalDocument] no repoRoot resolved for taskless review request — dropping");
+                        _debugLogService?.Warning("TerminalDocument", "no repoRoot resolved for taskless review request — dropping");
                         return;
                     }
                     var crServiceWt = _codeReviewService ??= new MultiTerminal.Services.CodeReviewService(_messageBroker);
@@ -1508,8 +1505,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[TerminalDocument] OnHudGitOpenDiffPopupRequested failed: {ex.Message}");
+                _debugLogService?.Error("TerminalDocument", $"OnHudGitOpenDiffPopupRequested failed: {ex.Message}");
             }
         }
 
@@ -1709,7 +1705,7 @@ namespace MultiTerminal.Docking
         {
             _hudSplitRatio = ratio;
             if (_isDisposing || _terminalHudSplitter == null) return;
-            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] ApplyHudSplitRatio: ratio={ratio:F4}, collapsed={_terminalHudSplitter.Panel2Collapsed}, height={_terminalHudSplitter.Height}");
+            _debugLogService?.Trace("HUD-DEBUG", $"ApplyHudSplitRatio: ratio={ratio:F4}, collapsed={_terminalHudSplitter.Panel2Collapsed}, height={_terminalHudSplitter.Height}");
             if (_terminalHudSplitter.Panel2Collapsed || _terminalHudSplitter.Height <= 0) return;
             bool prevSuppress = _suppressSplitterEvents;
             try
@@ -1755,7 +1751,7 @@ namespace MultiTerminal.Docking
 
             bool show = _terminalHudSplitter.Panel2Collapsed; // collapsed → show it
             double ratioToApply = _hudSplitRatio;
-            System.Diagnostics.Debug.WriteLine($"[HUD-DEBUG] ToggleHud: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}");
+            _debugLogService?.Trace("HUD-DEBUG", $"ToggleHud: show={show}, ratioToApply={ratioToApply:F4}, suppress={_suppressSplitterEvents}");
 
             _suppressSplitterEvents = true;
             _terminalHudSplitter.Panel2Collapsed = !show;
@@ -1909,12 +1905,12 @@ namespace MultiTerminal.Docking
 
         private void UpdateProjectFileWatcher(string directory)
         {
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument] UpdateProjectFileWatcher called with: {directory}");
+            _debugLogService?.Trace("TerminalDocument", $"UpdateProjectFileWatcher called with: {directory}");
 
             // Skip if already watching this directory
             if (_projectFileWatcher != null && _lastWatchedDirectory == directory)
             {
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument] Already watching {directory}, skipping");
+                _debugLogService?.Trace("TerminalDocument", $"Already watching {directory}, skipping");
                 return;
             }
 
@@ -1954,17 +1950,17 @@ namespace MultiTerminal.Docking
                 _projectFileWatcher.Created += OnProjectFileEvent;
                 _projectFileWatcher.Changed += OnProjectFileEvent;
                 _projectFileWatcher.EnableRaisingEvents = true;
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument] FileSystemWatcher created for: {_projectFileWatcher.Path}, Filter: {_projectFileWatcher.Filter}");
+                _debugLogService?.Trace("TerminalDocument", $"FileSystemWatcher created for: {_projectFileWatcher.Path}, Filter: {_projectFileWatcher.Filter}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument] Failed to create FileSystemWatcher: {ex.Message}");
+                _debugLogService?.Error("TerminalDocument", $"Failed to create FileSystemWatcher: {ex.Message}");
             }
         }
 
         private void OnProjectFileEvent(object sender, FileSystemEventArgs e)
         {
-            System.Diagnostics.Trace.WriteLine($"[TerminalDocument] OnProjectFileEvent: Name={e.Name}, ChangeType={e.ChangeType}, FullPath={e.FullPath}");
+            _debugLogService?.Trace("TerminalDocument", $"OnProjectFileEvent: Name={e.Name}, ChangeType={e.ChangeType}, FullPath={e.FullPath}");
 
             // Check if it's the project.json file or .claude folder
             if (e.Name == "project.json" || e.Name == ".claude")
@@ -2005,14 +2001,14 @@ namespace MultiTerminal.Docking
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Trace.WriteLine($"[TerminalDocument] Failed to update FileSystemWatcher: {ex.Message}");
+                            _debugLogService?.Error("TerminalDocument", $"Failed to update FileSystemWatcher: {ex.Message}");
                         }
                     }
                     return;
                 }
 
                 // Marshal to UI thread and fire event
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument] Firing ProjectFileChanged event");
+                _debugLogService?.Trace("TerminalDocument", $"Firing ProjectFileChanged event");
                 if (this.DockPanel?.InvokeRequired == true)
                 {
                     this.DockPanel.BeginInvoke(new Action(() => ProjectFileChanged?.Invoke(this, EventArgs.Empty)));
@@ -2208,13 +2204,16 @@ namespace MultiTerminal.Docking
         public bool IsStartScreenVisible => _isStartScreenVisible;
 
         /// <summary>
-        /// Sets the debug log service for status bar logging.
+        /// Sets the debug log service for status bar, task HUD, and terminal (ConPTY +
+        /// WebView2 renderer) logging.
         /// </summary>
         public void SetDebugLogService(DebugLogService debugLogService)
         {
             _debugLogService = debugLogService;
             _statusBar?.SetDebugLogService(debugLogService);
             _hudTabContainer?.TaskHud?.SetDebugLogService(debugLogService);
+            _terminal?.SetDebugLogService(debugLogService);
+            _startScreen?.SetDebugLogService(debugLogService); // StartScreenControl diagnostics → unified sink (4c86f18d)
         }
 
         /// <summary>
@@ -2354,8 +2353,7 @@ namespace MultiTerminal.Docking
                 if (!_loggedEmptyAgentName)
                 {
                     _loggedEmptyAgentName = true;
-                    System.Diagnostics.Trace.WriteLine(
-                        $"[TerminalDocument.OnBrokerTaskActiveChanged] Empty _originalAgentName — dropping event AgentName='{args.AgentName}' NewTaskId='{args.NewTaskId}'. Expected during the restored-terminal window before user launches; investigate if seen after StartTerminal/OnMcpTerminalRegistered have run.");
+                    _debugLogService?.Warning("TerminalDocument.OnBrokerTaskActiveChanged", $"Empty _originalAgentName — dropping event AgentName='{args.AgentName}' NewTaskId='{args.NewTaskId}'. Expected during the restored-terminal window before user launches; investigate if seen after StartTerminal/OnMcpTerminalRegistered have run.");
                 }
                 return;
             }
@@ -2382,8 +2380,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[TerminalDocument.OnBrokerTaskActiveChanged] broker lookup failed: {ex.GetType().Name}: {ex.Message}");
+                _debugLogService?.Error("TerminalDocument.OnBrokerTaskActiveChanged", $"broker lookup failed: {ex.GetType().Name}: {ex.Message}");
                 return;
             }
 
@@ -2404,8 +2401,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[TerminalDocument.OnBrokerTaskActiveChanged] SetProject failed: {ex.GetType().Name}: {ex.Message}");
+                _debugLogService?.Error("TerminalDocument.OnBrokerTaskActiveChanged", $"SetProject failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -2570,11 +2566,11 @@ namespace MultiTerminal.Docking
                     $"mt-statusline-{terminalName}-{_docId}.json");
 
                 File.WriteAllText(filePath, JsonSerializer.Serialize(fallback));
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument.WriteFallbackStatusline] Wrote fallback to '{filePath}'");
+                _debugLogService?.Trace("TerminalDocument.WriteFallbackStatusline", $"Wrote fallback to '{filePath}'");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[TerminalDocument.WriteFallbackStatusline] Failed: {ex.Message}");
+                _debugLogService?.Error("TerminalDocument.WriteFallbackStatusline", $"Failed: {ex.Message}");
             }
         }
 
@@ -3061,7 +3057,7 @@ namespace MultiTerminal.Docking
                                 resolvedProjectName = System.IO.Path.GetFileName(folderForUi.TrimEnd('\\', '/'));
                             }
 
-                            System.Diagnostics.Trace.WriteLine($"#PROJ# [TerminalDocument.StatusLinePoll] Instance={InstanceId} DocId='{_docId}' folderForUi='{folderForUi}' resolvedProjectId='{resolvedProjectId}' resolvedProjectName='{resolvedProjectName}' (was _projectName='{_projectName}')");
+                            _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.StatusLinePoll] Instance={InstanceId} DocId='{_docId}' folderForUi='{folderForUi}' resolvedProjectId='{resolvedProjectId}' resolvedProjectName='{resolvedProjectName}' (was _projectName='{_projectName}')");
                             _projectName = resolvedProjectName;
                             // Also refresh the status bar Row 1 so its project-name
                             // title tracks Claude Code's real workspace instead of
@@ -3230,8 +3226,7 @@ namespace MultiTerminal.Docking
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine(
-                        $"[TerminalDocument.RefreshWorkingTreeDirty] {ex.GetType().Name}: {ex.Message}");
+                    _debugLogService?.Trace("TerminalDocument.RefreshWorkingTreeDirty", $"{ex.GetType().Name}: {ex.Message}");
                 }
                 finally
                 {

@@ -117,18 +117,18 @@ namespace MultiTerminal.ChatPanel
             catch (OperationCanceledException)
             {
                 // Expected during shutdown — WebView2 aborts initialization when the host is closing
-                System.Diagnostics.Debug.WriteLine("Chat panel WebView2 init cancelled (shutdown).");
+                _broker?.DebugLogService?.Warning("ChatPanel", "Chat panel WebView2 init cancelled (shutdown).");
                 _isInitializing = false;
             }
             catch (Exception ex) when (_isShuttingDown || IsDisposed || Disposing)
             {
                 // Suppress any errors during shutdown
-                System.Diagnostics.Debug.WriteLine($"Chat panel WebView2 init failed during shutdown: {ex.Message}");
+                _broker?.DebugLogService?.Error("ChatPanel", $"Chat panel WebView2 init failed during shutdown: {ex.Message}");
                 _isInitializing = false;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Chat panel WebView2 init failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("ChatPanel", $"Chat panel WebView2 init failed: {ex.Message}");
                 _isInitializing = false;
             }
         }
@@ -147,14 +147,14 @@ namespace MultiTerminal.ChatPanel
 
             // Load the HTML using robust path searching
             var htmlPath = GetHtmlPath();
-            System.Diagnostics.Debug.WriteLine($"Chat panel HTML path: {htmlPath}");
+            _broker?.DebugLogService?.Info("ChatPanel", $"Chat panel HTML path: {htmlPath}");
             if (File.Exists(htmlPath))
             {
                 _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"Chat panel HTML NOT FOUND at: {htmlPath}");
+                _broker?.DebugLogService?.Warning("ChatPanel", $"Chat panel HTML NOT FOUND at: {htmlPath}");
                 _webView.CoreWebView2.NavigateToString($"<html><body><h1>Chat panel HTML not found</h1><p>Searched: {htmlPath}</p></body></html>");
             }
 
@@ -243,7 +243,7 @@ namespace MultiTerminal.ChatPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Chat panel message error: {ex.Message}");
+                _broker?.DebugLogService?.Error("ChatPanel", $"Chat panel message error: {ex.Message}");
             }
         }
 

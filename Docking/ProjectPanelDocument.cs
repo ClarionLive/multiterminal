@@ -55,6 +55,9 @@ namespace MultiTerminal.Docking
         private string _currentWorkingDirectory;
         private Project _currentProject;
 
+        /// <summary>Unified debug log sink. Null-safe (all call sites use <c>?.</c>) until wired via <see cref="SetDebugLogService"/>.</summary>
+        public DebugLogService DebugLogService { get; set; }
+
         // Header controls removed — project selector now lives in WebView2
 
         // WebView2 renderer
@@ -166,10 +169,21 @@ namespace MultiTerminal.Docking
             _gatewayService = gatewayService;
         }
 
+        /// <summary>
+        /// Injects the shared debug log sink and propagates it to the WebView2 renderer,
+        /// which owns its own logging call sites.
+        /// </summary>
+        public void SetDebugLogService(DebugLogService debugLogService)
+        {
+            DebugLogService = debugLogService;
+            if (_renderer != null)
+                _renderer.DebugLogService = debugLogService;
+        }
+
         public void SetSessionLineageService(SessionLineageService lineageService)
         {
             _lineageService = lineageService;
-            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] SessionLineageService injected from MainForm");
+            DebugLogService?.Trace("ProjectPanel", $"SessionLineageService injected from MainForm");
         }
 
         public void SetTheme(TerminalTheme theme)
@@ -192,7 +206,7 @@ namespace MultiTerminal.Docking
 
         public async void RefreshForProject(Project project)
         {
-            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] RefreshForProject called: {project?.Name ?? "null"}");
+            DebugLogService?.Trace("ProjectPanel", $"RefreshForProject called: {project?.Name ?? "null"}");
 
             _currentProject = project;
 
@@ -265,7 +279,7 @@ namespace MultiTerminal.Docking
             };
 
             // Show project immediately without stats (to avoid UI freeze)
-            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Calling renderer.ShowProject for {projectWithAllPrompts.Name} (initial, no stats)");
+            DebugLogService?.Trace("ProjectPanel", $"Calling renderer.ShowProject for {projectWithAllPrompts.Name} (initial, no stats)");
             _renderer?.ShowProject(projectWithAllPrompts, null);
 
             // Fetch team lead options once and send to dropdown (reused after stats re-render)
@@ -297,7 +311,7 @@ namespace MultiTerminal.Docking
             var stats = await Task.Run(() => CalculateProjectStats(project.Path));
 
             // Update renderer with stats (back on UI thread)
-            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Updating renderer with stats for {projectWithAllPrompts.Name}");
+            DebugLogService?.Trace("ProjectPanel", $"Updating renderer with stats for {projectWithAllPrompts.Name}");
             _renderer?.ShowProject(projectWithAllPrompts, stats);
 
             // Re-send cached team lead options (stats re-render clears the dropdown options)
@@ -394,7 +408,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error calculating stats: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"Error calculating stats: {ex.Message}");
             }
 
             return stats;
@@ -416,7 +430,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendTeamLeadOptions error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SendTeamLeadOptions error: {ex.Message}");
                 return null;
             }
         }
@@ -442,7 +456,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendSourceAccountOptions error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SendSourceAccountOptions error: {ex.Message}");
                 return null;
             }
         }
@@ -462,7 +476,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableAgents error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SendAvailableAgents error: {ex.Message}");
                 return null;
             }
         }
@@ -482,7 +496,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableMcpServers error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SendAvailableMcpServers error: {ex.Message}");
                 return null;
             }
         }
@@ -513,7 +527,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableSkills error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SendAvailableSkills error: {ex.Message}");
                 return null;
             }
         }
@@ -552,7 +566,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SendAvailableSpecialistAgents error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SendAvailableSpecialistAgents error: {ex.Message}");
                 return null;
             }
         }
@@ -602,13 +616,13 @@ namespace MultiTerminal.Docking
 
                 if (success)
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Field '{e.Field}' updated to '{e.Value}' for project {_currentProject.Id}");
+                    DebugLogService?.Trace("ProjectPanel", $"Field '{e.Field}' updated to '{e.Value}' for project {_currentProject.Id}");
                     UpdateProjectFieldInMemory(e.Field, e.Value);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnFieldUpdateRequested error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"OnFieldUpdateRequested error: {ex.Message}");
                 _renderer?.SendFieldSaved(e.Field, false);
             }
         }
@@ -657,7 +671,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnRefreshAssociationsRequested error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"OnRefreshAssociationsRequested error: {ex.Message}");
             }
         }
 
@@ -702,7 +716,7 @@ namespace MultiTerminal.Docking
                         (success, newId) = HandleSkillCrud(projectId, action, itemJson);
                         break;
                     default:
-                        System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Unknown association tableName: {tableName}");
+                        DebugLogService?.Warning("ProjectPanel", $"Unknown association tableName: {tableName}");
                         break;
                 }
 
@@ -710,7 +724,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnAssociationUpdateRequested error ({tableName}/{action}): {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"OnAssociationUpdateRequested error ({tableName}/{action}): {ex.Message}");
                 _renderer?.SendAssociationSaved(tableName, action, false);
             }
         }
@@ -785,7 +799,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SyncGatewayProfile failed: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"SyncGatewayProfile failed: {ex.Message}");
             }
         }
 
@@ -1025,7 +1039,7 @@ namespace MultiTerminal.Docking
             var lineageService = _lineageService;
             if (lineageService == null)
             {
-                System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available");
+                DebugLogService?.Warning("ProjectPanel", "SessionLineageService not available");
                 _renderer?.ClearSessions();
                 return;
             }
@@ -1033,7 +1047,7 @@ namespace MultiTerminal.Docking
             var claudeFolder = SessionLineageService.GetClaudeProjectFolder(projectPath);
             if (claudeFolder == null)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] No Claude project folder found for {projectPath}");
+                DebugLogService?.Warning("ProjectPanel", $"No Claude project folder found for {projectPath}");
                 _renderer?.ClearSessions();
                 return;
             }
@@ -1059,12 +1073,12 @@ namespace MultiTerminal.Docking
                 });
 
                 // Back on UI thread - update renderer
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Loaded {sessionSummaries.Count} sessions from lineage for {projectPath}");
+                DebugLogService?.Info("ProjectPanel", $"Loaded {sessionSummaries.Count} sessions from lineage for {projectPath}");
                 _renderer?.ShowSessions(sessionSummaries);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Failed to load sessions: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"Failed to load sessions: {ex.Message}");
                 _renderer?.ClearSessions();
             }
         }
@@ -1075,7 +1089,7 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(sessionId))
                 return;
 
-            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OpenSessionRequested: {sessionId}");
+            DebugLogService?.Info("ProjectPanel", $"OpenSessionRequested: {sessionId}");
 
             // Raise the event for MainForm to handle session viewing
             ViewSessionRequested?.Invoke(this, sessionId);
@@ -1093,14 +1107,14 @@ namespace MultiTerminal.Docking
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SearchSessionsRequested: {query}");
+            DebugLogService?.Info("ProjectPanel", $"SearchSessionsRequested: {query}");
 
             try
             {
                 var lineageService = _lineageService;
                 if (lineageService == null)
                 {
-                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available for search");
+                    DebugLogService?.Warning("ProjectPanel", "SessionLineageService not available for search");
                     return;
                 }
 
@@ -1118,12 +1132,12 @@ namespace MultiTerminal.Docking
                     }).ToList();
                 });
 
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Found {results.Count} message matches for '{query}'");
+                DebugLogService?.Info("ProjectPanel", $"Found {results.Count} message matches for '{query}'");
                 _renderer?.ShowSearchResults(results, query);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Failed to search sessions: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"Failed to search sessions: {ex.Message}");
             }
         }
 
@@ -1132,14 +1146,14 @@ namespace MultiTerminal.Docking
             if (_currentProject?.Path == null)
                 return;
 
-            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] SyncSessionsRequested for project: {_currentProject.Path}");
+            DebugLogService?.Info("ProjectPanel", $"SyncSessionsRequested for project: {_currentProject.Path}");
 
             try
             {
                 var lineageService = _lineageService;
                 if (lineageService == null)
                 {
-                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available for sync");
+                    DebugLogService?.Warning("ProjectPanel", "SessionLineageService not available for sync");
                     _renderer?.ShowSyncResult(0);
                     return;
                 }
@@ -1147,7 +1161,7 @@ namespace MultiTerminal.Docking
                 var claudeFolder = SessionLineageService.GetClaudeProjectFolder(_currentProject.Path);
                 if (claudeFolder == null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] No Claude project folder for sync: {_currentProject.Path}");
+                    DebugLogService?.Warning("ProjectPanel", $"No Claude project folder for sync: {_currentProject.Path}");
                     _renderer?.ShowSyncResult(0);
                     return;
                 }
@@ -1155,7 +1169,7 @@ namespace MultiTerminal.Docking
                 // Sync from Claude's storage to local database on background thread
                 var syncResult = await Task.Run(() => lineageService.SyncNewSessions(claudeFolder));
                 int count = syncResult.Imported;
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Synced {count} sessions to lineage database");
+                DebugLogService?.Info("ProjectPanel", $"Synced {count} sessions to lineage database");
 
                 // Refresh the display (back on UI thread)
                 await LoadSessionsForProjectAsync(_currentProject.Path);
@@ -1165,7 +1179,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Failed to sync sessions: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"Failed to sync sessions: {ex.Message}");
                 _renderer?.ShowSyncResult(0);
             }
         }
@@ -1183,7 +1197,7 @@ namespace MultiTerminal.Docking
                 var lineageService = _lineageService;
                 if (lineageService == null)
                 {
-                    System.Diagnostics.Debug.WriteLine("[ProjectPanel] SessionLineageService not available");
+                    DebugLogService?.Warning("ProjectPanel", "SessionLineageService not available");
                     _renderer?.ShowSessionMessages(sessionId, new List<SessionMessageSummary>());
                     return;
                 }
@@ -1206,12 +1220,12 @@ namespace MultiTerminal.Docking
                         .ToList();
                 });
 
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Loaded {summaries.Count} messages for session {sessionId}");
+                DebugLogService?.Info("ProjectPanel", $"Loaded {summaries.Count} messages for session {sessionId}");
                 _renderer?.ShowSessionMessages(sessionId, summaries);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] Failed to load session messages: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"Failed to load session messages: {ex.Message}");
                 _renderer?.ShowSessionMessages(sessionId, new List<SessionMessageSummary>());
             }
         }
@@ -1224,14 +1238,14 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnSelectProjectRequested(object sender, string projectId)
         {
-            System.Diagnostics.Trace.WriteLine($"[ProjectPanel] SelectProject requested: {projectId}");
+            DebugLogService?.Trace("ProjectPanel", $"SelectProject requested: {projectId}");
 
             Project project = null;
             if (_projectDatabase != null && !string.IsNullOrEmpty(projectId))
             {
                 project = _projectDatabase.GetRichProject(projectId);
                 if (project != null)
-                    System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from SQLite: {projectId}");
+                    DebugLogService?.Trace("ProjectPanel", $"Project loaded from SQLite: {projectId}");
             }
 
             // Fall back to JSON registry
@@ -1243,7 +1257,7 @@ namespace MultiTerminal.Docking
                 {
                     project = _projectService?.LoadProject(entry.Path);
                     if (project != null)
-                        System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Project loaded from JSON: {entry.Path}");
+                        DebugLogService?.Trace("ProjectPanel", $"Project loaded from JSON: {entry.Path}");
                 }
             }
 
@@ -1253,7 +1267,7 @@ namespace MultiTerminal.Docking
             }
             else
             {
-                System.Diagnostics.Trace.WriteLine($"[ProjectPanel] Failed to load project: {projectId}");
+                DebugLogService?.Error("ProjectPanel", $"Failed to load project: {projectId}");
             }
         }
 
@@ -1397,7 +1411,7 @@ namespace MultiTerminal.Docking
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnListDirectoryRequested error: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"OnListDirectoryRequested error: {ex.Message}");
             }
         }
 
@@ -1407,19 +1421,19 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnReadFileRequested(object sender, string filePath)
         {
-            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: filePath={filePath}");
+            DebugLogService?.Info("ProjectPanel", $"OnReadFileRequested: filePath={filePath}");
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: file is null/empty or doesn't exist");
+                DebugLogService?.Warning("ProjectPanel", $"OnReadFileRequested: file is null/empty or doesn't exist");
                 return;
             }
             if (!IsPathWithinProject(filePath))
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: path not within project. ProjectPath={_currentProject?.Path ?? "null"}");
+                DebugLogService?.Warning("ProjectPanel", $"OnReadFileRequested: path not within project. ProjectPath={_currentProject?.Path ?? "null"}");
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[ProjectPanel] OnReadFileRequested: invoking FilePreviewRequested");
+            DebugLogService?.Info("ProjectPanel", $"OnReadFileRequested: invoking FilePreviewRequested");
             // Route to the external FilePreviewPanel instead of rendering inline
             FilePreviewRequested?.Invoke(this, filePath);
         }

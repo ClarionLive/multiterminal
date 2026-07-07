@@ -256,8 +256,8 @@ namespace MultiTerminal.API.Gateway
                 var webRoot = Path.Combine(contentRoot, "wwwroot");
                 if (!Directory.Exists(webRoot))
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        "[MultiRemoteGatewayHost] wwwroot not found at " + webRoot +
+                    _broker?.DebugLogService?.Warning("MultiRemoteGatewayHost",
+                        "wwwroot not found at " + webRoot +
                         " — the PWA will 404 until the build copies it to output.");
                 }
 
@@ -364,14 +364,14 @@ namespace MultiTerminal.API.Gateway
                                     var result = await pushForRelay
                                         .SendToAllWithResult(e.Title, e.Body, e.RequestType, e.AgentName)
                                         .ConfigureAwait(false);
-                                    System.Diagnostics.Debug.WriteLine(
-                                        "[MultiRemoteGatewayHost] R4 relay push (" + e.RequestType +
+                                    _broker?.DebugLogService?.Trace("MultiRemoteGatewayHost",
+                                        "R4 relay push (" + e.RequestType +
                                         "): delivered=" + result.SuccessCount + "/" + result.SubscriptionCount);
                                 }
                                 catch (Exception ex)
                                 {
-                                    System.Diagnostics.Debug.WriteLine(
-                                        "[MultiRemoteGatewayHost] R4 relay push failed: " + ex.Message);
+                                    _broker?.DebugLogService?.Error("MultiRemoteGatewayHost",
+                                        "R4 relay push failed: " + ex.Message);
                                 }
                             });
                         };
@@ -406,8 +406,8 @@ namespace MultiTerminal.API.Gateway
                     _isRunning = false;
                 }
 
-                System.Diagnostics.Debug.WriteLine(
-                    "[MultiRemoteGatewayHost] Failed to start on port " + _port + ": " + ex.Message);
+                _broker?.DebugLogService?.Error("MultiRemoteGatewayHost",
+                    "Failed to start on port " + _port + ": " + ex.Message);
                 ServerError?.Invoke(this, ex);
                 throw;
             }
@@ -442,8 +442,8 @@ namespace MultiTerminal.API.Gateway
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        "[MultiRemoteGatewayHost] Error stopping: " + ex.Message);
+                    _broker?.DebugLogService?.Error("MultiRemoteGatewayHost",
+                        "Error stopping: " + ex.Message);
                 }
             }
         }
@@ -478,8 +478,8 @@ namespace MultiTerminal.API.Gateway
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        "[MultiRemoteGatewayHost] Error disposing: " + ex.Message);
+                    _broker?.DebugLogService?.Error("MultiRemoteGatewayHost",
+                        "Error disposing: " + ex.Message);
                 }
             }
 

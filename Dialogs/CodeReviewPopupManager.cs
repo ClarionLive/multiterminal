@@ -195,8 +195,7 @@ namespace MultiTerminal.Dialogs
                     try { onQuickTaskCreated(taskId); }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Trace.WriteLine(
-                            $"[CodeReviewPopupManager] onQuickTaskCreated threw: {ex.Message}");
+                        broker?.DebugLogService?.Error("CodeReviewPopup", $"onQuickTaskCreated threw: {ex.Message}");
                     }
                 };
             }
@@ -234,8 +233,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupManager] Initialize failed: {ex.Message}");
+                broker?.DebugLogService?.Error("CodeReviewPopup", $"Initialize failed: {ex.Message}");
             }
         }
 
@@ -263,8 +261,10 @@ namespace MultiTerminal.Dialogs
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[CodeReviewPopupManager] ApplyThemeToAll failed: {ex.Message}");
+                    // No broker parameter on this static method (ApplyThemeToAll(bool) is called
+                    // from MainForm's theme toggle with just isDark) — use the specific form's own
+                    // sink instead, wired when that form was Initialize()'d.
+                    f.DebugLogService?.Error("CodeReviewPopup", $"ApplyThemeToAll failed: {ex.Message}");
                 }
             }
         }

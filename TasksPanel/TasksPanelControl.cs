@@ -95,13 +95,11 @@ namespace MultiTerminal.TasksPanel
 
         private void DebugLog(string message)
         {
-            System.Diagnostics.Debug.WriteLine($"[TasksPanel] {message}");
             _debugLogService?.Trace("TasksPanel", message);
         }
 
         private void DebugLogError(string message)
         {
-            System.Diagnostics.Debug.WriteLine($"[TasksPanel] ERROR: {message}");
             _debugLogService?.Error("TasksPanel", message);
         }
 
@@ -881,7 +879,7 @@ namespace MultiTerminal.TasksPanel
                             var result = _broker?.TrackHelperSpawn(taskId, prompt, spawnedBy);
                             if (result != null)
                             {
-                                System.Diagnostics.Debug.WriteLine($"Helper spawned: {result.HelperId} (success={result.Success})");
+                                _debugLogService?.Info("TasksPanel", $"Helper spawned: {result.HelperId} (success={result.Success})");
                             }
                         }
                         break;
@@ -889,7 +887,7 @@ namespace MultiTerminal.TasksPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error processing tasks panel message: {ex.Message}");
+                _debugLogService?.Error("TasksPanel", $"Error processing tasks panel message: {ex.Message}");
             }
         }
 

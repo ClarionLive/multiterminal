@@ -55,7 +55,7 @@ namespace MultiTerminal.API.Controllers
             if (results.Count > 0)
             {
                 try { service.BumpReferences(results.ConvertAll(r => r.Id)); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[KnowledgeController] BumpReferences failed: {ex.Message}"); }
+                catch (Exception ex) { _broker?.DebugLogService?.Error("KnowledgeController", $"BumpReferences failed: {ex.Message}"); }
             }
 
             return Ok(new { results, totalCount = results.Count });

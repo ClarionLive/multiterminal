@@ -54,7 +54,7 @@ namespace MultiTerminal.ProfilePanel
 
         private void OnRendererReady(object sender, EventArgs e)
         {
-            System.Diagnostics.Trace.WriteLine("[ProfilePanel] OnRendererReady fired");
+            _messageBroker?.DebugLogService?.Trace("ProfilePanel", "OnRendererReady fired");
 
             // WebView2 is now ready - load initial data
             LoadProfiles();
@@ -81,12 +81,13 @@ namespace MultiTerminal.ProfilePanel
             }
 
             _messageBroker = messageBroker;
+            _renderer.DebugLogService = _messageBroker?.DebugLogService;
 
             if (_messageBroker != null)
             {
                 // Subscribe to profile updates
                 _messageBroker.ProfilesUpdated += OnProfilesUpdated;
-                System.Diagnostics.Trace.WriteLine("[ProfilePanel] Subscribed to MessageBroker.ProfilesUpdated");
+                _messageBroker?.DebugLogService?.Trace("ProfilePanel", "Subscribed to MessageBroker.ProfilesUpdated");
             }
         }
 
@@ -106,13 +107,13 @@ namespace MultiTerminal.ProfilePanel
         {
             if (_messageBroker == null)
             {
-                System.Diagnostics.Trace.WriteLine("[ProfilePanel] MessageBroker not set, cannot load profiles");
+                _messageBroker?.DebugLogService?.Warning("ProfilePanel", "MessageBroker not set, cannot load profiles");
                 return;
             }
 
             if (!_renderer.IsInitialized)
             {
-                System.Diagnostics.Trace.WriteLine("[ProfilePanel] Renderer not initialized yet");
+                _messageBroker?.DebugLogService?.Trace("ProfilePanel", "Renderer not initialized yet");
                 return;
             }
 
@@ -123,16 +124,16 @@ namespace MultiTerminal.ProfilePanel
                 {
                     _renderer.SetProfiles(result.Profiles);
                     _hasLoadedInitialData = true;
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Loaded {result.Profiles.Count} profiles");
+                    _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Loaded {result.Profiles.Count} profiles");
                 }
                 else
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Failed to load profiles: {result.Error}");
+                    _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Failed to load profiles: {result.Error}");
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error loading profiles: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Error loading profiles: {ex.Message}");
             }
         }
 
@@ -146,7 +147,7 @@ namespace MultiTerminal.ProfilePanel
 
             try
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Create profile requested: {profile.Id}");
+                _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Create profile requested: {profile.Id}");
                 var result = _messageBroker.CreateProfile(
                     profile.Id,
                     profile.DisplayName,
@@ -163,19 +164,19 @@ namespace MultiTerminal.ProfilePanel
 
                 if (result.Success)
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Profile created: {profile.Id}");
+                    _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Profile created: {profile.Id}");
                     // ProfilesUpdated event will auto-refresh the UI
                 }
                 else
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Failed to create profile: {result.Error}");
+                    _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Failed to create profile: {result.Error}");
                     MessageBox.Show($"Failed to create profile: {result.Error}", "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error creating profile: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Error creating profile: {ex.Message}");
                 MessageBox.Show($"Error creating profile: {ex.Message}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -187,7 +188,7 @@ namespace MultiTerminal.ProfilePanel
 
             try
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Update profile requested: {profile.Id}");
+                _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Update profile requested: {profile.Id}");
                 var result = _messageBroker.UpdateProfile(
                     profile.Id,
                     profile.DisplayName,
@@ -204,19 +205,19 @@ namespace MultiTerminal.ProfilePanel
 
                 if (result.Success)
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Profile updated: {profile.Id}");
+                    _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Profile updated: {profile.Id}");
                     // ProfilesUpdated event will auto-refresh the UI
                 }
                 else
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Failed to update profile: {result.Error}");
+                    _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Failed to update profile: {result.Error}");
                     MessageBox.Show($"Failed to update profile: {result.Error}", "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error updating profile: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Error updating profile: {ex.Message}");
                 MessageBox.Show($"Error updating profile: {ex.Message}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -237,24 +238,24 @@ namespace MultiTerminal.ProfilePanel
                 if (confirmResult != DialogResult.Yes)
                     return;
 
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Delete profile requested: {id}");
+                _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Delete profile requested: {id}");
                 var result = _messageBroker.DeleteProfile(id);
 
                 if (result.Success)
                 {
                     _renderer.NotifyProfileDeleted(id);
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Profile deleted: {id}");
+                    _messageBroker?.DebugLogService?.Trace("ProfilePanel", $"Profile deleted: {id}");
                 }
                 else
                 {
-                    System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Failed to delete profile: {result.Error}");
+                    _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Failed to delete profile: {result.Error}");
                     MessageBox.Show($"Failed to delete profile: {result.Error}", "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error deleting profile: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("ProfilePanel", $"Error deleting profile: {ex.Message}");
                 MessageBox.Show($"Error deleting profile: {ex.Message}", "Error",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -278,7 +279,7 @@ namespace MultiTerminal.ProfilePanel
                 return;
             }
 
-            System.Diagnostics.Trace.WriteLine("[ProfilePanel] ProfilesUpdated event received");
+            _messageBroker?.DebugLogService?.Trace("ProfilePanel", "ProfilesUpdated event received");
             LoadProfiles();
         }
 
