@@ -58,9 +58,10 @@ namespace MultiTerminal.API
         /// <summary>
         /// Scoped-read predicate: true ONLY for the per-process panel virtual-host origin
         /// (<see cref="PanelHosting.Origin"/> — a CSPRNG-random <c>.invalid</c> host, so unforgeable and
-        /// non-resolvable). Rejects "null", loopback (any port), remote, empty, and malformed origins
-        /// (fail closed). Also the trusted-origin test the <see cref="SecFetchSiteWriteGuardMiddleware"/>
-        /// shares.
+        /// non-resolvable). Everything else is rejected simply by not equalling that origin (fail closed):
+        /// "null", loopback (any port), remote, empty, and malformed origins are all covered by the single
+        /// equality check — those cases are exercised in RestCorsOriginPolicyTests. Also the trusted-origin
+        /// test the <see cref="SecFetchSiteWriteGuardMiddleware"/> shares.
         /// </summary>
         public static bool IsTrustedBrowserOrigin(string origin)
         {

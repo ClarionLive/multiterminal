@@ -37,6 +37,11 @@ namespace MultiTerminal.API
     /// </remarks>
     internal static class PanelHosting
     {
+        // NOTE: declaration order is load-bearing — Token must precede the two fields derived from it.
+        // (C# runs static field initializers in textual order and completes ALL of them before any first
+        // access, so this is safe today; a reorder that moved Token below would silently yield an
+        // empty-token host. RestCorsOriginPolicyTests.Panel_origin_is_random_and_non_resolvable guards it.)
+        //
         // 128-bit token from a CSPRNG (RandomNumberGenerator, NOT Guid/Math.Random), hex-encoded so the
         // value is a valid DNS label (0-9a-f only). Generated once per process at type load.
         private static readonly string Token = GenerateToken();
