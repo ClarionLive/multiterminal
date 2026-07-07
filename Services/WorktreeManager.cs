@@ -192,7 +192,7 @@ namespace MultiTerminal.Services
         /// <summary>True when <paramref name="branch"/> exists as a local head.</summary>
         private static async Task<bool> BranchExistsAsync(string repoRoot, string branch)
         {
-            var (exitCode, _, _) = await RunGitAsync(
+            var (exitCode, _, _) = await GitExec.RunAsync(
                 repoRoot, "show-ref", "--verify", "--quiet", $"refs/heads/{branch}").ConfigureAwait(false);
             return exitCode == 0;
         }
@@ -210,7 +210,7 @@ namespace MultiTerminal.Services
         /// on a task branch — i.e. not a usable trunk to fork from.</exception>
         private static async Task<string> ResolveTrunkAsync(string repoRoot)
         {
-            var (exitCode, stdout, stderr) = await RunGitAsync(
+            var (exitCode, stdout, stderr) = await GitExec.RunAsync(
                 repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
             if (exitCode != 0)
             {
@@ -254,7 +254,7 @@ namespace MultiTerminal.Services
         // filesystem path operation on caller-supplied input.
         private static async Task<string> ResolveMainCheckoutRootAsync(string repoRoot)
         {
-            var (exitCode, stdout, stderr) = await RunGitAsync(
+            var (exitCode, stdout, stderr) = await GitExec.RunAsync(
                 repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false);
             if (exitCode != 0)
             {
@@ -309,7 +309,7 @@ namespace MultiTerminal.Services
         {
             if (await BranchExistsAsync(repoRoot, canonicalBranch).ConfigureAwait(false)) return;
             string trunk = await ResolveTrunkAsync(repoRoot).ConfigureAwait(false);
-            var (exitCode, stdout, stderr) = await RunGitAsync(
+            var (exitCode, stdout, stderr) = await GitExec.RunAsync(
                 repoRoot, "branch", canonicalBranch, trunk).ConfigureAwait(false);
             if (exitCode != 0)
             {
@@ -342,7 +342,7 @@ namespace MultiTerminal.Services
                 args.Add(branchName);
             }
 
-            var (exitCode, stdout, stderr) = await RunGitAsync(repoRoot, args.ToArray()).ConfigureAwait(false);
+            var (exitCode, stdout, stderr) = await GitExec.RunAsync(repoRoot, GitExec.WorktreeAddTimeoutMs, args.ToArray()).ConfigureAwait(false);
             if (exitCode != 0)
             {
                 throw new InvalidOperationException(
@@ -436,12 +436,12 @@ namespace MultiTerminal.Services
             if (!Directory.Exists(record.WorktreePath))
 #pragma warning restore CA3003
             {
-                await RunGitAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
+                await GitExec.RunAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
                 _db.MarkWorktreePruned(record.TaskId, record.AgentName);
                 return true;
             }
 
-            var (exitCode, stdout, stderr) = await RunGitAsync(
+            var (exitCode, stdout, stderr) = await GitExec.RunAsync(
                 repoRoot, "worktree", "remove", record.WorktreePath).ConfigureAwait(false);
 
             if (exitCode != 0)
@@ -529,7 +529,7 @@ namespace MultiTerminal.Services
         /// </summary>
         private static async Task<bool> IsWorktreeUnregisteredAsync(string repoRoot, string worktreePath)
         {
-            var (exitCode, stdout, _) = await RunGitAsync(
+            var (exitCode, stdout, _) = await GitExec.RunAsync(
                 repoRoot, "worktree", "list", "--porcelain").ConfigureAwait(false);
             if (exitCode != 0) return false;
 
@@ -614,7 +614,7 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(repoRoot)) return null;
             try
             {
-                var (exitCode, stdout, _) = await RunGitAsync(repoRoot, "status", "--porcelain").ConfigureAwait(false);
+                var (exitCode, stdout, _) = await GitExec.RunAsync(repoRoot, "status", "--porcelain").ConfigureAwait(false);
                 if (exitCode != 0) return null;
                 return WorktreeMergeService.ParsePorcelainPaths(stdout);
             }
@@ -666,29 +666,5 @@ namespace MultiTerminal.Services
         }
 #pragma warning restore CA3003
 
-        private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(
-            string workingDir, params string[] args)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "git",
-                WorkingDirectory = workingDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            foreach (var arg in args)
-            {
-                psi.ArgumentList.Add(arg);
-            }
-
-            using var proc = new Process { StartInfo = psi };
-            proc.Start();
-            string stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-            string stderr = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
-            await proc.WaitForExitAsync().ConfigureAwait(false);
-            return (proc.ExitCode, stdout, stderr);
-        }
     }
 }

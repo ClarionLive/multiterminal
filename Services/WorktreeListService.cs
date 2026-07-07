@@ -109,8 +109,8 @@ namespace MultiTerminal.Services
                 return new List<WorktreeEntry>();
 #pragma warning restore CA3003
 
-            var (exitCode, stdout, _) = await RunGitAsync(
-                workingDir, "worktree", "list", "--porcelain").ConfigureAwait(false);
+            var (exitCode, stdout, _) = await GitExec.RunAsync(
+                workingDir, GitTimeoutMs, "worktree", "list", "--porcelain").ConfigureAwait(false);
             if (exitCode != 0 || string.IsNullOrEmpty(stdout))
                 return new List<WorktreeEntry>();
 
@@ -295,8 +295,8 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(worktreePath) || !Directory.Exists(worktreePath))
                 return -1;
 
-            var (exitCode, stdout, _) = await RunGitAsync(
-                worktreePath, "status", "--porcelain").ConfigureAwait(false);
+            var (exitCode, stdout, _) = await GitExec.RunAsync(
+                worktreePath, GitTimeoutMs, "status", "--porcelain").ConfigureAwait(false);
             if (exitCode != 0) return -1;
             if (string.IsNullOrEmpty(stdout)) return 0;
 
@@ -329,8 +329,8 @@ namespace MultiTerminal.Services
             if (!Directory.Exists(workingDir)) return string.Empty;
 #pragma warning restore CA3003
 
-            var (exitCode, stdout, _) = await RunGitAsync(
-                workingDir, "rev-parse", "--git-common-dir").ConfigureAwait(false);
+            var (exitCode, stdout, _) = await GitExec.RunAsync(
+                workingDir, GitTimeoutMs, "rev-parse", "--git-common-dir").ConfigureAwait(false);
             if (exitCode != 0) return string.Empty;
             string raw = (stdout ?? string.Empty).Trim();
             if (raw.Length == 0) return string.Empty;
@@ -439,53 +439,6 @@ namespace MultiTerminal.Services
             {
                 return path.Replace('/', Path.DirectorySeparatorChar)
                     .TrimEnd(Path.DirectorySeparatorChar);
-            }
-        }
-
-        /// <summary>
-        /// Runs git as a child process with a wall-clock timeout. Returns
-        /// <c>(-1, "", "")</c> on timeout or process-start failure — caller
-        /// must treat non-zero exit codes as "no data." Process gets killed
-        /// on timeout to avoid orphan hangs.
-        /// </summary>
-        private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(
-            string workingDir, params string[] args)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "git",
-                WorkingDirectory = workingDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-            foreach (var arg in args) psi.ArgumentList.Add(arg);
-
-            try
-            {
-                using var proc = new Process { StartInfo = psi };
-                proc.Start();
-
-                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-                var stderrTask = proc.StandardError.ReadToEndAsync();
-                var exitTask = proc.WaitForExitAsync();
-
-                var winner = await Task.WhenAny(exitTask, Task.Delay(GitTimeoutMs)).ConfigureAwait(false);
-                if (winner != exitTask)
-                {
-                    try { proc.Kill(entireProcessTree: true); } catch { }
-                    return (-1, string.Empty, string.Empty);
-                }
-
-                string stdout = await stdoutTask.ConfigureAwait(false);
-                string stderr = await stderrTask.ConfigureAwait(false);
-                return (proc.ExitCode, stdout, stderr);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[WorktreeListService] git invocation failed: {ex.Message}");
-                return (-1, string.Empty, string.Empty);
             }
         }
     }

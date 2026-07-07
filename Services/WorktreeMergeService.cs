@@ -79,17 +79,17 @@ namespace MultiTerminal.Services
             // this equals the canonical record's branch.
             string branchName = WorktreeNaming.CanonicalBranch(taskId);
 
-            var trunkResult = await RunGitAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
-            if (trunkResult.exitCode != 0)
+            var trunkResult = await GitExec.RunAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (trunkResult.ExitCode != 0)
             {
                 return new MergeResult
                 {
                     Success = false,
-                    Stderr = $"rev-parse trunk failed: {trunkResult.stderr.Trim()}"
+                    Stderr = $"rev-parse trunk failed: {trunkResult.Stderr.Trim()}"
                 };
             }
 
-            string trunk = trunkResult.stdout.Trim();
+            string trunk = trunkResult.Stdout.Trim();
             if (string.Equals(trunk, "HEAD", StringComparison.OrdinalIgnoreCase))
             {
                 return new MergeResult
@@ -152,16 +152,16 @@ namespace MultiTerminal.Services
                 };
             }
 
-            var branchListResult = await RunGitAsync(repoRoot, "branch", "--list", branchName).ConfigureAwait(false);
-            if (branchListResult.exitCode != 0)
+            var branchListResult = await GitExec.RunAsync(repoRoot, "branch", "--list", branchName).ConfigureAwait(false);
+            if (branchListResult.ExitCode != 0)
             {
                 return new MergeResult
                 {
                     Success = false,
-                    Stderr = $"branch --list failed: {branchListResult.stderr.Trim()}"
+                    Stderr = $"branch --list failed: {branchListResult.Stderr.Trim()}"
                 };
             }
-            if (string.IsNullOrWhiteSpace(branchListResult.stdout))
+            if (string.IsNullOrWhiteSpace(branchListResult.Stdout))
             {
                 return new MergeResult
                 {
@@ -170,26 +170,26 @@ namespace MultiTerminal.Services
                 };
             }
 
-            var aheadResult = await RunGitAsync(
+            var aheadResult = await GitExec.RunAsync(
                 repoRoot, "log", "--oneline", $"{trunk}..{branchName}").ConfigureAwait(false);
-            if (aheadResult.exitCode != 0)
+            if (aheadResult.ExitCode != 0)
             {
                 return new MergeResult
                 {
                     Success = false,
-                    Stderr = $"git log {trunk}..{branchName} failed: {aheadResult.stderr.Trim()}"
+                    Stderr = $"git log {trunk}..{branchName} failed: {aheadResult.Stderr.Trim()}"
                 };
             }
-            if (string.IsNullOrWhiteSpace(aheadResult.stdout))
+            if (string.IsNullOrWhiteSpace(aheadResult.Stdout))
             {
                 // Task branch has no commits beyond trunk — safe to delete without merging.
-                var deleteEmpty = await RunGitAsync(repoRoot, "branch", "-d", branchName).ConfigureAwait(false);
-                if (deleteEmpty.exitCode != 0)
+                var deleteEmpty = await GitExec.RunAsync(repoRoot, "branch", "-d", branchName).ConfigureAwait(false);
+                if (deleteEmpty.ExitCode != 0)
                 {
                     return new MergeResult
                     {
                         Success = false,
-                        Stderr = $"branch -d (empty) failed: {deleteEmpty.stderr.Trim()}"
+                        Stderr = $"branch -d (empty) failed: {deleteEmpty.Stderr.Trim()}"
                     };
                 }
                 return new MergeResult
@@ -204,18 +204,18 @@ namespace MultiTerminal.Services
             // git would refuse anyway, but our message is clearer. Use
             // --untracked-files=no because untracked files don't block merges
             // unless they'd be overwritten, and git's own check catches that case.
-            var dirtyCheck = await RunGitAsync(repoRoot, "status", "--porcelain", "--untracked-files=no").ConfigureAwait(false);
-            if (dirtyCheck.exitCode != 0)
+            var dirtyCheck = await GitExec.RunAsync(repoRoot, "status", "--porcelain", "--untracked-files=no").ConfigureAwait(false);
+            if (dirtyCheck.ExitCode != 0)
             {
                 return new MergeResult
                 {
                     Success = false,
-                    Stderr = $"main-checkout status check failed: {dirtyCheck.stderr.Trim()}"
+                    Stderr = $"main-checkout status check failed: {dirtyCheck.Stderr.Trim()}"
                 };
             }
-            if (!string.IsNullOrWhiteSpace(dirtyCheck.stdout))
+            if (!string.IsNullOrWhiteSpace(dirtyCheck.Stdout))
             {
-                var dirtyPaths = ParsePorcelainPaths(dirtyCheck.stdout);
+                var dirtyPaths = ParsePorcelainPaths(dirtyCheck.Stdout);
                 var nonBookkeeping = new System.Collections.Generic.List<string>();
                 var bookkeeping = new System.Collections.Generic.List<string>();
                 foreach (var p in dirtyPaths)
@@ -241,25 +241,25 @@ namespace MultiTerminal.Services
                 // floating as a perpetual working-tree change.
                 foreach (var p in bookkeeping)
                 {
-                    var addResult = await RunGitAsync(repoRoot, "add", "--", p).ConfigureAwait(false);
-                    if (addResult.exitCode != 0)
+                    var addResult = await GitExec.RunAsync(repoRoot, "add", "--", p).ConfigureAwait(false);
+                    if (addResult.ExitCode != 0)
                     {
                         return new MergeResult
                         {
                             Success = false,
-                            Stderr = $"failed to stage bookkeeping file '{p}' before merge: {addResult.stderr.Trim()}"
+                            Stderr = $"failed to stage bookkeeping file '{p}' before merge: {addResult.Stderr.Trim()}"
                         };
                     }
                 }
 
-                var commitResult = await RunGitAsync(
+                var commitResult = await GitExec.RunAsync(
                     repoRoot, "commit", "-m", $"chore: project.json bookkeeping for {taskId.Substring(0, Math.Min(8, taskId.Length))}").ConfigureAwait(false);
-                if (commitResult.exitCode != 0)
+                if (commitResult.ExitCode != 0)
                 {
                     return new MergeResult
                     {
                         Success = false,
-                        Stderr = $"failed to commit bookkeeping files before merge: {commitResult.stderr.Trim()}; stdout: {commitResult.stdout.Trim()}"
+                        Stderr = $"failed to commit bookkeeping files before merge: {commitResult.Stderr.Trim()}; stdout: {commitResult.Stdout.Trim()}"
                     };
                 }
             }
@@ -272,45 +272,45 @@ namespace MultiTerminal.Services
             // merge and abort if it no longer matches the validated trunk. This
             // shrinks the race window to effectively nothing; a stronger repo-wide
             // mutex is tracked as a follow-up.
-            var headRecheck = await RunGitAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
-            if (headRecheck.exitCode != 0 || !string.Equals(headRecheck.stdout.Trim(), trunk, StringComparison.Ordinal))
+            var headRecheck = await GitExec.RunAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (headRecheck.ExitCode != 0 || !string.Equals(headRecheck.Stdout.Trim(), trunk, StringComparison.Ordinal))
             {
                 return new MergeResult
                 {
                     Success = false,
                     Merged = false,
                     MergedInto = trunk,
-                    Stderr = $"Main checkout's branch changed from '{trunk}' to '{headRecheck.stdout.Trim()}' during merge preparation (concurrent checkout?); aborting to avoid merging '{branchName}' into the wrong branch. Re-mark the task done to retry."
+                    Stderr = $"Main checkout's branch changed from '{trunk}' to '{headRecheck.Stdout.Trim()}' during merge preparation (concurrent checkout?); aborting to avoid merging '{branchName}' into the wrong branch. Re-mark the task done to retry."
                 };
             }
 
-            var mergeRunResult = await RunGitAsync(
+            var mergeRunResult = await GitExec.RunAsync(
                 repoRoot, "merge", "--no-edit", branchName).ConfigureAwait(false);
-            if (mergeRunResult.exitCode != 0)
+            if (mergeRunResult.ExitCode != 0)
             {
                 // Conflict (or other merge error) — abort to keep main clean.
-                await RunGitAsync(repoRoot, "merge", "--abort").ConfigureAwait(false);
+                await GitExec.RunAsync(repoRoot, "merge", "--abort").ConfigureAwait(false);
                 return new MergeResult
                 {
                     Success = false,
                     HadConflicts = true,
                     MergedInto = trunk,
-                    Stderr = $"git merge failed (conflict or other error): {mergeRunResult.stderr.Trim()}; stdout: {mergeRunResult.stdout.Trim()}"
+                    Stderr = $"git merge failed (conflict or other error): {mergeRunResult.Stderr.Trim()}; stdout: {mergeRunResult.Stdout.Trim()}"
                 };
             }
 
             // Use lowercase -d (refuses if not merged). The merge just succeeded
             // so this should always work; if it doesn't, surface as partial
             // success — the merge is durable, only the branch cleanup failed.
-            var deleteBranchResult = await RunGitAsync(repoRoot, "branch", "-d", branchName).ConfigureAwait(false);
-            if (deleteBranchResult.exitCode != 0)
+            var deleteBranchResult = await GitExec.RunAsync(repoRoot, "branch", "-d", branchName).ConfigureAwait(false);
+            if (deleteBranchResult.ExitCode != 0)
             {
                 return new MergeResult
                 {
                     Success = true,
                     Merged = true,
                     MergedInto = trunk,
-                    Stderr = $"merged but branch -d failed (manual cleanup needed): {deleteBranchResult.stderr.Trim()}"
+                    Stderr = $"merged but branch -d failed (manual cleanup needed): {deleteBranchResult.Stderr.Trim()}"
                 };
             }
 
@@ -331,10 +331,10 @@ namespace MultiTerminal.Services
         /// </summary>
         private async Task<(bool ok, string trunk, string error)> ResolveTrunkAsync(string repoRoot)
         {
-            var r = await RunGitAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
-            if (r.exitCode != 0)
-                return (false, null, $"git rev-parse --abbrev-ref HEAD failed: {r.stderr.Trim()}");
-            string trunk = r.stdout.Trim();
+            var r = await GitExec.RunAsync(repoRoot, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (r.ExitCode != 0)
+                return (false, null, $"git rev-parse --abbrev-ref HEAD failed: {r.Stderr.Trim()}");
+            string trunk = r.Stdout.Trim();
             if (string.Equals(trunk, "HEAD", StringComparison.OrdinalIgnoreCase))
                 return (false, null, "main checkout is in detached HEAD; refusing to create the canonical branch from an unknown base");
             if (trunk.StartsWith("task/", StringComparison.Ordinal))
@@ -390,11 +390,11 @@ namespace MultiTerminal.Services
 
             // (b) Helper branches present in git but not covered by an active row.
             string helperPrefix = canonicalBranch + "--"; // task/<idShort>--
-            var branchList = await RunGitAsync(
+            var branchList = await GitExec.RunAsync(
                 repoRoot, "for-each-ref", "--format=%(refname:short)", $"refs/heads/{canonicalBranch}*").ConfigureAwait(false);
-            if (branchList.exitCode == 0)
+            if (branchList.ExitCode == 0)
             {
-                foreach (var raw in branchList.stdout.Split('\n'))
+                foreach (var raw in branchList.Stdout.Split('\n'))
                 {
                     string b = raw.Trim();
                     if (b.StartsWith(helperPrefix, StringComparison.Ordinal) && seenBranches.Add(b))
@@ -427,8 +427,8 @@ namespace MultiTerminal.Services
             {
                 // Ensure the canonical branch exists (helpers create it when they fork,
                 // but be defensive); create from current HEAD if missing.
-                var refCheck = await RunGitAsync(repoRoot, "show-ref", "--verify", "--quiet", $"refs/heads/{canonicalBranch}").ConfigureAwait(false);
-                if (refCheck.exitCode != 0)
+                var refCheck = await GitExec.RunAsync(repoRoot, "show-ref", "--verify", "--quiet", $"refs/heads/{canonicalBranch}").ConfigureAwait(false);
+                if (refCheck.ExitCode != 0)
                 {
                     // Root the canonical branch at trunk, not at whatever HEAD points to
                     // (bab81a92 pipeline fix #4): a detached/task-branch HEAD here would
@@ -440,11 +440,11 @@ namespace MultiTerminal.Services
                         result.Stderr = $"could not create canonical branch '{canonicalBranch}' for integration: {trunkErr}";
                         return result;
                     }
-                    var branchCreate = await RunGitAsync(repoRoot, "branch", canonicalBranch, trunk).ConfigureAwait(false);
-                    if (branchCreate.exitCode != 0)
+                    var branchCreate = await GitExec.RunAsync(repoRoot, "branch", canonicalBranch, trunk).ConfigureAwait(false);
+                    if (branchCreate.ExitCode != 0)
                     {
                         result.Success = false;
-                        result.Stderr = $"could not create canonical branch '{canonicalBranch}' from '{trunk}' for integration: {branchCreate.stderr.Trim()}";
+                        result.Stderr = $"could not create canonical branch '{canonicalBranch}' from '{trunk}' for integration: {branchCreate.Stderr.Trim()}";
                         return result;
                     }
                 }
@@ -455,13 +455,13 @@ namespace MultiTerminal.Services
                 // worktree registered, which would make the `git worktree add` below
                 // fail. Best-effort remove it first (no-op when absent), then prune any
                 // dangling administrative entry.
-                await RunGitAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
-                await RunGitAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
-                var add = await RunGitAsync(repoRoot, "worktree", "add", transientPath, canonicalBranch).ConfigureAwait(false);
-                if (add.exitCode != 0)
+                await GitExec.RunAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
+                await GitExec.RunAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
+                var add = await GitExec.RunAsync(repoRoot, GitExec.WorktreeAddTimeoutMs, "worktree", "add", transientPath, canonicalBranch).ConfigureAwait(false);
+                if (add.ExitCode != 0)
                 {
                     result.Success = false;
-                    result.Stderr = $"could not create transient canonical worktree for integration: {add.stderr.Trim()}";
+                    result.Stderr = $"could not create transient canonical worktree for integration: {add.Stderr.Trim()}";
                     return result;
                 }
                 canonicalWorktree = transientPath;
@@ -471,26 +471,26 @@ namespace MultiTerminal.Services
             try
             {
                 // Confirm the host worktree is on the canonical branch before merging.
-                var headResult = await RunGitAsync(canonicalWorktree, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
-                if (headResult.exitCode != 0
-                    || !string.Equals(headResult.stdout.Trim(), canonicalBranch, StringComparison.Ordinal))
+                var headResult = await GitExec.RunAsync(canonicalWorktree, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+                if (headResult.ExitCode != 0
+                    || !string.Equals(headResult.Stdout.Trim(), canonicalBranch, StringComparison.Ordinal))
                 {
                     result.Success = false;
-                    result.Stderr = $"canonical worktree not on '{canonicalBranch}' (HEAD='{headResult.stdout.Trim()}'); refusing to integrate";
+                    result.Stderr = $"canonical worktree not on '{canonicalBranch}' (HEAD='{headResult.Stdout.Trim()}'); refusing to integrate";
                     return result;
                 }
 
                 foreach (var helperBranch in helperBranches)
                 {
-                    var ahead = await RunGitAsync(
+                    var ahead = await GitExec.RunAsync(
                         repoRoot, "log", "--oneline", $"{canonicalBranch}..{helperBranch}").ConfigureAwait(false);
-                    if (ahead.exitCode != 0)
+                    if (ahead.ExitCode != 0)
                     {
                         result.Success = false;
-                        result.Stderr = $"git log {canonicalBranch}..{helperBranch} failed: {ahead.stderr.Trim()}";
+                        result.Stderr = $"git log {canonicalBranch}..{helperBranch} failed: {ahead.Stderr.Trim()}";
                         return result;
                     }
-                    if (string.IsNullOrWhiteSpace(ahead.stdout))
+                    if (string.IsNullOrWhiteSpace(ahead.Stdout))
                     {
                         // No commits beyond canonical — nothing to merge, but still a
                         // branch to clean up after prune.
@@ -498,16 +498,16 @@ namespace MultiTerminal.Services
                         continue;
                     }
 
-                    var merge = await RunGitAsync(canonicalWorktree, "merge", "--no-edit", helperBranch).ConfigureAwait(false);
-                    if (merge.exitCode != 0)
+                    var merge = await GitExec.RunAsync(canonicalWorktree, "merge", "--no-edit", helperBranch).ConfigureAwait(false);
+                    if (merge.ExitCode != 0)
                     {
                         // Conflict — abort to keep the canonical worktree clean, record
                         // the branch, and stop. Caller preserves all worktrees/branches.
-                        await RunGitAsync(canonicalWorktree, "merge", "--abort").ConfigureAwait(false);
+                        await GitExec.RunAsync(canonicalWorktree, "merge", "--abort").ConfigureAwait(false);
                         result.Success = false;
                         result.HadConflicts = true;
                         result.ConflictBranches.Add(helperBranch);
-                        result.Stderr = $"integration of '{helperBranch}' into '{canonicalBranch}' conflicted: {merge.stderr.Trim()}; stdout: {merge.stdout.Trim()}";
+                        result.Stderr = $"integration of '{helperBranch}' into '{canonicalBranch}' conflicted: {merge.Stderr.Trim()}; stdout: {merge.Stdout.Trim()}";
                         return result;
                     }
 
@@ -522,7 +522,7 @@ namespace MultiTerminal.Services
                 {
                     // Remove the transient host worktree; integration commits live on
                     // the canonical branch ref, so --force is safe.
-                    await RunGitAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
+                    await GitExec.RunAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
                 }
             }
         }
@@ -537,8 +537,8 @@ namespace MultiTerminal.Services
         public async Task<bool> DeleteBranchAsync(string repoRoot, string branchName, bool force)
         {
             if (string.IsNullOrEmpty(repoRoot) || string.IsNullOrEmpty(branchName)) return false;
-            var res = await RunGitAsync(repoRoot, "branch", force ? "-D" : "-d", branchName).ConfigureAwait(false);
-            return res.exitCode == 0;
+            var res = await GitExec.RunAsync(repoRoot, "branch", force ? "-D" : "-d", branchName).ConfigureAwait(false);
+            return res.ExitCode == 0;
         }
 
         /// <summary>
@@ -599,10 +599,10 @@ namespace MultiTerminal.Services
         private static async Task<string> DetectDefaultBranchAsync(string repoRoot)
         {
             // (2) Remote's published default (origin/HEAD -> origin/<branch>).
-            var remote = await RunGitAsync(repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
-            if (remote.exitCode == 0)
+            var remote = await GitExec.RunAsync(repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
+            if (remote.ExitCode == 0)
             {
-                string r = remote.stdout.Trim();
+                string r = remote.Stdout.Trim();
                 const string prefix = "origin/";
                 if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
                 if (!string.IsNullOrEmpty(r)) return r;
@@ -622,12 +622,12 @@ namespace MultiTerminal.Services
             // with a genuinely unconventional trunk name must set the project's
             // git_default_branch (the authoritative source). Task branches
             // (task/<id>[--<slug>]) are excluded — they're never trunk.
-            var branches = await RunGitAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/").ConfigureAwait(false);
-            if (branches.exitCode == 0)
+            var branches = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/").ConfigureAwait(false);
+            if (branches.ExitCode == 0)
             {
                 string sole = null;
                 int count = 0;
-                foreach (var raw in branches.stdout.Split('\n'))
+                foreach (var raw in branches.Stdout.Split('\n'))
                 {
                     string b = raw.Trim();
                     if (b.Length == 0 || b.StartsWith("task/", StringComparison.Ordinal)) continue;
@@ -660,30 +660,6 @@ namespace MultiTerminal.Services
             return false;
         }
 
-        private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(
-            string workingDir, params string[] args)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "git",
-                WorkingDirectory = workingDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            foreach (var arg in args)
-            {
-                psi.ArgumentList.Add(arg);
-            }
-
-            using var proc = new Process { StartInfo = psi };
-            proc.Start();
-            string stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-            string stderr = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
-            await proc.WaitForExitAsync().ConfigureAwait(false);
-            return (proc.ExitCode, stdout, stderr);
-        }
     }
 
     /// <summary>
