@@ -1047,7 +1047,8 @@ namespace MultiTerminal.Docking
             var claudeFolder = SessionLineageService.GetClaudeProjectFolder(projectPath);
             if (claudeFolder == null)
             {
-                DebugLogService?.Warning("ProjectPanel", $"No Claude project folder found for {projectPath}");
+                DebugLogService?.Warning("ProjectPanel", "No Claude project folder found");
+                DebugLogService?.Trace("ProjectPanel", $"No Claude project folder found for {projectPath}");
                 _renderer?.ClearSessions();
                 return;
             }
@@ -1073,7 +1074,8 @@ namespace MultiTerminal.Docking
                 });
 
                 // Back on UI thread - update renderer
-                DebugLogService?.Info("ProjectPanel", $"Loaded {sessionSummaries.Count} sessions from lineage for {projectPath}");
+                DebugLogService?.Info("ProjectPanel", $"Loaded {sessionSummaries.Count} sessions from lineage");
+                DebugLogService?.Trace("ProjectPanel", $"Loaded sessions for {projectPath}");
                 _renderer?.ShowSessions(sessionSummaries);
             }
             catch (Exception ex)
@@ -1089,7 +1091,7 @@ namespace MultiTerminal.Docking
             if (string.IsNullOrEmpty(sessionId))
                 return;
 
-            DebugLogService?.Info("ProjectPanel", $"OpenSessionRequested: {sessionId}");
+            DebugLogService?.Trace("ProjectPanel", $"OpenSessionRequested: {sessionId}");
 
             // Raise the event for MainForm to handle session viewing
             ViewSessionRequested?.Invoke(this, sessionId);
@@ -1107,7 +1109,7 @@ namespace MultiTerminal.Docking
                 return;
             }
 
-            DebugLogService?.Info("ProjectPanel", $"SearchSessionsRequested: {query}");
+            DebugLogService?.Trace("ProjectPanel", $"SearchSessionsRequested: {query}");
 
             try
             {
@@ -1132,7 +1134,8 @@ namespace MultiTerminal.Docking
                     }).ToList();
                 });
 
-                DebugLogService?.Info("ProjectPanel", $"Found {results.Count} message matches for '{query}'");
+                DebugLogService?.Info("ProjectPanel", $"Found {results.Count} message matches");
+                DebugLogService?.Trace("ProjectPanel", $"Search query: '{query}'");
                 _renderer?.ShowSearchResults(results, query);
             }
             catch (Exception ex)
@@ -1146,7 +1149,7 @@ namespace MultiTerminal.Docking
             if (_currentProject?.Path == null)
                 return;
 
-            DebugLogService?.Info("ProjectPanel", $"SyncSessionsRequested for project: {_currentProject.Path}");
+            DebugLogService?.Trace("ProjectPanel", $"SyncSessionsRequested for project: {_currentProject.Path}");
 
             try
             {
@@ -1161,7 +1164,8 @@ namespace MultiTerminal.Docking
                 var claudeFolder = SessionLineageService.GetClaudeProjectFolder(_currentProject.Path);
                 if (claudeFolder == null)
                 {
-                    DebugLogService?.Warning("ProjectPanel", $"No Claude project folder for sync: {_currentProject.Path}");
+                    DebugLogService?.Warning("ProjectPanel", "No Claude project folder for sync");
+                    DebugLogService?.Trace("ProjectPanel", $"No Claude project folder for sync: {_currentProject.Path}");
                     _renderer?.ShowSyncResult(0);
                     return;
                 }
@@ -1220,7 +1224,8 @@ namespace MultiTerminal.Docking
                         .ToList();
                 });
 
-                DebugLogService?.Info("ProjectPanel", $"Loaded {summaries.Count} messages for session {sessionId}");
+                DebugLogService?.Info("ProjectPanel", $"Loaded {summaries.Count} messages for a session");
+                DebugLogService?.Trace("ProjectPanel", $"Loaded messages for session {sessionId}");
                 _renderer?.ShowSessionMessages(sessionId, summaries);
             }
             catch (Exception ex)
@@ -1421,7 +1426,7 @@ namespace MultiTerminal.Docking
         /// </summary>
         private void OnReadFileRequested(object sender, string filePath)
         {
-            DebugLogService?.Info("ProjectPanel", $"OnReadFileRequested: filePath={filePath}");
+            DebugLogService?.Trace("ProjectPanel", $"OnReadFileRequested: filePath={filePath}");
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
             {
                 DebugLogService?.Warning("ProjectPanel", $"OnReadFileRequested: file is null/empty or doesn't exist");
@@ -1429,7 +1434,8 @@ namespace MultiTerminal.Docking
             }
             if (!IsPathWithinProject(filePath))
             {
-                DebugLogService?.Warning("ProjectPanel", $"OnReadFileRequested: path not within project. ProjectPath={_currentProject?.Path ?? "null"}");
+                DebugLogService?.Warning("ProjectPanel", "OnReadFileRequested: path not within project");
+                DebugLogService?.Trace("ProjectPanel", $"OnReadFileRequested: path not within project. ProjectPath={_currentProject?.Path ?? "null"}");
                 return;
             }
 

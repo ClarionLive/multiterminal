@@ -752,7 +752,6 @@ namespace MultiTerminal.Terminal
                 return false;
             }
 
-            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
             DebugLogService?.Trace("WebViewTerminalRenderer", $"SendEnterWithRetryAsync starting (maxRetries={maxRetries})");
 
             // Progressive escalation: Try different methods based on attempt number
@@ -854,7 +853,6 @@ namespace MultiTerminal.Terminal
                 return false;
             }
 
-            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
             DebugLogService?.Trace("WebViewTerminalRenderer", $"SendEnterWithFallbackAsync starting");
 
             // Method 1: Try JS sendEnter (current approach)

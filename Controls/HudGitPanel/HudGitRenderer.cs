@@ -476,8 +476,12 @@ namespace MultiTerminal.Controls
 
             if (!IsAllowedWorktree(newPath))
             {
+                // Raw path omitted from this Release-visible Warning (4c86f18d: user filesystem paths are
+                // sensitive data; the event itself is the signal). Full path available at Trace if needed.
                 _broker?.DebugLogService?.Warning(
-                    "HudGit", $"SwitchToRepo: Rejected non-allowlisted path: {newPath}");
+                    "HudGit", "SwitchToRepo: rejected non-allowlisted path");
+                _broker?.DebugLogService?.Trace(
+                    "HudGit", $"SwitchToRepo: rejected path was: {newPath}");
                 return;
             }
 
@@ -518,8 +522,12 @@ namespace MultiTerminal.Controls
                 && !string.Equals(_projectPath, _originalProjectPath, StringComparison.OrdinalIgnoreCase)
                 && !IsAllowedWorktree(_projectPath))
             {
+                // Paths omitted from this Release-visible Warning (4c86f18d: filesystem paths are sensitive);
+                // the revert event is the signal, full paths at Trace.
                 _broker?.DebugLogService?.Warning(
-                    "HudGit", $"UpdateWorktreeAllowlist: Current path '{_projectPath}' is no longer in the validated worktree set — reverting to original '{_originalProjectPath}'.");
+                    "HudGit", "UpdateWorktreeAllowlist: current path no longer in the validated worktree set — reverting to original");
+                _broker?.DebugLogService?.Trace(
+                    "HudGit", $"UpdateWorktreeAllowlist: reverting '{_projectPath}' → '{_originalProjectPath}'");
                 PersistSelectedRepo(_originalProjectPath, _originalProjectPath); // removes key
                 UnsubscribeCurrent();
                 _projectPath = _originalProjectPath;
@@ -1197,8 +1205,12 @@ namespace MultiTerminal.Controls
                 if (!string.IsNullOrEmpty(registered)
                     && !string.Equals(registered, _projectPath, StringComparison.OrdinalIgnoreCase))
                 {
+                    // Paths omitted from this Release-visible Warning (4c86f18d: filesystem paths are
+                    // sensitive); the rebind event is the signal, full paths at Trace.
                     _broker?.DebugLogService?.Warning(
-                        "HudGit", $"ApplyProject: Bound path '{_projectPath}' no longer exists; rebinding to registered project path '{registered}'.");
+                        "HudGit", "ApplyProject: bound path no longer exists; rebinding to registered project path");
+                    _broker?.DebugLogService?.Trace(
+                        "HudGit", $"ApplyProject: rebinding '{_projectPath}' → '{registered}'");
                     _projectPath = registered;
                 }
             }

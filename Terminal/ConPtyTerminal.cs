@@ -286,12 +286,12 @@ namespace MultiTerminal.Terminal
 
         private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
         {
-            DebugLogService?.Info("ConPtyTerminal.StartProcess", $"===== START =====");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"shellPath: '{shellPath}'");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"workingDirectory: '{workingDirectory}'");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"docId: '{docId ?? "null"}'");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"terminalName: '{terminalName ?? "null"}'");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
+            DebugLogService?.Info("ConPtyTerminal", $"StartProcess ===== START =====");
+            DebugLogService?.Trace("ConPtyTerminal", $"shellPath: '{shellPath}'");
+            DebugLogService?.Trace("ConPtyTerminal", $"workingDirectory: '{workingDirectory}'");
+            DebugLogService?.Trace("ConPtyTerminal", $"docId: '{docId ?? "null"}'");
+            DebugLogService?.Trace("ConPtyTerminal", $"terminalName: '{terminalName ?? "null"}'");
+            DebugLogService?.Trace("ConPtyTerminal", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
 
             // Initialize attribute list
             IntPtr attrListSize = IntPtr.Zero;
@@ -328,7 +328,7 @@ namespace MultiTerminal.Terminal
             // Build command line with execution policy bypass
             // Include prompt function that sets window title to current directory (for recent folders tracking)
             // Set MULTITERMINAL_DOC_ID and MULTITERMINAL_NAME environment variables for MCP
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Building environment setup...");
+            DebugLogService?.Trace("ConPtyTerminal", $"Building environment setup...");
             // Force UTF-8 encoding in the child PowerShell process for correct international character handling
             string envSetup = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::InputEncoding = [System.Text.Encoding]::UTF8; ";
 
@@ -344,55 +344,55 @@ namespace MultiTerminal.Terminal
             if (string.IsNullOrEmpty(docId))
             {
                 docId = Guid.NewGuid().ToString("N").Substring(0, 8);
-                DebugLogService?.Warning("ConPtyTerminal.StartProcess", $"NO docId supplied - generated fallback MULTITERMINAL_DOC_ID = '{docId}'");
+                DebugLogService?.Warning("ConPtyTerminal", $"NO docId supplied - generated fallback MULTITERMINAL_DOC_ID = '{docId}'");
             }
             string safeDocId = docId.Replace("'", "''");
             envSetup += $"$env:MULTITERMINAL_DOC_ID = '{safeDocId}'; ";
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MULTITERMINAL_DOC_ID = '{docId}'");
+            DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_DOC_ID = '{docId}'");
 
             if (!string.IsNullOrEmpty(terminalName))
             {
                 string safeTerminalName = terminalName.Replace("'", "''");
                 envSetup += $"$env:MULTITERMINAL_NAME = '{safeTerminalName}'; ";
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MULTITERMINAL_NAME = '{terminalName}'");
+                DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_NAME = '{terminalName}'");
             }
             else
             {
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"NO terminalName - MULTITERMINAL_NAME will not be set!");
+                DebugLogService?.Trace("ConPtyTerminal", $"NO terminalName - MULTITERMINAL_NAME will not be set!");
             }
 
             if (!string.IsNullOrEmpty(spawnerName))
             {
                 string safeSpawnerName = spawnerName.Replace("'", "''");
                 envSetup += $"$env:MULTITERMINAL_SPAWNER = '{safeSpawnerName}'; ";
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MULTITERMINAL_SPAWNER = '{spawnerName}'");
+                DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_SPAWNER = '{spawnerName}'");
             }
 
             if (!string.IsNullOrEmpty(projectId))
             {
                 string safeProjectId = projectId.Replace("'", "''");
                 envSetup += $"$env:MULTITERMINAL_PROJECT_ID = '{safeProjectId}'; ";
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MULTITERMINAL_PROJECT_ID = '{projectId}'");
+                DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_PROJECT_ID = '{projectId}'");
             }
 
             if (isTeamLead)
             {
                 envSetup += "$env:MULTITERMINAL_TEAM_LEAD = 'true'; ";
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MULTITERMINAL_TEAM_LEAD = 'true'");
+                DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_TEAM_LEAD = 'true'");
             }
 
             if (!string.IsNullOrEmpty(gatewayProfile))
             {
                 string safeGatewayProfile = gatewayProfile.Replace("'", "''");
                 envSetup += $"$env:MCP_GATEWAY_PROFILE = '{safeGatewayProfile}'; ";
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MCP_GATEWAY_PROFILE = '{gatewayProfile}'");
+                DebugLogService?.Trace("ConPtyTerminal", $"Setting MCP_GATEWAY_PROFILE = '{gatewayProfile}'");
             }
 
             if (!string.IsNullOrEmpty(taskWorktreePath))
             {
                 string safeWorktreePath = taskWorktreePath.Replace("'", "''");
                 envSetup += $"$env:MULTITERMINAL_TASK_WORKTREE = '{safeWorktreePath}'; ";
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Setting MULTITERMINAL_TASK_WORKTREE = '{taskWorktreePath}'");
+                DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_TASK_WORKTREE = '{taskWorktreePath}'");
             }
 
             // Enable flicker-free alternate-screen renderer for Claude Code
@@ -438,7 +438,7 @@ namespace MultiTerminal.Terminal
             }
             else
             {
-                DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"NO autoRunCommand - terminal will start with prompt only");
+                DebugLogService?.Trace("ConPtyTerminal", $"NO autoRunCommand - terminal will start with prompt only");
             }
 
             // Use -NoExit only for plain shells (no autoRunCommand). When an autoRunCommand is
@@ -446,11 +446,11 @@ namespace MultiTerminal.Terminal
             // that ProcessExited fires and the terminal returns to the Start Screen.
             string noExit = string.IsNullOrEmpty(autoRunCommand) ? "-NoExit " : "";
             string commandLine = $"\"{shellPath}\" -NoLogo -ExecutionPolicy Bypass {noExit}-Command \"{envSetup}{cdPrefix}{promptFunc}{autoRun}\"";
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Final command line:");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"{commandLine}");
+            DebugLogService?.Trace("ConPtyTerminal", $"Final command line:");
+            DebugLogService?.Trace("ConPtyTerminal", $"{commandLine}");
 
             // Create process
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Calling CreateProcess...");
+            DebugLogService?.Trace("ConPtyTerminal", $"Calling CreateProcess...");
             if (!NativeMethods.CreateProcess(
                 null,
                 commandLine,
@@ -465,13 +465,13 @@ namespace MultiTerminal.Terminal
                 ref startupInfo,
                 out var processInfo))
             {
-                DebugLogService?.Error("ConPtyTerminal.StartProcess", $"CreateProcess FAILED: {Marshal.GetLastWin32Error()}");
+                DebugLogService?.Error("ConPtyTerminal", $"CreateProcess FAILED: {Marshal.GetLastWin32Error()}");
                 throw new InvalidOperationException("Failed to create process: " + Marshal.GetLastWin32Error());
             }
 
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"CreateProcess succeeded!");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Process handle: {processInfo.hProcess}");
-            DebugLogService?.Trace("ConPtyTerminal.StartProcess", $"Thread handle: {processInfo.hThread}");
+            DebugLogService?.Trace("ConPtyTerminal", $"CreateProcess succeeded!");
+            DebugLogService?.Trace("ConPtyTerminal", $"Process handle: {processInfo.hProcess}");
+            DebugLogService?.Trace("ConPtyTerminal", $"Thread handle: {processInfo.hThread}");
 
             _processHandle = processInfo.hProcess;
             _threadHandle = processInfo.hThread;
@@ -487,7 +487,7 @@ namespace MultiTerminal.Terminal
             _inputWriter = new FileStream(_inputWriteSide, FileAccess.Write);
             _outputReader = new FileStream(_outputReadSide, FileAccess.Read);
 
-            DebugLogService?.Info("ConPtyTerminal.StartProcess", $"===== COMPLETE =====");
+            DebugLogService?.Info("ConPtyTerminal", $"StartProcess ===== COMPLETE =====");
         }
 
         /// <summary>

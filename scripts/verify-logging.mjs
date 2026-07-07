@@ -312,10 +312,10 @@ for (const r of CONVERTED) {
   try { statSync(join(ROOT, r)); } catch { failures.push(`MISSING: converted file ${r} not found`); }
 }
 
-console.log(`Logging sweep census (c425e3a2):`);
+console.log(`Logging sweep census (c425e3a2 + 4c86f18d):`);
 console.log(`  converted (zero-verified): ${convertedOk}/${CONVERTED.size}`);
 console.log(`  allowlisted can't-convert sites: ${allowlisted}`);
-console.log(`  deferred (4c86f18d + cd8ca48c): ${deferred} files`);
+console.log(`  deferred (cd8ca48c — Bob's GitExec set, not yet landed): ${deferred} files`);
 if (failures.length) {
   console.error(`\nFAIL (${failures.length}):`);
   for (const f of failures) console.error(`  - ${f}`);

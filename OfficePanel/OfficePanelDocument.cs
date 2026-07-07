@@ -108,10 +108,12 @@ namespace MultiTerminal.OfficePanel
         /// </summary>
         public void Initialize(MessageBroker messageBroker, ActivityService activityService)
         {
-            _messageBroker?.DebugLogService?.Info("OfficePanel", $"Initialize called, messageBroker={(messageBroker == null ? "NULL" : "OK")}, activityService={(activityService == null ? "NULL" : "OK")}, renderer={(_renderer == null ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
-
             _messageBroker = messageBroker;
             _activityService = activityService;
+
+            // Log AFTER assigning _messageBroker so the sink is live on first init (4c86f18d: was logged
+            // before assignment and silently dropped on the first Initialize).
+            _messageBroker?.DebugLogService?.Info("OfficePanel", $"Initialize called, messageBroker={(messageBroker == null ? "NULL" : "OK")}, activityService={(activityService == null ? "NULL" : "OK")}, renderer={(_renderer == null ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
 
             if (_renderer != null)
             {
