@@ -5698,19 +5698,25 @@ namespace MultiTerminal.MCPServer.Services
 
                 if (!string.Equals(canonicalProjectId, task.ProjectId, StringComparison.Ordinal))
                 {
-                    string originalProjectId = task.ProjectId;
-                    task.ProjectId = canonicalProjectId;
+                    // Self-heal the legacy ProjectId THROUGH the write path. This must clone the CURRENT
+                    // cache entry and swap coherently: the AddHelper call above may have swapped a fresh
+                    // clone into _tasks[taskId] (helper added), so the local `task` is now stale — mutating
+                    // it in place + SaveTask would persist the canonical id to the DB while the cache kept
+                    // the OLD one (the exact cache/DB divergence P5 eliminates). MutateTaskInternal persists
+                    // FIRST, so a failure leaves cache+DB coherent on the old id with no manual revert; on
+                    // success `task` is refreshed to the coherent swapped-in entry for the block below.
                     try
                     {
-                        _taskDb.SaveTask(task);
+                        var healed = MutateTaskInternal(taskId, t => t.ProjectId = canonicalProjectId);
+                        if (healed != null)
+                        {
+                            task = healed;
+                        }
                     }
                     catch (Exception ex)
                     {
-                        // Persistence failed — revert in-memory mutation so the
-                        // durable record stays consistent with the in-memory cache,
-                        // and skip worktree creation under a binding the task row
-                        // doesn't actually claim.
-                        task.ProjectId = originalProjectId;
+                        // Persistence failed — the cache is left on the old id (coherent with the DB row),
+                        // and we skip worktree creation under a binding the task row doesn't claim.
                         canCreateWorktree = false;
                         System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist normalized ProjectId for task {taskId}: {ex.Message}");
                         RecordActivity(new ActivityEvent
@@ -6279,10 +6285,12 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Debug-only cache-coherency check (P5 / 1df2a534): samples up to <paramref name="sampleSize"/>
-        /// cached tasks and compares their persisted fields against the DB row, reporting any divergence.
-        /// Under the single write path the answer is always "coherent" — this is the observable evidence
-        /// that clone→persist→swap keeps <c>_tasks</c> in lockstep with the tasks table. Not on any hot
-        /// path; exposed via the debug endpoint and exercised as verification in the P5 test suite.
+        /// cached tasks and compares the persisted tasks-ROW fields against the DB row, reporting any
+        /// divergence. (<see cref="KanbanTask.Helpers"/> live in the <c>task_helpers</c> side table, not
+        /// the tasks row, so they are out of scope here.) Under the single write path the answer is always
+        /// "coherent" — this is the observable evidence that clone→persist→swap keeps <c>_tasks</c> in
+        /// lockstep with the tasks table. Not on any hot path; exposed via the debug endpoint and exercised
+        /// as verification in the P5 test suite.
         /// </summary>
         public CacheCoherencyReport VerifyCacheCoherency(int sampleSize = 50)
         {
@@ -6307,15 +6315,26 @@ namespace MultiTerminal.MCPServer.Services
                     continue;
                 }
 
+                // Compare the full persisted tasks-row scalar set (not a token subset) so "coherent" is
+                // meaningful — a divergence on ANY row field the write path is responsible for is caught.
                 if (cachedTask.Status != dbTask.Status
                     || cachedTask.SubStatus != dbTask.SubStatus
                     || cachedTask.Assignee != dbTask.Assignee
                     || cachedTask.Title != dbTask.Title
+                    || cachedTask.Description != dbTask.Description
                     || cachedTask.Priority != dbTask.Priority
                     || cachedTask.ProjectId != dbTask.ProjectId
                     || cachedTask.Plan != dbTask.Plan
                     || cachedTask.ChecklistJson != dbTask.ChecklistJson
-                    || cachedTask.ContinuationNotes != dbTask.ContinuationNotes)
+                    || cachedTask.ImplementationChecklistJson != dbTask.ImplementationChecklistJson
+                    || cachedTask.ImplementationSummary != dbTask.ImplementationSummary
+                    || cachedTask.TestResults != dbTask.TestResults
+                    || cachedTask.ReviewNotes != dbTask.ReviewNotes
+                    || cachedTask.ContinuationNotes != dbTask.ContinuationNotes
+                    || cachedTask.SortOrder != dbTask.SortOrder
+                    || cachedTask.AutoStatus != dbTask.AutoStatus
+                    || cachedTask.IsQuickTask != dbTask.IsQuickTask
+                    || cachedTask.StaleLevel != dbTask.StaleLevel)
                 {
                     report.Divergences.Add(
                         $"{cachedTask.Id}: cache/DB field divergence (cache status='{cachedTask.Status}' sub='{cachedTask.SubStatus}' vs db status='{dbTask.Status}' sub='{dbTask.SubStatus}')");
