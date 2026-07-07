@@ -156,7 +156,7 @@ namespace MultiTerminal.Tests
             _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
             _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "todo", Assignee = "diana", SubStatus = null, CreatedAt = DateTime.UtcNow });
 
-            Assert.Throws<InvalidOperationException>(() => _db.SetTaskActiveTransactional("B", "diana", DateTime.UtcNow));
+            Assert.Throws<InvalidOperationException>(() => _db.SetTaskActiveTransactional("B", new List<string> { "A" }, DateTime.UtcNow));
 
             Assert.Equal("active", _db.GetTask("A").SubStatus);  // pause rolled back — A still active
             Assert.Equal("todo", _db.GetTask("B").Status);       // B untouched
@@ -169,7 +169,7 @@ namespace MultiTerminal.Tests
             _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
             _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "in_progress", Assignee = "diana", SubStatus = "paused", CreatedAt = DateTime.UtcNow });
 
-            var paused = _db.SetTaskActiveTransactional("B", "diana", DateTime.UtcNow);
+            var paused = _db.SetTaskActiveTransactional("B", new List<string> { "A" }, DateTime.UtcNow);
 
             Assert.Contains("A", paused);
             Assert.Equal("active", _db.GetTask("B").SubStatus);
@@ -253,20 +253,27 @@ namespace MultiTerminal.Tests
             return n;
         }
 
-        [Fact]
-        public void SetTaskActiveTransactional_PausesCaseVariantAssignee()
+        [Theory]
+        [InlineData("Diana", "diana")]    // ASCII case variant
+        [InlineData("Élodie", "élodie")]  // NON-ASCII case variant — SQLite COLLATE NOCASE would MISS this row
+        public void SetTaskActive_CaseVariantAssignee_KeepsSingleActive(string activeCase, string activatingCase)
         {
-            // Codex-caught HIGH (7c59c004): the assignee comparison must be case-INSENSITIVE to match the C#
-            // agent-name domain (SetTaskActive discovers siblings with OrdinalIgnoreCase). Without COLLATE
-            // NOCASE, "Diana"-active + "diana"-activated leaves BOTH active (durable two-active).
-            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "Diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
-            _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "in_progress", Assignee = "diana", SubStatus = "paused", CreatedAt = DateTime.UtcNow });
+            // 7c59c004 Codex class-close: SetTaskActive discovers siblings with C# OrdinalIgnoreCase and pauses
+            // them BY ID (no assignee SQL collation), so a case-variant active sibling — INCLUDING non-ASCII,
+            // where SQLite COLLATE NOCASE folds nothing and would leave a durable two-active — is still paused.
+            var a = _svc.CreateTask("A", "d", activeCase).TaskId;
+            var b = _svc.CreateTask("B", "d", activatingCase).TaskId;
+            _svc.ClaimTask(a, activeCase, null);
+            _svc.ClaimTask(b, activatingCase, null);
+            _svc.UpdateTaskStatus(a, "in_progress");
+            _svc.UpdateTaskStatus(b, "in_progress");
+            _svc.SetTaskActive(a, activeCase);       // A active as the differently-cased assignee
 
-            var paused = _db.SetTaskActiveTransactional("B", "diana", DateTime.UtcNow);
+            _svc.SetTaskActive(b, activatingCase);   // activate B under the case-variant name
 
-            Assert.Contains("A", paused);                        // "Diana" paused despite the casing difference
-            Assert.Equal("paused", _db.GetTask("A").SubStatus);
-            Assert.Equal("active", _db.GetTask("B").SubStatus);  // only B active — no durable two-active
+            Assert.Equal("paused", _db.GetTask(a).SubStatus);   // A paused despite the case (incl. non-ASCII)
+            Assert.Equal("active", _db.GetTask(b).SubStatus);   // only B active — no durable two-active
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
         [Fact]

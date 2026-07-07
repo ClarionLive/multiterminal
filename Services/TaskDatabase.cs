@@ -1528,55 +1528,53 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Atomically pause the assignee's currently-active task(s) AND activate <paramref name="taskId"/>
-        /// in ONE transaction (7c59c004). Either both writes land or neither: a sibling-pause failure rolls
-        /// the activation back, so the tasks table can never hold two rows <c>sub_status='active'</c> for one
-        /// assignee (the failure mode 1df2a534 could only mitigate at read time). Returns the ids ACTUALLY
-        /// paused (DB-authoritative) so the caller can swap their cache entries and report them. Throws — with
-        /// the transaction rolled back, nothing changed — if the target row is missing or no longer
+        /// Atomically pause the given sibling task ids AND activate <paramref name="taskId"/> in ONE
+        /// transaction (7c59c004). Either both land or neither: an activation failure rolls the pauses back,
+        /// so the tasks table can never hold two rows <c>sub_status='active'</c> for one assignee (the failure
+        /// mode 1df2a534 could only mitigate at read time). Returns the ids ACTUALLY paused (those still active
+        /// at pause time) so the caller can swap their cache entries and report them. Throws — with the
+        /// transaction rolled back, nothing changed — if the target row is missing or no longer
         /// <c>in_progress</c> at activation time.
-        /// <para>Scope boundary (Alice's ruling): this transaction spans DB STATE ONLY. Git/worktree
-        /// side-effects are the caller's POST-commit, best-effort concern and are deliberately NOT in here —
-        /// a worktree failure must never roll back a committed activation.</para>
+        /// <para>Pauses BY ID (7c59c004 Codex class-close), NOT by an <c>assignee</c> SQL comparison: the
+        /// caller (SetTaskActive) discovers the sibling set with the authoritative C# agent-name equality
+        /// (<c>OrdinalIgnoreCase</c>) under the per-assignee lock and passes those ids here. That removes the
+        /// C#-vs-SQLite collation dependency entirely — no ASCII/non-ASCII case-fold gap can leave a durable
+        /// two-active — and deletes the old surprise-sibling defensive path.</para>
+        /// <para>Scope boundary: this transaction spans DB STATE ONLY. Git/worktree side-effects are the
+        /// caller's POST-commit, best-effort concern and are deliberately NOT in here — a worktree failure must
+        /// never roll back a committed activation.</para>
         /// </summary>
-        public List<string> SetTaskActiveTransactional(string taskId, string assignee, DateTime pausedAt)
+        public List<string> SetTaskActiveTransactional(string taskId, IReadOnlyList<string> siblingIdsToPause, DateTime pausedAt)
         {
             using var gate = LockConn();
             using var tx = _connection.BeginTransaction();
             try
             {
-                // 1) Capture the active siblings (excluding the target) inside the txn — the authoritative set
-                //    to pause + hand back for the cache swap.
-                // COLLATE NOCASE (7c59c004 Codex-caught HIGH): the C# agent-name domain compares assignees
-                // case-INSENSITIVELY (SetTaskActive discovers siblings with OrdinalIgnoreCase), so this SQL
-                // MUST match case-insensitively too — else "Diana"-active + "diana"-activated would leave both
-                // active (the transaction pausing only exact-case rows). ASCII agent names → NOCASE ≡ Ordinal
-                // IgnoreCase. The same fix is applied to the sibling assignee filters GetActiveTaskForAgent /
-                // GetStaleTasksForTerminal (one root, all tasks.assignee WHERE-filters).
+                // 1+2) Pause EXACTLY the caller-discovered siblings, by id. Each pause is guarded on the row
+                //      still being active, so a row that changed concurrently is skipped (0 rows) rather than
+                //      blindly overwritten; the returned list is the ids actually paused.
                 var paused = new List<string>();
-                const string selectSql = @"
-                    SELECT id FROM tasks
-                    WHERE assignee = @assignee COLLATE NOCASE AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
-                using (var sel = new SQLiteCommand(selectSql, _connection, tx))
-                {
-                    sel.Parameters.AddWithValue("@assignee", (object)assignee ?? DBNull.Value);
-                    sel.Parameters.AddWithValue("@taskId", taskId);
-                    using var reader = sel.ExecuteReader();
-                    while (reader.Read()) paused.Add(reader.GetString(0));
-                }
-
-                // 2) Pause them.
-                if (paused.Count > 0)
+                if (siblingIdsToPause != null && siblingIdsToPause.Count > 0)
                 {
                     const string pauseSql = @"
                         UPDATE tasks SET sub_status = 'paused', paused_at = @pausedAt, updated_at = @now
-                        WHERE assignee = @assignee COLLATE NOCASE AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
-                    using var pause = new SQLiteCommand(pauseSql, _connection, tx);
-                    pause.Parameters.AddWithValue("@assignee", (object)assignee ?? DBNull.Value);
-                    pause.Parameters.AddWithValue("@taskId", taskId);
-                    pause.Parameters.AddWithValue("@pausedAt", pausedAt);
-                    pause.Parameters.AddWithValue("@now", DateTime.UtcNow);
-                    pause.ExecuteNonQuery();
+                        WHERE id = @id AND status = 'in_progress' AND sub_status = 'active'";
+                    foreach (var siblingId in siblingIdsToPause)
+                    {
+                        if (siblingId == null || string.Equals(siblingId, taskId, StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        using var pause = new SQLiteCommand(pauseSql, _connection, tx);
+                        pause.Parameters.AddWithValue("@id", siblingId);
+                        pause.Parameters.AddWithValue("@pausedAt", pausedAt);
+                        pause.Parameters.AddWithValue("@now", DateTime.UtcNow);
+                        if (pause.ExecuteNonQuery() > 0)
+                        {
+                            paused.Add(siblingId);
+                        }
+                    }
                 }
 
                 // 3) Activate the target — still requiring in_progress, so a task that went done/deleted

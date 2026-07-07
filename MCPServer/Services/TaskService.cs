@@ -2185,10 +2185,13 @@ namespace MultiTerminal.MCPServer.Services
                     lockIds.AddRange(cachedSiblingIds);
                     WithTaskLocks(lockIds, () =>
                     {
-                        // ONE transaction: pause the active siblings + activate the target. Throws (rolled
-                        // back, nothing changed) if the target is gone / not in_progress. Returns the
-                        // DB-authoritative paused id set.
-                        var actuallyPaused = _taskDb.SetTaskActiveTransactional(taskId, assignee, pauseStamp);
+                        // ONE transaction: pause EXACTLY the C#-discovered siblings (by id) + activate the
+                        // target. Throws (rolled back, nothing changed) if the target is gone / not in_progress.
+                        // Returns the ids actually paused (those still active) — always a subset of
+                        // cachedSiblingIds, so every returned id is one we already hold the per-task lock for
+                        // (no surprise-sibling / unlocked-swap case). Pausing by id removes the C#-vs-SQLite
+                        // assignee-collation dependency entirely (Codex class-close).
+                        var actuallyPaused = _taskDb.SetTaskActiveTransactional(taskId, cachedSiblingIds, pauseStamp);
 
                         // Commit succeeded — swap the cache to match the durable state. Raw cache writes (this
                         // method is a census-allowlisted write-path bypass) done UNDER the locks we hold, so
@@ -2204,16 +2207,6 @@ namespace MultiTerminal.MCPServer.Services
                         foreach (var pid in actuallyPaused)
                         {
                             pausedIds.Add(pid);
-
-                            // Under the assignee lock, actuallyPaused == cachedSiblingIds, so every pid is in
-                            // lockIds. Defensive: if the DB paused an id we DON'T hold a lock for (a stale
-                            // pre-existing two-active anomaly this ticket otherwise eliminates), log it — the
-                            // DB is authoritative — rather than write its cache entry unlocked.
-                            if (!lockIds.Contains(pid))
-                            {
-                                _host.LogError($"SetTaskActive: DB paused unexpected sibling {pid} not in the lock set; skipping cache swap (DB authoritative).");
-                                continue;
-                            }
                             if (_tasks.TryGetValue(pid, out var curSib))
                             {
                                 var pausedClone = curSib.Clone();
@@ -2817,8 +2810,12 @@ namespace MultiTerminal.MCPServer.Services
         // ALWAYS acquire the assignee lock BEFORE any per-task lock — assignee-lock → per-task lock(s)
         // (WithTaskLocks, sorted) → LockConn. No site inverts this. Unbounded by design (one small object per
         // assignee ever activated), same accepted pattern as the per-task locks.
+        // Keyed case-INSENSITIVELY (7c59c004 Codex-caught): the agent-name domain is case-insensitive
+        // (assignee discovery uses OrdinalIgnoreCase), so "Diana" and "diana" MUST share one lock and
+        // serialize — else concurrent case-variant activations wouldn't serialize and could each miss the
+        // other's sibling. StringComparer.OrdinalIgnoreCase matches the domain's equality semantics exactly.
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _assigneeActivationLocks
-            = new System.Collections.Concurrent.ConcurrentDictionary<string, object>();
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
         private object AssigneeActivationLock(string assignee) => _assigneeActivationLocks.GetOrAdd(assignee ?? string.Empty, _ => new object());
 

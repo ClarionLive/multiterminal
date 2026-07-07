@@ -98,6 +98,18 @@ const KNOWN_UNLOCKED_EXPOSURES = [
     hardening: '651105b3',
   },
   {
+    site: 'Services/TaskDatabase.cs: GetActiveTaskForAgent + GetStaleTasksForTerminal (assignee COLLATE NOCASE read queries)',
+    exposure: 'These read-resolution queries filter tasks.assignee with COLLATE NOCASE, which case-folds ONLY ASCII, ' +
+              'whereas the C# agent-name domain uses OrdinalIgnoreCase (folds non-ASCII too, e.g. É↔é). For a ' +
+              'non-ASCII case-variant name, GetActiveTaskForAgent("élodie") can MISS an "Élodie" active row → ' +
+              'returns null (self-correcting: the caller re-resolves / user re-activates). NOT durable corruption ' +
+              '(the durable SetTaskActive two-active path no longer depends on collation — it pauses by C#-discovered ' +
+              'id). Correct under the "agent names are ASCII" assumption, which ValidateAgentName does not currently ' +
+              'enforce. The follow-up decides: an ASCII ingress gate (make the assumption provable) OR canonicalize ' +
+              'assignee — AFTER confirming whether non-ASCII agent names are ever legitimate (do not tighten validation blind).',
+    hardening: '153fde77',
+  },
+  {
     site: 'MCPServer/Services/TaskService.cs: ReorderTask rebalance (RebalanceSortOrder before the affected per-task locks)',
     exposure: 'ReorderTask calls _taskDb.RebalanceSortOrder(column) OUTSIDE the affected tasks per-task locks. A ' +
               'concurrent MutateTaskInternal on an affected sibling can clone the old cached SortOrder, then its ' +
