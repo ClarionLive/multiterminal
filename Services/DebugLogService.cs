@@ -62,6 +62,22 @@ namespace MultiTerminal.Services
         public bool IsPaused { get; private set; }
 
         /// <summary>
+        /// Minimum level a <see cref="Log"/> call must meet to be recorded; entries below this are
+        /// dropped BEFORE enqueue (no UI entry, no file write, no event) — the cheap-exit that makes
+        /// the c425e3a2 sweep's "downgrade hot-path noise to Trace" actually reduce Release volume.
+        /// Defaults to Trace in Debug builds (everything visible) and Info in Release (Trace skipped).
+        /// Settable at runtime so diagnostics can lower the floor in a Release session on demand.
+        /// This does not regress any user-visible baseline: pre-sweep, Debug.WriteLine compiled out
+        /// of Release entirely and Trace.WriteLine fired only to (empty) trace listeners, so there is
+        /// no existing visible Trace output for the Info floor to hide.
+        /// </summary>
+#if DEBUG
+        public DebugLogLevel MinimumLevel { get; set; } = DebugLogLevel.Trace;
+#else
+        public DebugLogLevel MinimumLevel { get; set; } = DebugLogLevel.Info;
+#endif
+
+        /// <summary>
         /// The full path to the current session's log file.
         /// </summary>
         public string LogFilePath => _logFilePath;
@@ -131,6 +147,7 @@ namespace MultiTerminal.Services
         public void Log(string source, DebugLogLevel level, string message)
         {
             if (IsPaused) return;
+            if (level < MinimumLevel) return;
 
             var entry = new DebugLogEntry(source, level, message);
             _logQueue.Enqueue(entry);
