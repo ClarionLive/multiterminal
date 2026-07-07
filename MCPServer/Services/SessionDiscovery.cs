@@ -42,7 +42,7 @@ namespace MultiTerminal.MCPServer.Services
     /// cache is static to survive across those instances.</para>
     ///
     /// <para>Session METADATA is derived from the transcript, but the terminal
-    /// IDENTITY is resolved from the authoritative <c>session_lineage</c> store via
+    /// IDENTITY is resolved from the authoritative <c>session_agent_map</c> store via
     /// an injected <c>Func&lt;sessionId,string&gt;</c> (a narrow resolver, not a raw
     /// DB connection) — the transcript does not reliably carry the terminal's own
     /// name. Transcript parsing (<see cref="ExtractIdentity"/>) is the fallback when
@@ -54,7 +54,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly SessionSyncService _sync = new SessionSyncService();
 
         // Authoritative identity source: maps a session id to the terminal identity
-        // that owned it (register_session -> session_lineage; see TaskDatabase.
+        // that owned it (register_session -> session_agent_map; see TaskDatabase.
         // GetSessionAgentName). Injected as a narrow Func so the discovery layer
         // stays testable and takes no raw DB connection. Null in contexts without
         // the DB (tests, headless) — then identity falls back to transcript parsing.
@@ -153,7 +153,7 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Resolve the terminal identity that owned a session. The AUTHORITATIVE
-        /// source is <c>session_lineage</c> (via the injected resolver, keyed by
+        /// source is <c>session_agent_map</c> (via the injected resolver, keyed by
         /// session id) — MT records the identity at register_session time, whereas
         /// the transcript does NOT reliably contain the terminal's own name (the
         /// SessionStart-hook block is the literal <c>MULTITERMINAL_NAME=&lt;name&gt;</c>
