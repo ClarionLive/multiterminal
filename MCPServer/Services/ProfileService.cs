@@ -277,10 +277,11 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Broadcast profile updates to all clients. Public because the terminal-registration region
-        /// (RegisterTerminal/UnregisterTerminal, broker-side) still calls it after its own cache writes.
+        /// Broadcast profile updates to all clients. Private since e1643ccc: the CRUD + online/offline
+        /// write-path methods are its only callers now that registration reaches the cache through the
+        /// persist-first write path (no broker-side broadcast call remains).
         /// </summary>
-        public void BroadcastProfileUpdate()
+        private void BroadcastProfileUpdate()
         {
             var profiles = _profiles.Values.OrderBy(p => p.DisplayName ?? p.Id).ToList();
             _host.RaiseProfilesUpdated(profiles);
@@ -332,6 +333,7 @@ namespace MultiTerminal.MCPServer.Services
             return profile;
         }
 
+        // Stays private + Internal-suffixed (no cross-region caller — DeleteProfile is the only entry point).
         private bool DeleteProfileInternal(string id)
         {
             if (!_profiles.ContainsKey(id))

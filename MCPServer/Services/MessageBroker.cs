@@ -4561,9 +4561,9 @@ namespace MultiTerminal.MCPServer.Services
 
         // Team-member profile cache + CRUD + write path were extracted to ProfileService (ticket 86f3fd21,
         // second broker region). The broker keeps the full public profile surface below as one-line
-        // delegations — controllers/panels are untouched. Private helpers (Mutate/Insert/DeleteProfileInternal,
-        // BroadcastProfileUpdate, LoadPersistedProfiles) moved with the region; the terminal-registration
-        // region reaches the relocated cache through _profileService's narrow accessors.
+        // delegations — controllers/panels are untouched. The terminal-registration region reaches the
+        // relocated cache through _profileService's read accessors (TryGetProfile/ContainsProfile) plus its
+        // public write path (MutateProfile/InsertProfile) — persist-first since e1643ccc, no cache-only bypass.
         public CreateProfileResult CreateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null, bool? isTeamLead = null)
             => _profileService.CreateProfile(id, displayName, avatarUrl, role, bio, skills, interests, projectIds, agentInstructions, preferredModel, isTeamLead);
 
