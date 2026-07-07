@@ -48,9 +48,9 @@ namespace MultiTerminal.API.Controllers
         public IActionResult CreateProject([FromBody] CreateProjectRequest request)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.Name))
-                return BadRequest(new { error = "Project name is required" });
+                return Problem(detail: "Project name is required", statusCode: 400);
             if (string.IsNullOrWhiteSpace(request.Path))
-                return BadRequest(new { error = "Project path is required" });
+                return Problem(detail: "Project path is required", statusCode: 400);
 
             // Create folder if it doesn't already exist — matches the UI button behavior
             // (Directory.CreateDirectory is a no-op for existing folders).
@@ -60,7 +60,7 @@ namespace MultiTerminal.API.Controllers
             #pragma warning restore CA3003
             catch (System.Exception ex)
             {
-                return BadRequest(new { error = $"Failed to create project folder: {ex.Message}" });
+                return Problem(detail: $"Failed to create project folder: {ex.Message}", statusCode: 400);
             }
 
             var result = _broker.CreateProject(
@@ -74,7 +74,7 @@ namespace MultiTerminal.API.Controllers
                 currentVersion: request.CurrentVersion);
 
             if (!result.Success)
-                return BadRequest(new { error = result.Error ?? "Failed to create project" });
+                return Problem(detail: result.Error ?? "Failed to create project", statusCode: 400);
 
             return Ok(new
             {
@@ -95,7 +95,7 @@ namespace MultiTerminal.API.Controllers
 
             var project = _projectDb.GetRichProject(projectId);
             if (project == null)
-                return NotFound(new { error = $"Project '{projectId}' not found" });
+                return Problem(detail: $"Project '{projectId}' not found", statusCode: 404);
 
             return Ok(project);
         }
@@ -108,7 +108,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult UpdateProject(string projectId, [FromBody] UpdateProjectRequest request)
         {
             if (request?.Fields == null || request.Fields.Count == 0)
-                return BadRequest(new { error = "No fields provided" });
+                return Problem(detail: "No fields provided", statusCode: 400);
 
             var updated = new List<string>();
             var rejected = new List<string>();
@@ -142,9 +142,9 @@ namespace MultiTerminal.API.Controllers
                 deleteLocalConfig);
 
             if (!result.Success)
-                return NotFound(new { error = result.Error ?? $"Project '{projectId}' not found" });
+                return Problem(detail: result.Error ?? $"Project '{projectId}' not found", statusCode: 404);
 
-            return Ok(new { success = true, projectId });
+            return Ok(new { projectId });
         }
 
         /// <summary>
@@ -155,7 +155,7 @@ namespace MultiTerminal.API.Controllers
         {
             var context = _contextService.GetProjectContext(projectId);
             if (context == null)
-                return NotFound(new { error = $"Project '{projectId}' not found" });
+                return Problem(detail: $"Project '{projectId}' not found", statusCode: 404);
 
             return Ok(context);
         }
@@ -188,7 +188,7 @@ namespace MultiTerminal.API.Controllers
                 Role = request.Role,
                 PreferredModel = request.PreferredModel
             });
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -199,9 +199,9 @@ namespace MultiTerminal.API.Controllers
         {
             var deleted = _projectDb.DeleteProjectAgent(projectId, agentName);
             if (!deleted)
-                return NotFound(new { error = $"Agent '{agentName}' not found on project '{projectId}'" });
+                return Problem(detail: $"Agent '{agentName}' not found on project '{projectId}'", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         #endregion
@@ -221,7 +221,7 @@ namespace MultiTerminal.API.Controllers
                 ServerName = request.ServerName,
                 IsEnabled = request.IsEnabled
             });
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -232,9 +232,9 @@ namespace MultiTerminal.API.Controllers
         {
             var deleted = _projectDb.DeleteProjectMcpServer(projectId, serverName);
             if (!deleted)
-                return NotFound(new { error = $"MCP server '{serverName}' not found on project '{projectId}'" });
+                return Problem(detail: $"MCP server '{serverName}' not found on project '{projectId}'", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         #endregion
@@ -255,7 +255,7 @@ namespace MultiTerminal.API.Controllers
                 IsEnabled = request.IsEnabled,
                 CustomPrompt = request.CustomPrompt
             });
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -266,9 +266,9 @@ namespace MultiTerminal.API.Controllers
         {
             var deleted = _projectDb.DeleteProjectSpecialistAgent(projectId, agentType);
             if (!deleted)
-                return NotFound(new { error = $"Specialist '{agentType}' not found on project '{projectId}'" });
+                return Problem(detail: $"Specialist '{agentType}' not found on project '{projectId}'", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         #endregion
@@ -289,7 +289,7 @@ namespace MultiTerminal.API.Controllers
                 PathValue = request.PathValue,
                 Description = request.Description
             });
-            return Ok(new { success = true, id });
+            return Ok(new { id });
         }
 
         /// <summary>
@@ -300,9 +300,9 @@ namespace MultiTerminal.API.Controllers
         {
             var deleted = _projectDb.DeleteProjectPath(pathId);
             if (!deleted)
-                return NotFound(new { error = $"Path {pathId} not found" });
+                return Problem(detail: $"Path {pathId} not found", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         #endregion
@@ -323,7 +323,7 @@ namespace MultiTerminal.API.Controllers
                 PromptText = request.PromptText,
                 DisplayOrder = request.DisplayOrder
             });
-            return Ok(new { success = true, id });
+            return Ok(new { id });
         }
 
         /// <summary>
@@ -334,9 +334,9 @@ namespace MultiTerminal.API.Controllers
         {
             var deleted = _projectDb.DeleteProjectPrompt(promptId);
             if (!deleted)
-                return NotFound(new { error = $"Prompt {promptId} not found" });
+                return Problem(detail: $"Prompt {promptId} not found", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         #endregion
@@ -356,7 +356,7 @@ namespace MultiTerminal.API.Controllers
                 SkillName = request.SkillName,
                 IsEnabled = request.IsEnabled
             });
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -367,9 +367,9 @@ namespace MultiTerminal.API.Controllers
         {
             var deleted = _projectDb.DeleteProjectSkill(projectId, skillName);
             if (!deleted)
-                return NotFound(new { error = $"Skill '{skillName}' not found on project '{projectId}'" });
+                return Problem(detail: $"Skill '{skillName}' not found on project '{projectId}'", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         #endregion
