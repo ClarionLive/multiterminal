@@ -296,6 +296,32 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
+        [Fact]
+        public void UrgentClaim_ThrowingRecordActivitySink_DoesNotPoisonCommittedClaim()
+        {
+            // 7c59c004 Codex security [medium]: RecordActivity is a POST-COMMIT best-effort sink in the make-active
+            // path (both MakeTaskActive and EmitPauseSummaries). A throwing sink must NEVER escape and turn a
+            // committed claim + exclusive activation into a reported failure (the RaiseSafe resilient-dispatch
+            // principle from 1df2a534, applied to the activity sink). Setup: A active, C todo.
+            var a = _svc.CreateTask("A", "d", "diana").TaskId;
+            var c = _svc.CreateTask("C", "d", "diana").TaskId;
+            _svc.ClaimTask(a, "diana", null);
+            _svc.UpdateTaskStatus(a, "in_progress");
+            _svc.SetTaskActive(a, "diana");   // A active; C todo
+
+            // Make the activity sink throw, then urgently claim C: MakeTaskActive commits (pauses A + activates C)
+            // and EmitPauseSummaries runs — both hit the throwing RecordActivity, now exception-contained.
+            _host.ThrowFromRecordActivity = true;
+            var result = _svc.ClaimTask(c, "diana", "urgent");
+            _host.ThrowFromRecordActivity = false;
+
+            Assert.True(result.Success, "committed urgent claim must report success even when the activity sink throws");
+            Assert.Equal(1, DbActiveCount("diana"));           // exactly one active — the committed activation stands
+            Assert.Equal("active", _db.GetTask(c).SubStatus);  // C active (the urgent claim)
+            Assert.Equal("paused", _db.GetTask(a).SubStatus);  // A paused by ActivateExclusively's atomic txn
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
         // Count DB rows that are active for an assignee (authoritative — asserts the invariant on the durable store).
         private int DbActiveCount(string assignee)
         {
@@ -354,6 +380,10 @@ namespace MultiTerminal.Tests
         {
             public int TasksUpdatedCount { get; private set; }
 
+            // When set, RecordActivity throws — models a post-commit best-effort activity sink going down, to
+            // prove a throwing sink can't poison a committed claim (7c59c004 Codex security [medium]).
+            public bool ThrowFromRecordActivity { get; set; }
+
             public void RaiseTasksUpdated(List<KanbanTask> tasks) => TasksUpdatedCount++;
             public void RaiseTaskClaimed(TaskClaimedEventArgs args) { }
             public void RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) { }
@@ -361,7 +391,10 @@ namespace MultiTerminal.Tests
             public void LogWarning(string message) { }
             public void LogInfo(string message) { }
             public void LogTrace(string message) { }
-            public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false) { }
+            public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
+            {
+                if (ThrowFromRecordActivity) throw new InvalidOperationException("test: activity sink down");
+            }
             public CreateInboxMessageResult CreateInboxNotification(string userId, string taskId, string taskTitle, int? checklistItemIndex, string checklistItemName, string type, string summary, string createdBy) => new CreateInboxMessageResult { Success = true };
             public void NotifyReportSaved(string taskId, string reportId, string agentName, string verdict) { }
             public Task<SendResult> NotifyHelperAdded(string helperName, string taskId, string taskTitle, string assignee) => Task.FromResult(new SendResult());

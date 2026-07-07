@@ -636,15 +636,22 @@ namespace MultiTerminal.MCPServer.Services
                     }
                 }
 
-                // Record activity for pausing
-                _host.RecordActivity(new ActivityEvent
+                // Record activity for pausing. Best-effort, exception-contained: the claim + activation are
+                // ALREADY committed by the time we get here (MakeTaskActive returned), so a throwing activity
+                // sink must NEVER escape to make ClaimTask report failure on a committed transaction (Codex
+                // 7c59c004; the RaiseSafe resilient-dispatch principle from 1df2a534, applied to the sink).
+                try
                 {
-                    Terminal = assignee,
-                    Type = "task",
-                    Action = "paused",
-                    Content = $"Paused task: {title}",
-                    RelatedId = id
-                });
+                    _host.RecordActivity(new ActivityEvent
+                    {
+                        Terminal = assignee,
+                        Type = "task",
+                        Action = "paused",
+                        Content = $"Paused task: {title}",
+                        RelatedId = id
+                    });
+                }
+                catch (Exception ex) { _host.LogError($"EmitPauseSummaries: RecordActivity failed for {id}: {ex.Message}"); }
             }
         }
 
@@ -708,22 +715,34 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            // Auto-update activity: terminal claimed a task
-            _host.ActivityService?.UpdateActivity(
-                assignee,
-                "working",
-                $"Working on: {task.Title}",
-                taskId: taskId);
-
-            // Record activity for the feed
-            _host.RecordActivity(new ActivityEvent
+            // Post-commit feed side-effects. Best-effort, exception-contained: the claim + exclusive activation
+            // are ALREADY committed above (MutateTaskInternal + ActivateExclusively), so a throwing activity sink
+            // must NEVER escape and make ClaimTask report failure on a committed transaction (Codex 7c59c004; the
+            // RaiseSafe resilient-dispatch principle from 1df2a534, applied to the activity sinks).
+            try
             {
-                Terminal = assignee,
-                Type = "task",
-                Action = "claimed",
-                Content = $"Claimed task: {task.Title}",
-                RelatedId = taskId
-            });
+                // Auto-update activity: terminal claimed a task
+                _host.ActivityService?.UpdateActivity(
+                    assignee,
+                    "working",
+                    $"Working on: {task.Title}",
+                    taskId: taskId);
+            }
+            catch (Exception ex) { _host.LogError($"MakeTaskActive: UpdateActivity failed for {taskId}: {ex.Message}"); }
+
+            try
+            {
+                // Record activity for the feed
+                _host.RecordActivity(new ActivityEvent
+                {
+                    Terminal = assignee,
+                    Type = "task",
+                    Action = "claimed",
+                    Content = $"Claimed task: {task.Title}",
+                    RelatedId = taskId
+                });
+            }
+            catch (Exception ex) { _host.LogError($"MakeTaskActive: RecordActivity failed for {taskId}: {ex.Message}"); }
 
             return (true, pausedIds, pausedTitles);
         }
