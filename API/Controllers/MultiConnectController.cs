@@ -42,12 +42,10 @@ namespace MultiTerminal.API.Controllers
             if (!IsLoopbackRequest())
                 return StatusCode(403, new { error = "Loopback only" });
 
-            // CSRF/exfil defense: the :5050 host serves AllowAnyOrigin CORS, so a malicious page in
-            // the victim's loopback browser could otherwise fetch this and read hostname/username/
-            // phoneUrl/port/secret-is-set. The shared guard refuses a browser cross-origin fetch
-            // while local tooling / the setup skill (HttpClient, no Origin) passes.
-            if (!CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request))
-                return StatusCode(403, new { error = "Origin not allowed" });
+            // CSRF/exfil defense against a browser cross-origin READ (this leaks hostname/username/
+            // phoneUrl/port/secret-is-set) is now provided globally by the strict CORS allowlist
+            // (task f9697aac): a non-allowlisted browser origin gets no ACAO so its JS can't read the
+            // response. The per-endpoint CrossOriginBrowserGuard was retired in the same ticket.
 
             // Gateway port: settings int → appsettings MultiRemote:Port → default 5100.
             int? settingsPort = _settings.GetMultiConnectGatewayPort();
@@ -109,10 +107,10 @@ namespace MultiTerminal.API.Controllers
             if (!IsLoopbackRequest())
                 return StatusCode(403, new { error = "Loopback only" });
 
-            // CSRF defense: reuse the shared guard (Origin + Sec-Fetch-Site). A browser cross-origin
-            // POST is refused; curl / the local tab / the setup skill (no Origin) passes.
-            if (!CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request))
-                return StatusCode(403, new { error = "Origin not allowed" });
+            // CSRF defense against a blind cross-site browser POST is now provided globally by
+            // SecFetchSiteWriteGuardMiddleware (task f9697aac): a cross-site/same-site browser write is
+            // rejected while curl / the setup skill (no fetch-metadata headers) passes. The
+            // per-endpoint CrossOriginBrowserGuard was retired in the same ticket.
 
             if (request == null)
                 return BadRequest(new { error = "Missing request body" });
@@ -265,10 +263,9 @@ namespace MultiTerminal.API.Controllers
             if (!IsLoopbackRequest())
                 return StatusCode(403, new { error = "Loopback only" });
 
-            // Same cross-origin browser guard as GET /config — this leaks the tailscale hostname
-            // and backend state, which a malicious loopback-origin page must not be able to read.
-            if (!CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request))
-                return StatusCode(403, new { error = "Origin not allowed" });
+            // Same cross-origin browser READ protection as GET /config — this leaks the tailscale
+            // hostname and backend state. Now provided globally by the strict CORS allowlist
+            // (task f9697aac); the per-endpoint CrossOriginBrowserGuard was retired in the same ticket.
 
             var status = await TailscaleService.GetStatusAsync().ConfigureAwait(false);
             return Ok(new
