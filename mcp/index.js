@@ -59,7 +59,21 @@ function seg(value) {
   if (value === undefined || value === null) {
     throw new Error(`apiCall path segment is required (got ${value})`);
   }
-  return encodeURIComponent(String(value));
+  const s = String(value);
+  // encodeURIComponent does NOT encode "." — and the WHATWG URL parser
+  // normalizes "." / ".." path segments regardless (popping/collapsing route
+  // segments). Because the surrounding template supplies the slashes, a segment
+  // that is EXACTLY "." or ".." still traverses even after encoding:
+  // `/api/tasks/${seg("..")}/status` -> `/api/status`. encodeURIComponent DOES
+  // neutralize every other traversal payload — a slash becomes %2F (not
+  // renormalized to a separator) and a literal "%2e" becomes "%252e" once the
+  // "%" is encoded (so it is no longer a dot segment). So the only residual hole
+  // is the bare dot/empty segment: reject "", ".", ".." outright. (Pipeline
+  // Run 1 Codex security-auditor [critical].)
+  if (s === "" || s === "." || s === "..") {
+    throw new Error(`apiCall path segment "${s}" would alter the route (empty/dot segment rejected)`);
+  }
+  return encodeURIComponent(s);
 }
 
 async function apiCall(endpoint, method = "GET", body = null) {
@@ -3286,7 +3300,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_inbox": {
         const unreadOnly = args.unreadOnly || false;
         const limit = args.limit || 50;
-        const result = await apiCall(`/api/tasks/inbox/${seg(args.userId)}?unreadOnly=${unreadOnly}&limit=${limit}`);
+        const result = await apiCall(`/api/tasks/inbox/${seg(args.userId)}?unreadOnly=${encodeURIComponent(unreadOnly)}&limit=${encodeURIComponent(limit)}`);
         return {
           content: [{ type: "text", text: formatInbox(result) }],
         };
@@ -3337,7 +3351,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Attachment Handlers
       case "get_checklist_item_images": {
-        const attachments = await apiCall(`/api/tasks/${seg(args.taskId)}/attachments?itemIndex=${args.itemIndex}`);
+        const attachments = await apiCall(`/api/tasks/${seg(args.taskId)}/attachments?itemIndex=${encodeURIComponent(args.itemIndex)}`);
 
         if (!attachments || attachments.length === 0) {
           return {
@@ -3609,7 +3623,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const count = Math.min(args.count || 50, 500);
         const offset = args.offset || 0;
-        let query = `?count=${count}&offset=${offset}`;
+        let query = `?count=${count}&offset=${encodeURIComponent(offset)}`;
         if (args.source) query += `&source=${encodeURIComponent(args.source)}`;
         if (args.level) query += `&level=${encodeURIComponent(args.level)}`;
         if (args.search) query += `&search=${encodeURIComponent(args.search)}`;
@@ -3805,7 +3819,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let latestUrl = `/api/session-lineage/latest?projectPath=${encodeURIComponent(args.projectPath)}`;
         if (args.agentName) latestUrl += `&agentName=${encodeURIComponent(args.agentName)}`;
         if (args.excludeSessionId) latestUrl += `&excludeSessionId=${encodeURIComponent(args.excludeSessionId)}`;
-        if (args.skip) latestUrl += `&skip=${args.skip}`;
+        if (args.skip) latestUrl += `&skip=${encodeURIComponent(args.skip)}`;
         const latestData = await apiCall(latestUrl);
         if (latestData.error || !latestData.session) {
           return {
@@ -3866,7 +3880,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_unsummarized_sessions": {
         const limit = args.limit || 10;
-        const unsumData = await apiCall(`/api/session-lineage/unsummarized?projectPath=${encodeURIComponent(args.projectPath)}&limit=${limit}`);
+        const unsumData = await apiCall(`/api/session-lineage/unsummarized?projectPath=${encodeURIComponent(args.projectPath)}&limit=${encodeURIComponent(limit)}`);
         if (unsumData.error) {
           return {
             content: [{ type: "text", text: `Error: ${unsumData.error}` }],
@@ -3962,7 +3976,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // contains slashes, which ASP.NET Core route segments don't accept.
         // Now passed via the `branch` query parameter (URLSearchParams handles
         // percent-encoding correctly for slashes + every other character).
-        const projectId = encodeURIComponent(args.projectId);
+        // Raw arg — seg() at the interpolation does the single encode (one
+        // mechanism). Pre-encoding here would double-encode (harmless no-op for
+        // the hex/GUID projectId domain, but violates the sweep's invariant).
+        const projectId = args.projectId;
         const params = new URLSearchParams();
         params.set("branch", args.branchName);
         if (args.originatingTaskId) params.set("originatingTaskId", args.originatingTaskId);
@@ -4012,7 +4029,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_branch_outcomes": {
-        const projectId = encodeURIComponent(args.projectId);
+        // Raw arg — seg() at the interpolation does the single encode (one
+        // mechanism). Pre-encoding here would double-encode (harmless no-op for
+        // the hex/GUID projectId domain, but violates the sweep's invariant).
+        const projectId = args.projectId;
         const result = await apiCall(`/api/branch-metadata/${seg(projectId)}/outcomes`);
         const outcomes = (result && result.outcomes) || [];
         if (outcomes.length === 0) {
@@ -4036,7 +4056,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // the URL path into the request body so it can carry the project's
         // task/<id> convention (slash-bearing branch names) without route
         // segment escaping pitfalls.
-        const projectId = encodeURIComponent(args.projectId);
+        // Raw arg — seg() at the interpolation does the single encode (one
+        // mechanism). Pre-encoding here would double-encode (harmless no-op for
+        // the hex/GUID projectId domain, but violates the sweep's invariant).
+        const projectId = args.projectId;
         const result = await apiCall(
           `/api/branch-metadata/${seg(projectId)}/outcome`,
           "POST",
@@ -4634,7 +4657,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_task_reports": {
-        const data = await apiCall(`/api/tasks/${seg(args.taskId)}/reports?agentName=${encodeURIComponent(args.agentName || "")}&limit=${args.limit || 50}`);
+        const data = await apiCall(`/api/tasks/${seg(args.taskId)}/reports?agentName=${encodeURIComponent(args.agentName || "")}&limit=${encodeURIComponent(args.limit || 50)}`);
         if (!data.reports || data.reports.length === 0) {
           return { content: [{ type: "text", text: `No reports found for task ${args.taskId}` }] };
         }
