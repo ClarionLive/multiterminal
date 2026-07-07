@@ -42,6 +42,17 @@ namespace MultiTerminal.MCPServer.Models
         /// When the project was last updated.
         /// </summary>
         public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+        /// <summary>
+        /// Returns a copy of this project. Every field is a string or value type, so a member-wise copy
+        /// is a complete deep copy. Used by MessageBroker's project write path (P5 / ticket 1df2a534): a
+        /// mutation is applied to a clone, persisted, and only then swapped into the cache — a persist
+        /// failure can't leave the cache diverged, and readers never observe a half-mutated project.
+        /// </summary>
+        public Project Clone()
+        {
+            return (Project)MemberwiseClone();
+        }
     }
 
     /// <summary>

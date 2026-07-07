@@ -1532,6 +1532,9 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 var tasks = _taskDb.LoadAllTasks();
+                // Write-path bypass (P5 / 1df2a534): startup bootstrap seed FROM the DB, not a mutation —
+                // populate the cache directly, no per-row broadcast, no persist-back. Documented exception,
+                // same class as LoadPersistedProjects/Profiles and ReorderTask's sort_order refresh.
                 foreach (var task in tasks)
                 {
                     _tasks.TryAdd(task.Id, task);
@@ -1552,6 +1555,7 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 var projects = _projectDb.GetAllProjects();
+                // Write-path bypass (P5): startup bootstrap seed from the DB, not a mutation (see LoadPersistedTasks).
                 foreach (var project in projects)
                 {
                     _projects.TryAdd(project.Id, project);
@@ -1572,6 +1576,7 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 var profiles = _taskDb.LoadAllProfiles();
+                // Write-path bypass (P5): startup bootstrap seed from the DB, not a mutation (see LoadPersistedTasks).
                 foreach (var profile in profiles)
                 {
                     _profiles.TryAdd(profile.Id, profile);
@@ -6623,54 +6628,57 @@ namespace MultiTerminal.MCPServer.Services
                 Path = path
             };
 
-            if (_projects.TryAdd(project.Id, project))
+            // Persist-before-cache (write path): on a DB failure the project never enters the cache and we
+            // return Success=false (pre-P5 this swallowed the failure and kept an unpersisted cache entry).
+            // Rich columns get filled by the SaveRichProject UPSERT inside ProjectService.SaveProject below.
+            try
             {
-                // Persist to database (5-column INSERT — rich columns get filled by the
-                // SaveRichProject UPSERT inside ProjectService.SaveProject below).
-                try { _projectDb.SaveProject(project); }
-                catch (Exception ex) { LogError($"Failed to save project to database: {ex.Message}"); }
-
-                // Create or update .claude/project.json file (and SaveRichProject UPSERT).
-                MultiTerminal.Models.Project fileProject = null;
-                if (!string.IsNullOrEmpty(path) && ProjectService != null)
-                {
-                    try
-                    {
-                        fileProject = MultiTerminal.Models.Project.Create(name, path);
-                        fileProject.Id = project.Id; // Use the same 8-char ID across DB and JSON.
-                        fileProject.Description = description ?? "";
-                        if (!string.IsNullOrEmpty(teamLead)) fileProject.TeamLead = teamLead;
-                        if (!string.IsNullOrEmpty(defaultTerminal)) fileProject.DefaultTerminal = defaultTerminal;
-                        if (!string.IsNullOrEmpty(projectType)) fileProject.ProjectType = projectType;
-                        if (!string.IsNullOrEmpty(currentVersion)) fileProject.CurrentVersion = currentVersion;
-                        if (!string.IsNullOrEmpty(createdBy)) fileProject.CreatedBy = createdBy;
-                        ProjectService.SaveProject(fileProject);
-                        LogInfo($"Created/updated project file at {path}/.claude/project.json");
-                    }
-                    catch (Exception ex) { LogError($"Failed to save project file: {ex.Message}"); }
-                }
-
-                BroadcastProjectUpdate();
-
-                // Record activity for the feed
-                RecordActivity(new ActivityEvent
-                {
-                    Terminal = createdBy ?? "System",
-                    Type = "project",
-                    Action = "created",
-                    Content = $"Created project: {name}",
-                    RelatedId = project.Id
-                });
-
-                return new CreateProjectResult
-                {
-                    Success = true,
-                    ProjectId = project.Id,
-                    CreatedFileProject = fileProject,
-                };
+                InsertProjectInternal(project);
+            }
+            catch (Exception ex)
+            {
+                LogError($"CreateProject: failed to save project to database: {ex.Message}");
+                return new CreateProjectResult { Success = false, Error = $"Failed to persist project: {ex.Message}" };
             }
 
-            return new CreateProjectResult { Success = false, Error = "Failed to create project" };
+            // Create or update .claude/project.json file (and SaveRichProject UPSERT).
+            MultiTerminal.Models.Project fileProject = null;
+            if (!string.IsNullOrEmpty(path) && ProjectService != null)
+            {
+                try
+                {
+                    fileProject = MultiTerminal.Models.Project.Create(name, path);
+                    fileProject.Id = project.Id; // Use the same 8-char ID across DB and JSON.
+                    fileProject.Description = description ?? "";
+                    if (!string.IsNullOrEmpty(teamLead)) fileProject.TeamLead = teamLead;
+                    if (!string.IsNullOrEmpty(defaultTerminal)) fileProject.DefaultTerminal = defaultTerminal;
+                    if (!string.IsNullOrEmpty(projectType)) fileProject.ProjectType = projectType;
+                    if (!string.IsNullOrEmpty(currentVersion)) fileProject.CurrentVersion = currentVersion;
+                    if (!string.IsNullOrEmpty(createdBy)) fileProject.CreatedBy = createdBy;
+                    ProjectService.SaveProject(fileProject);
+                    LogInfo($"Created/updated project file at {path}/.claude/project.json");
+                }
+                catch (Exception ex) { LogError($"Failed to save project file: {ex.Message}"); }
+            }
+
+            BroadcastProjectUpdate();
+
+            // Record activity for the feed
+            RecordActivity(new ActivityEvent
+            {
+                Terminal = createdBy ?? "System",
+                Type = "project",
+                Action = "created",
+                Content = $"Created project: {name}",
+                RelatedId = project.Id
+            });
+
+            return new CreateProjectResult
+            {
+                Success = true,
+                ProjectId = project.Id,
+                CreatedFileProject = fileProject,
+            };
         }
 
         /// <summary>
@@ -6816,21 +6824,31 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             var previousName = project.Name;
+            var newName = !string.IsNullOrWhiteSpace(name) ? name : previousName;
 
-            // Update only if values are provided
-            if (!string.IsNullOrWhiteSpace(name))
+            // Write path: clone → mutate → persist → swap. On a persist failure the cache keeps the old
+            // project (coherent) and we return Success=false instead of the pre-P5 swallow-and-succeed.
+            try
             {
-                project.Name = name;
+                MutateProjectInternal(projectId, p =>
+                {
+                    // Update only if values are provided.
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        p.Name = name;
+                    }
+                    if (description != null)
+                    {
+                        p.Description = description;
+                    }
+                    p.UpdatedAt = DateTime.UtcNow;
+                });
             }
-            if (description != null)
+            catch (Exception ex)
             {
-                project.Description = description;
+                LogError($"UpdateProject: persist failed for {projectId}: {ex.Message}");
+                return new UpdateProjectResult { Success = false, Error = $"Failed to persist project update: {ex.Message}" };
             }
-            project.UpdatedAt = DateTime.UtcNow;
-
-            // Persist to database
-            try { _projectDb.SaveProject(project); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update project: {ex.Message}"); }
 
             BroadcastProjectUpdate();
 
@@ -6840,9 +6858,9 @@ namespace MultiTerminal.MCPServer.Services
                 Terminal = updatedBy ?? "System",
                 Type = "project",
                 Action = "updated",
-                Content = previousName != project.Name
-                    ? $"Renamed project: '{previousName}' -> '{project.Name}'"
-                    : $"Updated project: {project.Name}",
+                Content = previousName != newName
+                    ? $"Renamed project: '{previousName}' -> '{newName}'"
+                    : $"Updated project: {newName}",
                 RelatedId = projectId
             });
 
@@ -7000,6 +7018,31 @@ namespace MultiTerminal.MCPServer.Services
             RaiseSafe(ProjectsUpdated, projects);
         }
 
+        // Project write path (P5 / 1df2a534) — same ordering rule as the task write path: clone → mutate
+        // the clone → persist → swap into the cache ONLY on persist success, so a DB failure never leaves
+        // the _projects cache ahead of the DB. Neither helper broadcasts (the caller decides). See the
+        // MutateTaskInternal ORDERING RULE comment for the full rationale.
+        private Project MutateProjectInternal(string projectId, Action<Project> mutate)
+        {
+            if (!_projects.TryGetValue(projectId, out var current))
+            {
+                return null;
+            }
+
+            var updated = current.Clone();
+            mutate(updated);
+            _projectDb.SaveProject(updated);   // persist FIRST — if this throws, the cache stays coherent
+            _projects[projectId] = updated;    // swap into cache only after the DB write succeeded
+            return updated;
+        }
+
+        private Project InsertProjectInternal(Project project)
+        {
+            _projectDb.SaveProject(project);   // persist FIRST
+            _projects[project.Id] = project;   // add to cache only after the DB write succeeded
+            return project;
+        }
+
         #endregion
 
         #region Profile Methods
@@ -7037,11 +7080,17 @@ namespace MultiTerminal.MCPServer.Services
             if (interests != null) profile.SetInterests(interests);
             if (projectIds != null) profile.SetProjectIds(projectIds);
 
-            _profiles.TryAdd(id, profile);
-
-            // Persist to database
-            try { _taskDb.SaveProfile(profile); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save profile: {ex.Message}"); }
+            // Persist-before-cache (write path): on a durable-write failure the profile never enters the
+            // cache, and we return Success=false instead of the pre-P5 swallow-and-succeed.
+            try
+            {
+                InsertProfileInternal(profile);
+            }
+            catch (Exception ex)
+            {
+                LogError($"CreateProfile: persist failed for {id}: {ex.Message}");
+                return new CreateProfileResult { Success = false, Error = $"Failed to persist profile: {ex.Message}" };
+            }
 
             BroadcastProfileUpdate();
 
@@ -7053,28 +7102,36 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public UpdateProfileResult UpdateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null, bool? isTeamLead = null)
         {
-            if (!_profiles.TryGetValue(id, out var profile))
+            if (!_profiles.ContainsKey(id))
             {
                 return new UpdateProfileResult { Success = false, Error = $"Profile not found: {id}" };
             }
 
-            // Update only provided fields (null means don't change)
-            if (displayName != null) profile.DisplayName = displayName;
-            if (avatarUrl != null) profile.AvatarUrl = avatarUrl;
-            if (role != null) profile.Role = role;
-            if (bio != null) profile.Bio = bio;
-            if (skills != null) profile.SetSkills(skills);
-            if (interests != null) profile.SetInterests(interests);
-            if (projectIds != null) profile.SetProjectIds(projectIds);
-            if (agentInstructions != null) profile.AgentInstructions = agentInstructions;
-            if (preferredModel != null) profile.PreferredModel = preferredModel;
-            if (isTeamLead.HasValue) profile.IsTeamLead = isTeamLead.Value;
-
-            profile.UpdatedAt = DateTime.UtcNow;
-
-            // Persist to database
-            try { _taskDb.SaveProfile(profile); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update profile: {ex.Message}"); }
+            // Write path: clone → mutate → persist → swap. A persist failure keeps the cached profile
+            // (coherent) and returns Success=false instead of the pre-P5 swallow-and-succeed.
+            try
+            {
+                MutateProfileInternal(id, p =>
+                {
+                    // Update only provided fields (null means don't change).
+                    if (displayName != null) p.DisplayName = displayName;
+                    if (avatarUrl != null) p.AvatarUrl = avatarUrl;
+                    if (role != null) p.Role = role;
+                    if (bio != null) p.Bio = bio;
+                    if (skills != null) p.SetSkills(skills);
+                    if (interests != null) p.SetInterests(interests);
+                    if (projectIds != null) p.SetProjectIds(projectIds);
+                    if (agentInstructions != null) p.AgentInstructions = agentInstructions;
+                    if (preferredModel != null) p.PreferredModel = preferredModel;
+                    if (isTeamLead.HasValue) p.IsTeamLead = isTeamLead.Value;
+                    p.UpdatedAt = DateTime.UtcNow;
+                });
+            }
+            catch (Exception ex)
+            {
+                LogError($"UpdateProfile: persist failed for {id}: {ex.Message}");
+                return new UpdateProfileResult { Success = false, Error = $"Failed to persist profile update: {ex.Message}" };
+            }
 
             BroadcastProfileUpdate();
 
@@ -7111,14 +7168,24 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public DeleteProfileResult DeleteProfile(string id)
         {
-            if (!_profiles.TryRemove(id, out var profile))
+            if (!_profiles.ContainsKey(id))
             {
                 return new DeleteProfileResult { Success = false, Error = $"Profile not found: {id}" };
             }
 
-            // Delete from database
-            try { _taskDb.DeleteProfile(id); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to delete profile: {ex.Message}"); }
+            // Delete from the DB FIRST, then remove from the cache (mirror of the insert ordering). A
+            // failed delete keeps the profile in both stores rather than dropping it from the UI only.
+            try
+            {
+                _taskDb.DeleteProfile(id);
+            }
+            catch (Exception ex)
+            {
+                LogError($"DeleteProfile: persist failed for {id}: {ex.Message}");
+                return new DeleteProfileResult { Success = false, Error = $"Failed to delete profile: {ex.Message}" };
+            }
+
+            _profiles.TryRemove(id, out _);
 
             BroadcastProfileUpdate();
 
@@ -7133,30 +7200,28 @@ namespace MultiTerminal.MCPServer.Services
         {
             try
             {
-                // Auto-create profile if it doesn't exist
+                // Auto-create profile if it doesn't exist (persist-before-cache via the write path).
                 if (!_profiles.ContainsKey(id))
                 {
-                    var newProfile = new TeamMemberProfile
+                    InsertProfileInternal(new TeamMemberProfile
                     {
                         Id = id,
                         DisplayName = id,
                         IsOnline = true,
                         CreatedAt = DateTime.UtcNow,
                         UpdatedAt = DateTime.UtcNow
-                    };
-                    _profiles.TryAdd(id, newProfile);
-                    _taskDb.SaveProfile(newProfile);
+                    });
+                    _taskDb.SetProfileOnline(id);
                     System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-created profile: {id}");
                 }
-
-                // Set online in database
-                _taskDb.SetProfileOnline(id);
-
-                // Update in-memory profile
-                if (_profiles.TryGetValue(id, out var profile))
+                else
                 {
-                    profile.IsOnline = true;
-                    profile.UpdatedAt = DateTime.UtcNow;
+                    // Targeted online-flag write as the persist step + coherent cache swap.
+                    MutateProfileInternal(id, p =>
+                    {
+                        p.IsOnline = true;
+                        p.UpdatedAt = DateTime.UtcNow;
+                    }, _ => _taskDb.SetProfileOnline(id));
                 }
 
                 BroadcastProfileUpdate();
@@ -7179,14 +7244,15 @@ namespace MultiTerminal.MCPServer.Services
         {
             try
             {
-                // Set offline in database
-                _taskDb.SetProfileOffline(id);
-
-                // Update in-memory profile
-                if (_profiles.TryGetValue(id, out var profile))
+                // If cached, swap coherently with the offline-flag write as the persist step; if not
+                // cached, still write the DB flag (matches pre-P5, which always wrote it).
+                if (MutateProfileInternal(id, p =>
                 {
-                    profile.IsOnline = false;
-                    profile.UpdatedAt = DateTime.UtcNow;
+                    p.IsOnline = false;
+                    p.UpdatedAt = DateTime.UtcNow;
+                }, _ => _taskDb.SetProfileOffline(id)) == null)
+                {
+                    _taskDb.SetProfileOffline(id);
                 }
 
                 BroadcastProfileUpdate();
@@ -7208,6 +7274,38 @@ namespace MultiTerminal.MCPServer.Services
         {
             var profiles = _profiles.Values.OrderBy(p => p.DisplayName ?? p.Id).ToList();
             RaiseSafe(ProfilesUpdated, profiles);
+        }
+
+        // Profile write path (P5 / 1df2a534) — clone → mutate → persist → swap, the mirror of the task /
+        // project paths. `persist` defaults to a full-row SaveProfile; pass a custom action for a targeted
+        // column write (e.g. the online-flag writers). Neither helper broadcasts (the caller decides).
+        private TeamMemberProfile MutateProfileInternal(string id, Action<TeamMemberProfile> mutate, Action<TeamMemberProfile> persist = null)
+        {
+            if (!_profiles.TryGetValue(id, out var current))
+            {
+                return null;
+            }
+
+            var updated = current.Clone();
+            mutate(updated);
+            if (persist != null)
+            {
+                persist(updated);
+            }
+            else
+            {
+                _taskDb.SaveProfile(updated);   // persist FIRST
+            }
+
+            _profiles[id] = updated;   // swap into cache only after the DB write succeeded
+            return updated;
+        }
+
+        private TeamMemberProfile InsertProfileInternal(TeamMemberProfile profile)
+        {
+            _taskDb.SaveProfile(profile);   // persist FIRST
+            _profiles[profile.Id] = profile;   // add to cache only after the DB write succeeded
+            return profile;
         }
 
         #endregion

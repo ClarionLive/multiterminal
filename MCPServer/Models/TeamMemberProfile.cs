@@ -137,6 +137,18 @@ namespace MultiTerminal.MCPServer.Models
         {
             ProjectIdsJson = System.Text.Json.JsonSerializer.Serialize(projectIds ?? new List<string>());
         }
+
+        /// <summary>
+        /// Returns a copy of this profile. Every field is a string or value type (skills, interests and
+        /// project ids are stored as JSON strings), so a member-wise copy is a complete deep copy. Used by
+        /// MessageBroker's profile write path (P5 / ticket 1df2a534): a mutation is applied to a clone,
+        /// persisted, and only then swapped into the cache — a persist failure can't leave the cache
+        /// diverged, and readers never observe a half-mutated profile.
+        /// </summary>
+        public TeamMemberProfile Clone()
+        {
+            return (TeamMemberProfile)MemberwiseClone();
+        }
     }
 
     /// <summary>
