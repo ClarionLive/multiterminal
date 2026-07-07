@@ -3969,6 +3969,11 @@ namespace MultiTerminal.MCPServer.Services
             bool wasQueued = false;
             string queuedBehind = null;
 
+            // The CORE claim persist (queue or activate the CLAIMED task) is FATAL: if the durable write
+            // fails we abort with Success=false and do NOT broadcast, so an agent never proceeds on a claim
+            // that evaporates on restart (P5 pipeline A). Pausing the sibling is best-effort.
+            const string claimPersistFailed = "Failed to persist the claim (the task's durable state was not written — DB unavailable?).";
+
             if (currentActiveTask != null)
             {
                 switch (priority)
@@ -3978,7 +3983,11 @@ namespace MultiTerminal.MCPServer.Services
                         if (IsTerminalInCriticalSection(assignee))
                         {
                             // Queue the urgent task - it will activate when critical section ends
-                            QueueTaskForTerminal(task, assignee, isLowPriority: false);
+                            if (!QueueTaskForTerminal(task, assignee, isLowPriority: false))
+                            {
+                                return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
+                            }
+
                             wasQueued = true;
                             queuedBehind = currentActiveTask.Title;
 
@@ -3993,15 +4002,25 @@ namespace MultiTerminal.MCPServer.Services
                         }
                         else
                         {
-                            // Pause current active task and make urgent task active
+                            // Activate the urgent task FIRST (fatal), THEN pause the current active task
+                            // (best-effort). This ordering means a failed activation leaves the sibling
+                            // unpaused and coherent (P5 pipeline A, SetTaskActive ruling applied here too).
+                            if (!MakeTaskActive(task, assignee, taskId))
+                            {
+                                return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
+                            }
+
                             PauseTaskWithSummary(currentActiveTask, assignee);
-                            MakeTaskActive(task, assignee, taskId);
                         }
                         break;
 
                     case "low":
                         // Add to bottom of paused stack
-                        QueueTaskForTerminal(task, assignee, isLowPriority: true);
+                        if (!QueueTaskForTerminal(task, assignee, isLowPriority: true))
+                        {
+                            return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
+                        }
+
                         wasQueued = true;
                         queuedBehind = currentActiveTask.Title;
 
@@ -4018,7 +4037,11 @@ namespace MultiTerminal.MCPServer.Services
                     case "normal":
                     default:
                         // Queue behind current task (doesn't interrupt)
-                        QueueTaskForTerminal(task, assignee, isLowPriority: false);
+                        if (!QueueTaskForTerminal(task, assignee, isLowPriority: false))
+                        {
+                            return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
+                        }
+
                         wasQueued = true;
                         queuedBehind = currentActiveTask.Title;
 
@@ -4036,7 +4059,10 @@ namespace MultiTerminal.MCPServer.Services
             else
             {
                 // No active task - make this task active regardless of priority
-                MakeTaskActive(task, assignee, taskId);
+                if (!MakeTaskActive(task, assignee, taskId))
+                {
+                    return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
+                }
             }
 
             BroadcastTaskUpdate();
@@ -4111,21 +4137,30 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Queue a task for a terminal (add to paused stack without interrupting current work).
         /// </summary>
-        private void QueueTaskForTerminal(KanbanTask task, string assignee, bool isLowPriority = false)
+        /// <returns>true if the claim persisted; false (not found OR DB write failed) so ClaimTask aborts
+        /// with Success=false. The core claim persist is FATAL (P5 pipeline A); summary is best-effort.</returns>
+        private bool QueueTaskForTerminal(KanbanTask task, string assignee, bool isLowPriority = false)
         {
-            // Write path, no broadcast — the ClaimTask caller broadcasts once after the whole claim.
-            // Low priority tasks get a past timestamp to sort them to the bottom of the stack.
+            // Core claim persist through the write path, no broadcast — the ClaimTask caller broadcasts
+            // once after the whole claim. Low priority tasks get a past timestamp to sort to the bottom.
             try
             {
-                MutateTaskInternal(task.Id, t =>
+                if (MutateTaskInternal(task.Id, t =>
                 {
                     t.Assignee = assignee;
                     t.Status = "in_progress";
                     t.SubStatus = "queued";
                     t.PausedAt = isLowPriority ? DateTime.UtcNow.AddDays(-1) : DateTime.UtcNow;
-                });
+                }) == null)
+                {
+                    return false;
+                }
             }
-            catch (Exception ex) { LogError($"QueueTaskForTerminal: persist failed for {task.Id}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                LogError($"QueueTaskForTerminal: persist failed for {task.Id}: {ex.Message}");
+                return false;
+            }
 
             // Auto-generate summary when task is claimed (even if queued)
             if (SummaryService != null)
@@ -4144,6 +4179,8 @@ namespace MultiTerminal.MCPServer.Services
                     System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to auto-generate summary: {ex.Message}");
                 }
             }
+
+            return true;
         }
 
         /// <summary>
@@ -4194,19 +4231,28 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Make a task active and update activity tracking.
         /// </summary>
-        private void MakeTaskActive(KanbanTask task, string assignee, string taskId)
+        /// <returns>true if the activation persisted; false (not found OR DB write failed) so ClaimTask
+        /// aborts with Success=false. The core activation persist is FATAL (P5 pipeline A).</returns>
+        private bool MakeTaskActive(KanbanTask task, string assignee, string taskId)
         {
-            // Write path, no broadcast — the ClaimTask caller broadcasts once after the whole claim.
+            // Core activation persist through the write path, no broadcast — ClaimTask broadcasts once.
             try
             {
-                MutateTaskInternal(taskId, t =>
+                if (MutateTaskInternal(taskId, t =>
                 {
                     t.Assignee = assignee;
                     t.Status = "in_progress";
                     t.SubStatus = "active";
-                });
+                }) == null)
+                {
+                    return false;
+                }
             }
-            catch (Exception ex) { LogError($"MakeTaskActive: persist failed for {taskId}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                LogError($"MakeTaskActive: persist failed for {taskId}: {ex.Message}");
+                return false;
+            }
 
             // Auto-generate summary when task is claimed
             if (SummaryService != null)
@@ -4242,6 +4288,8 @@ namespace MultiTerminal.MCPServer.Services
                 Content = $"Claimed task: {task.Title}",
                 RelatedId = taskId
             });
+
+            return true;
         }
 
         /// <summary>
@@ -4285,10 +4333,12 @@ namespace MultiTerminal.MCPServer.Services
             var previousSubStatus = task.SubStatus;
             var assignee = task.Assignee;
 
-            // Write path (no broadcast — broadcast once below, after the optional auto-resume).
+            // Write path (no broadcast — broadcast once below, after the optional auto-resume). The status
+            // persist is FATAL (P5 pipeline A): failure returns Success=false with no broadcast/side-effects
+            // and the cache untouched, so a caller never proceeds on a status change that didn't persist.
             try
             {
-                MutateTaskInternal(taskId, t =>
+                if (MutateTaskInternal(taskId, t =>
                 {
                     t.Status = status;
 
@@ -4313,9 +4363,16 @@ namespace MultiTerminal.MCPServer.Services
                         t.SubStatus = null;
                         t.PausedAt = null;
                     }
-                });
+                }) == null)
+                {
+                    return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
+                }
             }
-            catch (Exception ex) { LogError($"UpdateTaskStatus: persist failed for {taskId}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                LogError($"UpdateTaskStatus: persist failed for {taskId}: {ex.Message}");
+                return new UpdateTaskStatusResult { Success = false, Error = $"Failed to persist status change: {ex.Message}" };
+            }
 
             // Auto-generate summary on status change
             if (previousStatus != status && SummaryService != null)
@@ -4765,22 +4822,27 @@ namespace MultiTerminal.MCPServer.Services
             if (!double.IsFinite(newSortOrder))
                 return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: newSortOrder must be a finite number (got {newSortOrder})." };
 
-            // Status change first — UpdateTaskStatus handles validation, side-effects,
-            // and persistence. If it fails, bail before touching sort_order.
+            // Status change first — UpdateTaskStatus handles validation, side-effects, and persistence.
+            // If it fails, bail before touching sort_order. UpdateTaskStatus swaps a NEW clone into the
+            // cache, so our local `task` is stale afterward — re-fetch it before the sort logic reads
+            // task.Status below (otherwise we'd snapshot/rebalance the OLD column).
             if (!string.IsNullOrEmpty(newStatus) && task.Status != newStatus)
             {
                 var statusResult = UpdateTaskStatus(taskId, newStatus);
                 if (!statusResult.Success)
                     return statusResult;
+
+                if (!_tasks.TryGetValue(taskId, out task))
+                    return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
             // Write-path exception (P5 / 1df2a534): sort_order is NOT persisted via the SaveTask row
             // upsert — it has a dedicated column writer (UpdateSortOrder) and a whole-column
-            // RebalanceSortOrder that rewrites many sibling rows at once. The block below persists to
-            // those and then refreshes the affected in-memory tasks' SortOrder FROM the DB, so the cache
-            // follows the durable write rather than diverging. Routing this through MutateTask/SaveTask
-            // would be incorrect (wrong writer, and it would miss the bulk rebalance). Documented bypass,
-            // like LoadPersistedTasks (the status change above already went through the write path).
+            // RebalanceSortOrder that rewrites many sibling rows at once. The block below PERSISTS FIRST,
+            // then refreshes/sets the affected in-memory tasks' SortOrder from the durable write — so the
+            // cache follows the DB and cannot diverge, and a failed sort write returns Success=false with
+            // the cache untouched. Routing this through MutateTask/SaveTask would be incorrect (wrong
+            // writer, and it would miss the bulk rebalance). Documented bypass, like LoadPersistedTasks.
             const double MIN_SORT_GAP = 1e-6;
 
             // Collapse guard: snapshot neighbors in the target column AFTER the
@@ -4800,29 +4862,34 @@ namespace MultiTerminal.MCPServer.Services
             bool tooCloseBelow = prevOrder.HasValue && (newSortOrder - prevOrder.Value) < MIN_SORT_GAP;
             bool tooCloseAbove = nextOrder.HasValue && (nextOrder.Value - newSortOrder) < MIN_SORT_GAP;
 
-            if (tooCloseBelow || tooCloseAbove)
+            try
             {
-                // Rebalance the whole column. The current task is still in the
-                // column at its previous sort_order; the rebalance will give it
-                // a clean integer slot, then we compute a fresh midpoint from
-                // the user-intended position. To preserve the visual rank the
-                // user dragged to, set sort_order to the desired endpoint of
-                // the gap before rebalance.
-                task.SortOrder = newSortOrder;
-                _taskDb.UpdateSortOrder(taskId, newSortOrder);
-                _taskDb.RebalanceSortOrder(task.Status);
-
-                // Reload affected tasks' sort_order from DB into in-memory map
-                foreach (var t in _tasks.Values.Where(t => t.Status == task.Status).ToList())
+                if (tooCloseBelow || tooCloseAbove)
                 {
-                    var refreshed = _taskDb.GetTask(t.Id);
-                    if (refreshed != null) t.SortOrder = refreshed.SortOrder;
+                    // Rebalance the whole column. PERSIST FIRST: position the task at the desired endpoint
+                    // in the DB (so RebalanceSortOrder gives it the right rank), rebalance the column in the
+                    // DB, THEN reload every affected task's sort_order FROM the DB into the cache. Nothing in
+                    // the cache is mutated until after the durable writes, so a throw leaves it untouched.
+                    _taskDb.UpdateSortOrder(taskId, newSortOrder);
+                    _taskDb.RebalanceSortOrder(task.Status);
+
+                    foreach (var t in _tasks.Values.Where(t => t.Status == task.Status).ToList())
+                    {
+                        var refreshed = _taskDb.GetTask(t.Id);
+                        if (refreshed != null) t.SortOrder = refreshed.SortOrder;
+                    }
+                }
+                else
+                {
+                    // Persist FIRST, then update the cache — a failed sort write leaves the cache untouched.
+                    _taskDb.UpdateSortOrder(taskId, newSortOrder);
+                    task.SortOrder = newSortOrder;
                 }
             }
-            else
+            catch (Exception ex)
             {
-                task.SortOrder = newSortOrder;
-                _taskDb.UpdateSortOrder(taskId, newSortOrder);
+                LogError($"ReorderTask: failed to persist sort_order for {taskId}: {ex.Message}");
+                return new UpdateTaskStatusResult { Success = false, Error = $"Failed to persist reorder: {ex.Message}" };
             }
 
             BroadcastTaskUpdate();
@@ -5602,17 +5669,43 @@ namespace MultiTerminal.MCPServer.Services
             bool isActingAssignee = string.IsNullOrEmpty(task.Assignee)
                 || string.Equals(actingAgent, task.Assignee, StringComparison.OrdinalIgnoreCase);
 
+            // Activate THIS task FIRST, and make its persist FATAL (P5 pipeline A + Alice's SetTaskActive
+            // ruling): if the activation doesn't persist we return Success=false BEFORE touching any
+            // sibling, so a failed activation leaves the siblings unpaused and the board coherent. Reassign
+            // `task` to the swapped-in cache entry so the worktree / project-id self-heal below operates on
+            // the live cached object.
+            try
+            {
+                var activated = MutateTaskInternal(taskId, t =>
+                {
+                    t.SubStatus = "active";
+                    t.PausedAt = null;
+                });
+                if (activated == null)
+                {
+                    return new SetTaskActiveResult { Success = false, Error = $"Task not found: {taskId}" };
+                }
+
+                task = activated;
+            }
+            catch (Exception ex)
+            {
+                LogError($"SetTaskActive: failed to set task active: {ex.Message}");
+                return new SetTaskActiveResult { Success = false, Error = $"Failed to persist activation: {ex.Message}" };
+            }
+
             var pausedIds = new List<string>();
             var pausedTitles = new List<string>();
 
-            // Capture the previously-active task's id + worktree (for the
-            // TaskActiveChanged event fired below). One assignee can have at
-            // most one active task, so the first match in the loop wins; if
-            // none, both stay null and AC4's "no-active-task baseline" applies.
+            // Capture the previously-active task's id + worktree (for the TaskActiveChanged event below),
+            // then pause the OTHER active tasks for this assignee — BEST-EFFORT (the activation, the durable
+            // core, already succeeded; a sibling-pause miss is logged, not fatal). One assignee has at most
+            // one active task, so the first match wins. There is a synchronous in-cache window where this
+            // task and a sibling are both "active", but no event is broadcast until the end so subscribers
+            // never observe it.
             string oldTaskId = null;
             string oldWorktreePath = null;
 
-            // Auto-pause other active tasks for this assignee
             foreach (var kvp in _tasks)
             {
                 var other = kvp.Value;
@@ -5631,7 +5724,6 @@ namespace MultiTerminal.MCPServer.Services
                     pausedIds.Add(other.Id);
                     pausedTitles.Add(other.Title);
 
-                    // Write path (no broadcast — one broadcast covers the whole activation below).
                     var otherId = other.Id;
                     try
                     {
@@ -5644,23 +5736,6 @@ namespace MultiTerminal.MCPServer.Services
                     catch (Exception ex) { LogError($"SetTaskActive: failed to pause task {otherId}: {ex.Message}"); }
                 }
             }
-
-            // Set this task active via the write path. Reassign `task` to the swapped-in cache entry so
-            // the worktree / project-id self-heal below keeps operating on the live cached object (its
-            // own project-id save already reverts on failure).
-            try
-            {
-                var activated = MutateTaskInternal(taskId, t =>
-                {
-                    t.SubStatus = "active";
-                    t.PausedAt = null;
-                });
-                if (activated != null)
-                {
-                    task = activated;
-                }
-            }
-            catch (Exception ex) { LogError($"SetTaskActive: failed to set task active: {ex.Message}"); }
 
             // Auto-helper: an agent that activates a task it doesn't own (not the
             // assignee, not already a helper) is registered as a helper so the
@@ -6193,7 +6268,7 @@ namespace MultiTerminal.MCPServer.Services
         /// methods swap several tasks then broadcast once). A persist exception propagates and leaves the
         /// cache untouched (coherent-fail).
         /// </summary>
-        private KanbanTask MutateTaskInternal(string taskId, Action<KanbanTask> mutate)
+        private KanbanTask MutateTaskInternal(string taskId, Action<KanbanTask> mutate, Action<KanbanTask> persist = null)
         {
             if (!_tasks.TryGetValue(taskId, out var current))
             {
@@ -6202,8 +6277,20 @@ namespace MultiTerminal.MCPServer.Services
 
             var updated = current.Clone();
             mutate(updated);
-            _taskDb.SaveTask(updated);   // persist FIRST — if this throws, the cache stays coherent
-            _tasks[taskId] = updated;    // swap into cache only after the DB write succeeded
+
+            // persist FIRST — if this throws, the cache stays coherent. Defaults to a full-row SaveTask;
+            // pass a custom action for a side-table / targeted-column write (e.g. RespondToStale's
+            // ClearStaleTracking / RecordStaleResponse) where the clone mirrors what that writer persists.
+            if (persist != null)
+            {
+                persist(updated);
+            }
+            else
+            {
+                _taskDb.SaveTask(updated);
+            }
+
+            _tasks[taskId] = updated;   // swap into cache only after the DB write succeeded
             return updated;
         }
 
@@ -6315,8 +6402,12 @@ namespace MultiTerminal.MCPServer.Services
                     continue;
                 }
 
-                // Compare the full persisted tasks-row scalar set (not a token subset) so "coherent" is
-                // meaningful — a divergence on ANY row field the write path is responsible for is caught.
+                // Compare the persisted tasks-row STRING/NUMERIC/BOOL fields (not a token subset) so
+                // "coherent" is meaningful — a divergence on any of these is caught. DateTime columns
+                // (CreatedAt, PausedAt, FlaggedStaleAt, StaleNotifiedAt) are DELIBERATELY excluded: SQLite
+                // storage truncates sub-tick precision, so an exact-equality check would false-positive on
+                // a faithful round-trip. They are still written by SaveTask like every other field, so the
+                // clone→persist→swap guarantee covers them; they're just not exact-comparable spot-checks.
                 if (cachedTask.Status != dbTask.Status
                     || cachedTask.SubStatus != dbTask.SubStatus
                     || cachedTask.Assignee != dbTask.Assignee
@@ -6334,7 +6425,9 @@ namespace MultiTerminal.MCPServer.Services
                     || cachedTask.SortOrder != dbTask.SortOrder
                     || cachedTask.AutoStatus != dbTask.AutoStatus
                     || cachedTask.IsQuickTask != dbTask.IsQuickTask
-                    || cachedTask.StaleLevel != dbTask.StaleLevel)
+                    || cachedTask.CreatedBy != dbTask.CreatedBy
+                    || cachedTask.StaleLevel != dbTask.StaleLevel
+                    || cachedTask.StaleResponse != dbTask.StaleResponse)
                 {
                     report.Divergences.Add(
                         $"{cachedTask.Id}: cache/DB field divergence (cache status='{cachedTask.Status}' sub='{cachedTask.SubStatus}' vs db status='{dbTask.Status}' sub='{dbTask.SubStatus}')");
@@ -6519,30 +6612,31 @@ namespace MultiTerminal.MCPServer.Services
                 return new RespondStaleResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
+            var title = task.Title;
+
             try
             {
-                // Record the response in the database
-                _taskDb.RecordStaleResponse(taskId, response);
-
-                // Handle different responses
+                // All branches route through the write path (P5 pipeline C) so cache and DB stay coherent.
+                // Pre-P5 this mutated the cached task in place: still_relevant set StaleResponse=response and
+                // left StaleNotifiedAt while ClearStaleTracking actually NULLed both in the DB — a divergence.
+                KanbanTask updated;
                 if (response == "still_relevant")
                 {
-                    // Clear stale flag and reset timer
-                    _taskDb.ClearStaleTracking(taskId);
-                    task.StaleLevel = 0;
-                    task.FlaggedStaleAt = null;
-                    task.StaleResponse = response;
-                }
-                else if (response == "will_close")
-                {
-                    // User indicated they'll close - keep flag but record response
-                    task.StaleResponse = response;
+                    // Clear the stale flag + reset the timer. Mirror EXACTLY what ClearStaleTracking writes
+                    // (stale_level=0, flagged_stale_at/stale_notified_at/stale_response = NULL) in the clone.
+                    updated = MutateTaskInternal(taskId, t =>
+                    {
+                        t.StaleLevel = 0;
+                        t.FlaggedStaleAt = null;
+                        t.StaleNotifiedAt = null;
+                        t.StaleResponse = null;
+                    }, _ => _taskDb.ClearStaleTracking(taskId));
                 }
                 else if (response == "reprioritize")
                 {
-                    // Move task back to todo and clear stale flag — through the write path so a persist
-                    // failure leaves the cache coherent (the enclosing try/catch reports the failure).
-                    MutateTaskInternal(taskId, t =>
+                    // Move back to todo + clear the stale flag; the default SaveTask persist writes the
+                    // whole row (including stale_response).
+                    updated = MutateTaskInternal(taskId, t =>
                     {
                         t.Status = "todo";
                         t.SubStatus = null;
@@ -6551,6 +6645,18 @@ namespace MultiTerminal.MCPServer.Services
                         t.FlaggedStaleAt = null;
                         t.StaleResponse = response;
                     });
+                }
+                else
+                {
+                    // will_close (and any other free-text response): keep the flag, just record the response
+                    // via RecordStaleResponse (which the clone mirrors into StaleResponse).
+                    updated = MutateTaskInternal(taskId, t => t.StaleResponse = response,
+                        _ => _taskDb.RecordStaleResponse(taskId, response));
+                }
+
+                if (updated == null)
+                {
+                    return new RespondStaleResult { Success = false, Error = $"Task not found: {taskId}" };
                 }
 
                 BroadcastTaskUpdate();
@@ -6561,7 +6667,7 @@ namespace MultiTerminal.MCPServer.Services
                     Terminal = terminalName,
                     Type = "stale",
                     Action = "responded",
-                    Content = $"Responded to stale task '{task.Title}': {response}",
+                    Content = $"Responded to stale task '{title}': {response}",
                     RelatedId = taskId
                 });
 
