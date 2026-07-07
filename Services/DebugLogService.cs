@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using MultiTerminal.Models;
 
 namespace MultiTerminal.Services
@@ -19,12 +20,26 @@ namespace MultiTerminal.Services
         private readonly ConcurrentQueue<DebugLogEntry> _logQueue = new ConcurrentQueue<DebugLogEntry>();
         private const int MaxQueueSize = 10000;
         private OutputDebugStringListener _outputDebugListener;
-        private bool _isDisposed;
+        private volatile bool _isDisposed;
 
-        // File-based persistence
+        // File-based persistence. Writes are BUFFERED: callers enqueue onto _writeQueue (lock-free,
+        // never blocks the caller) and a single background writer thread drains it in batches and
+        // flushes once per batch. This decouples file I/O from hot-path caller threads (broker
+        // routing, watchers, timers) — before the c425e3a2 logging sweep these Debug/Trace.WriteLine
+        // sites compiled out in Release; converting them to an always-on SYNCHRONOUS flush-per-call
+        // (the old AutoFlush=true + locked WriteLine model) would regress exactly those hot paths.
         private readonly string _logFilePath;
         private readonly object _fileLock = new object();
         private StreamWriter _logWriter;
+
+        // Background file-writer pipeline. _writeQueue is unbounded (Add never blocks the caller);
+        // the writer keeps up because draining is O(batch) with a single flush. Only populated when
+        // file logging actually initialized (_fileLoggingEnabled) so a failed log-file open doesn't
+        // grow the queue without bound.
+        private readonly BlockingCollection<DebugLogEntry> _writeQueue;
+        private readonly Thread _writerThread;
+        private readonly bool _fileLoggingEnabled;
+        private const int WriterFlushIntervalMs = 1000;
 
         /// <summary>
         /// Raised when a new log message is added (on UI thread-safe context).
@@ -72,15 +87,31 @@ namespace MultiTerminal.Services
                 Directory.CreateDirectory(logDir);
                 string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
                 _logFilePath = Path.Combine(logDir, $"debug-{timestamp}.log");
+
+                // AutoFlush=false: the background writer flushes once per drained batch, not once
+                // per line. Per-line synchronous flush is the hot-path cost the buffering removes.
                 _logWriter = new StreamWriter(_logFilePath, append: true, encoding: Encoding.UTF8)
                 {
-                    AutoFlush = true
+                    AutoFlush = false
                 };
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[DebugLogService] Failed to create log file: {ex.Message}");
                 _logFilePath = null;
+                _logWriter = null;
+            }
+
+            _fileLoggingEnabled = _logWriter != null;
+            if (_fileLoggingEnabled)
+            {
+                _writeQueue = new BlockingCollection<DebugLogEntry>(new ConcurrentQueue<DebugLogEntry>());
+                _writerThread = new Thread(WriterLoop)
+                {
+                    IsBackground = true,
+                    Name = "DebugLogService.Writer",
+                };
+                _writerThread.Start();
             }
         }
 
@@ -103,7 +134,7 @@ namespace MultiTerminal.Services
 
             var entry = new DebugLogEntry(source, level, message);
             _logQueue.Enqueue(entry);
-            WriteToFile(entry);
+            EnqueueWrite(entry);
 
             // Auto-prune if queue exceeds max size
             while (_logQueue.Count > MaxQueueSize)
@@ -287,7 +318,7 @@ namespace MultiTerminal.Services
                 e.ProcessName);
 
             _logQueue.Enqueue(entry);
-            WriteToFile(entry);
+            EnqueueWrite(entry);
 
             // Auto-prune if queue exceeds max size
             while (_logQueue.Count > MaxQueueSize)
@@ -300,22 +331,62 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Write a log entry to the file. Thread-safe via lock.
+        /// Hand a log entry to the background writer. Non-blocking: the caller never touches the
+        /// file. Silently drops if file logging is disabled or the queue is completed (dispose).
         /// </summary>
-        private void WriteToFile(DebugLogEntry entry)
+        private void EnqueueWrite(DebugLogEntry entry)
         {
-            if (_logWriter == null) return;
+            if (!_fileLoggingEnabled || _writeQueue == null) return;
 
             try
             {
-                lock (_fileLock)
+                _writeQueue.Add(entry);
+            }
+            catch (InvalidOperationException)
+            {
+                // Add-after-CompleteAdding during shutdown — safe to drop (writer is stopping).
+            }
+        }
+
+        /// <summary>
+        /// Background writer loop. Blocks up to <see cref="WriterFlushIntervalMs"/> for the next
+        /// entry, then drains every entry currently available and flushes ONCE per batch. This is
+        /// what turns N synchronous per-line flushes into one flush per batch (the buffering win).
+        /// Exits when the queue is completed (Dispose) and fully drained.
+        /// </summary>
+        private void WriterLoop()
+        {
+            try
+            {
+                while (_writeQueue.TryTake(out var entry, WriterFlushIntervalMs))
                 {
-                    _logWriter.WriteLine(entry.ToFullString());
+                    lock (_fileLock)
+                    {
+                        if (_logWriter == null) continue;
+                        try
+                        {
+                            _logWriter.WriteLine(entry.ToFullString());
+                            // Drain everything else already queued into the same flush.
+                            while (_writeQueue.TryTake(out var more))
+                            {
+                                _logWriter.WriteLine(more.ToFullString());
+                            }
+                            _logWriter.Flush();
+                        }
+                        catch
+                        {
+                            // Don't let file I/O errors kill the writer thread.
+                        }
+                    }
                 }
             }
-            catch
+            catch (ObjectDisposedException)
             {
-                // Don't let file I/O errors break logging
+                // _writeQueue disposed during shutdown race — nothing left to write.
+            }
+            catch (OperationCanceledException)
+            {
+                // CompleteAdding signalled mid-take — treat as clean stop.
             }
         }
 
@@ -333,19 +404,30 @@ namespace MultiTerminal.Services
             {
                 StopSystemWideCapture();
 
-                lock (_fileLock)
+                // Stop accepting new entries and let the writer drain what's queued, then exit.
+                // Bounded join so a hung disk can't block application shutdown; the writer is a
+                // background thread, so if it doesn't finish in time the OS reclaims it on exit.
+                _writeQueue?.CompleteAdding();
+                bool joined = _writerThread == null || _writerThread.Join(TimeSpan.FromSeconds(3));
+
+                if (joined)
                 {
-                    if (_logWriter != null)
+                    lock (_fileLock)
                     {
-                        try
+                        if (_logWriter != null)
                         {
-                            _logWriter.Flush();
-                            _logWriter.Dispose();
+                            try
+                            {
+                                _logWriter.Flush();
+                                _logWriter.Dispose();
+                            }
+                            catch { }
+                            _logWriter = null;
                         }
-                        catch { }
-                        _logWriter = null;
                     }
                 }
+
+                _writeQueue?.Dispose();
             }
         }
     }
