@@ -44,6 +44,24 @@ function isValidProjectId(id) {
   return typeof id === "string" && PROJECT_ID_RE.test(id);
 }
 
+// The one sanctioned way to interpolate a dynamic value into an apiCall() URL
+// PATH SEGMENT. encodeURIComponent percent-encodes path metacharacters (notably
+// '/' and '.'), so a hostile or malformed arg like "../tasks/<id>" becomes
+// "..%2Ftasks%2F<id>" — the URL parser will NOT normalize %2F into a separator,
+// so it can't escape its intended route into a sibling resource (ticket 6dcf3fa2;
+// delete_project precedent ec97c446). A path segment is never legitimately empty,
+// so nullish is rejected to fail fast rather than emit "/undefined" or an empty
+// "//" segment. NOTE: query-string VALUES are not path segments — build those
+// with URLSearchParams (or encodeURIComponent per-value), never with seg().
+// The pathEncoding.test.mjs gate asserts every path-segment interpolation in an
+// api template literal goes through this function.
+function seg(value) {
+  if (value === undefined || value === null) {
+    throw new Error(`apiCall path segment is required (got ${value})`);
+  }
+  return encodeURIComponent(String(value));
+}
+
 async function apiCall(endpoint, method = "GET", body = null) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -2579,7 +2597,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_tasks": {
         const status = args.status || "all";
         const includeQuickTasks = args.includeQuickTasks === true;
-        const tasks = await apiCall(`/api/tasks?status=${status}&includeQuickTasks=${includeQuickTasks}`);
+        const tasks = await apiCall(`/api/tasks?status=${encodeURIComponent(status)}&includeQuickTasks=${includeQuickTasks}`);
         return {
           content: [
             {
@@ -2628,7 +2646,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_task_status": {
-        await apiCall(`/api/tasks/${args.taskId}/status`, "PATCH", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/status`, "PATCH", {
           status: args.status,
           updatedBy: args.updatedBy,
         });
@@ -2643,7 +2661,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "rename_task": {
-        await apiCall(`/api/tasks/${args.taskId}/title`, "PATCH", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/title`, "PATCH", {
           newTitle: args.newTitle,
           updatedBy: args.updatedBy,
         });
@@ -2658,7 +2676,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "delete_task": {
-        await apiCall(`/api/tasks/${args.taskId}?deletedBy=${args.deletedBy}`, "DELETE");
+        await apiCall(`/api/tasks/${seg(args.taskId)}?deletedBy=${encodeURIComponent(args.deletedBy)}`, "DELETE");
         return {
           content: [
             {
@@ -2670,7 +2688,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "claim_task": {
-        await apiCall(`/api/tasks/${args.taskId}/assign`, "POST", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/assign`, "POST", {
           assignee: args.assignee,
         });
         return {
@@ -2825,7 +2843,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_messages": {
-        const messages = await apiCall(`/api/messaging/messages/${args.terminalId}`);
+        const messages = await apiCall(`/api/messaging/messages/${seg(args.terminalId)}`);
         if (!messages || messages.length === 0) {
           return {
             content: [
@@ -2854,7 +2872,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Kanban Workflow: Enhanced Checklist Handlers
       case "update_task_checklist": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/checklist/${args.itemIndex}/transition`, "POST", {
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/checklist/${seg(args.itemIndex)}/transition`, "POST", {
           newStatus: args.newStatus,
           notes: args.notes,
           updatedBy: args.updatedBy,
@@ -2866,7 +2884,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Auto-detect pipeline trigger: if all items are now testing or done
         if (args.newStatus === "testing") {
           try {
-            const taskData = await apiCall(`/api/tasks/${args.taskId}`);
+            const taskData = await apiCall(`/api/tasks/${seg(args.taskId)}`);
             let checklist = taskData.checklist || taskData.checklist_json;
             if (typeof checklist === "string") checklist = JSON.parse(checklist);
             if (Array.isArray(checklist)) {
@@ -2887,7 +2905,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "assign_checklist_item": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/checklist/${args.itemIndex}/assign`, "POST", {
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/checklist/${seg(args.itemIndex)}/assign`, "POST", {
           assignee: args.assignee ?? null,
         });
         const who = args.assignee ? args.assignee : "nobody (unassigned)";
@@ -2897,7 +2915,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_task_continuation": {
-        await apiCall(`/api/tasks/${args.taskId}/continuation`, "PATCH", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/continuation`, "PATCH", {
           continuationNotes: args.continuationNotes,
           updatedBy: args.updatedBy,
         });
@@ -2907,7 +2925,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_task_plan": {
-        await apiCall(`/api/tasks/${args.taskId}/plan`, "PATCH", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/plan`, "PATCH", {
           plan: args.plan,
           updatedBy: args.updatedBy,
         });
@@ -2917,7 +2935,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_task_summary": {
-        await apiCall(`/api/tasks/${args.taskId}/summary`, "PATCH", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/summary`, "PATCH", {
           implementationSummary: args.implementationSummary || null,
           testResults: args.testResults || null,
           updatedBy: args.updatedBy,
@@ -2928,7 +2946,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "set_task_active": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/activate`, "POST", {
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/activate`, "POST", {
           updatedBy: args.updatedBy,
         });
         let text = `✅ Task ${args.taskId} set as active.`;
@@ -2941,14 +2959,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_task_detail": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/detail`);
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/detail`);
         const task = result.task;
         const summary = result.checklistSummary;
         const checklist = result.checklist;
 
         // Fetch report count (non-blocking, default to 0 on error)
         let reportData = { count: 0, reports: [] };
-        try { reportData = await apiCall(`/api/tasks/${args.taskId}/reports?limit=10`); } catch (e) { /* ignore */ }
+        try { reportData = await apiCall(`/api/tasks/${seg(args.taskId)}/reports?limit=10`); } catch (e) { /* ignore */ }
 
         let text = `📋 Task: ${task.title}\n`;
         text += `Status: ${task.status}`;
@@ -3013,7 +3031,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const ctxDocId = args.docId || process.env.MULTITERMINAL_DOC_ID;
         const ctxQs = ctxDocId ? `?docId=${encodeURIComponent(ctxDocId)}` : "";
-        const stats = await apiCall(`/api/terminals/${encodeURIComponent(ctxName)}/stats${ctxQs}`);
+        const stats = await apiCall(`/api/terminals/${seg(ctxName)}/stats${ctxQs}`);
         if (!stats || stats.available === false) {
           return { content: [{ type: "text", text: `No live context stats for '${ctxName}' yet (terminal not reporting). Try again after a turn or two.` }] };
         }
@@ -3048,12 +3066,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!args.acknowledge) {
           return { content: [{ type: "text", text: `⚠️ clear_my_context will WIPE your conversation. Before clearing:\n1. Write continuation notes: update_task_continuation (where to resume, current file, next step).\n2. Make sure you're at a clean stopping point (not mid-step).\nThen call clear_my_context again with acknowledge:true — as the LAST action of your turn. SessionStart will rebuild you from your notes + the session summary.` }] };
         }
-        await apiCall(`/api/terminals/${encodeURIComponent(clrName)}/submit`, "POST", { text: "/clear" });
+        await apiCall(`/api/terminals/${seg(clrName)}/submit`, "POST", { text: "/clear" });
         return { content: [{ type: "text", text: `🧹 Submitted /clear to '${clrName}'. Your context will clear and SessionStart will reload from continuation notes + session summary. (If nothing happens, the terminal may not be resolvable by that name — check MULTITERMINAL_NAME.)` }] };
       }
 
       case "get_my_active_task": {
-        const result = await apiCall(`/api/tasks/active/${encodeURIComponent(args.agentName)}`);
+        const result = await apiCall(`/api/tasks/active/${seg(args.agentName)}`);
         const task = result.task;
         if (!task) {
           return { content: [{ type: "text", text: `No active task for ${args.agentName}. Use list_tasks or get_my_pickable_tasks to find work.` }] };
@@ -3109,7 +3127,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_active_worktree": {
-        const result = await apiCall(`/api/worktrees/active/${encodeURIComponent(args.agentName)}`);
+        const result = await apiCall(`/api/worktrees/active/${seg(args.agentName)}`);
         if (!result.worktreePath) {
           // No active task, or active task has no materialized worktree
           // (worktree mode off / project unregistered / git failure). Mirrors
@@ -3136,7 +3154,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_my_pickable_tasks": {
-        const result = await apiCall(`/api/tasks/pickable/${encodeURIComponent(args.agentName)}`);
+        const result = await apiCall(`/api/tasks/pickable/${seg(args.agentName)}`);
         const tasks = result.tasks;
 
         if (!tasks || tasks.length === 0) {
@@ -3189,7 +3207,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_checklist": {
-        await apiCall(`/api/tasks/${args.taskId}/checklist`, "PATCH", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/checklist`, "PATCH", {
           checklistJson: args.checklistJson,
         });
         let checklistText = `✅ Checklist updated for task ${args.taskId}`;
@@ -3238,14 +3256,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("Each element must be a description string or an {item,...} object.");
         });
 
-        await apiCall(`/api/tasks/${args.taskId}/checklist/append`, "POST", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/checklist/append`, "POST", {
           itemsJson: JSON.stringify(normalized),
         });
         let appendText = `✅ Appended ${normalized.length} item(s) to checklist for task ${args.taskId}`;
 
         // Auto-detect pipeline trigger: re-fetch and check if all items are now testing or done.
         try {
-          const taskData = await apiCall(`/api/tasks/${args.taskId}`);
+          const taskData = await apiCall(`/api/tasks/${seg(args.taskId)}`);
           let checklist = taskData.checklist || taskData.checklist_json;
           if (typeof checklist === "string") checklist = JSON.parse(checklist);
           if (Array.isArray(checklist)) {
@@ -3268,7 +3286,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_inbox": {
         const unreadOnly = args.unreadOnly || false;
         const limit = args.limit || 50;
-        const result = await apiCall(`/api/tasks/inbox/${args.userId}?unreadOnly=${unreadOnly}&limit=${limit}`);
+        const result = await apiCall(`/api/tasks/inbox/${seg(args.userId)}?unreadOnly=${unreadOnly}&limit=${limit}`);
         return {
           content: [{ type: "text", text: formatInbox(result) }],
         };
@@ -3276,12 +3294,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "mark_inbox_read": {
         if (args.messageId) {
-          await apiCall(`/api/tasks/inbox/${args.messageId}/read`, "POST");
+          await apiCall(`/api/tasks/inbox/${seg(args.messageId)}/read`, "POST");
           return {
             content: [{ type: "text", text: `✅ Message ${args.messageId} marked as read.` }],
           };
         } else if (args.userId) {
-          await apiCall(`/api/tasks/inbox/${args.userId}/read-all`, "POST");
+          await apiCall(`/api/tasks/inbox/${seg(args.userId)}/read-all`, "POST");
           return {
             content: [{ type: "text", text: `✅ All messages marked as read for ${args.userId}.` }],
           };
@@ -3291,7 +3309,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "reply_to_inbox": {
-        await apiCall(`/api/tasks/inbox/${args.messageId}/reply`, "POST", {
+        await apiCall(`/api/tasks/inbox/${seg(args.messageId)}/reply`, "POST", {
           replyText: args.replyText,
         });
         return {
@@ -3301,7 +3319,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Helper Management Handlers
       case "add_helper": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/helpers`, "POST", {
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/helpers`, "POST", {
           helper: args.helper,
           addedBy: args.addedBy,
         });
@@ -3311,7 +3329,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "remove_helper": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/helpers/${args.helperName}`, "DELETE");
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/helpers/${seg(args.helperName)}`, "DELETE");
         return {
           content: [{ type: "text", text: `✅ Helper ${args.helperName} removed from task ${args.taskId} (${result.helperCount} remaining helpers)` }],
         };
@@ -3319,7 +3337,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Attachment Handlers
       case "get_checklist_item_images": {
-        const attachments = await apiCall(`/api/tasks/${args.taskId}/attachments?itemIndex=${args.itemIndex}`);
+        const attachments = await apiCall(`/api/tasks/${seg(args.taskId)}/attachments?itemIndex=${args.itemIndex}`);
 
         if (!attachments || attachments.length === 0) {
           return {
@@ -3329,7 +3347,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const content = [];
         for (const att of attachments) {
-          const dataResp = await apiCall(`/api/tasks/attachments/${att.id}/base64`);
+          const dataResp = await apiCall(`/api/tasks/attachments/${seg(att.id)}/base64`);
           content.push({
             type: "image",
             data: dataResp.base64,
@@ -3340,7 +3358,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_message_images": {
-        const images = await apiCall(`/api/messaging/images/${encodeURIComponent(args.batchId)}`);
+        const images = await apiCall(`/api/messaging/images/${seg(args.batchId)}`);
 
         if (!images || images.length === 0) {
           return {
@@ -3449,7 +3467,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.deletedBy) qs.set("deletedBy", args.deletedBy);
         const query = qs.toString();
         const suffix = query ? `?${query}` : "";
-        const result = await apiCall(`/api/projects/${encodeURIComponent(args.projectId)}${suffix}`, "DELETE");
+        const result = await apiCall(`/api/projects/${seg(args.projectId)}${suffix}`, "DELETE");
         let text = `✅ Project deleted.\n`;
         text += `  ID: ${result.projectId ?? args.projectId}`;
         if (args.deleteLocalConfig) text += `\n  (.claude/project.json also deleted)`;
@@ -3459,14 +3477,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_project": {
-        const result = await apiCall(`/api/projects/${args.projectId}`);
+        const result = await apiCall(`/api/projects/${seg(args.projectId)}`);
         return {
           content: [{ type: "text", text: formatProject(result) }],
         };
       }
 
       case "update_project": {
-        const result = await apiCall(`/api/projects/${args.projectId}`, "PATCH", {
+        const result = await apiCall(`/api/projects/${seg(args.projectId)}`, "PATCH", {
           fields: args.fields,
         });
         let text = `✅ Project ${args.projectId} updated.`;
@@ -3478,7 +3496,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "add_project_agent": {
-        await apiCall(`/api/projects/${args.projectId}/agents`, "POST", {
+        await apiCall(`/api/projects/${seg(args.projectId)}/agents`, "POST", {
           agentName: args.agentName,
           role: args.role || null,
           preferredModel: args.preferredModel || null,
@@ -3489,7 +3507,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "remove_project_agent": {
-        await apiCall(`/api/projects/${args.projectId}/agents/${encodeURIComponent(args.agentName)}`, "DELETE");
+        await apiCall(`/api/projects/${seg(args.projectId)}/agents/${seg(args.agentName)}`, "DELETE");
         return {
           content: [{ type: "text", text: `✅ Agent "${args.agentName}" removed from project ${args.projectId}` }],
         };
@@ -3500,27 +3518,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let endpoint, body, label;
         switch (args.type) {
           case "mcp_server":
-            endpoint = `/api/projects/${pid}/mcp-servers`;
+            endpoint = `/api/projects/${seg(pid)}/mcp-servers`;
             body = { serverName: args.serverName, isEnabled: args.isEnabled ?? true };
             label = `MCP server "${args.serverName}"`;
             break;
           case "specialist":
-            endpoint = `/api/projects/${pid}/specialists`;
+            endpoint = `/api/projects/${seg(pid)}/specialists`;
             body = { agentType: args.agentType, isEnabled: args.isEnabled ?? true, customPrompt: args.customPrompt || null };
             label = `specialist "${args.agentType}"`;
             break;
           case "path":
-            endpoint = `/api/projects/${pid}/paths`;
+            endpoint = `/api/projects/${seg(pid)}/paths`;
             body = { pathType: args.pathType, pathValue: args.pathValue, description: args.description || null };
             label = `path [${args.pathType}] ${args.pathValue}`;
             break;
           case "prompt":
-            endpoint = `/api/projects/${pid}/prompts`;
+            endpoint = `/api/projects/${seg(pid)}/prompts`;
             body = { promptType: args.promptType, promptText: args.promptText, displayOrder: args.displayOrder ?? 0 };
             label = `prompt [${args.promptType}]`;
             break;
           case "skill":
-            endpoint = `/api/projects/${pid}/skills`;
+            endpoint = `/api/projects/${seg(pid)}/skills`;
             body = { skillName: args.skillName, isEnabled: args.isEnabled ?? true };
             label = `skill "${args.skillName}"`;
             break;
@@ -3538,23 +3556,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let rendpoint, rlabel;
         switch (args.type) {
           case "mcp_server":
-            rendpoint = `/api/projects/${rpid}/mcp-servers/${encodeURIComponent(args.serverName)}`;
+            rendpoint = `/api/projects/${seg(rpid)}/mcp-servers/${seg(args.serverName)}`;
             rlabel = `MCP server "${args.serverName}"`;
             break;
           case "specialist":
-            rendpoint = `/api/projects/${rpid}/specialists/${encodeURIComponent(args.agentType)}`;
+            rendpoint = `/api/projects/${seg(rpid)}/specialists/${seg(args.agentType)}`;
             rlabel = `specialist "${args.agentType}"`;
             break;
           case "path":
-            rendpoint = `/api/projects/${rpid}/paths/${args.pathId}`;
+            rendpoint = `/api/projects/${seg(rpid)}/paths/${seg(args.pathId)}`;
             rlabel = `path ${args.pathId}`;
             break;
           case "prompt":
-            rendpoint = `/api/projects/${rpid}/prompts/${args.promptId}`;
+            rendpoint = `/api/projects/${seg(rpid)}/prompts/${seg(args.promptId)}`;
             rlabel = `prompt ${args.promptId}`;
             break;
           case "skill":
-            rendpoint = `/api/projects/${rpid}/skills/${encodeURIComponent(args.skillName)}`;
+            rendpoint = `/api/projects/${seg(rpid)}/skills/${seg(args.skillName)}`;
             rlabel = `skill "${args.skillName}"`;
             break;
           default:
@@ -3583,7 +3601,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const lines = args.count || 200;
           let query = `?lines=${lines}`;
           if (args.search) query += `&search=${encodeURIComponent(args.search)}`;
-          const result = await apiCall(`/api/debug/files/${encodeURIComponent(fileName)}${query}`);
+          const result = await apiCall(`/api/debug/files/${seg(fileName)}${query}`);
           const header = `📋 Log File: ${result.file} (${result.totalLines} lines)\n\n`;
           const content = result.entries.join("\n");
           return { content: [{ type: "text", text: header + content }] };
@@ -3659,7 +3677,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_task_sessions": {
-        const sessions = await apiCall(`/api/session-lineage/task/${encodeURIComponent(args.taskId)}/sessions`);
+        const sessions = await apiCall(`/api/session-lineage/task/${seg(args.taskId)}/sessions`);
         if (!sessions || sessions.length === 0) {
           return {
             content: [{ type: "text", text: `No imported sessions found for task ${args.taskId}.` }],
@@ -3684,7 +3702,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_session_lineage": {
-        const chain = await apiCall(`/api/session-lineage/${encodeURIComponent(args.sessionId)}/chain`);
+        const chain = await apiCall(`/api/session-lineage/${seg(args.sessionId)}/chain`);
         if (!chain || chain.length === 0) {
           return {
             content: [{ type: "text", text: `No lineage chain found for session ${args.sessionId}.` }],
@@ -3799,7 +3817,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Auto-ensure the session is fully processed (import + index + summarize)
         // This bypasses the 120s freshness guard since we know the previous session is closed.
         if (s.processingStatus && s.processingStatus !== "complete") {
-          const readyData = await apiCall(`/api/session-lineage/${encodeURIComponent(s.sessionId || s.id)}/ensure-ready`, "POST");
+          const readyData = await apiCall(`/api/session-lineage/${seg(s.sessionId || s.id)}/ensure-ready`, "POST");
           if (readyData && readyData.session) {
             s = readyData.session;
           }
@@ -3834,7 +3852,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_session_summary": {
-        const updateData = await apiCall(`/api/session-lineage/${encodeURIComponent(args.sessionId)}/summary`, "PUT", { summary: args.summary });
+        const updateData = await apiCall(`/api/session-lineage/${seg(args.sessionId)}/summary`, "PUT", { summary: args.summary });
         if (updateData && updateData.error) {
           return {
             content: [{ type: "text", text: `Failed to save summary: ${updateData.error}` }],
@@ -3948,7 +3966,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = new URLSearchParams();
         params.set("branch", args.branchName);
         if (args.originatingTaskId) params.set("originatingTaskId", args.originatingTaskId);
-        const path = `/api/branch-metadata/${projectId}/draft-context?${params.toString()}`;
+        const path = `/api/branch-metadata/${seg(projectId)}/draft-context?${params.toString()}`;
         const result = await apiCall(path);
 
         // Pipeline Run 2 finding (Codex security MEDIUM): treat task title +
@@ -3995,7 +4013,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_branch_outcomes": {
         const projectId = encodeURIComponent(args.projectId);
-        const result = await apiCall(`/api/branch-metadata/${projectId}/outcomes`);
+        const result = await apiCall(`/api/branch-metadata/${seg(projectId)}/outcomes`);
         const outcomes = (result && result.outcomes) || [];
         if (outcomes.length === 0) {
           return {
@@ -4020,7 +4038,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // segment escaping pitfalls.
         const projectId = encodeURIComponent(args.projectId);
         const result = await apiCall(
-          `/api/branch-metadata/${projectId}/outcome`,
+          `/api/branch-metadata/${seg(projectId)}/outcome`,
           "POST",
           {
             branchName: args.branchName,
@@ -4133,7 +4151,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_wiki_article": {
         const params = new URLSearchParams();
         params.set("projectRoot", args.projectRoot);
-        const result = await apiCall(`/api/wiki/articles/${encodeURIComponent(args.subsystemId)}?${params.toString()}`);
+        const result = await apiCall(`/api/wiki/articles/${seg(args.subsystemId)}?${params.toString()}`);
         if (!result.markdown) {
           return { content: [{ type: "text", text: `Article '${args.subsystemId}' not found. Run generate_wiki first.` }] };
         }
@@ -4141,7 +4159,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_daily_digest": {
-        const endpoint = args.date ? `/api/digest/${args.date}` : "/api/digest/latest";
+        const endpoint = args.date ? `/api/digest/${seg(args.date)}` : "/api/digest/latest";
         let result;
         try {
           result = await apiCall(endpoint);
@@ -4520,7 +4538,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // =============================================
 
       case "add_task_relationship": {
-        const result = await apiCall(`/api/tasks/${args.sourceTaskId}/relationships`, "POST", {
+        const result = await apiCall(`/api/tasks/${seg(args.sourceTaskId)}/relationships`, "POST", {
           targetTaskId: args.targetTaskId,
           type: args.type,
           createdBy: args.createdBy,
@@ -4531,14 +4549,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "remove_task_relationship": {
-        await apiCall(`/api/tasks/${args.sourceTaskId}/relationships/${args.targetTaskId}`, "DELETE");
+        await apiCall(`/api/tasks/${seg(args.sourceTaskId)}/relationships/${seg(args.targetTaskId)}`, "DELETE");
         return {
           content: [{ type: "text", text: `✅ Relationship removed between ${args.sourceTaskId} and ${args.targetTaskId}` }],
         };
       }
 
       case "get_task_relationships": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/relationships`);
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/relationships`);
         const rels = result.relationships || [];
         if (rels.length === 0) {
           return { content: [{ type: "text", text: "No relationships found for this task." }] };
@@ -4566,7 +4584,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.checklistItemIndex !== undefined && args.checklistItemIndex !== null) {
           body.checklistItemIndex = args.checklistItemIndex;
         }
-        const result = await apiCall(`/api/tasks/${args.taskId}/files`, "POST", body);
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/files`, "POST", body);
         const scopeNote = (args.checklistItemIndex !== undefined && args.checklistItemIndex !== null)
           ? ` [item ${args.checklistItemIndex}]`
           : "";
@@ -4576,7 +4594,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "unlink_task_file": {
-        await apiCall(`/api/tasks/${args.taskId}/files/unlink`, "POST", {
+        await apiCall(`/api/tasks/${seg(args.taskId)}/files/unlink`, "POST", {
           filePath: args.filePath,
         });
         return {
@@ -4585,7 +4603,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_task_files": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/files`);
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/files`);
         const files = result.files || [];
         if (files.length === 0) {
           return { content: [{ type: "text", text: "No files linked to this task." }] };
@@ -4601,7 +4619,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "save_task_report": {
-        const result = await apiCall(`/api/tasks/${args.taskId}/reports`, "POST", {
+        const result = await apiCall(`/api/tasks/${seg(args.taskId)}/reports`, "POST", {
           agentName: args.agentName,
           reportContent: args.reportContent,
           reportType: args.reportType || "html",
@@ -4616,7 +4634,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_task_reports": {
-        const data = await apiCall(`/api/tasks/${args.taskId}/reports?agentName=${args.agentName || ""}&limit=${args.limit || 50}`);
+        const data = await apiCall(`/api/tasks/${seg(args.taskId)}/reports?agentName=${encodeURIComponent(args.agentName || "")}&limit=${args.limit || 50}`);
         if (!data.reports || data.reports.length === 0) {
           return { content: [{ type: "text", text: `No reports found for task ${args.taskId}` }] };
         }
