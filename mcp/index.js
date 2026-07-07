@@ -3047,7 +3047,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const ctxDocId = args.docId || process.env.MULTITERMINAL_DOC_ID;
         const ctxQs = ctxDocId ? `?docId=${encodeURIComponent(ctxDocId)}` : "";
-        const stats = await apiCall(`/api/terminals/${seg(ctxName)}/stats${ctxQs}`);
+        const stats = await apiCall(`/api/terminals/${seg(ctxName)}/stats` + ctxQs);
         if (!stats || stats.available === false) {
           return { content: [{ type: "text", text: `No live context stats for '${ctxName}' yet (terminal not reporting). Try again after a turn or two.` }] };
         }
@@ -3483,7 +3483,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.deletedBy) qs.set("deletedBy", args.deletedBy);
         const query = qs.toString();
         const suffix = query ? `?${query}` : "";
-        const result = await apiCall(`/api/projects/${seg(args.projectId)}${suffix}`, "DELETE");
+        const result = await apiCall(`/api/projects/${seg(args.projectId)}` + suffix, "DELETE");
         let text = `✅ Project deleted.\n`;
         text += `  ID: ${result.projectId ?? args.projectId}`;
         if (args.deleteLocalConfig) text += `\n  (.claude/project.json also deleted)`;
@@ -3617,7 +3617,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const lines = args.count || 200;
           let query = `?lines=${encodeURIComponent(lines)}`;
           if (args.search) query += `&search=${encodeURIComponent(args.search)}`;
-          const result = await apiCall(`/api/debug/files/${seg(fileName)}${query}`);
+          const result = await apiCall(`/api/debug/files/${seg(fileName)}` + query);
           const header = `📋 Log File: ${result.file} (${result.totalLines} lines)\n\n`;
           const content = result.entries.join("\n");
           return { content: [{ type: "text", text: header + content }] };
@@ -3629,7 +3629,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.source) query += `&source=${encodeURIComponent(args.source)}`;
         if (args.level) query += `&level=${encodeURIComponent(args.level)}`;
         if (args.search) query += `&search=${encodeURIComponent(args.search)}`;
-        const result = await apiCall(`/api/debug/logs${query}`);
+        const result = await apiCall(`/api/debug/logs` + query);
         return {
           content: [{ type: "text", text: formatDebugLogs(result) }],
         };
