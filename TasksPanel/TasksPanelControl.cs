@@ -267,10 +267,11 @@ namespace MultiTerminal.TasksPanel
             DebugLog($"HTML path resolved: {htmlPath}, exists={File.Exists(htmlPath)}");
             if (File.Exists(htmlPath))
             {
-                // Serve the panel from a real virtual-host origin (http://mt-panels.local) instead
-                // of file:// (task f9697aac). Under file:// the panel's fetch()es to the :5050 REST
-                // API carried the forgeable Origin "null", forcing a null-tolerant CORS carve-out;
-                // a mapped virtual host gives it a stable, allowlistable origin so CORS can be strict.
+                // Serve the panel from the per-process virtual-host origin (PanelHosting.Origin — a
+                // random, non-resolvable .invalid host) instead of file:// (task f9697aac). Under file://
+                // the panel's fetch()es to the :5050 REST API carried the forgeable Origin "null"; a
+                // mapped virtual host gives it an unguessable, allowlistable origin so CORS can scope
+                // the panel's read access to just the report endpoints.
                 // Map the folder that actually contains the resolved HTML (GetHtmlPath probes several
                 // locations) so the mapping matches wherever the file was found. Allow = the page may
                 // load its own (same-origin) resources; the cross-origin fetch to localhost:5050 is a
