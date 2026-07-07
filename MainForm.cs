@@ -3555,7 +3555,13 @@ namespace MultiTerminal
 
             try
             {
-                var discovery = new MCPServer.Services.SessionDiscovery();
+                // Resolve identity from the authoritative session_lineage store
+                // (register_session -> TaskDatabase.GetSessionAgentName) rather than
+                // the transcript, which doesn't reliably carry the terminal's own
+                // name. Falls back to transcript parsing for foreign/unknown sessions
+                // (task 4558fa6b).
+                var discovery = new MCPServer.Services.SessionDiscovery(
+                    sid => _mcpServer?.Broker?.TaskDb?.GetSessionAgentName(sid));
                 var discovered = discovery.DiscoverIdentitiesInProject(projectPath);
                 // Dictionary keys are identity names
                 identities.AddRange(discovered.Keys);

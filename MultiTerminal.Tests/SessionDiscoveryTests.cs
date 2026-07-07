@@ -216,5 +216,26 @@ namespace MultiTerminal.Tests
             var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
             Assert.Single(sessions);
         }
+
+        [Fact]
+        public void Identity_ResolverWins_OverTranscript_AndFallsBackWhenUnknown()
+        {
+            // Session A: the transcript says "[Zeta]:" but the authoritative resolver
+            // (session_lineage) knows this session was owned by Bob.
+            var pathA = WriteSession("[Zeta]: transcript-derived name");
+            var uuidA = Path.GetFileNameWithoutExtension(pathA);
+            // Session B: the resolver doesn't know it → falls back to the transcript.
+            WriteSession("[Alice]: fallback name");
+
+            var lineage = new System.Collections.Generic.Dictionary<string, string> { [uuidA] = "Bob" };
+            var discovery = new SessionDiscovery(_projectsRoot,
+                sid => lineage.TryGetValue(sid, out var n) ? n : null);
+
+            var identities = discovery.DiscoverIdentitiesInProject(_projectPath);
+
+            Assert.Contains("Bob", identities.Keys);         // resolver won over transcript "Zeta"
+            Assert.DoesNotContain("Zeta", identities.Keys);  // transcript name NOT used when resolver knows
+            Assert.Contains("Alice", identities.Keys);       // fallback to transcript for the unknown session
+        }
     }
 }

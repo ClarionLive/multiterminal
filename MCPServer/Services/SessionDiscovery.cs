@@ -39,12 +39,26 @@ namespace MultiTerminal.MCPServer.Services
     /// <para>Derivation is mtime-gated in-process (a static per-file cache keyed
     /// by path+mtime) so repeated calls re-parse only the JSONL files that
     /// actually changed — this class is instantiated ad-hoc per call, so the
-    /// cache is static to survive across those instances. No database dependency.</para>
+    /// cache is static to survive across those instances.</para>
+    ///
+    /// <para>Session METADATA is derived from the transcript, but the terminal
+    /// IDENTITY is resolved from the authoritative <c>session_lineage</c> store via
+    /// an injected <c>Func&lt;sessionId,string&gt;</c> (a narrow resolver, not a raw
+    /// DB connection) — the transcript does not reliably carry the terminal's own
+    /// name. Transcript parsing (<see cref="ExtractIdentity"/>) is the fallback when
+    /// no resolver is wired or a session is unknown to it (task 4558fa6b).</para>
     /// </summary>
     public class SessionDiscovery
     {
         private readonly string _claudeProjectsPath;
         private readonly SessionSyncService _sync = new SessionSyncService();
+
+        // Authoritative identity source: maps a session id to the terminal identity
+        // that owned it (register_session -> session_lineage; see TaskDatabase.
+        // GetSessionAgentName). Injected as a narrow Func so the discovery layer
+        // stays testable and takes no raw DB connection. Null in contexts without
+        // the DB (tests, headless) — then identity falls back to transcript parsing.
+        private readonly Func<string, string> _identityResolver;
 
         // Pattern 1: Session received message FROM identity (e.g., "[Alice]: Hello")
         // This means the session IS that identity
@@ -82,16 +96,18 @@ namespace MultiTerminal.MCPServer.Services
         private const long MaxJsonlBytes = 64L * 1024 * 1024; // 64 MB per transcript
         private const int MaxCacheEntries = 4000;
 
-        public SessionDiscovery()
+        public SessionDiscovery(Func<string, string> identityResolver = null)
         {
             // Default Claude projects path
             var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             _claudeProjectsPath = Path.Combine(userProfile, ".claude", "projects");
+            _identityResolver = identityResolver;
         }
 
-        public SessionDiscovery(string claudeProjectsPath)
+        public SessionDiscovery(string claudeProjectsPath, Func<string, string> identityResolver = null)
         {
             _claudeProjectsPath = claudeProjectsPath;
+            _identityResolver = identityResolver;
         }
 
         /// <summary>
@@ -136,6 +152,29 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Resolve the terminal identity that owned a session. The AUTHORITATIVE
+        /// source is <c>session_lineage</c> (via the injected resolver, keyed by
+        /// session id) — MT records the identity at register_session time, whereas
+        /// the transcript does NOT reliably contain the terminal's own name (the
+        /// SessionStart-hook block is the literal <c>MULTITERMINAL_NAME=&lt;name&gt;</c>
+        /// placeholder, and a leading "[Alice]:" means Alice SENT to this terminal,
+        /// not that the terminal IS Alice). Transcript parsing
+        /// (<see cref="ExtractIdentity"/>) is therefore only a fallback for sessions
+        /// the resolver doesn't know (foreign/unregistered), or when no resolver is
+        /// wired (tests/headless).
+        /// </summary>
+        private string ResolveIdentity(SessionEntry entry)
+        {
+            if (_identityResolver != null && !string.IsNullOrEmpty(entry.SessionId))
+            {
+                var resolved = _identityResolver(entry.SessionId);
+                if (!string.IsNullOrWhiteSpace(resolved))
+                    return resolved;
+            }
+            return ExtractIdentity(entry.FirstPrompt);
+        }
+
+        /// <summary>
         /// Discover sessions for a specific identity in a specific project.
         /// Returns sessions sorted by modified date (most recent first).
         /// </summary>
@@ -145,7 +184,7 @@ namespace MultiTerminal.MCPServer.Services
 
             foreach (var entry in GetProjectSessionEntries(projectPath))
             {
-                var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                var extractedIdentity = ResolveIdentity(entry);
                 if (extractedIdentity != null &&
                     extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                 {
@@ -175,7 +214,7 @@ namespace MultiTerminal.MCPServer.Services
         public List<DiscoveredSession> DiscoverAllSessionsInProject(string projectPath)
         {
             return GetProjectSessionEntries(projectPath)
-                .Select(e => ToDiscoveredSession(e, ExtractIdentity(e.FirstPrompt), projectPath))
+                .Select(e => ToDiscoveredSession(e, ResolveIdentity(e), projectPath))
                 .OrderByDescending(s => s.Modified)
                 .ToList();
         }
@@ -194,7 +233,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 foreach (var entry in GetEntriesForFolder(projectFolder, null))
                 {
-                    var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                    var extractedIdentity = ResolveIdentity(entry);
                     if (extractedIdentity != null &&
                         extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -217,7 +256,7 @@ namespace MultiTerminal.MCPServer.Services
             var entries = GetProjectSessionEntries(projectPath);
             foreach (var entry in entries.OrderByDescending(e => ParseDateTime(e.Modified)))
             {
-                var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                var extractedIdentity = ResolveIdentity(entry);
                 if (extractedIdentity != null && !identities.ContainsKey(extractedIdentity))
                 {
                     identities[extractedIdentity] = ToDiscoveredSession(entry, extractedIdentity, projectPath);
