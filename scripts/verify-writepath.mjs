@@ -52,20 +52,17 @@ const TARGETS = ['MCPServer/Services/MessageBroker.cs', 'MCPServer/Services/Task
 const WRITE_PATH_HELPERS = new Set([
   'MutateTaskInternal', 'TryMutateTask', 'InsertTaskInternal', 'DeleteTaskInternal', 'SaveTask',
   'MutateProjectInternal', 'InsertProjectInternal',
-  'MutateProfileInternal', 'InsertProfileInternal', 'DeleteProfileInternal',
+  'MutateProfile', 'InsertProfile', 'DeleteProfileInternal',   // public since e1643ccc (registration write path)
 ]);
 
-// Ratified, enumerated bypasses (NOT inferred). e1643ccc will convert RegisterTerminal/UnregisterTerminal
-// and remove them here (its close condition), shrinking this set rather than letting it accrete.
+// Ratified, enumerated bypasses (NOT inferred). e1643ccc CONVERTED RegisterTerminal/UnregisterTerminal onto
+// the profile write path and removed them + the TryAddProfile cache-only primitive from this set (its close
+// condition) — the set shrinks as debt is paid, it does not accrete. A raw profile write reappearing in
+// RegisterTerminal/UnregisterTerminal now FAILS the census (proven by the self-test regression fixture).
 const NAMED_BYPASSES = new Set([
-  'RegisterTerminal',        // terminal-registration orchestration (docId/name match, rename, team-lead) — e1643ccc
-  'UnregisterTerminal',      // registration teardown — e1643ccc
   'LoadPersistedTasks',      // startup bootstrap seed FROM the DB (not a mutation)
   'LoadPersistedProjects',   // startup bootstrap seed
   'LoadPersistedProfiles',   // startup bootstrap seed
-  'TryAddProfile',           // ProfileService cache-add primitive serving the RegisterTerminal bootstrap bypass
-                             //   (paired with the broker-side _taskDb.SaveProfile); removed with RegisterTerminal
-                             //   when e1643ccc adopts the write path. Relocated from the broker by 86f3fd21.
   'ReorderTask',             // sort_order via dedicated column writers + bulk rebalance + cache refresh FROM db
   'DeleteProject',           // canonical unregister via ProjectService + coherent cache-restore-on-failure
   'SetTaskActive',           // project-id self-heal SaveTask (its own revert-on-failure), rest via the write path
@@ -228,16 +225,24 @@ function selfTest() {
       src: `class ProfileService {\n        public void SneakyRelocatedProfileWrite(string id, TeamMemberProfile p) {\n            _profiles[id] = p;\n        }\n}`,
     },
     {
-      name: 'post-extraction: the relocated profile write-path helper (MutateProfileInternal) PASSES',
+      name: 'post-extraction: the relocated profile write-path helper (MutateProfile) PASSES',
       expectOk: true,
-      src: `class ProfileService {\n        private TeamMemberProfile MutateProfileInternal(string id) {\n            _taskDb.SaveProfile(updated);\n            _profiles[id] = updated;\n            return updated;\n        }\n}`,
+      src: `class ProfileService {\n        public TeamMemberProfile MutateProfile(string id) {\n            _taskDb.SaveProfile(updated);\n            _profiles[id] = updated;\n            return updated;\n        }\n}`,
     },
     {
-      // The cross-region-writer primitive (86f3fd21): TryAddProfile is the narrow cache-add the broker-side
-      // RegisterTerminal bypass now reaches through. It is an allowlisted named bypass, so its raw TryAdd PASSES.
-      name: 'post-extraction: TryAddProfile cache-add primitive PASSES (allowlisted named bypass)',
+      // e1643ccc close condition: RegisterTerminal/UnregisterTerminal were CONVERTED onto the write path and
+      // REMOVED from NAMED_BYPASSES. Prove the census now FAILS if a raw profile write reappears in one of
+      // them — the whole point of paying the debt is that the bypass can't silently come back.
+      name: 'post-conversion: raw _profiles/SaveProfile write in RegisterTerminal now FAILS (no longer a bypass)',
+      expectOk: false,
+      src: `class MessageBroker {\n        public RegisterResult RegisterTerminal(string name) {\n            _profiles.TryAdd(name, newProfile);\n            _taskDb.SaveProfile(newProfile);\n            return ok;\n        }\n}`,
+    },
+    {
+      // The persist-first primitive (e1643ccc): InsertProfile is now the public write-path entry the
+      // registration region uses instead of a cache-only add — allowlisted as a write-path helper.
+      name: 'post-conversion: InsertProfile persist-first write-path helper PASSES',
       expectOk: true,
-      src: `class ProfileService {\n        public bool TryAddProfile(TeamMemberProfile profile) {\n            return _profiles.TryAdd(profile.Id, profile);\n        }\n}`,
+      src: `class ProfileService {\n        public TeamMemberProfile InsertProfile(TeamMemberProfile profile) {\n            _taskDb.SaveProfile(profile);\n            _profiles[profile.Id] = profile;\n            return profile;\n        }\n}`,
     },
   ];
 

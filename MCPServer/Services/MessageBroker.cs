@@ -36,7 +36,8 @@ namespace MultiTerminal.MCPServer.Services
         // the second broker region — validates the extraction template). The broker keeps its full public
         // profile surface as one-line delegations and reaches back in as the service's IProfileServiceHost
         // (event raising + IsTemporaryAgent). The terminal-registration region reaches the relocated
-        // _profiles cache through the service's narrow accessors (TryGetProfile/ContainsProfile/TryAddProfile).
+        // _profiles cache through the service's read accessors + the public write path (MutateProfile/
+        // InsertProfile — persist-first since e1643ccc; no cache-only bypass remains).
         private readonly ProfileService _profileService;
         private readonly TaskDatabase _taskDb;
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
@@ -1765,12 +1766,13 @@ namespace MultiTerminal.MCPServer.Services
                 // Handle profile transitions
                 try
                 {
-                    // Mark OLD profile offline
-                    if (_profileService.TryGetProfile(oldName, out var oldProfile))
+                    // Mark OLD profile offline (write path: clone→persist→swap; no-op if not cached)
+                    if (_profileService.MutateProfile(oldName, p =>
                     {
-                        oldProfile.IsOnline = false;
-                        oldProfile.UpdatedAt = DateTime.UtcNow;
-                        _taskDb.SaveProfile(oldProfile);
+                        p.IsOnline = false;
+                        p.UpdatedAt = DateTime.UtcNow;
+                    }) != null)
+                    {
                         DebugLogService?.Info("MessageBroker", $"Marked old profile offline: {oldName}");
                     }
 
@@ -1778,17 +1780,19 @@ namespace MultiTerminal.MCPServer.Services
                     // Skip profile creation for temporary agents (e.g. "Agent Alice")
                     if (!IsTemporaryAgent(newName))
                     {
-                        if (_profileService.TryGetProfile(newName, out var newProfile))
+                        if (_profileService.ContainsProfile(newName))
                         {
-                            newProfile.IsOnline = true;
-                            newProfile.UpdatedAt = DateTime.UtcNow;
-                            _taskDb.SaveProfile(newProfile);
+                            _profileService.MutateProfile(newName, p =>
+                            {
+                                p.IsOnline = true;
+                                p.UpdatedAt = DateTime.UtcNow;
+                            });
                             DebugLogService?.Info("MessageBroker", $"Marked new profile online: {newName}");
                         }
                         else
                         {
-                            // Create new profile online
-                            newProfile = new TeamMemberProfile
+                            // Create new profile online (persist-first via the write path)
+                            _profileService.InsertProfile(new TeamMemberProfile
                             {
                                 Id = newName,
                                 DisplayName = newName,
@@ -1796,9 +1800,7 @@ namespace MultiTerminal.MCPServer.Services
                                 IsTeamLead = isTeamLead,
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
-                            };
-                            _profileService.TryAddProfile(newProfile);
-                            _taskDb.SaveProfile(newProfile);
+                            });
                             DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
                         }
                     }
@@ -1858,7 +1860,8 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         if (!_profileService.ContainsProfile(name))
                         {
-                            var newProfile = new TeamMemberProfile
+                            // Persist-first auto-create (offline; set online below)
+                            _profileService.InsertProfile(new TeamMemberProfile
                             {
                                 Id = name,
                                 DisplayName = name,
@@ -1866,19 +1869,13 @@ namespace MultiTerminal.MCPServer.Services
                                 IsTeamLead = isTeamLead,
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
-                            };
-                            _profileService.TryAddProfile(newProfile);
-                            _taskDb.SaveProfile(newProfile);
+                            });
                             DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
                         }
                         else if (isTeamLead)
                         {
-                            // Update existing profile's IsTeamLead flag
-                            if (_profileService.TryGetProfile(name, out var leadProfile))
-                            {
-                                leadProfile.IsTeamLead = true;
-                                _taskDb.SaveProfile(leadProfile);
-                            }
+                            // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
+                            _profileService.MutateProfile(name, p => p.IsTeamLead = true);
                         }
 
                         // Set profile online now that terminal is registering
@@ -1930,7 +1927,8 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         if (!_profileService.ContainsProfile(name))
                         {
-                            var newProfile = new TeamMemberProfile
+                            // Persist-first auto-create (offline; set online below)
+                            _profileService.InsertProfile(new TeamMemberProfile
                             {
                                 Id = name,
                                 DisplayName = name,
@@ -1938,19 +1936,13 @@ namespace MultiTerminal.MCPServer.Services
                                 IsTeamLead = isTeamLead,
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
-                            };
-                            _profileService.TryAddProfile(newProfile);
-                            _taskDb.SaveProfile(newProfile);
+                            });
                             DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
                         }
                         else if (isTeamLead)
                         {
-                            // Update existing profile's IsTeamLead flag
-                            if (_profileService.TryGetProfile(name, out var leadProfile))
-                            {
-                                leadProfile.IsTeamLead = true;
-                                _taskDb.SaveProfile(leadProfile);
-                            }
+                            // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
+                            _profileService.MutateProfile(name, p => p.IsTeamLead = true);
                         }
 
                         // Set profile online now that terminal is registering
@@ -2051,24 +2043,9 @@ namespace MultiTerminal.MCPServer.Services
                 terminal.IsConnected = false;
                 RaiseSafe(TerminalDisconnected, terminal);
 
-                // Set profile offline
-                try
-                {
-                    _taskDb.SetProfileOffline(terminal.Name);
-
-                    // Update in-memory profile
-                    if (_profileService.TryGetProfile(terminal.Name, out var profile))
-                    {
-                        profile.IsOnline = false;
-                        profile.UpdatedAt = DateTime.UtcNow;
-                    }
-
-                    _profileService.BroadcastProfileUpdate();
-                }
-                catch (Exception ex)
-                {
-                    DebugLogService?.Error("MessageBroker", $"Failed to set profile offline: {ex.Message}");
-                }
+                // Set profile offline through the write path: DB flag + coherent cache swap + broadcast,
+                // with its own error handling (ProfileService logs + returns a result, never throws here).
+                _profileService.SetProfileOffline(terminal.Name);
             }
         }
 
