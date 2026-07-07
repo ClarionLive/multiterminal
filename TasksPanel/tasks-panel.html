@@ -1731,10 +1731,21 @@
                     const data = await resp.json();
                     taskReportsCache[taskId] = { loading: false, reports: data.reports || [] };
                 } else {
-                    taskReportsCache[taskId] = { loading: false, reports: [] };
+                    // Non-2xx: a real "no reports" is a 200 with an empty array, so a non-ok here is an
+                    // actual failure — surface it (task f9697aac) instead of silently showing 0 reports.
+                    // error:true is distinct from a valid empty list so the status popup shows a visible
+                    // failed state, not "No reports yet".
+                    console.error('[tasks-panel] report list fetch failed for ' + taskId + ': HTTP ' + resp.status);
+                    taskReportsCache[taskId] = { loading: false, reports: [], error: true };
                 }
             } catch(e) {
-                taskReportsCache[taskId] = { loading: false, reports: [] };
+                // A CORS denial (e.g. the :5050 allowlist no longer trusts this panel's origin) surfaces
+                // here as a fetch TypeError, NOT a non-ok response — so this catch is the loud signal for
+                // a future CORS/virtual-host regression rather than a silent empty-report list (f9697aac).
+                // error:true drives a VISIBLE failed state in the status popup (console alone isn't enough).
+                console.error('[tasks-panel] report list fetch error for ' + taskId +
+                    ' (possible CORS/origin regression — check the :5050 allowlist trusts this panel origin):', e);
+                taskReportsCache[taskId] = { loading: false, reports: [], error: true };
             }
             // Re-render to show updated badges
             renderAllTasks();
@@ -1743,7 +1754,10 @@
         async function viewAgentReport(taskId, reportId) {
             try {
                 const resp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/reports/' + reportId);
-                if (!resp.ok) return;
+                if (!resp.ok) {
+                    console.error('[tasks-panel] report fetch failed for ' + taskId + '/' + reportId + ': HTTP ' + resp.status);
+                    return;
+                }
                 const report = await resp.json();
                 let content;
                 if (report.report_type === 'html') {
@@ -2030,6 +2044,10 @@
                 _activeStatusPopup = null;
             }
             const cached = taskReportsCache[taskId];
+            // A failed fetch (non-2xx or CORS/network error) is distinct from a valid empty report list
+            // — show a visible failed state rather than "No reports yet" so a CORS/virtual-host
+            // regression is obvious in the UI, not just the console (task f9697aac).
+            const fetchFailed = cached && cached.error;
             const reports = (cached && !cached.loading) ? cached.reports : [];
             const agentResults = REVIEW_AGENTS.map(agent => {
                 const report = reports.find(r => agent.match(r.agent_name));
@@ -2046,7 +2064,10 @@
             const popup = document.createElement('div');
             popup.className = 'status-popup';
             popup.dataset.taskId = taskId;
-            popup.innerHTML = `<div class="status-popup-title">Pipeline Status</div><div>${badges || '<span style="color:#888">No reports yet</span>'}</div>`;
+            const popupBody = fetchFailed
+                ? '<span style="color:#e06c75">&#x26A0; Reports unavailable — fetch failed (see console)</span>'
+                : (badges || '<span style="color:#888">No reports yet</span>');
+            popup.innerHTML = `<div class="status-popup-title">Pipeline Status</div><div>${popupBody}</div>`;
             const btn = event.currentTarget;
             const iconsRow = btn.closest('.task-card-icons');
             iconsRow.appendChild(popup);

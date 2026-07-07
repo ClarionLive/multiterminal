@@ -49,10 +49,11 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("github-token")]
         public IActionResult GetGitHubToken()
         {
-            // This hands back a raw PAT; gate it like the other token endpoints so a browser
-            // cross-origin fetch (which AllowAnyOrigin would otherwise let read) is refused
-            // while a local agent using HttpClient still passes.
-            if (!IsLocalNonBrowserCaller())
+            // This hands back a raw PAT; keep it loopback-only. The cross-origin browser READ
+            // protection that used to live here (retired CrossOriginBrowserGuard) is now provided
+            // globally by the strict CORS allowlist (task f9697aac): a non-allowlisted browser origin
+            // gets no ACAO, so its JS cannot read the token — while a local HttpClient agent passes.
+            if (!IsLoopback())
                 return StatusCode(403, new { error = "Token access is restricted to local callers" });
 
             // When more than one github-provider account exists there is no unambiguous global
@@ -126,19 +127,15 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// True when the caller is a local, non-browser client (e.g. an agent using HttpClient).
-        /// Loopback alone is insufficient under the global AllowAnyOrigin CORS policy: a malicious
-        /// web page could fetch this token URL cross-origin and read the PAT. A null remote address
-        /// (in-process / test host) is treated as local; the cross-origin browser fetch is rejected
-        /// via the shared <see cref="CrossOriginBrowserGuard"/>.
+        /// True when the request originated from the loopback interface (127.0.0.1 / ::1).
+        /// A null remote address (in-process / test host) is treated as local. Cross-origin browser
+        /// READS are now blocked globally by the strict CORS allowlist (task f9697aac), so this only
+        /// needs the loopback-IP check; a local agent using HttpClient passes.
         /// </summary>
-        private bool IsLocalNonBrowserCaller()
+        private bool IsLoopback()
         {
             var remote = HttpContext?.Connection?.RemoteIpAddress;
-            if (remote != null && !IPAddress.IsLoopback(remote))
-                return false;
-
-            return CrossOriginBrowserGuard.IsLocalNonBrowserCaller(Request);
+            return remote == null || IPAddress.IsLoopback(remote);
         }
     }
 }

@@ -209,26 +209,25 @@ namespace MultiTerminal.API
                 builder.Services.AddProblemDetails();
                 builder.Services.AddExceptionHandler<RestApiExceptionHandler>();
 
-                // CORS (Eval P2 item 3, task c522764d): replace AllowAnyOrigin with a two-tier
-                // allowlist (see RestCorsOriginPolicy for the full rationale + retirement path f9697aac).
-                //  - DEFAULT policy (all controllers): loopback origins ONLY, no "null". Blocks the
-                //    drive-by remote-web-page CSRF/exfil READ threat AllowAnyOrigin left open —
-                //    including a hostile sandboxed iframe whose opaque origin serializes to "null".
-                //  - NAMED policy (FilePanelPolicyName): loopback + "null", applied via [EnableCors]
-                //    to TaskReportsController only — the one controller the file:// tasks-panel.html
-                //    actually fetches. Scoping "null" to that controller (PM ruling A) shrinks the
-                //    interim null-origin read-window from the whole API to a single controller.
-                // NOTE: intentionally NO AllowCredentials on either policy — the panels are
-                // credential-less, and null-origin + credentials is a CORS footgun.
+                // CORS (Eval P2 task c522764d, redesigned in Eval P2c task f9697aac — pipeline Run 1
+                // HIGH/LOW; see RestCorsOriginPolicy for the full rationale). Least-privilege scheme:
+                //  - DEFAULT policy: DENY all cross-origin (DenyAllOrigins). No controller needs a browser
+                //    origin by default, so the loopback-gated PAT/secret GETs (OwnerProfile /
+                //    SourceControlAccounts / MultiConnect) expose no ACAO to any browser origin.
+                //  - SCOPED policy (PanelReadPolicyName): the per-process, CSPRNG-random, non-resolvable
+                //    panel virtual-host origin, applied via [EnableCors] to TaskReportsController's report
+                //    GETs ONLY — the sole browser-read surface on :5050.
+                // This is the READ boundary only; blind cross-site CSRF WRITES are handled by
+                // SecFetchSiteWriteGuardMiddleware below. NO AllowCredentials — the panels are credential-less.
                 builder.Services.AddCors(options =>
                 {
                     options.AddDefaultPolicy(policy =>
-                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsLoopbackOrigin)
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.DenyAllOrigins)
                               .AllowAnyHeader()
                               .AllowAnyMethod());
 
-                    options.AddPolicy(RestCorsOriginPolicy.FilePanelPolicyName, policy =>
-                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsAllowedOrigin)
+                    options.AddPolicy(RestCorsOriginPolicy.PanelReadPolicyName, policy =>
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsTrustedBrowserOrigin)
                               .AllowAnyHeader()
                               .AllowAnyMethod());
                 });
@@ -252,6 +251,13 @@ namespace MultiTerminal.API
 
                 // Enable CORS
                 app.UseCors();
+
+                // Global CSRF write-guard (Eval P2c, task f9697aac): CORS only gates READS, so this
+                // rejects blind cross-site browser WRITES (unsafe methods) for the whole :5050 surface,
+                // generalizing the retired per-endpoint CrossOriginBrowserGuard. Runs after UseCors so
+                // the CORS preflight (OPTIONS) is handled first; header-absent callers (Node MCP, hooks,
+                // curl, HttpClient) always pass. See SecFetchSiteWriteGuardMiddleware.
+                app.UseSecFetchSiteWriteGuard();
 
                 // Wire up ActivityService to MessageBroker for auto-update hooks
                 var activityService = app.Services.GetRequiredService<ActivityService>();

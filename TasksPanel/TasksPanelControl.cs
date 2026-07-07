@@ -267,8 +267,24 @@ namespace MultiTerminal.TasksPanel
             DebugLog($"HTML path resolved: {htmlPath}, exists={File.Exists(htmlPath)}");
             if (File.Exists(htmlPath))
             {
-                var uri = new Uri(htmlPath).AbsoluteUri;
-                DebugLog($"Navigating to: {uri}");
+                // Serve the panel from the per-process virtual-host origin (PanelHosting.Origin — a
+                // random, non-resolvable .invalid host) instead of file:// (task f9697aac). Under file://
+                // the panel's fetch()es to the :5050 REST API carried the forgeable Origin "null"; a
+                // mapped virtual host gives it an unguessable, allowlistable origin so CORS can scope
+                // the panel's read access to just the report endpoints.
+                // Map the folder that actually contains the resolved HTML (GetHtmlPath probes several
+                // locations) so the mapping matches wherever the file was found. Allow = the page may
+                // load its own (same-origin) resources; the cross-origin fetch to localhost:5050 is a
+                // separate request governed by the :5050 CORS policy, not by this access kind.
+                var htmlDir = Path.GetDirectoryName(htmlPath);
+                var fileName = Path.GetFileName(htmlPath);
+                _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    MultiTerminal.API.PanelHosting.VirtualHostName,
+                    htmlDir,
+                    CoreWebView2HostResourceAccessKind.Allow);
+
+                var uri = $"{MultiTerminal.API.PanelHosting.Origin}/{fileName}";
+                DebugLog($"Navigating to virtual host: {uri} (folder mapping: {htmlDir})");
                 _webView.CoreWebView2.Navigate(uri);
             }
             else
