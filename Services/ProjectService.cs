@@ -286,22 +286,40 @@ namespace MultiTerminal.Services
             var richProject = _projectDb.GetRichProject(projectId);
             if (richProject != null)
             {
-                richProject.LastOpenedAt = DateTime.Now;
-                _projectDb.SaveRichProject(richProject);
+                var stampedAt = DateTime.Now;
+                richProject.LastOpenedAt = stampedAt;
 
-                // Also update the portable project.json if it exists
-                if (!string.IsNullOrEmpty(richProject.Path))
+                // Persist best-effort on a background thread: the stamp is cosmetic recency
+                // metadata, and a busy multiterminal.db (e.g. a code-graph reindex holding the
+                // write lock for seconds) must not throw into the caller's launch/select
+                // handler or stall the UI thread (task 93ad8184). Single-column UpdateLastOpened,
+                // NOT SaveRichProject — a deferred full-row snapshot could revert a concurrent
+                // project edit or resurrect a deleted row (pipeline Run-1 finding).
+                _ = System.Threading.Tasks.Task.Run(() =>
                 {
-                    var fileProject = LoadProject(richProject.Path);
-                    if (fileProject != null)
+                    try
                     {
-                        fileProject.LastOpenedAt = DateTime.Now;
-                        string configPath = GetProjectConfigPath(richProject.Path);
-                        string json = SerializeProjectJson(fileProject);
-                        try { File.WriteAllText(configPath, json); }
-                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to update project.json lastOpenedAt: {ex.Message}"); }
+                        _projectDb.UpdateLastOpened(richProject.Id, stampedAt);
+
+                        // Also update the portable project.json if it exists
+                        if (!string.IsNullOrEmpty(richProject.Path))
+                        {
+                            var fileProject = LoadProject(richProject.Path);
+                            if (fileProject != null)
+                            {
+                                fileProject.LastOpenedAt = stampedAt;
+                                string configPath = GetProjectConfigPath(richProject.Path);
+                                string json = SerializeProjectJson(fileProject);
+                                try { File.WriteAllText(configPath, json); }
+                                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to update project.json lastOpenedAt: {ex.Message}"); }
+                            }
+                        }
                     }
-                }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[ProjectService] Best-effort LastOpenedAt stamp failed: {ex.Message}");
+                    }
+                });
 
                 ProjectOpened?.Invoke(this, new ProjectEventArgs(richProject));
             }

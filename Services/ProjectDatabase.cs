@@ -760,6 +760,30 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Updates ONLY <c>last_opened_at</c> for a project (93ad8184). Deliberately NOT the
+        /// SaveRichProject UPSERT: the recency stamp is written best-effort from a background
+        /// thread, and a deferred full-row snapshot could resurrect a deleted project (the
+        /// UPSERT inserts) or revert a concurrent edit (the snapshot's non-null fields win the
+        /// per-column COALESCE). A plain single-column UPDATE can do neither — it touches no
+        /// other field and affects zero rows if the project was deleted in the interim.
+        /// Monotonic: an out-of-order deferred stamp (two fire-and-forget opens completing in
+        /// reverse) can never move the timestamp backwards.
+        /// </summary>
+        public void UpdateLastOpened(string projectId, DateTime lastOpenedAt)
+        {
+            if (string.IsNullOrWhiteSpace(projectId)) return;
+            lock (_dbLock)
+            {
+                const string sql = @"UPDATE projects SET last_opened_at = @lastOpenedAt
+                                     WHERE id = @id AND (last_opened_at IS NULL OR last_opened_at < @lastOpenedAt)";
+                using var command = new SQLiteCommand(sql, _connection);
+                command.Parameters.AddWithValue("@lastOpenedAt", lastOpenedAt);
+                command.Parameters.AddWithValue("@id", projectId);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        /// <summary>
         /// Sets (or clears) a project's source control account binding directly, out-of-band
         /// from the COALESCE-ing SaveRichProject UPSERT. A null/empty accountId CLEARS the
         /// binding ("(None)"). This is the only SaveRichProject-independent path that can erase

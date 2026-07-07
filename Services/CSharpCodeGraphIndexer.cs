@@ -21,6 +21,12 @@ namespace MultiTerminal.Services
     /// </summary>
     public class CSharpCodeGraphIndexer
     {
+        // Files per write transaction. One whole-project transaction held the WAL write lock for
+        // the full pass (6-23s observed on this repo) — longer than every sibling connection's 5s
+        // busy_timeout (MultiterminalDb), so concurrent writers (project-launch LastOpenedAt stamp,
+        // gateway profile sync) hit 'database is locked'. 25 files bounds a chunk to ~1-2s.
+        private const int IndexChunkSize = 25;
+
         private readonly CodeGraphDatabase _db;
         private readonly CodeGraphQuery _query;
 
@@ -100,31 +106,21 @@ namespace MultiTerminal.Services
             // Pass 1: Extract symbols
             Report("Pass 1: Extracting symbols...");
             int symbolCount = 0;
-            // bb2b0104 (pipeline Run 1, debugger HIGH): dispose the transaction — whose Dispose
-            // rolls back on the non-committed/exception path — BEFORE EndTransaction releases
-            // CodeGraphDatabase._syncLock. Otherwise the rollback would run on the shared connection
-            // with the gate already released, racing a CodeGraph reader that was queued on _syncLock
-            // for the whole reindex (two threads on one System.Data.SQLite handle).
-            var txn = _db.BeginTransaction();
-            try
+            // Chunked commits (93ad8184): committing every IndexChunkSize files releases the WAL
+            // write lock AND CodeGraphDatabase._syncLock between chunks, so sibling-connection
+            // writers and in-process CodeGraph readers are blocked for at most one chunk instead
+            // of the whole pass. CodeGraphIndexCoordinator still serializes whole rebuilds, so
+            // chunks from two rebuilds can't interleave. Mid-rebuild partial visibility is
+            // acceptable: the graph is advisory and clear→rebuild was already non-atomic
+            // (ClearProject runs before this pass outside any transaction); a failed run leaves
+            // last_indexed unset so the watcher retries.
+            ChunkedWritePass(syntaxTrees, tree =>
             {
-                foreach (var tree in syntaxTrees)
-                {
-                    var model = compilation.GetSemanticModel(tree);
-                    var walker = new SymbolExtractor(_db, projectId, model);
-                    walker.Visit(tree.GetRoot());
-                    symbolCount += walker.SymbolCount;
-                }
-                txn.Commit();
-            }
-            finally
-            {
-                // Nest so a throwing rollback in txn.Dispose() can never skip EndTransaction —
-                // otherwise _syncLock's Monitor.Exit is missed and every future CodeGraph op deadlocks
-                // (pipeline Run 2 debugger LOW).
-                try { txn.Dispose(); }
-                finally { _db.EndTransaction(); }
-            }
+                var model = compilation.GetSemanticModel(tree);
+                var walker = new SymbolExtractor(_db, projectId, model);
+                walker.Visit(tree.GetRoot());
+                symbolCount += walker.SymbolCount;
+            });
             Report($"  {symbolCount} symbols extracted");
 
             // Pass 2: Extract relationships (scoped rebuild for this project only)
@@ -134,27 +130,14 @@ namespace MultiTerminal.Services
             int relCount = 0;
             var dedupSet = new HashSet<string>();
 
-            // bb2b0104 (pipeline Run 1, debugger HIGH): same ordering fix as Pass 1 — dispose the
-            // transaction (rollback on the error path) BEFORE EndTransaction releases _syncLock.
-            var relTxn = _db.BeginTransaction();
-            try
+            // Chunked commits — same rationale as Pass 1 (93ad8184).
+            ChunkedWritePass(syntaxTrees, tree =>
             {
-                foreach (var tree in syntaxTrees)
-                {
-                    var model = compilation.GetSemanticModel(tree);
-                    var walker = new RelationshipExtractor(_db, projectId, model, symbolLookup, dedupSet);
-                    walker.Visit(tree.GetRoot());
-                    relCount += walker.RelationshipCount;
-                }
-                relTxn.Commit();
-            }
-            finally
-            {
-                // Nest so a throwing rollback can't skip EndTransaction and leak _syncLock
-                // (pipeline Run 2 debugger LOW; same as Pass 1).
-                try { relTxn.Dispose(); }
-                finally { _db.EndTransaction(); }
-            }
+                var model = compilation.GetSemanticModel(tree);
+                var walker = new RelationshipExtractor(_db, projectId, model, symbolLookup, dedupSet);
+                walker.Visit(tree.GetRoot());
+                relCount += walker.RelationshipCount;
+            });
             Report($"  {relCount} relationships extracted");
 
             // Store metadata
@@ -180,6 +163,38 @@ namespace MultiTerminal.Services
                 RelationshipCount = relCount,
                 DurationMs = sw.ElapsedMilliseconds
             };
+        }
+
+        /// <summary>
+        /// Runs a write pass over the syntax trees in chunks of <see cref="IndexChunkSize"/> files,
+        /// committing between chunks so the WAL write lock and CodeGraphDatabase's sync gate are
+        /// held for at most one chunk's duration instead of the whole pass (93ad8184). Preserves
+        /// the bb2b0104 ordering per chunk: the transaction is disposed — whose Dispose rolls back
+        /// a non-committed chunk — BEFORE EndTransaction releases the sync gate, so the rollback
+        /// never runs on the shared connection after a queued reader has been admitted; the
+        /// dispose is nested in a finally so a throwing rollback can never leak the Monitor.
+        /// </summary>
+        private void ChunkedWritePass(List<SyntaxTree> syntaxTrees, Action<SyntaxTree> processTree)
+        {
+            for (int start = 0; start < syntaxTrees.Count; start += IndexChunkSize)
+            {
+                int end = Math.Min(start + IndexChunkSize, syntaxTrees.Count);
+                var txn = _db.BeginTransaction();
+                try
+                {
+                    for (int i = start; i < end; i++)
+                    {
+                        processTree(syntaxTrees[i]);
+                    }
+
+                    txn.Commit();
+                }
+                finally
+                {
+                    try { txn.Dispose(); }
+                    finally { _db.EndTransaction(); }
+                }
+            }
         }
 
         /// <summary>

@@ -3156,9 +3156,10 @@ namespace MultiTerminal
                     _debugLogService?.Warning("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] *** ID MISMATCH *** requested='{e.ProjectId}' returned='{project.Id}' name='{project.Name}'");
                 }
 
-                // Update last opened timestamp
-                project.LastOpenedAt = DateTime.Now;
-                _sharedProjectDatabase?.SaveRichProject(project);
+                // Update last opened timestamp — best-effort and off the UI thread. The stamp
+                // is cosmetic recency metadata; a busy multiterminal.db (e.g. a code-graph
+                // reindex holding the write lock for seconds) must not abort the launch (93ad8184).
+                StampLastOpenedBestEffort(project);
 
                 // Resolve terminal kind. Explicit override from the start-screen split-button
                 // dropdown wins; otherwise fall back to the project's stored default (normalized).
@@ -3271,6 +3272,33 @@ namespace MultiTerminal
                 doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
                 MessageBox.Show($"Failed to launch project: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        /// <summary>
+        /// Stamps <c>LastOpenedAt</c> on a background thread, swallowing failures. The stamp is
+        /// cosmetic (start-screen recency ordering); a locked multiterminal.db — e.g. a code-graph
+        /// reindex holding the write lock for several seconds — must never surface as a launch
+        /// error (task 93ad8184). Uses the single-column UpdateLastOpened, NOT SaveRichProject —
+        /// a deferred full-row snapshot could revert a concurrent project edit or resurrect a
+        /// deleted row (pipeline Run-1 finding).
+        /// </summary>
+        private void StampLastOpenedBestEffort(Models.Project project)
+        {
+            var db = _sharedProjectDatabase;
+            if (project == null || db == null) return;
+            var stampedAt = DateTime.Now;
+            project.LastOpenedAt = stampedAt;
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    db.UpdateLastOpened(project.Id, stampedAt);
+                }
+                catch (Exception ex)
+                {
+                    _debugLogService?.Warning("MainForm", $"Best-effort LastOpenedAt stamp failed for '{project.Name}': {ex.Message}");
+                }
+            });
         }
 
         /// <summary>
