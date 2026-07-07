@@ -171,10 +171,9 @@ namespace MultiTerminal.API.Controllers
                 try { _broker.DeleteTask(taskId, request.CreatedBy); }
                 catch (Exception ex)
                 {
-                    return StatusCode(500, new
-                    {
-                        error = $"{linkError}. Rollback also failed: {ex.Message}. Orphan quick-task id={taskId} may need manual cleanup."
-                    });
+                    return Problem(
+                        detail: $"{linkError}. Rollback also failed: {ex.Message}. Orphan quick-task id={taskId} may need manual cleanup.",
+                        statusCode: 500);
                 }
                 return Problem(detail: $"{linkError}. Quick-task rolled back.", statusCode: 400);
             }
