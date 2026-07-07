@@ -237,6 +237,33 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
+        [Fact]
+        public async System.Threading.Tasks.Task ClaimTask_ConcurrentSetTaskActive_KeepsSingleActive()
+        {
+            // 7c59c004 Codex class-close: ClaimTask's activation now routes through the SAME ActivateExclusively
+            // primitive (under the per-assignee lock) as SetTaskActive, so a concurrent claim-activate + activate
+            // for one assignee can't leave a durable two-active (the off-lock MakeTaskActive race Codex flagged).
+            for (int trial = 0; trial < 20; trial++)
+            {
+                var a = _svc.CreateTask($"A{trial}", "d", "diana").TaskId;
+                var b = _svc.CreateTask($"B{trial}", "d", "diana").TaskId;
+                var c = _svc.CreateTask($"C{trial}", "d", "diana").TaskId;   // stays todo until claimed
+                _svc.ClaimTask(a, "diana", null);
+                _svc.ClaimTask(b, "diana", null);
+                _svc.UpdateTaskStatus(a, "in_progress");
+                _svc.UpdateTaskStatus(b, "in_progress");
+                _svc.SetTaskActive(a, "diana");   // A active; B in_progress; C todo
+
+                // Race: activate B (already claimed) vs claim+activate C (urgent → MakeTaskActive path).
+                var t1 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(b, "diana"));
+                var t2 = System.Threading.Tasks.Task.Run(() => _svc.ClaimTask(c, "diana", "urgent"));
+                await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+                Assert.True(DbActiveCount("diana") <= 1, $"trial {trial}: >1 active for diana (durable two-active)");
+            }
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
         // Count DB rows that are active for an assignee (authoritative — asserts the invariant on the durable store).
         private int DbActiveCount(string assignee)
         {

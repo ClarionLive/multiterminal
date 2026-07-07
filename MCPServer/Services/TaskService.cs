@@ -420,9 +420,11 @@ namespace MultiTerminal.MCPServer.Services
                         }
                         else
                         {
-                            // Activate the urgent task FIRST (fatal), THEN pause the current active task
-                            // (best-effort). This ordering means a failed activation leaves the sibling
-                            // unpaused and coherent (P5 pipeline A, SetTaskActive ruling applied here too).
+                            // Claim + EXCLUSIVELY activate the urgent task: MakeTaskActive now pauses the
+                            // current active sibling ATOMICALLY under the assignee lock (7c59c004 class-close),
+                            // so a concurrent claim/activate can't leave a durable two-active. PauseTaskWithSummary
+                            // below is kept only for the paused task's summary side-effect — the pause itself is
+                            // already done (idempotent).
                             if (!MakeTaskActive(task, assignee, taskId))
                             {
                                 return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
@@ -644,18 +646,25 @@ namespace MultiTerminal.MCPServer.Services
         /// aborts with Success=false. The core activation persist is FATAL (P5 pipeline A).</returns>
         private bool MakeTaskActive(KanbanTask task, string assignee, string taskId)
         {
-            // Core activation persist through the write path, no broadcast — ClaimTask broadcasts once.
+            // 7c59c004 (Codex class-close): claim the target into in_progress (sub_status stays null — not yet
+            // competing for "active"), THEN make it the SINGLE active task via the shared ActivateExclusively
+            // primitive — which, under the per-assignee activation lock, pauses the assignee's current active
+            // sibling AND activates the target in ONE transaction. The old single-write "just set active" left
+            // the prior active task untouched and ran OFF the assignee lock, so a concurrent claim/activate
+            // could leave a durable two-active. No broadcast here — ClaimTask broadcasts once.
             try
             {
                 if (MutateTaskInternal(taskId, t =>
                 {
                     t.Assignee = assignee;
                     t.Status = "in_progress";
-                    t.SubStatus = "active";
                 }) == null)
                 {
                     return false;
                 }
+
+                // Acting agent == the claiming assignee. Pauses any current active sibling atomically.
+                ActivateExclusively(taskId, assignee, assignee, DateTime.UtcNow);
             }
             catch (Exception ex)
             {
@@ -2137,92 +2146,31 @@ namespace MultiTerminal.MCPServer.Services
             bool isActingAssignee = string.IsNullOrEmpty(task.Assignee)
                 || string.Equals(actingAgent, task.Assignee, StringComparison.OrdinalIgnoreCase);
 
-            // ── Atomic DB-state core (7c59c004, Alice's ruling): pause the assignee's active sibling(s) AND
-            //    activate THIS task in ONE DB transaction, so a sibling-pause failure ROLLS BACK the
-            //    activation — the board can never be left with two rows sub_status='active'. This fails SAFE
-            //    (the prior task stays active, coherent; the user retries) instead of open (two active rows,
-            //    which 1df2a534 could only mitigate at read time). Git/worktree side-effects stay POST-commit
-            //    + best-effort (below) and must NOT roll back a committed activation. The transaction + cache
-            //    swaps run under the per-task write locks for the target + its cached active sibling(s)
-            //    (sorted → deadlock-free) so a concurrent same-task field mutator can't interleave.
-            var pausedIds = new List<string>();
-            var pausedTitles = new List<string>();
-            string oldTaskId = null;
-            string oldWorktreePath = null;
+            // ── Atomic DB-state core: pause the assignee's active sibling(s) AND activate THIS task in ONE
+            //    transaction via the shared ActivateExclusively primitive (7c59c004). Fails SAFE (the prior
+            //    task stays active on a rollback) instead of open (two active rows). Git/worktree side-effects
+            //    stay POST-commit + best-effort (below) and must NOT roll back a committed activation.
             var pauseStamp = DateTime.UtcNow;
-
+            List<string> pausedIds;
+            List<string> pausedTitles;
+            string oldTaskId;
+            string oldWorktreePath;
             try
             {
-                // F-B (7c59c004): the assignee activation lock is the OUTERMOST tier, held across sibling
-                // DISCOVERY + the transaction + the cache swaps. Because it serializes every make-active for
-                // this assignee (SetTaskActive + UpdateTaskStatus's auto-resume), the cache-discovered active
-                // sibling set can't be changed by a concurrent activation between discovery and the
-                // transaction — so the WithTaskLocks set covers exactly the tasks the transaction pauses.
-                // Ordering: assignee-lock → per-task lock(s) → LockConn.
-                lock (AssigneeActivationLock(assignee))
-                {
-                    // Discover the currently-active sibling(s) for this assignee (stable under the lock;
-                    // single-active model → normally ≤1): the lock set, plus the old-task id/worktree for the
-                    // TaskActiveChanged event.
-                    var cachedSiblingIds = new List<string>();
-                    foreach (var kvp in _tasks)
-                    {
-                        var other = kvp.Value;
-                        if (other.Id != taskId && other.Status == "in_progress" && other.SubStatus == "active"
-                            && string.Equals(other.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
-                        {
-                            cachedSiblingIds.Add(other.Id);
-                            if (oldTaskId == null)
-                            {
-                                oldTaskId = other.Id;
-                                oldWorktreePath = _host.Worktrees?.GetWorktreePathForTask(other.Id, actingAgent)
-                                                  ?? _host.Worktrees?.GetWorktreePathForTask(other.Id);
-                            }
-                        }
-                    }
-
-                    var lockIds = new List<string> { taskId };
-                    lockIds.AddRange(cachedSiblingIds);
-                    WithTaskLocks(lockIds, () =>
-                    {
-                        // ONE transaction: pause EXACTLY the C#-discovered siblings (by id) + activate the
-                        // target. Throws (rolled back, nothing changed) if the target is gone / not in_progress.
-                        // Returns the ids actually paused (those still active) — always a subset of
-                        // cachedSiblingIds, so every returned id is one we already hold the per-task lock for
-                        // (no surprise-sibling / unlocked-swap case). Pausing by id removes the C#-vs-SQLite
-                        // assignee-collation dependency entirely (Codex class-close).
-                        var actuallyPaused = _taskDb.SetTaskActiveTransactional(taskId, cachedSiblingIds, pauseStamp);
-
-                        // Commit succeeded — swap the cache to match the durable state. Raw cache writes (this
-                        // method is a census-allowlisted write-path bypass) done UNDER the locks we hold, so
-                        // no concurrent mutator can interleave; no extra DB write (the transaction persisted).
-                        if (_tasks.TryGetValue(taskId, out var curTarget))
-                        {
-                            var activated = curTarget.Clone();
-                            activated.SubStatus = "active";
-                            activated.PausedAt = null;
-                            _tasks[taskId] = activated;
-                            task = activated;
-                        }
-                        foreach (var pid in actuallyPaused)
-                        {
-                            pausedIds.Add(pid);
-                            if (_tasks.TryGetValue(pid, out var curSib))
-                            {
-                                var pausedClone = curSib.Clone();
-                                pausedClone.SubStatus = "paused";
-                                pausedClone.PausedAt = pauseStamp;
-                                _tasks[pid] = pausedClone;
-                                pausedTitles.Add(pausedClone.Title);
-                            }
-                        }
-                    });
-                }
+                (pausedIds, pausedTitles, oldTaskId, oldWorktreePath) =
+                    ActivateExclusively(taskId, assignee, actingAgent, pauseStamp);
             }
             catch (Exception ex)
             {
                 _host.LogError($"SetTaskActive: atomic pause+activate failed for {taskId}: {ex.Message}");
                 return new SetTaskActiveResult { Success = false, Error = $"Failed to activate task (rolled back): {ex.Message}" };
+            }
+
+            // Re-read the swapped-in target from the cache for the worktree / project-id-self-heal / event
+            // logic below (ActivateExclusively swapped a fresh clone into _tasks[taskId]).
+            if (_tasks.TryGetValue(taskId, out var swappedTarget))
+            {
+                task = swappedTarget;
             }
 
             // Auto-helper: an agent that activates a task it doesn't own (not the
@@ -2818,6 +2766,84 @@ namespace MultiTerminal.MCPServer.Services
             = new System.Collections.Concurrent.ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
         private object AssigneeActivationLock(string assignee) => _assigneeActivationLocks.GetOrAdd(assignee ?? string.Empty, _ => new object());
+
+        /// <summary>
+        /// The shared "make <paramref name="taskId"/> the single active task for <paramref name="assignee"/>"
+        /// primitive (7c59c004). Under the per-assignee activation lock it discovers the assignee's currently-
+        /// active sibling(s) with the C# OrdinalIgnoreCase agent-name domain, then in ONE DB transaction
+        /// (<see cref="TaskDatabase.SetTaskActiveTransactional"/>, pause-by-id) pauses those siblings AND
+        /// activates the target, and swaps the cache to match. EVERY deliberate make-active path — SetTaskActive
+        /// AND ClaimTask — routes through here, so no off-lock activation can race in the pause window and leave
+        /// a durable two-active (the Codex-caught ClaimTask class-close). The target must already be
+        /// <c>in_progress</c> (ClaimTask claims it first). Throws — transaction rolled back, nothing changed — if
+        /// the target is missing / not in_progress. Returns the paused ids + titles + the previously-active
+        /// id/worktree for the caller's TaskActiveChanged event. Does NOT broadcast or run git/worktree
+        /// side-effects — those stay the caller's post-commit, best-effort concern.
+        /// </summary>
+        private (List<string> PausedIds, List<string> PausedTitles, string OldTaskId, string OldWorktreePath)
+            ActivateExclusively(string taskId, string assignee, string actingAgent, DateTime pauseStamp)
+        {
+            var pausedIds = new List<string>();
+            var pausedTitles = new List<string>();
+            string oldTaskId = null;
+            string oldWorktreePath = null;
+
+            // Ordering: assignee-lock (outermost) → per-task lock(s) → LockConn. Held across DISCOVERY +
+            // transaction + cache swaps, so a concurrent make-active for this assignee can't change the
+            // sibling set between discovery and the transaction.
+            lock (AssigneeActivationLock(assignee))
+            {
+                var cachedSiblingIds = new List<string>();
+                foreach (var kvp in _tasks)
+                {
+                    var other = kvp.Value;
+                    if (other.Id != taskId && other.Status == "in_progress" && other.SubStatus == "active"
+                        && string.Equals(other.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
+                    {
+                        cachedSiblingIds.Add(other.Id);
+                        if (oldTaskId == null)
+                        {
+                            oldTaskId = other.Id;
+                            oldWorktreePath = _host.Worktrees?.GetWorktreePathForTask(other.Id, actingAgent)
+                                              ?? _host.Worktrees?.GetWorktreePathForTask(other.Id);
+                        }
+                    }
+                }
+
+                var lockIds = new List<string> { taskId };
+                lockIds.AddRange(cachedSiblingIds);
+                WithTaskLocks(lockIds, () =>
+                {
+                    // ONE transaction: pause EXACTLY the C#-discovered siblings (by id) + activate the target.
+                    // Throws (rolled back) if the target is gone / not in_progress. Pausing by id removes the
+                    // C#-vs-SQLite assignee-collation dependency; every returned id is a subset of
+                    // cachedSiblingIds, so we already hold its per-task lock (no unlocked swap).
+                    var actuallyPaused = _taskDb.SetTaskActiveTransactional(taskId, cachedSiblingIds, pauseStamp);
+
+                    if (_tasks.TryGetValue(taskId, out var curTarget))
+                    {
+                        var activated = curTarget.Clone();
+                        activated.SubStatus = "active";
+                        activated.PausedAt = null;
+                        _tasks[taskId] = activated;
+                    }
+                    foreach (var pid in actuallyPaused)
+                    {
+                        pausedIds.Add(pid);
+                        if (_tasks.TryGetValue(pid, out var curSib))
+                        {
+                            var pausedClone = curSib.Clone();
+                            pausedClone.SubStatus = "paused";
+                            pausedClone.PausedAt = pauseStamp;
+                            _tasks[pid] = pausedClone;
+                            pausedTitles.Add(pausedClone.Title);
+                        }
+                    }
+                });
+            }
+
+            return (pausedIds, pausedTitles, oldTaskId, oldWorktreePath);
+        }
 
         /// <summary>
         /// Run <paramref name="body"/> holding the per-task write locks for every id in

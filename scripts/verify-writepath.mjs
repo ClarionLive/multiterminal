@@ -87,14 +87,16 @@ const KNOWN_UNLOCKED_EXPOSURES = [
     hardening: '1f327236',
   },
   {
-    site: 'MCPServer/Services/TaskService.cs: ClaimTask (MakeTaskActive) + SetAutoStatus/RecalculateAutoStatus',
-    exposure: 'The single-active-per-assignee invariant is guarded by the per-assignee activation lock only at ' +
-              'SetTaskActive + UpdateTaskStatus auto-resume (7c59c004 F-B/New-1). ClaimTask and RecalculateAutoStatus ' +
-              'also transition a task to sub_status=active WITHOUT that lock, so a concurrent SetTaskActive can pause ' +
-              'a DB-active sibling not in its lock set — SetTaskActive DEFENSIVELY logs + skips the cache swap (never ' +
-              'writes an unlocked entry), so this is a TRANSIENT, self-healing cache-active/DB-paused divergence, not ' +
-              'a durable corruption. The structural fix is one serialized activation primitive every make-active path ' +
-              'routes through (ends the whack-a-mole). Pre-existing; not a 7c59c004 regression.',
+    site: 'MCPServer/Services/TaskService.cs: RecalculateAutoStatus (auto-status checklist-derived activation)',
+    exposure: 'The single-active-per-assignee invariant is now enforced under the per-assignee activation lock at ' +
+              'ALL DELIBERATE make-active paths — SetTaskActive, UpdateTaskStatus auto-resume, AND ClaimTask, which ' +
+              'routes through the shared ActivateExclusively primitive (7c59c004). The ONE remaining make-active path ' +
+              'is RecalculateAutoStatus: it sets sub_status=active as a SIDE-EFFECT of checklist progress ' +
+              '(in_progress && sub_status==null) WITHOUT pausing the assignee current active task. Closing it is NOT ' +
+              'mechanical locking — it is a SEMANTIC PRECEDENCE decision: should an auto-progressing task STEAL ' +
+              '"active" from the assignee explicit active work? Almost certainly not, but that is a behavior change to ' +
+              'auto-status across 4 entangled callers with lifecycle-board risk. OWNER-scoped decision (change ' +
+              'auto-status to defer to explicit active, OR ratify the narrow auto-derived edge as a residual) → 651105b3.',
     hardening: '651105b3',
   },
   {
