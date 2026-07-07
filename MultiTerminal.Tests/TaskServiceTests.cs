@@ -231,14 +231,14 @@ namespace MultiTerminal.Tests
                 var t2 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(c, "diana"));
                 await System.Threading.Tasks.Task.WhenAll(t1, t2);
 
-                int activeForDiana = _tasks_ActiveCount("diana");
+                int activeForDiana = DbActiveCount("diana");
                 Assert.True(activeForDiana <= 1, $"trial {trial}: {activeForDiana} active tasks for diana (expected ≤1)");
             }
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
         // Count DB rows that are active for an assignee (authoritative — asserts the invariant on the durable store).
-        private int _tasks_ActiveCount(string assignee)
+        private int DbActiveCount(string assignee)
         {
             int n = 0;
             foreach (var t in _svc.GetTasks())

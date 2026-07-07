@@ -2808,7 +2808,8 @@ namespace MultiTerminal.MCPServer.Services
         // verify-writepath.mjs): ClaimTask (MakeTaskActive) and RecalculateAutoStatus also make-active but are
         // NOT yet under this lock — a transient, self-healing divergence (SetTaskActive's defensive skip never
         // writes an unlocked cache entry), not a durable corruption. The structural fix is one serialized
-        // activation primitive every make-active path routes through, deferred to 651105b3. ORDERING INVARIANT (composes with the per-task locks with NO new deadlock class):
+        // activation primitive every make-active path routes through, deferred to 651105b3.
+        // ORDERING INVARIANT (composes with the per-task locks with NO new deadlock class):
         // ALWAYS acquire the assignee lock BEFORE any per-task lock — assignee-lock → per-task lock(s)
         // (WithTaskLocks, sorted) → LockConn. No site inverts this. Unbounded by design (one small object per
         // assignee ever activated), same accepted pattern as the per-task locks.
