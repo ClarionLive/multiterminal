@@ -1528,6 +1528,82 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Atomically pause the given sibling task ids AND activate <paramref name="taskId"/> in ONE
+        /// transaction (7c59c004). Either both land or neither: an activation failure rolls the pauses back,
+        /// so the tasks table can never hold two rows <c>sub_status='active'</c> for one assignee (the failure
+        /// mode 1df2a534 could only mitigate at read time). Returns the ids ACTUALLY paused (those still active
+        /// at pause time) so the caller can swap their cache entries and report them. Throws — with the
+        /// transaction rolled back, nothing changed — if the target row is missing or no longer
+        /// <c>in_progress</c> at activation time.
+        /// <para>Pauses BY ID (7c59c004 Codex class-close), NOT by an <c>assignee</c> SQL comparison: the
+        /// caller (SetTaskActive) discovers the sibling set with the authoritative C# agent-name equality
+        /// (<c>OrdinalIgnoreCase</c>) under the per-assignee lock and passes those ids here. That removes the
+        /// C#-vs-SQLite collation dependency entirely — no ASCII/non-ASCII case-fold gap can leave a durable
+        /// two-active — and deletes the old surprise-sibling defensive path.</para>
+        /// <para>Scope boundary: this transaction spans DB STATE ONLY. Git/worktree side-effects are the
+        /// caller's POST-commit, best-effort concern and are deliberately NOT in here — a worktree failure must
+        /// never roll back a committed activation.</para>
+        /// </summary>
+        public List<string> SetTaskActiveTransactional(string taskId, IReadOnlyList<string> siblingIdsToPause, DateTime pausedAt)
+        {
+            using var gate = LockConn();
+            using var tx = _connection.BeginTransaction();
+            try
+            {
+                // 1+2) Pause EXACTLY the caller-discovered siblings, by id. Each pause is guarded on the row
+                //      still being active, so a row that changed concurrently is skipped (0 rows) rather than
+                //      blindly overwritten; the returned list is the ids actually paused.
+                var paused = new List<string>();
+                if (siblingIdsToPause != null && siblingIdsToPause.Count > 0)
+                {
+                    const string pauseSql = @"
+                        UPDATE tasks SET sub_status = 'paused', paused_at = @pausedAt, updated_at = @now
+                        WHERE id = @id AND status = 'in_progress' AND sub_status = 'active'";
+                    foreach (var siblingId in siblingIdsToPause)
+                    {
+                        if (siblingId == null || string.Equals(siblingId, taskId, StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        using var pause = new SQLiteCommand(pauseSql, _connection, tx);
+                        pause.Parameters.AddWithValue("@id", siblingId);
+                        pause.Parameters.AddWithValue("@pausedAt", pausedAt);
+                        pause.Parameters.AddWithValue("@now", DateTime.UtcNow);
+                        if (pause.ExecuteNonQuery() > 0)
+                        {
+                            paused.Add(siblingId);
+                        }
+                    }
+                }
+
+                // 3) Activate the target — still requiring in_progress, so a task that went done/deleted
+                //    between the caller's validation and here fails the whole transaction.
+                const string activateSql = @"
+                    UPDATE tasks SET sub_status = 'active', paused_at = NULL, updated_at = @now
+                    WHERE id = @taskId AND status = 'in_progress'";
+                using (var activate = new SQLiteCommand(activateSql, _connection, tx))
+                {
+                    activate.Parameters.AddWithValue("@taskId", taskId);
+                    activate.Parameters.AddWithValue("@now", DateTime.UtcNow);
+                    if (activate.ExecuteNonQuery() == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Task {taskId} not found or not in_progress at activation time.");
+                    }
+                }
+
+                tx.Commit();
+                return paused;
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
+        }
+
+        /// <summary>
         /// Delete a task by ID.
         /// </summary>
         public void DeleteTask(string taskId)
@@ -3190,7 +3266,7 @@ namespace MultiTerminal.Services
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
-                WHERE assignee = @agentName
+                WHERE assignee = @agentName COLLATE NOCASE
                   AND status = 'in_progress'
                   AND sub_status = 'active'
                 ORDER BY updated_at DESC
@@ -3400,7 +3476,7 @@ namespace MultiTerminal.Services
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
                        project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
-                WHERE assignee = @assignee AND stale_level > 0
+                WHERE assignee = @assignee COLLATE NOCASE AND stale_level > 0
                 ORDER BY stale_level DESC, paused_at ASC
             ";
 

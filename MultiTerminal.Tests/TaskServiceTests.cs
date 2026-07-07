@@ -117,6 +117,260 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
+        // ── 7c59c004 atomicity capstone ──────────────────────────────────────────────────────────────
+
+        [Fact]
+        public async System.Threading.Tasks.Task PerTaskLock_SerializesConcurrentDifferentFieldWrites_NoLostUpdate()
+        {
+            // The field-level lost update (item 2): two writers concurrently mutate DIFFERENT fields of the
+            // SAME task. Each write-path cycle clones the cached task and SaveTask persists the FULL row, so
+            // without the per-task lock a stale clone's full-row write clobbers the other writer's field and
+            // the later swap loses it. With the lock the read-modify-write serializes, so the last write of
+            // EACH field survives. Hammered to make the interleave overwhelmingly likely on the old path.
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            const int N = 300;
+
+            var w1 = System.Threading.Tasks.Task.Run(() =>
+            {
+                for (int i = 0; i < N; i++) _svc.UpdateTaskPlan(id, "plan-" + i, "diana");
+            });
+            var w2 = System.Threading.Tasks.Task.Run(() =>
+            {
+                for (int i = 0; i < N; i++) _svc.UpdateTaskContinuation(id, "notes-" + i, "diana");
+            });
+            await System.Threading.Tasks.Task.WhenAll(w1, w2);
+
+            var final = _svc.GetTask(id);
+            Assert.Equal("plan-" + (N - 1), final.Plan);                 // writer 1's field not clobbered
+            Assert.Equal("notes-" + (N - 1), final.ContinuationNotes);   // writer 2's field not clobbered
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);          // cache ≡ DB throughout
+        }
+
+        [Fact]
+        public void SetTaskActiveTransactional_RollsBackPause_WhenActivationTargetNotInProgress()
+        {
+            // Item 0: the pause+activate must be atomic. Seed an active task A for an assignee and a target B
+            // that is NOT in_progress, then drive the DB transaction directly: the activation UPDATE (guarded
+            // on status='in_progress') affects 0 rows and throws, so the sibling-pause of A must ROLL BACK.
+            // Fails safe (A stays active) instead of open (A paused with nothing active).
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "todo", Assignee = "diana", SubStatus = null, CreatedAt = DateTime.UtcNow });
+
+            Assert.Throws<InvalidOperationException>(() => _db.SetTaskActiveTransactional("B", new List<string> { "A" }, DateTime.UtcNow));
+
+            Assert.Equal("active", _db.GetTask("A").SubStatus);  // pause rolled back — A still active
+            Assert.Equal("todo", _db.GetTask("B").Status);       // B untouched
+        }
+
+        [Fact]
+        public void SetTaskActiveTransactional_PausesSiblingAndActivates_Atomically()
+        {
+            // Happy path: activating B atomically pauses the assignee's active sibling A and activates B.
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "in_progress", Assignee = "diana", SubStatus = "paused", CreatedAt = DateTime.UtcNow });
+
+            var paused = _db.SetTaskActiveTransactional("B", new List<string> { "A" }, DateTime.UtcNow);
+
+            Assert.Contains("A", paused);
+            Assert.Equal("active", _db.GetTask("B").SubStatus);
+            Assert.Equal("paused", _db.GetTask("A").SubStatus);
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task SetTaskActive_ConcurrentSameAssignee_KeepsSingleActive_UnderBothLocks()
+        {
+            // F-B (7c59c004): two concurrent SetTaskActive calls for the SAME assignee contend on the
+            // per-assignee activation lock (outermost) AND the per-task locks (WithTaskLocks) — both tiers
+            // held together. The single-active-per-assignee invariant must hold under the storm: exactly one
+            // of {a,b} active and the other paused, never two active, never a lost pause. Also a deadlock
+            // probe — if the assignee/task lock ordering were invertible this would hang.
+            var a = _svc.CreateTask("A", "d", "diana").TaskId;
+            var b = _svc.CreateTask("B", "d", "diana").TaskId;
+            _svc.ClaimTask(a, "diana", null);
+            _svc.ClaimTask(b, "diana", null);
+            _svc.UpdateTaskStatus(a, "in_progress");
+            _svc.UpdateTaskStatus(b, "in_progress");
+
+            const int N = 150;
+            var t1 = System.Threading.Tasks.Task.Run(() => { for (int i = 0; i < N; i++) _svc.SetTaskActive(a, "diana"); });
+            var t2 = System.Threading.Tasks.Task.Run(() => { for (int i = 0; i < N; i++) _svc.SetTaskActive(b, "diana"); });
+            await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+            var finalA = _db.GetTask(a);
+            var finalB = _db.GetTask(b);
+            int activeCount = (finalA.SubStatus == "active" ? 1 : 0) + (finalB.SubStatus == "active" ? 1 : 0);
+            Assert.Equal(1, activeCount);                        // never two active, never zero
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);  // cache ≡ DB after the storm
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task UpdateTaskStatusDone_ConcurrentSetTaskActive_NeverTwoActive()
+        {
+            // New-1 (7c59c004 F-B completion): UpdateTaskStatus marks the active task done OUTSIDE the assignee
+            // lock, then auto-resumes the most-recent paused task UNDER the lock. A concurrent SetTaskActive for
+            // the same assignee, interleaving between those two steps, could (pre-fix) leave TWO active tasks.
+            // The under-lock "assignee already has an active task? → skip resume" guard must keep it to ≤1.
+            // Repeated to make the narrow window likely.
+            for (int trial = 0; trial < 25; trial++)
+            {
+                var a = _svc.CreateTask($"A{trial}", "d", "diana").TaskId;
+                var b = _svc.CreateTask($"B{trial}", "d", "diana").TaskId;
+                var c = _svc.CreateTask($"C{trial}", "d", "diana").TaskId;
+                foreach (var id in new[] { a, b, c })
+                {
+                    _svc.ClaimTask(id, "diana", null);
+                    _svc.UpdateTaskStatus(id, "in_progress");
+                }
+                // a active; b most-recent paused; c older paused.
+                _svc.SetTaskActive(c, "diana");
+                _svc.SetTaskActive(b, "diana");
+                _svc.SetTaskActive(a, "diana");
+
+                // Race: mark the active task done (auto-resumes b) vs activate c.
+                var t1 = System.Threading.Tasks.Task.Run(() => _svc.UpdateTaskStatus(a, "done"));
+                var t2 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(c, "diana"));
+                await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+                int activeForDiana = DbActiveCount("diana");
+                Assert.True(activeForDiana <= 1, $"trial {trial}: {activeForDiana} active tasks for diana (expected ≤1)");
+            }
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task ClaimTask_ConcurrentSetTaskActive_KeepsSingleActive()
+        {
+            // 7c59c004 Codex class-close: ClaimTask's activation now routes through the SAME ActivateExclusively
+            // primitive (under the per-assignee lock) as SetTaskActive, so a concurrent claim-activate + activate
+            // for one assignee can't leave a durable two-active (the off-lock MakeTaskActive race Codex flagged).
+            for (int trial = 0; trial < 20; trial++)
+            {
+                var a = _svc.CreateTask($"A{trial}", "d", "diana").TaskId;
+                var b = _svc.CreateTask($"B{trial}", "d", "diana").TaskId;
+                var c = _svc.CreateTask($"C{trial}", "d", "diana").TaskId;   // stays todo until claimed
+                _svc.ClaimTask(a, "diana", null);
+                _svc.ClaimTask(b, "diana", null);
+                _svc.UpdateTaskStatus(a, "in_progress");
+                _svc.UpdateTaskStatus(b, "in_progress");
+                _svc.SetTaskActive(a, "diana");   // A active; B in_progress; C todo
+
+                // Race: activate B (already claimed) vs claim+activate C (urgent → MakeTaskActive path).
+                var t1 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(b, "diana"));
+                var t2 = System.Threading.Tasks.Task.Run(() => _svc.ClaimTask(c, "diana", "urgent"));
+                await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+                Assert.True(DbActiveCount("diana") <= 1, $"trial {trial}: >1 active for diana (durable two-active)");
+            }
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task UrgentClaim_ConcurrentReactivateOldActive_NeverZeroActive()
+        {
+            // 7c59c004 Codex CONFIRMATION-round finding: the urgent-claim path used to re-pause the pre-lock
+            // active task via PauseTaskWithSummary AFTER MakeTaskActive released the assignee lock. If a
+            // serialized SetTaskActive re-activated that same task in the window, the stale off-lock re-pause
+            // clobbered it → ZERO durable active for the assignee (a lost activation — the DUAL of two-active,
+            // which the ≤1 tests above don't catch). The fix removes that state write: ActivateExclusively is
+            // the SOLE make-active authority and already paused the sibling atomically; the caller only emits
+            // summary/activity keyed off the returned paused set. So EXACTLY ONE active must survive every
+            // interleaving — never zero (the regression this guards), never two.
+            for (int trial = 0; trial < 40; trial++)
+            {
+                var a = _svc.CreateTask($"A{trial}", "d", "diana").TaskId;
+                var c = _svc.CreateTask($"C{trial}", "d", "diana").TaskId;   // stays todo until the urgent claim
+                _svc.ClaimTask(a, "diana", null);
+                _svc.UpdateTaskStatus(a, "in_progress");
+                _svc.SetTaskActive(a, "diana");   // A active; C todo (prior trials' tasks all paused by single-active)
+
+                // Race: urgent claim of C (pauses A + activates C atomically under the lock, then emits the pause
+                // summary off-lock) vs SetTaskActive(A) (re-activates A). Pre-fix the stale off-lock re-pause of A
+                // could land AFTER the re-activation → zero active. Post-fix: always exactly one.
+                var t1 = System.Threading.Tasks.Task.Run(() => _svc.ClaimTask(c, "diana", "urgent"));
+                var t2 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(a, "diana"));
+                await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+                int active = DbActiveCount("diana");
+                Assert.Equal(1, active);   // EXACTLY one — never zero (stale-pause regression), never two
+            }
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
+        [Fact]
+        public void UrgentClaim_ThrowingRecordActivitySink_DoesNotPoisonCommittedClaim()
+        {
+            // 7c59c004 Codex security [medium]: RecordActivity is a POST-COMMIT best-effort sink in the make-active
+            // path (both MakeTaskActive and EmitPauseSummaries). A throwing sink must NEVER escape and turn a
+            // committed claim + exclusive activation into a reported failure (the RaiseSafe resilient-dispatch
+            // principle from 1df2a534, applied to the activity sink). Setup: A active, C todo.
+            var a = _svc.CreateTask("A", "d", "diana").TaskId;
+            var c = _svc.CreateTask("C", "d", "diana").TaskId;
+            _svc.ClaimTask(a, "diana", null);
+            _svc.UpdateTaskStatus(a, "in_progress");
+            _svc.SetTaskActive(a, "diana");   // A active; C todo
+
+            // Make the activity sink throw, then urgently claim C: MakeTaskActive commits (pauses A + activates C)
+            // and EmitPauseSummaries runs — both hit the throwing RecordActivity, now exception-contained.
+            _host.ThrowFromRecordActivity = true;
+            var result = _svc.ClaimTask(c, "diana", "urgent");
+            _host.ThrowFromRecordActivity = false;
+
+            Assert.True(result.Success, "committed urgent claim must report success even when the activity sink throws");
+            Assert.Equal(1, DbActiveCount("diana"));           // exactly one active — the committed activation stands
+            Assert.Equal("active", _db.GetTask(c).SubStatus);  // C active (the urgent claim)
+            Assert.Equal("paused", _db.GetTask(a).SubStatus);  // A paused by ActivateExclusively's atomic txn
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
+        // Count DB rows that are active for an assignee (authoritative — asserts the invariant on the durable store).
+        private int DbActiveCount(string assignee)
+        {
+            int n = 0;
+            foreach (var t in _svc.GetTasks())
+            {
+                var fresh = _db.GetTask(t.Id);
+                if (fresh != null && fresh.SubStatus == "active"
+                    && string.Equals(fresh.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        [Theory]
+        [InlineData("Diana", "diana")]    // ASCII case variant
+        [InlineData("Élodie", "élodie")]  // NON-ASCII case variant — SQLite COLLATE NOCASE would MISS this row
+        public void SetTaskActive_CaseVariantAssignee_KeepsSingleActive(string activeCase, string activatingCase)
+        {
+            // 7c59c004 Codex class-close: SetTaskActive discovers siblings with C# OrdinalIgnoreCase and pauses
+            // them BY ID (no assignee SQL collation), so a case-variant active sibling — INCLUDING non-ASCII,
+            // where SQLite COLLATE NOCASE folds nothing and would leave a durable two-active — is still paused.
+            var a = _svc.CreateTask("A", "d", activeCase).TaskId;
+            var b = _svc.CreateTask("B", "d", activatingCase).TaskId;
+            _svc.ClaimTask(a, activeCase, null);
+            _svc.ClaimTask(b, activatingCase, null);
+            _svc.UpdateTaskStatus(a, "in_progress");
+            _svc.UpdateTaskStatus(b, "in_progress");
+            _svc.SetTaskActive(a, activeCase);       // A active as the differently-cased assignee
+
+            _svc.SetTaskActive(b, activatingCase);   // activate B under the case-variant name
+
+            Assert.Equal("paused", _db.GetTask(a).SubStatus);   // A paused despite the case (incl. non-ASCII)
+            Assert.Equal("active", _db.GetTask(b).SubStatus);   // only B active — no durable two-active
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
+        [Fact]
+        public void GetActiveTaskForAgent_MatchesCaseVariantAssignee()
+        {
+            // Same root (sibling fix): the active-task resolution must find the row regardless of casing.
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "Diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            var active = _db.GetActiveTaskForAgent("diana");
+            Assert.NotNull(active);
+            Assert.Equal("A", active.Id);
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
@@ -126,6 +380,10 @@ namespace MultiTerminal.Tests
         {
             public int TasksUpdatedCount { get; private set; }
 
+            // When set, RecordActivity throws — models a post-commit best-effort activity sink going down, to
+            // prove a throwing sink can't poison a committed claim (7c59c004 Codex security [medium]).
+            public bool ThrowFromRecordActivity { get; set; }
+
             public void RaiseTasksUpdated(List<KanbanTask> tasks) => TasksUpdatedCount++;
             public void RaiseTaskClaimed(TaskClaimedEventArgs args) { }
             public void RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) { }
@@ -133,7 +391,10 @@ namespace MultiTerminal.Tests
             public void LogWarning(string message) { }
             public void LogInfo(string message) { }
             public void LogTrace(string message) { }
-            public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false) { }
+            public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
+            {
+                if (ThrowFromRecordActivity) throw new InvalidOperationException("test: activity sink down");
+            }
             public CreateInboxMessageResult CreateInboxNotification(string userId, string taskId, string taskTitle, int? checklistItemIndex, string checklistItemName, string type, string summary, string createdBy) => new CreateInboxMessageResult { Success = true };
             public void NotifyReportSaved(string taskId, string reportId, string agentName, string verdict) { }
             public Task<SendResult> NotifyHelperAdded(string helperName, string taskId, string taskTitle, string assignee) => Task.FromResult(new SendResult());

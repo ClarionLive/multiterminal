@@ -84,19 +84,32 @@ namespace MultiTerminal.MCPServer.Services
                 return;
             }
 
-            try
+            // 7c59c004 F-A(a): serialize the persist+swap under the task's write lock so this full-row write
+            // can't race a concurrent MutateTaskInternal (which holds the same lock) and clobber its fields.
+            // KNOWN RESIDUAL (hardening 1f327236): this locks the SaveTask swap, but it does NOT protect an
+            // external caller that mutates a GetTask-returned CACHED reference IN PLACE before calling here —
+            // CodeReviewService does exactly that (GetTask → mutate ref → SaveTask). The proper fix is a
+            // dedicated write method / snapshot-returning GetTask; enumerated in verify-writepath.mjs.
+            bool persisted = false;
+            lock (TaskWriteLock(task.Id))
             {
-                _taskDb.SaveTask(task);   // persist FIRST
-            }
-            catch (Exception ex)
-            {
-                // Don't swap the cache or broadcast a change we couldn't commit.
-                _host.LogError($"SaveTask: persist failed for task {task.Id}: {ex.Message}");
-                return;
+                try
+                {
+                    _taskDb.SaveTask(task);   // persist FIRST
+                    _tasks[task.Id] = task;   // cache reflects exactly what was persisted
+                    persisted = true;
+                }
+                catch (Exception ex)
+                {
+                    // Don't swap the cache or broadcast a change we couldn't commit.
+                    _host.LogError($"SaveTask: persist failed for task {task.Id}: {ex.Message}");
+                }
             }
 
-            _tasks[task.Id] = task;   // cache reflects exactly what was persisted
-            BroadcastTaskUpdate();
+            if (persisted)
+            {
+                BroadcastTaskUpdate();   // broadcast OUTSIDE the lock (reads the cache, doesn't write it)
+            }
         }
 
 
@@ -407,15 +420,21 @@ namespace MultiTerminal.MCPServer.Services
                         }
                         else
                         {
-                            // Activate the urgent task FIRST (fatal), THEN pause the current active task
-                            // (best-effort). This ordering means a failed activation leaves the sibling
-                            // unpaused and coherent (P5 pipeline A, SetTaskActive ruling applied here too).
-                            if (!MakeTaskActive(task, assignee, taskId))
+                            // Claim + EXCLUSIVELY activate the urgent task: MakeTaskActive pauses the current
+                            // active sibling ATOMICALLY under the assignee lock (7c59c004 class-close) and RETURNS
+                            // exactly which id(s) it paused. We emit the pause summary/activity for THAT set only —
+                            // never re-writing sub_status here. Re-pausing the pre-lock `currentActiveTask` off the
+                            // lock was a durable-corruption bug (Codex 7c59c004): a serialized SetTaskActive could
+                            // re-activate that task in the window after MakeTaskActive released the lock, and the
+                            // stale re-pause would clobber it → zero active. ActivateExclusively is the SOLE
+                            // make-active state-write authority; this is pure side-effect keyed off its result.
+                            var activation = MakeTaskActive(task, assignee, taskId);
+                            if (!activation.Ok)
                             {
                                 return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
                             }
 
-                            PauseTaskWithSummary(currentActiveTask, assignee);
+                            EmitPauseSummaries(activation.PausedIds, activation.PausedTitles, assignee);
                         }
                         break;
 
@@ -463,8 +482,9 @@ namespace MultiTerminal.MCPServer.Services
             }
             else
             {
-                // No active task - make this task active regardless of priority
-                if (!MakeTaskActive(task, assignee, taskId))
+                // No active task - make this task active regardless of priority. No prior active sibling to
+                // pause, so ActivateExclusively pauses nothing (empty set) and there is no pause side-effect.
+                if (!MakeTaskActive(task, assignee, taskId).Ok)
                 {
                     return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
                 }
@@ -581,73 +601,100 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Pause a task with auto-generated summary.
         /// </summary>
-        private void PauseTaskWithSummary(KanbanTask task, string assignee)
+        /// <summary>
+        /// Emit the summary + activity side-effects for tasks that <see cref="ActivateExclusively"/> ALREADY
+        /// paused (atomically, under the per-assignee activation lock), keyed off its returned paused set.
+        /// Deliberately writes NO task state: re-pausing here (as the old PauseTaskWithSummary did) was an
+        /// off-lock, unconditional sub_status='paused' write that could clobber a concurrent SetTaskActive
+        /// re-activation of the same task in the window after the activation released the lock → durable
+        /// zero-active (7c59c004 Codex class-close). ActivateExclusively is the SOLE make-active state-write
+        /// authority; this is pure side-effect. Indices align (PausedIds[i] ↔ PausedTitles[i]).
+        /// </summary>
+        private void EmitPauseSummaries(IReadOnlyList<string> pausedIds, IReadOnlyList<string> pausedTitles, string assignee)
         {
-            // Write path, no broadcast — the ClaimTask caller broadcasts once after the whole claim.
-            try
+            if (pausedIds == null) return;
+            for (int i = 0; i < pausedIds.Count; i++)
             {
-                MutateTaskInternal(task.Id, t =>
-                {
-                    t.SubStatus = "paused";
-                    t.PausedAt = DateTime.UtcNow;
-                });
-            }
-            catch (Exception ex) { _host.LogError($"PauseTaskWithSummary: persist failed for {task.Id}: {ex.Message}"); }
+                var id = pausedIds[i];
+                var title = (pausedTitles != null && i < pausedTitles.Count) ? pausedTitles[i] : id;
 
-            // Auto-generate summary for the paused task
-            if (_host.SummaryService != null)
-            {
+                // Auto-generate summary for the paused task
+                if (_host.SummaryService != null)
+                {
+                    try
+                    {
+                        _host.SummaryService.AutoGenerateSummary(
+                            id,
+                            title,
+                            "in_progress",
+                            "paused",
+                            assignee);
+                    }
+                    catch (Exception ex)
+                    {
+                        _host.LogError($"Failed to auto-generate summary for paused task {id}: {ex.Message}");
+                    }
+                }
+
+                // Record activity for pausing. Best-effort, exception-contained: the claim + activation are
+                // ALREADY committed by the time we get here (MakeTaskActive returned), so a throwing activity
+                // sink must NEVER escape to make ClaimTask report failure on a committed transaction (Codex
+                // 7c59c004; the RaiseSafe resilient-dispatch principle from 1df2a534, applied to the sink).
                 try
                 {
-                    _host.SummaryService.AutoGenerateSummary(
-                        task.Id,
-                        task.Title,
-                        "in_progress",
-                        "paused",
-                        assignee);
+                    _host.RecordActivity(new ActivityEvent
+                    {
+                        Terminal = assignee,
+                        Type = "task",
+                        Action = "paused",
+                        Content = $"Paused task: {title}",
+                        RelatedId = id
+                    });
                 }
-                catch (Exception ex)
-                {
-                    _host.LogError($"Failed to auto-generate summary for paused task: {ex.Message}");
-                }
+                catch (Exception ex) { _host.LogError($"EmitPauseSummaries: RecordActivity failed for {id}: {ex.Message}"); }
             }
-
-            // Record activity for pausing
-            _host.RecordActivity(new ActivityEvent
-            {
-                Terminal = assignee,
-                Type = "task",
-                Action = "paused",
-                Content = $"Paused task: {task.Title}",
-                RelatedId = task.Id
-            });
         }
 
 
         /// <summary>
         /// Make a task active and update activity tracking.
         /// </summary>
-        /// <returns>true if the activation persisted; false (not found OR DB write failed) so ClaimTask
-        /// aborts with Success=false. The core activation persist is FATAL (P5 pipeline A).</returns>
-        private bool MakeTaskActive(KanbanTask task, string assignee, string taskId)
+        /// <returns>Ok=true if the activation persisted; false (not found OR DB write failed) so ClaimTask
+        /// aborts with Success=false. The core activation persist is FATAL (P5 pipeline A). PausedIds/PausedTitles
+        /// are the sibling(s) ActivateExclusively ACTUALLY paused (atomically, under the assignee lock) — the
+        /// caller emits their pause summary/activity side-effects OFF this set, never by re-writing state
+        /// (7c59c004 Codex class-close: an off-lock re-pause can clobber a concurrent serialized re-activation).</returns>
+        private (bool Ok, List<string> PausedIds, List<string> PausedTitles) MakeTaskActive(KanbanTask task, string assignee, string taskId)
         {
-            // Core activation persist through the write path, no broadcast — ClaimTask broadcasts once.
+            List<string> pausedIds;
+            List<string> pausedTitles;
+
+            // 7c59c004 (Codex class-close): claim the target into in_progress (sub_status stays null — not yet
+            // competing for "active"), THEN make it the SINGLE active task via the shared ActivateExclusively
+            // primitive — which, under the per-assignee activation lock, pauses the assignee's current active
+            // sibling AND activates the target in ONE transaction. The old single-write "just set active" left
+            // the prior active task untouched and ran OFF the assignee lock, so a concurrent claim/activate
+            // could leave a durable two-active. No broadcast here — ClaimTask broadcasts once.
             try
             {
                 if (MutateTaskInternal(taskId, t =>
                 {
                     t.Assignee = assignee;
                     t.Status = "in_progress";
-                    t.SubStatus = "active";
                 }) == null)
                 {
-                    return false;
+                    return (false, null, null);
                 }
+
+                // Acting agent == the claiming assignee. Pauses any current active sibling atomically and
+                // returns exactly which id(s) it paused — that set (NOT the caller's pre-lock snapshot) is the
+                // authority for any pause side-effects, so the pause is never re-written off the lock.
+                (pausedIds, pausedTitles, _, _) = ActivateExclusively(taskId, assignee, assignee, DateTime.UtcNow);
             }
             catch (Exception ex)
             {
                 _host.LogError($"MakeTaskActive: persist failed for {taskId}: {ex.Message}");
-                return false;
+                return (false, null, null);
             }
 
             // Auto-generate summary when task is claimed
@@ -668,24 +715,36 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            // Auto-update activity: terminal claimed a task
-            _host.ActivityService?.UpdateActivity(
-                assignee,
-                "working",
-                $"Working on: {task.Title}",
-                taskId: taskId);
-
-            // Record activity for the feed
-            _host.RecordActivity(new ActivityEvent
+            // Post-commit feed side-effects. Best-effort, exception-contained: the claim + exclusive activation
+            // are ALREADY committed above (MutateTaskInternal + ActivateExclusively), so a throwing activity sink
+            // must NEVER escape and make ClaimTask report failure on a committed transaction (Codex 7c59c004; the
+            // RaiseSafe resilient-dispatch principle from 1df2a534, applied to the activity sinks).
+            try
             {
-                Terminal = assignee,
-                Type = "task",
-                Action = "claimed",
-                Content = $"Claimed task: {task.Title}",
-                RelatedId = taskId
-            });
+                // Auto-update activity: terminal claimed a task
+                _host.ActivityService?.UpdateActivity(
+                    assignee,
+                    "working",
+                    $"Working on: {task.Title}",
+                    taskId: taskId);
+            }
+            catch (Exception ex) { _host.LogError($"MakeTaskActive: UpdateActivity failed for {taskId}: {ex.Message}"); }
 
-            return true;
+            try
+            {
+                // Record activity for the feed
+                _host.RecordActivity(new ActivityEvent
+                {
+                    Terminal = assignee,
+                    Type = "task",
+                    Action = "claimed",
+                    Content = $"Claimed task: {task.Title}",
+                    RelatedId = taskId
+                });
+            }
+            catch (Exception ex) { _host.LogError($"MakeTaskActive: RecordActivity failed for {taskId}: {ex.Message}"); }
+
+            return (true, pausedIds, pausedTitles);
         }
 
 
@@ -711,7 +770,7 @@ namespace MultiTerminal.MCPServer.Services
         /// Implements stack behavior: when a task is marked "done" and was active,
         /// auto-resume the most recently paused task for that assignee.
         /// </summary>
-        public UpdateTaskStatusResult UpdateTaskStatus(string taskId, string status)
+        public UpdateTaskStatusResult UpdateTaskStatus(string taskId, string status, double? newSortOrder = null)
         {
             if (!_tasks.TryGetValue(taskId, out var task))
             {
@@ -761,6 +820,16 @@ namespace MultiTerminal.MCPServer.Services
                         t.SubStatus = null;
                         t.PausedAt = null;
                     }
+
+                    // 7c59c004 item 1 — cross-column reorder atomicity: when a drag also carries a new
+                    // sort_order, it rides in THIS same row write (SaveTask persists sort_order too), so the
+                    // status move and the sort land in ONE atomic persist. No window where the status moved
+                    // but the sort write failed separately. (ReorderTask passes it only on a column change;
+                    // same-column reorders keep using the dedicated UpdateSortOrder path.)
+                    if (newSortOrder.HasValue)
+                    {
+                        t.SortOrder = newSortOrder.Value;
+                    }
                 }) == null)
                 {
                     return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
@@ -794,21 +863,45 @@ namespace MultiTerminal.MCPServer.Services
             KanbanTask resumedTask = null;
             if (status == "done" && previousSubStatus == "active" && !string.IsNullOrEmpty(assignee))
             {
-                resumedTask = GetMostRecentPausedTask(assignee);
+                // F-B (7c59c004): the auto-resume makes a task ACTIVE for this assignee, so it must serialize
+                // with SetTaskActive under the SAME per-assignee activation lock (else the two could both
+                // make-active and break the single-active invariant / race each other's sibling discovery).
+                // Ordering: assignee-lock → per-task lock (via MutateTaskInternal) → LockConn. Discovery +
+                // make-active both under the lock.
+                lock (AssigneeActivationLock(assignee))
+                {
+                    // New-1 (7c59c004 F-B completion): the done write ABOVE vacated this assignee's active
+                    // slot OUTSIDE this lock, so a concurrent SetTaskActive could have activated another task
+                    // for the assignee in that window. Under this lock its cache+DB swap is fully committed,
+                    // so this check is authoritative: if the assignee ALREADY has an active task, SKIP the
+                    // auto-resume rather than create a second active task (don't override the user's explicit
+                    // activation). Closes the done→auto-resume two-active window.
+                    bool assigneeAlreadyActive = _tasks.Values.Any(t => t.Id != taskId
+                        && string.Equals(t.Assignee, assignee, StringComparison.OrdinalIgnoreCase)
+                        && t.Status == "in_progress" && t.SubStatus == "active");
+
+                    if (!assigneeAlreadyActive)
+                    {
+                        resumedTask = GetMostRecentPausedTask(assignee);
+                        if (resumedTask != null)
+                        {
+                            // Write path for the auto-resumed task (no broadcast — one broadcast below covers both).
+                            try
+                            {
+                                MutateTaskInternal(resumedTask.Id, t =>
+                                {
+                                    t.SubStatus = "active";
+                                    t.PausedAt = null;
+                                });
+                            }
+                            catch (Exception ex) { _host.LogError($"UpdateTaskStatus: persist failed for resumed task {resumedTask.Id}: {ex.Message}"); }
+                        }
+                    }
+                }
+
                 if (resumedTask != null)
                 {
-                    // Write path for the auto-resumed task (no broadcast — one broadcast below covers both).
-                    try
-                    {
-                        MutateTaskInternal(resumedTask.Id, t =>
-                        {
-                            t.SubStatus = "active";
-                            t.PausedAt = null;
-                        });
-                    }
-                    catch (Exception ex) { _host.LogError($"UpdateTaskStatus: persist failed for resumed task {resumedTask.Id}: {ex.Message}"); }
-
-                    // Update activity to show the resumed task
+                    // Activity updates are outside the assignee lock — they don't write task state.
                     _host.ActivityService?.UpdateActivity(
                         assignee,
                         "working",
@@ -1216,73 +1309,84 @@ namespace MultiTerminal.MCPServer.Services
             if (!double.IsFinite(newSortOrder))
                 return new UpdateTaskStatusResult { Success = false, Error = $"Cannot reorder: newSortOrder must be a finite number (got {newSortOrder})." };
 
-            // Status change first — UpdateTaskStatus handles validation, side-effects, and persistence.
-            // If it fails, bail before touching sort_order. UpdateTaskStatus swaps a NEW clone into the
-            // cache, so our local `task` is stale afterward — re-fetch it before the sort logic reads
-            // task.Status below (otherwise we'd snapshot/rebalance the OLD column).
-            if (!string.IsNullOrEmpty(newStatus) && task.Status != newStatus)
-            {
-                var statusResult = UpdateTaskStatus(taskId, newStatus);
-                if (!statusResult.Success)
-                    return statusResult;
-
-                if (!_tasks.TryGetValue(taskId, out task))
-                    return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
-            }
-
-            // Write-path exception (P5 / 1df2a534): sort_order is NOT persisted via the SaveTask row
-            // upsert — it has a dedicated column writer (UpdateSortOrder) and a whole-column
-            // RebalanceSortOrder that rewrites many sibling rows at once. The block below PERSISTS FIRST,
-            // then refreshes/sets the affected in-memory tasks' SortOrder from the durable write — so the
-            // cache follows the DB and cannot diverge, and a failed sort write returns Success=false with
-            // the cache untouched. Routing this through MutateTask/SaveTask would be incorrect (wrong
-            // writer, and it would miss the bulk rebalance). Documented bypass, like LoadPersistedTasks.
-            const double MIN_SORT_GAP = 1e-6;
-
-            // Collapse guard: snapshot neighbors in the target column AFTER the
-            // status change (the task may have just moved between columns).
-            var siblings = _tasks.Values
-                .Where(t => t.Status == task.Status && t.Id != taskId && t.SortOrder.HasValue)
-                .OrderBy(t => t.SortOrder.Value)
-                .ToList();
-
-            double? prevOrder = null, nextOrder = null;
-            foreach (var sib in siblings)
-            {
-                if (sib.SortOrder.Value < newSortOrder) prevOrder = sib.SortOrder.Value;
-                else if (sib.SortOrder.Value > newSortOrder && nextOrder == null) nextOrder = sib.SortOrder.Value;
-            }
-
-            bool tooCloseBelow = prevOrder.HasValue && (newSortOrder - prevOrder.Value) < MIN_SORT_GAP;
-            bool tooCloseAbove = nextOrder.HasValue && (nextOrder.Value - newSortOrder) < MIN_SORT_GAP;
+            // 7c59c004 item 1 — cross-column atomicity. When the drag changes the column, the status AND the
+            // new sort_order are persisted in ONE row write (UpdateTaskStatus's newSortOrder param → a single
+            // SaveTask), closing the old gap where the status committed+broadcast and then a SEPARATE sort
+            // write could fail, leaving the card moved but unsorted. A same-column reorder has no status
+            // write, so it persists sort through the dedicated UpdateSortOrder column writer. In BOTH cases
+            // the durable write lands before the collapse-guard rebalance, which only REFINES ranks within an
+            // already-correct column (its own transaction) and is therefore a best-effort refinement, not a
+            // correctness requirement. UpdateTaskStatus swaps a NEW clone into the cache, so re-fetch `task`.
+            bool statusChanging = !string.IsNullOrEmpty(newStatus) && task.Status != newStatus;
 
             try
             {
-                if (tooCloseBelow || tooCloseAbove)
+                if (statusChanging)
                 {
-                    // Rebalance the whole column. PERSIST FIRST: position the task at the desired endpoint
-                    // in the DB (so RebalanceSortOrder gives it the right rank), rebalance the column in the
-                    // DB, THEN reload every affected task's sort_order FROM the DB into the cache. Nothing in
-                    // the cache is mutated until after the durable writes, so a throw leaves it untouched.
-                    _taskDb.UpdateSortOrder(taskId, newSortOrder);
-                    _taskDb.RebalanceSortOrder(task.Status);
+                    var statusResult = UpdateTaskStatus(taskId, newStatus, newSortOrder);
+                    if (!statusResult.Success)
+                        return statusResult;
 
-                    foreach (var t in _tasks.Values.Where(t => t.Status == task.Status).ToList())
-                    {
-                        var refreshed = _taskDb.GetTask(t.Id);
-                        if (refreshed != null) t.SortOrder = refreshed.SortOrder;
-                    }
+                    if (!_tasks.TryGetValue(taskId, out task))
+                        return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
                 }
                 else
                 {
-                    // Persist FIRST, then update the cache — a failed sort write leaves the cache untouched.
-                    _taskDb.UpdateSortOrder(taskId, newSortOrder);
-                    task.SortOrder = newSortOrder;
+                    // Same-column reorder through the per-task lock (7c59c004 F-C): clone → persist(sort) →
+                    // swap, so a concurrent field mutator's full-row SaveTask (sort_order COALESCE) can no
+                    // longer clobber the reorder. Targeted persist = the dedicated UpdateSortOrder column writer.
+                    var reordered = MutateTaskInternal(taskId, t => t.SortOrder = newSortOrder,
+                        _ => _taskDb.UpdateSortOrder(taskId, newSortOrder));
+                    if (reordered == null)
+                        return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
+                    task = reordered;
+                }
+
+                // Collapse guard: snapshot neighbors in the (possibly new) target column and rebalance the
+                // whole column if the gap to a neighbor collapsed below epsilon. RebalanceSortOrder is its own
+                // atomic transaction; it refines ranks in the already-correct column, then we reload the
+                // affected tasks' sort_order FROM the DB into the cache.
+                const double MIN_SORT_GAP = 1e-6;
+                var siblings = _tasks.Values
+                    .Where(t => t.Status == task.Status && t.Id != taskId && t.SortOrder.HasValue)
+                    .OrderBy(t => t.SortOrder.Value)
+                    .ToList();
+
+                double? prevOrder = null, nextOrder = null;
+                foreach (var sib in siblings)
+                {
+                    if (sib.SortOrder.Value < newSortOrder) prevOrder = sib.SortOrder.Value;
+                    else if (sib.SortOrder.Value > newSortOrder && nextOrder == null) nextOrder = sib.SortOrder.Value;
+                }
+
+                bool tooCloseBelow = prevOrder.HasValue && (newSortOrder - prevOrder.Value) < MIN_SORT_GAP;
+                bool tooCloseAbove = nextOrder.HasValue && (nextOrder.Value - newSortOrder) < MIN_SORT_GAP;
+
+                if (tooCloseBelow || tooCloseAbove)
+                {
+                    _taskDb.RebalanceSortOrder(task.Status);
+                    // Sync each affected task's cached rank UNDER its per-task lock (7c59c004 F-C + New-3).
+                    // RebalanceSortOrder already persisted the DB ranks, so the persist step is a no-op — this
+                    // is a lock-protected cache refresh FROM the DB. The DB read is done INSIDE the mutate
+                    // lambda (i.e. under TaskWriteLock), NOT from a pre-lock snapshot, so a concurrent reorder
+                    // landing between read and swap can't leave a stale rank in the cache. KNOWN RESIDUAL
+                    // (503aa430, enumerated in verify-writepath.mjs): RebalanceSortOrder itself runs OUTSIDE
+                    // the affected tasks' per-task locks, so a concurrent full-row SaveTask (stale cloned
+                    // SortOrder via COALESCE) can still undo a rebalanced rank — SORT/display-rank only,
+                    // self-healing, coherent; deferred (heavy whole-column locking / rebalance-as-authoritative).
+                    foreach (var affectedId in _tasks.Values.Where(t => t.Status == task.Status).Select(t => t.Id).ToList())
+                    {
+                        MutateTaskInternal(affectedId, x =>
+                        {
+                            var fresh = _taskDb.GetTask(affectedId);
+                            if (fresh != null) x.SortOrder = fresh.SortOrder;
+                        }, _ => { });
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _host.LogError($"ReorderTask: failed to persist sort_order for {taskId}: {ex.Message}");
+                _host.LogError($"ReorderTask: failed to persist reorder for {taskId}: {ex.Message}");
                 return new UpdateTaskStatusResult { Success = false, Error = $"Failed to persist reorder: {ex.Message}" };
             }
 
@@ -2079,72 +2183,31 @@ namespace MultiTerminal.MCPServer.Services
             bool isActingAssignee = string.IsNullOrEmpty(task.Assignee)
                 || string.Equals(actingAgent, task.Assignee, StringComparison.OrdinalIgnoreCase);
 
-            // Activate THIS task FIRST, and make its persist FATAL (P5 pipeline A + Alice's SetTaskActive
-            // ruling): if the activation doesn't persist we return Success=false BEFORE touching any
-            // sibling, so a failed activation leaves the siblings unpaused and the board coherent. Reassign
-            // `task` to the swapped-in cache entry so the worktree / project-id self-heal below operates on
-            // the live cached object.
+            // ── Atomic DB-state core: pause the assignee's active sibling(s) AND activate THIS task in ONE
+            //    transaction via the shared ActivateExclusively primitive (7c59c004). Fails SAFE (the prior
+            //    task stays active on a rollback) instead of open (two active rows). Git/worktree side-effects
+            //    stay POST-commit + best-effort (below) and must NOT roll back a committed activation.
+            var pauseStamp = DateTime.UtcNow;
+            List<string> pausedIds;
+            List<string> pausedTitles;
+            string oldTaskId;
+            string oldWorktreePath;
             try
             {
-                var activated = MutateTaskInternal(taskId, t =>
-                {
-                    t.SubStatus = "active";
-                    t.PausedAt = null;
-                });
-                if (activated == null)
-                {
-                    return new SetTaskActiveResult { Success = false, Error = $"Task not found: {taskId}" };
-                }
-
-                task = activated;
+                (pausedIds, pausedTitles, oldTaskId, oldWorktreePath) =
+                    ActivateExclusively(taskId, assignee, actingAgent, pauseStamp);
             }
             catch (Exception ex)
             {
-                _host.LogError($"SetTaskActive: failed to set task active: {ex.Message}");
-                return new SetTaskActiveResult { Success = false, Error = $"Failed to persist activation: {ex.Message}" };
+                _host.LogError($"SetTaskActive: atomic pause+activate failed for {taskId}: {ex.Message}");
+                return new SetTaskActiveResult { Success = false, Error = $"Failed to activate task (rolled back): {ex.Message}" };
             }
 
-            var pausedIds = new List<string>();
-            var pausedTitles = new List<string>();
-
-            // Capture the previously-active task's id + worktree (for the TaskActiveChanged event below),
-            // then pause the OTHER active tasks for this assignee — BEST-EFFORT (the activation, the durable
-            // core, already succeeded; a sibling-pause miss is logged, not fatal). One assignee has at most
-            // one active task, so the first match wins. There is a synchronous in-cache window where this
-            // task and a sibling are both "active", but no event is broadcast until the end so subscribers
-            // never observe it.
-            string oldTaskId = null;
-            string oldWorktreePath = null;
-
-            foreach (var kvp in _tasks)
+            // Re-read the swapped-in target from the cache for the worktree / project-id-self-heal / event
+            // logic below (ActivateExclusively swapped a fresh clone into _tasks[taskId]).
+            if (_tasks.TryGetValue(taskId, out var swappedTarget))
             {
-                var other = kvp.Value;
-                if (other.Id != taskId &&
-                    other.Status == "in_progress" &&
-                    other.SubStatus == "active" &&
-                    string.Equals(other.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (oldTaskId == null)
-                    {
-                        oldTaskId = other.Id;
-                        oldWorktreePath = _host.Worktrees?.GetWorktreePathForTask(other.Id, actingAgent)
-                                          ?? _host.Worktrees?.GetWorktreePathForTask(other.Id);
-                    }
-
-                    pausedIds.Add(other.Id);
-                    pausedTitles.Add(other.Title);
-
-                    var otherId = other.Id;
-                    try
-                    {
-                        MutateTaskInternal(otherId, t =>
-                        {
-                            t.SubStatus = "paused";
-                            t.PausedAt = DateTime.UtcNow;
-                        });
-                    }
-                    catch (Exception ex) { _host.LogError($"SetTaskActive: failed to pause task {otherId}: {ex.Message}"); }
-                }
+                task = swappedTarget;
             }
 
             // Auto-helper: an agent that activates a task it doesn't own (not the
@@ -2699,37 +2762,191 @@ namespace MultiTerminal.MCPServer.Services
         // the new task WHOLE, never a half-applied mutation. Do NOT invert steps 3 and 4.
         // ─────────────────────────────────────────────────────────────────────────────────────────
 
+        // Per-task write locks (7c59c004). One lock object per task id, created on demand. Every write-path
+        // helper holds the task's lock across its WHOLE read-modify-write (clone→mutate→persist→swap), so two
+        // concurrent same-task writers can no longer clone the same base and clobber each other's field
+        // changes (field-level lost update). MT is single-process (the 4fec40e2 single-instance mutex
+        // forecloses a second writer to the tasks table), so a per-task in-process lock serializes ALL writers
+        // to a task row. The TaskService mutation chokepoint — MutateTaskInternal (and the now-locked SaveTask)
+        // — is lock-serialized. KNOWN RESIDUAL (hardening 1f327236, enumerated in verify-writepath.mjs): an
+        // external caller that mutates a GetTask-returned CACHED reference IN PLACE and then persists
+        // (CodeReviewService: GetTask → mutate ref → SaveTask) sidesteps the clone→swap discipline; the proper
+        // fix is a dedicated review-notes write method or a snapshot-returning GetTask, deferred to 1f327236.
+        // Unbounded by design — one small object per task ever written, the same accepted pattern as
+        // MessageBroker._taskWorktreeLocks. ORDERING INVARIANT: acquire per-task lock(s) — sorted by id when
+        // more than one (see WithTaskLocks) — BEFORE TaskDatabase.LockConn(); every site obeys this, so the
+        // two lock tiers can't deadlock. lock is reentrant per-thread, so a mutate/persist lambda re-entering
+        // the same task's write path on the same thread is safe.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _taskWriteLocks
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, object>();
+
+        private object TaskWriteLock(string taskId) => _taskWriteLocks.GetOrAdd(taskId ?? string.Empty, _ => new object());
+
+        // Per-assignee activation lock (7c59c004 F-B / New-1). Serializes the "make a task active for this
+        // assignee" operations — SetTaskActive AND UpdateTaskStatus's done→auto-resume — so the
+        // single-active-per-assignee invariant holds and SetTaskActive's cache-derived active-sibling set can't
+        // be changed by a concurrent activation between discovery and the transaction (which would otherwise
+        // pause a task whose per-task lock isn't held). KNOWN RESIDUAL (651105b3, enumerated in
+        // verify-writepath.mjs): ClaimTask (MakeTaskActive) and RecalculateAutoStatus also make-active but are
+        // NOT yet under this lock — a transient, self-healing divergence (SetTaskActive's defensive skip never
+        // writes an unlocked cache entry), not a durable corruption. The structural fix is one serialized
+        // activation primitive every make-active path routes through, deferred to 651105b3.
+        // ORDERING INVARIANT (composes with the per-task locks with NO new deadlock class):
+        // ALWAYS acquire the assignee lock BEFORE any per-task lock — assignee-lock → per-task lock(s)
+        // (WithTaskLocks, sorted) → LockConn. No site inverts this. Unbounded by design (one small object per
+        // assignee ever activated), same accepted pattern as the per-task locks.
+        // Keyed case-INSENSITIVELY (7c59c004 Codex-caught): the agent-name domain is case-insensitive
+        // (assignee discovery uses OrdinalIgnoreCase), so "Diana" and "diana" MUST share one lock and
+        // serialize — else concurrent case-variant activations wouldn't serialize and could each miss the
+        // other's sibling. StringComparer.OrdinalIgnoreCase matches the domain's equality semantics exactly.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _assigneeActivationLocks
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+
+        private object AssigneeActivationLock(string assignee) => _assigneeActivationLocks.GetOrAdd(assignee ?? string.Empty, _ => new object());
+
+        /// <summary>
+        /// The shared "make <paramref name="taskId"/> the single active task for <paramref name="assignee"/>"
+        /// primitive (7c59c004). Under the per-assignee activation lock it discovers the assignee's currently-
+        /// active sibling(s) with the C# OrdinalIgnoreCase agent-name domain, then in ONE DB transaction
+        /// (<see cref="TaskDatabase.SetTaskActiveTransactional"/>, pause-by-id) pauses those siblings AND
+        /// activates the target, and swaps the cache to match. EVERY deliberate make-active path — SetTaskActive
+        /// AND ClaimTask — routes through here, so no off-lock activation can race in the pause window and leave
+        /// a durable two-active (the Codex-caught ClaimTask class-close). The target must already be
+        /// <c>in_progress</c> (ClaimTask claims it first). Throws — transaction rolled back, nothing changed — if
+        /// the target is missing / not in_progress. Returns the paused ids + titles + the previously-active
+        /// id/worktree for the caller's TaskActiveChanged event. Does NOT broadcast or run git/worktree
+        /// side-effects — those stay the caller's post-commit, best-effort concern.
+        /// </summary>
+        private (List<string> PausedIds, List<string> PausedTitles, string OldTaskId, string OldWorktreePath)
+            ActivateExclusively(string taskId, string assignee, string actingAgent, DateTime pauseStamp)
+        {
+            var pausedIds = new List<string>();
+            var pausedTitles = new List<string>();
+            string oldTaskId = null;
+            string oldWorktreePath = null;
+
+            // Ordering: assignee-lock (outermost) → per-task lock(s) → LockConn. Held across DISCOVERY +
+            // transaction + cache swaps, so a concurrent make-active for this assignee can't change the
+            // sibling set between discovery and the transaction.
+            lock (AssigneeActivationLock(assignee))
+            {
+                var cachedSiblingIds = new List<string>();
+                foreach (var kvp in _tasks)
+                {
+                    var other = kvp.Value;
+                    if (other.Id != taskId && other.Status == "in_progress" && other.SubStatus == "active"
+                        && string.Equals(other.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
+                    {
+                        cachedSiblingIds.Add(other.Id);
+                        if (oldTaskId == null)
+                        {
+                            oldTaskId = other.Id;
+                            oldWorktreePath = _host.Worktrees?.GetWorktreePathForTask(other.Id, actingAgent)
+                                              ?? _host.Worktrees?.GetWorktreePathForTask(other.Id);
+                        }
+                    }
+                }
+
+                var lockIds = new List<string> { taskId };
+                lockIds.AddRange(cachedSiblingIds);
+                WithTaskLocks(lockIds, () =>
+                {
+                    // ONE transaction: pause EXACTLY the C#-discovered siblings (by id) + activate the target.
+                    // Throws (rolled back) if the target is gone / not in_progress. Pausing by id removes the
+                    // C#-vs-SQLite assignee-collation dependency; every returned id is a subset of
+                    // cachedSiblingIds, so we already hold its per-task lock (no unlocked swap).
+                    var actuallyPaused = _taskDb.SetTaskActiveTransactional(taskId, cachedSiblingIds, pauseStamp);
+
+                    if (_tasks.TryGetValue(taskId, out var curTarget))
+                    {
+                        var activated = curTarget.Clone();
+                        activated.SubStatus = "active";
+                        activated.PausedAt = null;
+                        _tasks[taskId] = activated;
+                    }
+                    foreach (var pid in actuallyPaused)
+                    {
+                        pausedIds.Add(pid);
+                        if (_tasks.TryGetValue(pid, out var curSib))
+                        {
+                            var pausedClone = curSib.Clone();
+                            pausedClone.SubStatus = "paused";
+                            pausedClone.PausedAt = pauseStamp;
+                            _tasks[pid] = pausedClone;
+                            pausedTitles.Add(pausedClone.Title);
+                        }
+                    }
+                });
+            }
+
+            return (pausedIds, pausedTitles, oldTaskId, oldWorktreePath);
+        }
+
+        /// <summary>
+        /// Run <paramref name="body"/> holding the per-task write locks for every id in
+        /// <paramref name="taskIds"/>, acquired in a consistent SORTED order so a multi-task atomic operation
+        /// (SetTaskActive's pause+activate) can't deadlock against another multi-task op or against a
+        /// single-lock <see cref="MutateTaskInternal"/>. Distinct, non-null ids.
+        /// </summary>
+        private void WithTaskLocks(IEnumerable<string> taskIds, Action body)
+        {
+            var ordered = taskIds.Where(id => id != null).Distinct(StringComparer.Ordinal)
+                                 .OrderBy(id => id, StringComparer.Ordinal).ToList();
+            var taken = new List<object>(ordered.Count);
+            try
+            {
+                foreach (var id in ordered)
+                {
+                    var gate = TaskWriteLock(id);
+                    System.Threading.Monitor.Enter(gate);
+                    taken.Add(gate);
+                }
+                body();
+            }
+            finally
+            {
+                for (int i = taken.Count - 1; i >= 0; i--)
+                {
+                    System.Threading.Monitor.Exit(taken[i]);
+                }
+            }
+        }
+
         /// <summary>
         /// Core of the single task write path: clone → mutate the clone → persist → swap into cache.
         /// Returns the swapped (new) task, or null if <paramref name="taskId"/> is not cached. Does NOT
         /// broadcast — the caller decides (single-task mutators call <see cref="MutateTask"/>; multi-task
         /// methods swap several tasks then broadcast once). A persist exception propagates and leaves the
-        /// cache untouched (coherent-fail).
+        /// cache untouched (coherent-fail). The whole cycle runs under the task's per-task write lock
+        /// (7c59c004) so concurrent same-task mutators serialize instead of losing each other's writes.
         /// </summary>
         private KanbanTask MutateTaskInternal(string taskId, Action<KanbanTask> mutate, Action<KanbanTask> persist = null)
         {
-            if (!_tasks.TryGetValue(taskId, out var current))
+            lock (TaskWriteLock(taskId))
             {
-                return null;
-            }
+                if (!_tasks.TryGetValue(taskId, out var current))
+                {
+                    return null;
+                }
 
-            var updated = current.Clone();
-            mutate(updated);
+                var updated = current.Clone();
+                mutate(updated);
 
-            // persist FIRST — if this throws, the cache stays coherent. Defaults to a full-row SaveTask;
-            // pass a custom action for a side-table / targeted-column write (e.g. RespondToStale's
-            // ClearStaleTracking / RecordStaleResponse) where the clone mirrors what that writer persists.
-            if (persist != null)
-            {
-                persist(updated);
-            }
-            else
-            {
-                _taskDb.SaveTask(updated);
-            }
+                // persist FIRST — if this throws, the cache stays coherent. Defaults to a full-row SaveTask;
+                // pass a custom action for a side-table / targeted-column write (e.g. RespondToStale's
+                // ClearStaleTracking / RecordStaleResponse) where the clone mirrors what that writer persists.
+                if (persist != null)
+                {
+                    persist(updated);
+                }
+                else
+                {
+                    _taskDb.SaveTask(updated);
+                }
 
-            _tasks[taskId] = updated;   // swap into cache only after the DB write succeeded
-            return updated;
+                _tasks[taskId] = updated;   // swap into cache only after the DB write succeeded
+                return updated;
+            }
         }
 
 
@@ -2749,33 +2966,29 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private bool TryMutateTask(string taskId, Action<KanbanTask> mutate, Action<KanbanTask> persist = null)
         {
-            if (!_tasks.TryGetValue(taskId, out var current))
-            {
-                return false;
-            }
-
-            var updated = current.Clone();
-            mutate(updated);
+            // Delegates to the single write-path chokepoint (7c59c004): MutateTaskInternal holds the per-task
+            // write lock across clone→persist→swap. This wrapper adds the "log-and-return-false on persist
+            // failure, broadcast on success" contract. Broadcast is intentionally OUTSIDE the lock — it reads
+            // the cache but doesn't write it, and holding the lock across event dispatch would widen the
+            // critical section over arbitrary subscriber code.
+            KanbanTask updated;
             try
             {
-                if (persist != null)
-                {
-                    persist(updated);
-                }
-                else
-                {
-                    _taskDb.SaveTask(updated);
-                }
+                updated = MutateTaskInternal(taskId, mutate, persist);
             }
             catch (Exception ex)
             {
-                // Persist failed — leave the cache on the OLD copy (coherent with the DB row) and report
-                // failure. Pre-P5 these sites swallowed the error and still returned Success=true.
+                // Persist failed — MutateTaskInternal left the cache on the OLD copy (coherent with the DB
+                // row). Report failure. Pre-P5 these sites swallowed the error and still returned Success=true.
                 _host.LogError($"TryMutateTask: persist failed for task {taskId}: {ex.Message}");
                 return false;
             }
 
-            _tasks[taskId] = updated;   // swap into cache only after the DB write succeeded
+            if (updated == null)
+            {
+                return false;   // task wasn't cached
+            }
+
             BroadcastTaskUpdate();
             return true;
         }
@@ -2788,9 +3001,15 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private KanbanTask InsertTaskInternal(KanbanTask task)
         {
-            _taskDb.SaveTask(task);   // persist FIRST
-            _tasks[task.Id] = task;   // add to cache only after the DB write succeeded
-            return task;
+            // Under the per-task lock for the uniform write-path invariant (7c59c004). New tasks carry a fresh
+            // Guid id so there is no real contention, but keeping every write-path helper on the lock makes
+            // "all task writes serialize per id" a clean, census-checkable rule.
+            lock (TaskWriteLock(task.Id))
+            {
+                _taskDb.SaveTask(task);   // persist FIRST
+                _tasks[task.Id] = task;   // add to cache only after the DB write succeeded
+                return task;
+            }
         }
 
 
@@ -2801,14 +3020,19 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private bool DeleteTaskInternal(string taskId)
         {
-            if (!_tasks.ContainsKey(taskId))
+            // Under the per-task lock (7c59c004) so a delete can't interleave with a concurrent mutate on the
+            // same task (which would otherwise swap a just-deleted task back into the cache).
+            lock (TaskWriteLock(taskId))
             {
-                return false;
-            }
+                if (!_tasks.ContainsKey(taskId))
+                {
+                    return false;
+                }
 
-            _taskDb.DeleteTask(taskId);       // delete from DB FIRST
-            _tasks.TryRemove(taskId, out _);  // remove from cache only after the DB delete succeeded
-            return true;
+                _taskDb.DeleteTask(taskId);       // delete from DB FIRST
+                _tasks.TryRemove(taskId, out _);  // remove from cache only after the DB delete succeeded
+                return true;
+            }
         }
 
 
@@ -3053,9 +3277,12 @@ namespace MultiTerminal.MCPServer.Services
         /// <returns>Result indicating success or failure.</returns>
         public RespondStaleResult RespondToStale(string taskId, string response, string terminalName)
         {
+            // 7c59c004 item 3 (1df2a534 NIT: repeated-returns dedup) — the "task not found" result is returned
+            // from both the initial cache miss and the defensive post-mutate null check; share one message.
+            var notFoundError = $"Task not found: {taskId}";
             if (!_tasks.TryGetValue(taskId, out var task))
             {
-                return new RespondStaleResult { Success = false, Error = $"Task not found: {taskId}" };
+                return new RespondStaleResult { Success = false, Error = notFoundError };
             }
 
             var title = task.Title;
@@ -3102,7 +3329,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 if (updated == null)
                 {
-                    return new RespondStaleResult { Success = false, Error = $"Task not found: {taskId}" };
+                    return new RespondStaleResult { Success = false, Error = notFoundError };
                 }
 
                 BroadcastTaskUpdate();
@@ -3121,6 +3348,8 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
+                // Log before returning, matching every sibling write-path method (7c59c004 pipeline NIT).
+                _host.LogError($"RespondToStale: persist failed for {taskId}: {ex.Message}");
                 return new RespondStaleResult { Success = false, Error = ex.Message };
             }
         }
