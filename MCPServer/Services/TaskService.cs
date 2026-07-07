@@ -3121,9 +3121,12 @@ namespace MultiTerminal.MCPServer.Services
         /// <returns>Result indicating success or failure.</returns>
         public RespondStaleResult RespondToStale(string taskId, string response, string terminalName)
         {
+            // 7c59c004 item 3 (1df2a534 NIT: repeated-returns dedup) — the "task not found" result is returned
+            // from both the initial cache miss and the defensive post-mutate null check; share one message.
+            var notFoundError = $"Task not found: {taskId}";
             if (!_tasks.TryGetValue(taskId, out var task))
             {
-                return new RespondStaleResult { Success = false, Error = $"Task not found: {taskId}" };
+                return new RespondStaleResult { Success = false, Error = notFoundError };
             }
 
             var title = task.Title;
@@ -3170,7 +3173,7 @@ namespace MultiTerminal.MCPServer.Services
 
                 if (updated == null)
                 {
-                    return new RespondStaleResult { Success = false, Error = $"Task not found: {taskId}" };
+                    return new RespondStaleResult { Success = false, Error = notFoundError };
                 }
 
                 BroadcastTaskUpdate();
