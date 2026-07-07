@@ -6,12 +6,20 @@
 // That guarantee holds only if EVERY core persist and EVERY raw cache write goes through the write-path
 // helpers — a "bypass" that writes the DB and/or the cache directly reintroduces the divergence bug.
 //
-// This census asserts: in MessageBroker.cs, every method that performs a CORE PERSIST or a RAW CACHE WRITE
-// is either (a) one of the write-path helper methods, or (b) a NAMED, ratified bypass. Any OTHER method
-// that writes a task/project/profile row or the _tasks/_projects/_profiles cache directly FAILS the check
-// — so a new bypass added anywhere else trips the build loudly (the same census-assertion move as the DB
-// gate in verify-taskdb-gate.mjs). Ratified bypasses are ENUMERATED here, never inferred; the follow-up
-// ticket e1643ccc converts RegisterTerminal/UnregisterTerminal off the list, shrinking it over time.
+// This census asserts: across the write-path source files, every method that performs a CORE PERSIST or a
+// RAW CACHE WRITE is either (a) one of the write-path helper methods, or (b) a NAMED, ratified bypass. Any
+// OTHER method that writes a task/project/profile row or the _tasks/_projects/_profiles cache directly FAILS
+// the check — so a new bypass added anywhere else trips the build loudly (the same census-assertion move as
+// the DB gate in verify-taskdb-gate.mjs). Ratified bypasses are ENUMERATED here, never inferred; the
+// follow-up ticket e1643ccc converts RegisterTerminal/UnregisterTerminal off the list, shrinking it over time.
+//
+// TWO FILES since ticket e7e89f4b (broker decomposition): the Kanban-task cache + CRUD + write-path helpers
+// (MutateTaskInternal/TryMutateTask/Insert/Delete + the LoadPersistedTasks/ReorderTask/SetTaskActive task
+// bypasses) were RELOCATED to TaskService.cs; the project/profile helpers stay in MessageBroker.cs. The
+// census scans BOTH files with the union allowlist — the load-bearing point Alice flagged: if it kept
+// scanning only MessageBroker.cs it would go SILENTLY GREEN on an emptied broker while a raw _tasks write in
+// TaskService.cs sailed through. A concrete negative fixture (a TaskService-shaped raw _tasks write in a
+// non-allowlisted method) proves the check still falsifies post-extraction.
 //
 // Detection runs on CODE-ONLY text (comments and string literals are masked), so a doc comment that names
 // _taskDb.SaveTask never counts.
@@ -32,7 +40,9 @@ const args = process.argv.slice(2);
 const doSelfTest = args.includes('--self-test');
 
 const REPO_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1'), '..');
-const TARGET = 'MCPServer/Services/MessageBroker.cs';
+// Both write-path source files (ticket e7e89f4b split the task region into TaskService.cs). The census
+// scans the union so a relocated write can't escape the check by moving files.
+const TARGETS = ['MCPServer/Services/MessageBroker.cs', 'MCPServer/Services/TaskService.cs'];
 
 // Methods permitted to contain a core persist / raw cache write.
 const WRITE_PATH_HELPERS = new Set([
@@ -189,6 +199,19 @@ function selfTest() {
       expectOk: true,
       src: `class B {\n        public bool Cmp(string id, KanbanTask o) {\n            return _tasks[id] == o;\n        }\n}`,
     },
+    {
+      // e7e89f4b extraction safety-net: the write path moved to TaskService.cs. Prove the census still
+      // falsifies on a raw _tasks write in a TaskService method that ISN'T an allowlisted helper/bypass —
+      // exactly the "silently green on an emptied broker" hole Alice flagged as non-negotiable.
+      name: 'post-extraction: raw _tasks write in a non-allowlisted TaskService method FAILS',
+      expectOk: false,
+      src: `class TaskService {\n        public void SneakyRelocatedWrite(string id, KanbanTask t) {\n            _tasks[id] = t;\n        }\n}`,
+    },
+    {
+      name: 'post-extraction: the relocated write-path helper (MutateTaskInternal) PASSES',
+      expectOk: true,
+      src: `class TaskService {\n        private KanbanTask MutateTaskInternal(string id) {\n            _taskDb.SaveTask(updated);\n            _tasks[id] = updated;\n            return updated;\n        }\n}`,
+    },
   ];
 
   let pass = 0;
@@ -206,22 +229,32 @@ function selfTest() {
 
 // ---- real check -----------------------------------------------------------------------------------
 function realCheck() {
-  const file = path.join(REPO_ROOT, TARGET);
-  if (!fs.existsSync(file)) {
-    console.error(`verify-writepath: target not found: ${file}`);
-    process.exit(2);
+  let totalMutations = 0;
+  let anyViolation = false;
+  for (const target of TARGETS) {
+    const file = path.join(REPO_ROOT, target);
+    if (!fs.existsSync(file)) {
+      console.error(`verify-writepath: target not found: ${file}`);
+      process.exit(2);
+    }
+    const src = fs.readFileSync(file, 'utf8');
+    const { violations, mutationCount } = analyze(src);
+    totalMutations += mutationCount;
+    if (violations.length === 0) {
+      console.log(`PASS  ${target}: ${mutationCount} core-persist/raw-cache write(s), all inside a write-path helper or a named bypass.`);
+    } else {
+      anyViolation = true;
+      console.error(`FAIL  ${target}: ${violations.length} write(s) bypass the write path and aren't allowlisted:`);
+      for (const v of violations) console.error(`  - ${v.method} (line ${v.line}): ${v.snippet}`);
+    }
   }
-  const src = fs.readFileSync(file, 'utf8');
-  const { violations, mutationCount } = analyze(src);
-  if (violations.length === 0) {
-    console.log(`PASS  ${TARGET}: ${mutationCount} core-persist/raw-cache write(s), all inside a write-path helper or a named bypass (${ALLOWED.size} allowed methods).`);
-    process.exit(0);
+  if (anyViolation) {
+    console.error(`\nRoute the write through a write-path helper (MutateTaskInternal / TryMutateTask / Insert* / Delete*),`);
+    console.error(`or, if it is a genuine ratified bypass, add its method name to NAMED_BYPASSES in this file.`);
+    process.exit(1);
   }
-  console.error(`FAIL  ${TARGET}: ${violations.length} write(s) bypass the write path and aren't allowlisted:`);
-  for (const v of violations) console.error(`  - ${v.method} (line ${v.line}): ${v.snippet}`);
-  console.error(`\nRoute the write through a write-path helper (MutateTaskInternal / TryMutateTask / Insert* / Delete*),`);
-  console.error(`or, if it is a genuine ratified bypass, add its method name to NAMED_BYPASSES in this file.`);
-  process.exit(1);
+  console.log(`\nOK  ${totalMutations} core-persist/raw-cache write(s) across ${TARGETS.length} files, all allowlisted (${ALLOWED.size} allowed methods).`);
+  process.exit(0);
 }
 
 if (doSelfTest) selfTest();
