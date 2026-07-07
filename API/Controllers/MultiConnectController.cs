@@ -40,7 +40,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetConfig()
         {
             if (!IsLoopbackRequest())
-                return StatusCode(403, new { error = "Loopback only" });
+                return Problem(detail: "Loopback only", statusCode: 403);
 
             // CSRF/exfil defense against a browser cross-origin READ (this leaks hostname/username/
             // phoneUrl/port/secret-is-set) is now provided globally by the strict CORS allowlist
@@ -105,7 +105,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> PostConfig([FromBody] MultiConnectConfigRequest request)
         {
             if (!IsLoopbackRequest())
-                return StatusCode(403, new { error = "Loopback only" });
+                return Problem(detail: "Loopback only", statusCode: 403);
 
             // CSRF defense against a blind cross-site browser POST is now provided globally by
             // SecFetchSiteWriteGuardMiddleware (task f9697aac): a cross-site/same-site browser write is
@@ -113,7 +113,7 @@ namespace MultiTerminal.API.Controllers
             // per-endpoint CrossOriginBrowserGuard was retired in the same ticket.
 
             if (request == null)
-                return BadRequest(new { error = "Missing request body" });
+                return Problem(detail: "Missing request body", statusCode: 400);
 
             // --- Validate EVERYTHING before writing anything (no partial write on 400) ----------
             // Field semantics: null = leave unchanged; "" = clear (Remove); value = set.
@@ -121,7 +121,7 @@ namespace MultiTerminal.API.Controllers
             if (IsSetValue(request.GatewayPort))
             {
                 if (!TryParsePort(request.GatewayPort, out int gp))
-                    return BadRequest(new { error = "gatewayPort must be an integer between 1 and 65535" });
+                    return Problem(detail: "gatewayPort must be an integer between 1 and 65535", statusCode: 400);
                 parsedGatewayPort = gp;
             }
 
@@ -129,15 +129,15 @@ namespace MultiTerminal.API.Controllers
             if (IsSetValue(request.TailscaleServePort))
             {
                 if (!TryParsePort(request.TailscaleServePort, out int sp))
-                    return BadRequest(new { error = "tailscaleServePort must be an integer between 1 and 65535" });
+                    return Problem(detail: "tailscaleServePort must be an integer between 1 and 65535", statusCode: 400);
                 parsedServePort = sp;
             }
 
             if (IsSetValue(request.VapidSubject) && !IsValidVapidSubject(request.VapidSubject))
-                return BadRequest(new { error = "vapidSubject must be a mailto: address or an http(s) URL" });
+                return Problem(detail: "vapidSubject must be a mailto: address or an http(s) URL", statusCode: 400);
 
             if (IsSetValue(request.RelayBaseUrl) && !IsAbsoluteHttpUrl(request.RelayBaseUrl))
-                return BadRequest(new { error = "relayBaseUrl must be an absolute http(s) URL" });
+                return Problem(detail: "relayBaseUrl must be an absolute http(s) URL", statusCode: 400);
 
             // Snapshot the effective restart-required fields (gateway port, NotificationSecret,
             // VapidSubject, relay BaseUrl) BEFORE persisting so we can tell whether one actually
@@ -261,7 +261,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> GetTailscaleStatus()
         {
             if (!IsLoopbackRequest())
-                return StatusCode(403, new { error = "Loopback only" });
+                return Problem(detail: "Loopback only", statusCode: 403);
 
             // Same cross-origin browser READ protection as GET /config — this leaks the tailscale
             // hostname and backend state. Now provided globally by the strict CORS allowlist

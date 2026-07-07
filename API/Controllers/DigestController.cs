@@ -31,7 +31,7 @@ namespace MultiTerminal.API.Controllers
             try
             {
                 if (!System.IO.Directory.Exists(DigestRoot))
-                    return NotFound(new { error = "No digests found" });
+                    return Problem(detail: "No digests found", statusCode: 404);
 
                 // Find the most recent date folder
                 var dirs = System.IO.Directory.GetDirectories(DigestRoot)
@@ -41,13 +41,13 @@ namespace MultiTerminal.API.Controllers
                     .ToList();
 
                 if (dirs.Count == 0)
-                    return NotFound(new { error = "No digests found" });
+                    return Problem(detail: "No digests found", statusCode: 404);
 
                 return GetDigestForDate(dirs[0]);
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = ex.Message });
+                return Problem(detail: ex.Message, statusCode: 500);
             }
         }
 
@@ -58,7 +58,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetByDate(string date)
         {
             if (!IsValidDateSegment(date))
-                return BadRequest(new { error = "Date must be YYYY-MM-DD format" });
+                return Problem(detail: "Date must be YYYY-MM-DD format", statusCode: 400);
 
             return GetDigestForDate(date);
         }
@@ -108,7 +108,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = ex.Message });
+                return Problem(detail: ex.Message, statusCode: 500);
             }
         }
 
@@ -120,13 +120,13 @@ namespace MultiTerminal.API.Controllers
         {
             // Only one regeneration at a time
             if (Interlocked.CompareExchange(ref _regenerating, 1, 0) != 0)
-                return Conflict(new { error = "Regeneration already in progress" });
+                return Problem(detail: "Regeneration already in progress", statusCode: 409);
 
             try
             {
                 var scriptPath = System.IO.Path.Combine(ProjectRoot, "src", "regenerate.js");
                 if (!System.IO.File.Exists(scriptPath))
-                    return StatusCode(500, new { error = "Regenerate script not found" });
+                    return Problem(detail: "Regenerate script not found", statusCode: 500);
 
                 var psi = new ProcessStartInfo
                 {
@@ -141,21 +141,24 @@ namespace MultiTerminal.API.Controllers
 
                 using var process = Process.Start(psi);
                 if (process == null)
-                    return StatusCode(500, new { error = "Failed to start regeneration process" });
+                    return Problem(detail: "Failed to start regeneration process", statusCode: 500);
 
                 var stdout = await process.StandardOutput.ReadToEndAsync();
                 var stderr = await process.StandardError.ReadToEndAsync();
                 await process.WaitForExitAsync();
 
                 if (process.ExitCode != 0)
-                    return StatusCode(500, new { error = "Regeneration failed", details = stderr, output = stdout });
+                    // Fold stderr into the ProblemDetails detail (P3b: house style has no Extensions;
+                    // consumers branch on HTTP status, not the error body — see API/CONVENTIONS.md).
+                    // stdout is dropped from the response; it stays available in the process logs.
+                    return Problem(detail: $"Regeneration failed: {stderr}", statusCode: 500);
 
                 // Return the fresh digest
                 return GetLatest();
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = ex.Message });
+                return Problem(detail: ex.Message, statusCode: 500);
             }
             finally
             {
@@ -169,14 +172,14 @@ namespace MultiTerminal.API.Controllers
             // names read off disk. Re-validate so every path into this method is strict
             // YYYY-MM-DD with no separators / traversal.
             if (!IsValidDateSegment(date))
-                return BadRequest(new { error = "Invalid date" });
+                return Problem(detail: "Invalid date", statusCode: 400);
 
             var dateDir = System.IO.Path.Combine(DigestRoot, date);
             // CA3003: `date` is guaranteed strict YYYY-MM-DD by IsValidDateSegment above; no path
             // separators or traversal sequences can appear in dateDir.
 #pragma warning disable CA3003
             if (!System.IO.Directory.Exists(dateDir))
-                return NotFound(new { error = $"No digest for {date}" });
+                return Problem(detail: $"No digest for {date}", statusCode: 404);
 #pragma warning restore CA3003
 
             var digestPath = System.IO.Path.Combine(dateDir, "digest.md");
@@ -223,7 +226,7 @@ namespace MultiTerminal.API.Controllers
             }
 
             if (digestMd == null)
-                return NotFound(new { error = $"Digest not yet generated for {date}" });
+                return Problem(detail: $"Digest not yet generated for {date}", statusCode: 404);
 
             return Ok(new
             {

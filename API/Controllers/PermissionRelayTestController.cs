@@ -62,7 +62,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult Toggle([FromBody] ToggleRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "body required: {\"enabled\": true|false}" });
+                return Problem(detail: "body required: {\"enabled\": true|false}", statusCode: 400);
 
             _settings.Set(SettingEnabled, request.Enabled ? "1" : "0");
             var enabled = _permissionRelay.IsRelayEnabled();
@@ -73,7 +73,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> TestElicitation([FromBody] ElicitationTestRequest request, CancellationToken ct)
         {
             if (!_permissionRelay.IsRelayEnabled())
-                return StatusCode(503, new { error = "relay disabled", hint = "POST /api/permission-relay/test/toggle {\"enabled\":true}" });
+                return Problem(detail: "relay disabled. Hint: POST /api/permission-relay/test/toggle {\"enabled\":true}", statusCode: 503);
 
             var id = Guid.NewGuid().ToString("N");
             var elicitation = new ElicitationRequest
@@ -114,7 +114,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> TestChoice([FromBody] ChoiceTestRequest request, CancellationToken ct)
         {
             if (!_permissionRelay.IsRelayEnabled())
-                return StatusCode(503, new { error = "relay disabled", hint = "POST /api/permission-relay/test/toggle {\"enabled\":true}" });
+                return Problem(detail: "relay disabled. Hint: POST /api/permission-relay/test/toggle {\"enabled\":true}", statusCode: 503);
 
             var opts = (request?.Options ?? new List<ChoiceOption>())
                 .Select(o => (o?.Label ?? string.Empty, o?.Value ?? string.Empty));
@@ -133,7 +133,7 @@ namespace MultiTerminal.API.Controllers
         public async Task<IActionResult> TestPlanApproval([FromBody] PlanApprovalTestRequest request, CancellationToken ct)
         {
             if (!_permissionRelay.IsRelayEnabled())
-                return StatusCode(503, new { error = "relay disabled", hint = "POST /api/permission-relay/test/toggle {\"enabled\":true}" });
+                return Problem(detail: "relay disabled. Hint: POST /api/permission-relay/test/toggle {\"enabled\":true}", statusCode: 503);
 
             var result = await _permissionRelay.BridgePlanApprovalAsync(
                 string.IsNullOrWhiteSpace(request?.AgentName) ? "Alice" : request.AgentName,
@@ -151,7 +151,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult TestNotification([FromBody] NotificationTestRequest request)
         {
             if (!_permissionRelay.IsRelayEnabled())
-                return StatusCode(503, new { error = "relay disabled", hint = "POST /api/permission-relay/test/toggle {\"enabled\":true}" });
+                return Problem(detail: "relay disabled. Hint: POST /api/permission-relay/test/toggle {\"enabled\":true}", statusCode: 503);
 
             _permissionRelay.Notify(
                 string.IsNullOrWhiteSpace(request?.AgentName) ? "Alice" : request.AgentName,

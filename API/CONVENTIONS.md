@@ -31,15 +31,45 @@ the MCP layer (`mcp/index.js` reads named fields + HTTP status, never `.success`
 and to lenient PWA checks (`res.success !== false`). Update any strict consumer in
 the **same commit** — see the consumer notes on ticket 7ce19175.
 
-## Coverage (as of task 7ce19175)
+## Coverage
 
-This convention is the **target** for the whole `:5050` surface, but 7ce19175's sweep
-was scoped to the `{success}`-envelope controllers (those the MCP layer / PWA / dual-surface
-gateway consume). **Migrated:** Spawn, Notifications, Tasks, TaskReports, AgentStats,
+This convention is the contract for the whole `:5050` surface. Two sweeps completed it:
+7ce19175 (P3) migrated the `{success}`-envelope controllers; 15e18626 (P3b) migrated the
+remaining error-only controllers that still emitted ad-hoc `{ error }`.
+
+**Migrated (P3, 7ce19175):** Spawn, Notifications, Tasks, TaskReports, AgentStats,
 ProjectContext, RemoteMode, AgentPanels, BrowserTabs, CodeGraph, Elicitations, Knowledge,
 Messaging, Office, Ripgrep, SessionLineage, SessionMemory, Wiki, XamlPreview, Terminals.
 
-**Not yet migrated** (still emit ad-hoc `{ error }` / old shapes — follow-up work, not
-covered by 7ce19175): BranchMetadata, Debug, Digest, Gateway, MultiConnect, OwnerProfile,
-SourceControlAccounts, Team, Worktrees (and PermissionRelayTest, DEBUG-only). New controllers
-should follow this contract from the start.
+**Migrated (P3b, 15e18626):** BranchMetadata, Debug, Digest, Gateway, MultiConnect,
+OwnerProfile, SourceControlAccounts, Team, Worktrees, PermissionRelayTest (DEBUG-only). All
+handled 4xx/5xx returns now use `Problem(detail, statusCode)`.
+
+The whole `:5050` controller surface now emits ProblemDetails for every handled error.
+New controllers should follow this contract from the start.
+
+### Falsifiable close (P3b)
+
+The error-shape sweep is verifiable by grep: **zero anonymous `{ error }` objects returned
+on an ERROR status** (`BadRequest`/`NotFound`/`Conflict`/`StatusCode(4xx|5xx, …)`) remain in
+`API/Controllers/`, outside the accepted divergences below.
+
+    rg 'new\s*\{\s*[Ee]rror\s*=' API/Controllers   # → 0 matches
+
+### Accepted divergences (NOT error returns — do not "fix")
+
+These are `error`-named fields inside **HTTP 200** bodies (status/warning data, not RFC 7807
+error returns), plus the one deliberate `{success}` retention. They are out of scope for the
+error-shape contract by construction (the contract governs error-STATUS responses only):
+
+- **`MultiConnectController` POST /config** (2 sites) — 200-OK partial-success bodies
+  `{ applied=false, restartRequired=true, error="settings persisted but restart…" }`. The
+  `error` field is a human-readable warning; the operation *succeeded* (settings persisted),
+  so it is a 200, not a 4xx. Renaming the field would be a consumer-visible contract change
+  for no benefit (P3b decision, PM-ratified).
+- **`MultiConnectController` GET /tailscale-status** — 200-OK body carries `error =
+  status.Error`, the Tailscale probe's own error string as a data field.
+- **`NotificationsController`** — 200-OK push-result body carries a per-device `error` field
+  (the device's push failure reason as data).
+- **Gateway `/api/spawn`** (`API/Gateway/GatewayServiceEndpoints.cs`) keeps `{ success=true }`
+  because the phone `terminals.js` strictly checks `data.success` (documented 5ad9ced).

@@ -61,11 +61,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetTeamRoster([FromQuery] string projectPath)
         {
             if (string.IsNullOrWhiteSpace(projectPath))
-                return BadRequest(new { error = "projectPath query parameter is required" });
+                return Problem(detail: "projectPath query parameter is required", statusCode: 400);
 
             var project = _projectService.LoadProject(projectPath);
             if (project == null)
-                return NotFound(new { error = $"No project found at path: {projectPath}" });
+                return Problem(detail: $"No project found at path: {projectPath}", statusCode: 404);
 
             if (project.TeamAgents == null || project.TeamAgents.Count == 0)
                 return Ok(new { projectName = project.Name, agents = new List<object>() });

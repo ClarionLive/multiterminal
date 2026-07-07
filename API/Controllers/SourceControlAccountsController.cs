@@ -40,14 +40,14 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetAccountToken(string id)
         {
             if (!IsLoopback())
-                return StatusCode(403, new { error = "Token access is restricted to local callers" });
+                return Problem(detail: "Token access is restricted to local callers", statusCode: 403);
 
             if (_accountService.Get(id) == null)
-                return NotFound(new { error = $"Source control account '{id}' not found" });
+                return Problem(detail: $"Source control account '{id}' not found", statusCode: 404);
 
             var token = _accountService.GetToken(id);
             if (string.IsNullOrEmpty(token))
-                return NotFound(new { error = "No token stored for this account" });
+                return Problem(detail: "No token stored for this account", statusCode: 404);
 
             return Ok(new { token });
         }
@@ -62,18 +62,18 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetProjectSourceAccount(string projectId)
         {
             if (!IsLoopback())
-                return StatusCode(403, new { error = "Token access is restricted to local callers" });
+                return Problem(detail: "Token access is restricted to local callers", statusCode: 403);
 
             var project = _projectDb.GetRichProject(projectId);
             if (project == null)
-                return NotFound(new { error = $"Project '{projectId}' not found" });
+                return Problem(detail: $"Project '{projectId}' not found", statusCode: 404);
 
             if (string.IsNullOrEmpty(project.SourceControlAccountId))
-                return NotFound(new { error = "Project has no source control account assigned" });
+                return Problem(detail: "Project has no source control account assigned", statusCode: 404);
 
             var account = _accountService.Get(project.SourceControlAccountId);
             if (account == null)
-                return NotFound(new { error = "Assigned source control account no longer exists" });
+                return Problem(detail: "Assigned source control account no longer exists", statusCode: 404);
 
             return Ok(new
             {

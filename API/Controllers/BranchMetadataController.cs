@@ -85,12 +85,12 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("{projectId}/outcome")]
         public IActionResult SetOutcome(string projectId, [FromBody] SetOutcomeRequest body)
         {
-            if (string.IsNullOrWhiteSpace(projectId)) return BadRequest(new { error = "projectId required" });
-            if (body == null) return BadRequest(new { error = "request body required" });
-            if (string.IsNullOrWhiteSpace(body.BranchName)) return BadRequest(new { error = "branchName required" });
+            if (string.IsNullOrWhiteSpace(projectId)) return Problem(detail: "projectId required", statusCode: 400);
+            if (body == null) return Problem(detail: "request body required", statusCode: 400);
+            if (string.IsNullOrWhiteSpace(body.BranchName)) return Problem(detail: "branchName required", statusCode: 400);
 
             if (!IsKnownProject(projectId))
-                return NotFound(new { error = "unknown project" });
+                return Problem(detail: "unknown project", statusCode: 404);
 
             string branchName = body.BranchName;
             _branchMetadataService.SetOutcome(projectId, branchName, body.Outcome, body.DraftedBy);
@@ -123,11 +123,11 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("{projectId}/draft-context")]
         public IActionResult GetDraftContext(string projectId, [FromQuery(Name = "branch")] string branchName, [FromQuery] string originatingTaskId = null)
         {
-            if (string.IsNullOrWhiteSpace(projectId)) return BadRequest(new { error = "projectId required" });
-            if (string.IsNullOrWhiteSpace(branchName)) return BadRequest(new { error = "branchName required" });
+            if (string.IsNullOrWhiteSpace(projectId)) return Problem(detail: "projectId required", statusCode: 400);
+            if (string.IsNullOrWhiteSpace(branchName)) return Problem(detail: "branchName required", statusCode: 400);
 
             if (!IsKnownProject(projectId))
-                return NotFound(new { error = "unknown project" });
+                return Problem(detail: "unknown project", statusCode: 404);
 
             string sourceTaskId = string.IsNullOrWhiteSpace(originatingTaskId) ? null : originatingTaskId.Trim();
             string sourceTaskTitle = null;
@@ -140,9 +140,9 @@ namespace MultiTerminal.API.Controllers
                 // and exfiltrate its title + description through this endpoint.
                 var explicitTask = _taskDb.GetTask(sourceTaskId);
                 if (explicitTask == null)
-                    return NotFound(new { error = "task not found" });
+                    return Problem(detail: "task not found", statusCode: 404);
                 if (!string.Equals(explicitTask.ProjectId, projectId, StringComparison.Ordinal))
-                    return BadRequest(new { error = "task does not belong to this project" });
+                    return Problem(detail: "task does not belong to this project", statusCode: 400);
                 sourceTaskTitle = explicitTask.Title;
                 sourceTaskDescription = explicitTask.Description;
             }
@@ -182,9 +182,9 @@ namespace MultiTerminal.API.Controllers
         [HttpGet("{projectId}/outcomes")]
         public IActionResult GetOutcomes(string projectId)
         {
-            if (string.IsNullOrWhiteSpace(projectId)) return BadRequest(new { error = "projectId required" });
+            if (string.IsNullOrWhiteSpace(projectId)) return Problem(detail: "projectId required", statusCode: 400);
             if (!IsKnownProject(projectId))
-                return NotFound(new { error = "unknown project" });
+                return Problem(detail: "unknown project", statusCode: 404);
 
             var outcomes = _branchMetadataService.GetOutcomes(projectId);
             return Ok(new

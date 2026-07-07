@@ -27,7 +27,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetServers()
         {
             if (!_gateway.IsGatewayInstalled())
-                return StatusCode(503, new { error = "MCP Gateway is not installed" });
+                return Problem(detail: "MCP Gateway is not installed", statusCode: 503);
 
             var servers = _gateway.GetAllGatewayServers();
             return Ok(new
@@ -53,7 +53,7 @@ namespace MultiTerminal.API.Controllers
             [FromQuery] string profile = null)
         {
             if (!_gateway.IsGatewayInstalled())
-                return StatusCode(503, new { error = "MCP Gateway is not installed" });
+                return Problem(detail: "MCP Gateway is not installed", statusCode: 503);
 
             if (!string.IsNullOrEmpty(server))
             {
@@ -91,12 +91,12 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetToolSchema(string namespacedName)
         {
             if (!_gateway.IsGatewayInstalled())
-                return StatusCode(503, new { error = "MCP Gateway is not installed" });
+                return Problem(detail: "MCP Gateway is not installed", statusCode: 503);
 
             // Parse "server__toolname" format
             int sepIdx = namespacedName.IndexOf("__");
             if (sepIdx < 0)
-                return BadRequest(new { error = "Tool name must be in 'server__toolname' format" });
+                return Problem(detail: "Tool name must be in 'server__toolname' format", statusCode: 400);
 
             string serverName = namespacedName.Substring(0, sepIdx);
             string toolName = namespacedName.Substring(sepIdx + 2);
@@ -105,7 +105,7 @@ namespace MultiTerminal.API.Controllers
             var tool = tools.FirstOrDefault(t => t.ToolName == toolName);
 
             if (tool == null)
-                return NotFound(new { error = $"Tool '{toolName}' not found on server '{serverName}'" });
+                return Problem(detail: $"Tool '{toolName}' not found on server '{serverName}'", statusCode: 404);
 
             return Ok(tool);
         }

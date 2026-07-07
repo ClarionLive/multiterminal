@@ -35,7 +35,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetActiveWorktree(string agentName)
         {
             if (string.IsNullOrWhiteSpace(agentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             // Read-or-create (task 4bcd1e24): backfill the worktree for an
             // already-active eligible task whose worktree was never materialized
