@@ -54,7 +54,7 @@ namespace MultiTerminal.API.Controllers
             // globally by the strict CORS allowlist (task f9697aac): a non-allowlisted browser origin
             // gets no ACAO, so its JS cannot read the token — while a local HttpClient agent passes.
             if (!IsLoopback())
-                return StatusCode(403, new { error = "Token access is restricted to local callers" });
+                return Problem(detail: "Token access is restricted to local callers", statusCode: 403);
 
             // When more than one github-provider account exists there is no unambiguous global
             // default, so refuse even if the legacy owner-profile secret is still populated —
@@ -62,14 +62,14 @@ namespace MultiTerminal.API.Controllers
             // leaves the legacy secret in place when accounts already exist, so this state is
             // reachable. Callers that need a specific account must use the per-project endpoint.
             if (CountGitHubAccounts() > 1)
-                return NotFound(new { error = "No GitHub token configured" });
+                return Problem(detail: "No GitHub token configured", statusCode: 404);
 
             var token = _ownerProfileService.GetGitHubToken();
             if (string.IsNullOrEmpty(token))
                 token = ResolveDefaultGitHubAccountToken();
 
             if (string.IsNullOrEmpty(token))
-                return NotFound(new { error = "No GitHub token configured" });
+                return Problem(detail: "No GitHub token configured", statusCode: 404);
 
             return Ok(new { token });
         }

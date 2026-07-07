@@ -33,7 +33,7 @@ namespace MultiTerminal.API.Controllers
             [FromQuery] string search = null)
         {
             if (DebugLog == null)
-                return StatusCode(503, new { error = "DebugLogService not initialized" });
+                return Problem(detail: "DebugLogService not initialized", statusCode: 503);
 
             var messages = DebugLog.GetMessages();
 
@@ -82,7 +82,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult ClearLogs()
         {
             if (DebugLog == null)
-                return StatusCode(503, new { error = "DebugLogService not initialized" });
+                return Problem(detail: "DebugLogService not initialized", statusCode: 503);
 
             var previousCount = DebugLog.Count;
             DebugLog.Clear();
@@ -96,7 +96,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult Pause()
         {
             if (DebugLog == null)
-                return StatusCode(503, new { error = "DebugLogService not initialized" });
+                return Problem(detail: "DebugLogService not initialized", statusCode: 503);
 
             DebugLog.Pause();
             return Ok(new { isPaused = true });
@@ -109,7 +109,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult Resume()
         {
             if (DebugLog == null)
-                return StatusCode(503, new { error = "DebugLogService not initialized" });
+                return Problem(detail: "DebugLogService not initialized", statusCode: 503);
 
             DebugLog.Resume();
             return Ok(new { isPaused = false });
@@ -122,7 +122,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetStatus()
         {
             if (DebugLog == null)
-                return StatusCode(503, new { error = "DebugLogService not initialized" });
+                return Problem(detail: "DebugLogService not initialized", statusCode: 503);
 
             return Ok(new
             {
@@ -191,14 +191,14 @@ namespace MultiTerminal.API.Controllers
 
             // Prevent path traversal
             if (!Path.GetFullPath(filePath).StartsWith(DebugLogService.LogDirectory, StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { error = "Invalid file name" });
+                return Problem(detail: "Invalid file name", statusCode: 400);
 
             // CA3003: filePath is already canonicalized by Path.GetFullPath above and confirmed to
             // be rooted in DebugLogService.LogDirectory; any traversal attempt was rejected with
             // BadRequest before reaching here.
 #pragma warning disable CA3003
             if (!System.IO.File.Exists(filePath))
-                return NotFound(new { error = $"Log file not found: {fileName}" });
+                return Problem(detail: $"Log file not found: {fileName}", statusCode: 404);
 #pragma warning restore CA3003
 
             var logLines = DebugLogService.ReadLogFile(filePath, lines > 0 ? lines : 0);
