@@ -30,9 +30,9 @@ namespace MultiTerminal.MCPServer.Services
         // Team member profile storage (relocated from MessageBroker — single owner per cache, bb2b0104).
         private readonly ConcurrentDictionary<string, TeamMemberProfile> _profiles = new ConcurrentDictionary<string, TeamMemberProfile>();
 
-        public ProfileService(TaskDatabase db, IProfileServiceHost host)
+        public ProfileService(TaskDatabase taskDb, IProfileServiceHost host)
         {
-            _taskDb = db ?? throw new ArgumentNullException(nameof(db));
+            _taskDb = taskDb ?? throw new ArgumentNullException(nameof(taskDb));
             _host = host ?? throw new ArgumentNullException(nameof(host));
         }
 
