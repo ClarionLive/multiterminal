@@ -85,7 +85,6 @@
       <li><a href="#sessions">Sessions</a> (9 tools)</li>
       <li><a href="#context">Context Self-Management</a> (2 tools)</li>
       <li><a href="#browser">Browser Tabs</a> (11 tools)</li>
-      <li><a href="#build">Build &amp; Run</a> (5 tools)</li>
       <li><a href="#xaml-tools">XAML</a> (1 tool)</li>
       <li><a href="#debug">Debug</a> (6 tools)</li>
       <li><a href="#search">Code Search</a> (2 tools)</li>
@@ -1594,118 +1593,6 @@ get_browser_messages(terminalId="Alice", tabId="abc123")</code></pre>
   toolName="search_results",
   input={"query": "SQL injection", "limit": 10}
 )</code></pre>
-  </div>
-
-  <!-- ================================================================== -->
-  <h2 id="build">Build &amp; Run</h2>
-  <!-- ================================================================== -->
-  <p>Windows build tools integrated from the Windows Build Runner. Auto-detect and build projects, run commands, batch files, and PowerShell scripts.</p>
-
-  <!-- build_project -->
-  <div class="tool-block" id="build_project">
-    <h3>build_project</h3>
-    <p>Auto-detect and build a project (.sln, .csproj, .vbproj, etc.). Locates MSBuild or dotnet automatically.</p>
-    <h4>Parameters</h4>
-    <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>projectPath</code></td><td>string</td><td>Yes</td><td>Path to project file or directory containing the project</td></tr>
-        <tr><td><code>configuration</code></td><td>string</td><td>No</td><td>Build configuration. Default: <code>Release</code></td></tr>
-        <tr><td><code>platform</code></td><td>string</td><td>No</td><td>Platform to build for. Default: <code>Any CPU</code></td></tr>
-        <tr><td><code>additionalArgs</code></td><td>string</td><td>No</td><td>Additional MSBuild/dotnet arguments</td></tr>
-        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Name of process to terminate before build</td></tr>
-        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Destination path to copy build output to after success</td></tr>
-        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>600000</code> (10 min)</td></tr>
-      </tbody>
-    </table>
-    <h4>Returns</h4>
-    <p>Build output with stdout, stderr, exit code, and build tool used.</p>
-    <h4>Example</h4>
-    <pre><code>build_project(
-  projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal",
-  configuration="Release",
-  processToKill="MultiTerminal"
-)</code></pre>
-  </div>
-
-  <!-- find_build_tools -->
-  <div class="tool-block" id="find_build_tools">
-    <h3>find_build_tools</h3>
-    <p>Find installed build tools (MSBuild, dotnet, etc.).</p>
-    <h4>Parameters</h4>
-    <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>tool</code></td><td>string</td><td>No</td><td>Specific tool to find: <code>msbuild</code>, <code>dotnet</code>, <code>all</code>. Default: <code>all</code></td></tr>
-      </tbody>
-    </table>
-    <h4>Returns</h4>
-    <p>List of found build tools with paths and versions.</p>
-    <h4>Example</h4>
-    <pre><code>find_build_tools(tool="msbuild")</code></pre>
-  </div>
-
-  <!-- run_command -->
-  <div class="tool-block" id="run_command">
-    <h3>run_command</h3>
-    <p>Execute a Windows command directly and return its output.</p>
-    <h4>Parameters</h4>
-    <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>command</code></td><td>string</td><td>Yes</td><td>Windows command to execute</td></tr>
-        <tr><td><code>workingDirectory</code></td><td>string</td><td>No</td><td>Working directory for execution</td></tr>
-        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>300000</code> (5 min)</td></tr>
-        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Process to terminate before execution</td></tr>
-        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Copy output to this path after success</td></tr>
-      </tbody>
-    </table>
-    <h4>Returns</h4>
-    <p>Command output with stdout, stderr, and exit code.</p>
-    <h4>Example</h4>
-    <pre><code>run_command(command="dir /b *.cs", workingDirectory="H:\\DevLaptop\\MyProject")</code></pre>
-  </div>
-
-  <!-- run_batch_file -->
-  <div class="tool-block" id="run_batch_file">
-    <h3>run_batch_file</h3>
-    <p>Execute a Windows batch file and return its output.</p>
-    <h4>Parameters</h4>
-    <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>batchFile</code></td><td>string</td><td>Yes</td><td>Path to the batch file to execute</td></tr>
-        <tr><td><code>workingDirectory</code></td><td>string</td><td>No</td><td>Working directory for execution</td></tr>
-        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>300000</code> (5 min)</td></tr>
-        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Process to terminate before execution</td></tr>
-        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Copy output to this path after success</td></tr>
-      </tbody>
-    </table>
-    <h4>Returns</h4>
-    <p>Batch file output with stdout, stderr, and exit code.</p>
-    <h4>Example</h4>
-    <pre><code>run_batch_file(batchFile="H:\\DevLaptop\\build.bat", workingDirectory="H:\\DevLaptop\\MyProject")</code></pre>
-  </div>
-
-  <!-- run_powershell_script -->
-  <div class="tool-block" id="run_powershell_script">
-    <h3>run_powershell_script</h3>
-    <p>Execute a PowerShell script and return its output.</p>
-    <h4>Parameters</h4>
-    <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
-      <tbody>
-        <tr><td><code>scriptFile</code></td><td>string</td><td>Yes</td><td>Path to the PowerShell script to execute</td></tr>
-        <tr><td><code>workingDirectory</code></td><td>string</td><td>No</td><td>Working directory for execution</td></tr>
-        <tr><td><code>timeout</code></td><td>number</td><td>No</td><td>Timeout in ms. Default: <code>300000</code> (5 min)</td></tr>
-        <tr><td><code>processToKill</code></td><td>string</td><td>No</td><td>Process to terminate before execution</td></tr>
-        <tr><td><code>copyOutputTo</code></td><td>string</td><td>No</td><td>Copy output to this path after success</td></tr>
-      </tbody>
-    </table>
-    <h4>Returns</h4>
-    <p>Script output with stdout, stderr, and exit code.</p>
-    <h4>Example</h4>
-    <pre><code>run_powershell_script(scriptFile="H:\\DevLaptop\\deploy.ps1")</code></pre>
   </div>
 
   <!-- ================================================================== -->
