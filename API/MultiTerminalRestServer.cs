@@ -432,11 +432,25 @@ namespace MultiTerminal.API
                 try { _staleTaskTimer?.Dispose(); _staleTaskTimer = null; } catch (Exception) { /* best-effort */ }
                 try { _staleAgentTimer?.Dispose(); _staleAgentTimer = null; } catch (Exception) { /* best-effort */ }
                 try { _host?.Dispose(); _host = null; } catch (Exception) { /* best-effort */ }
-                // The disposed host's DI container owned the ActivityFeedService the broker was
-                // wired to; drop the stale reference so nothing can touch that disposed,
-                // DB-owning instance during the Retry window. A successful retry re-wires it
-                // (task 4fec40e2 debugger defense-in-depth).
-                try { if (_broker != null) { _broker.ActivityFeedService = null; } } catch (Exception) { /* best-effort */ }
+                // The disposed host's DI container owned EVERY service StartAsync published onto the
+                // long-lived broker before the bind (ActivityService wraps this host's TaskDatabase
+                // connection; the others hold DI-owned deps too). Drop ALL of them so nothing calls
+                // into a disposed, DB-backed service during the Retry window; a successful retry
+                // re-publishes them. ProjectService is intentionally NOT cleared — it is MainForm's
+                // shared instance, not host-owned (task 4fec40e2 adversary defense-in-depth: clear
+                // every host-owned broker reference, not just one).
+                try
+                {
+                    if (_broker != null)
+                    {
+                        _broker.ActivityService = null;
+                        _broker.SummaryService = null;
+                        _broker.ComplexityDetector = null;
+                        _broker.ChangelogService = null;
+                        _broker.ActivityFeedService = null;
+                    }
+                }
+                catch (Exception) { /* best-effort */ }
 
                 ServerError?.Invoke(this, ex);
                 throw;
