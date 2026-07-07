@@ -229,6 +229,26 @@ namespace MultiTerminal.Services
                                 }
                             }
 
+                            // Mutating-timeout hazard (Eval P5 pipeline Run 2): a
+                            // timed-out merge is retry-later with an UNKNOWN outcome —
+                            // NOT an ordinary "branch still alive, merge it" pending
+                            // merge. And if the follow-up abort also failed, the checkout
+                            // may be HALF-MERGED. Surface both cases loudly and
+                            // distinctly rather than folding them into the generic
+                            // pending-merge line (or, worse, proceeding silently).
+                            if (retry != null && retry.TimedOut)
+                            {
+                                string tShort = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
+                                result.PendingMerges.Add(record.TaskId);
+                                recordActivity?.Invoke(
+                                    retry.IndeterminateState ? "janitor_merge_indeterminate" : "janitor_merge_timeout",
+                                    retry.IndeterminateState
+                                        ? $"HALF-MERGED checkout — MANUAL CLEANUP NEEDED for done task {tShort}: {retry.Stderr}"
+                                        : $"Auto-merge for done task {tShort} timed out and was rolled back; will retry next sweep. {retry.Stderr}",
+                                    record.TaskId);
+                                continue;
+                            }
+
                             // Surface the actual refusal/failure reason from the retry
                             // (task 90c2acc6, Codex adversary MEDIUM): the wrong-branch
                             // and fail-closed refusals carry an actionable Stderr (e.g.

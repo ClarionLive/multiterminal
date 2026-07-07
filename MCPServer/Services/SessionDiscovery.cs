@@ -75,6 +75,13 @@ namespace MultiTerminal.MCPServer.Services
             new Dictionary<string, CachedJsonlEntry>(StringComparer.OrdinalIgnoreCase);
         private static readonly object CacheLock = new object();
 
+        // Bound the derivation cost + the process-wide cache so a large or hostile
+        // project folder can't drive unbounded parse/memory growth. These are
+        // generous relative to real usage (the projects folder is the user's own
+        // local transcripts) but cap the pathological case.
+        private const long MaxJsonlBytes = 64L * 1024 * 1024; // 64 MB per transcript
+        private const int MaxCacheEntries = 4000;
+
         public SessionDiscovery()
         {
             // Default Claude projects path
@@ -142,7 +149,7 @@ namespace MultiTerminal.MCPServer.Services
                 if (extractedIdentity != null &&
                     extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                 {
-                    results.Add(ProjectEntry(entry, extractedIdentity, projectPath));
+                    results.Add(ToDiscoveredSession(entry, extractedIdentity, projectPath));
                 }
             }
 
@@ -168,7 +175,7 @@ namespace MultiTerminal.MCPServer.Services
         public List<DiscoveredSession> DiscoverAllSessionsInProject(string projectPath)
         {
             return GetProjectSessionEntries(projectPath)
-                .Select(e => ProjectEntry(e, ExtractIdentity(e.FirstPrompt), projectPath))
+                .Select(e => ToDiscoveredSession(e, ExtractIdentity(e.FirstPrompt), projectPath))
                 .OrderByDescending(s => s.Modified)
                 .ToList();
         }
@@ -191,7 +198,7 @@ namespace MultiTerminal.MCPServer.Services
                     if (extractedIdentity != null &&
                         extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                     {
-                        results.Add(ProjectEntry(entry, extractedIdentity, null));
+                        results.Add(ToDiscoveredSession(entry, extractedIdentity, null));
                     }
                 }
             }
@@ -207,14 +214,25 @@ namespace MultiTerminal.MCPServer.Services
         {
             var identities = new Dictionary<string, DiscoveredSession>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var entry in GetProjectSessionEntries(projectPath)
-                .OrderByDescending(e => ParseDateTime(e.Modified)))
+            var entries = GetProjectSessionEntries(projectPath);
+            foreach (var entry in entries.OrderByDescending(e => ParseDateTime(e.Modified)))
             {
                 var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
                 if (extractedIdentity != null && !identities.ContainsKey(extractedIdentity))
                 {
-                    identities[extractedIdentity] = ProjectEntry(entry, extractedIdentity, projectPath);
+                    identities[extractedIdentity] = ToDiscoveredSession(entry, extractedIdentity, projectPath);
                 }
+            }
+
+            // Observable signal (adversary Run-1 MEDIUM): the SOURCE is fresh but
+            // identity EXTRACTION can still yield nothing when the identity marker
+            // lives outside the first user prompt on current transcripts. Make that
+            // "fresh sessions but zero identities" state loud instead of silent so
+            // it isn't mistaken for "no sessions." Extraction fix: follow-up 4558fa6b.
+            if (identities.Count == 0 && entries.Count > 0)
+            {
+                Debug.WriteLine(
+                    $"[SessionDiscovery] {entries.Count} sessions derived but 0 identities extracted for '{projectPath}' — identity markers are outside the first user prompt on current transcripts (extraction tracked in follow-up 4558fa6b).");
             }
 
             return identities;
@@ -239,40 +257,44 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Core resolver: use <c>sessions-index.json</c> only when it is fresh
-        /// (newer than every JSONL in the folder); otherwise derive from the raw
-        /// JSONL transcripts. Logs which path served.
+        /// Core resolver: use <c>sessions-index.json</c> only when it is BOTH fresh
+        /// AND complete (see <see cref="IndexIsTrustworthy"/>); otherwise derive from
+        /// the raw JSONL transcripts. Logs which path served.
         /// </summary>
         private List<SessionEntry> GetEntriesForFolder(string projectFolder, string fallbackProjectPath)
         {
             var indexPath = Path.Combine(projectFolder, "sessions-index.json");
-            if (IsIndexFresh(projectFolder, indexPath))
+            var indexEntries = TryLoadIndexEntries(indexPath);
+            if (indexEntries != null && IndexIsTrustworthy(projectFolder, indexPath, indexEntries))
             {
-                var fromIndex = TryLoadIndexEntries(indexPath);
-                if (fromIndex != null)
-                {
-                    Debug.WriteLine(
-                        $"[SessionDiscovery] {Path.GetFileName(projectFolder)}: served {fromIndex.Count} entries from FRESH sessions-index.json");
-                    return fromIndex;
-                }
+                Debug.WriteLine(
+                    $"[SessionDiscovery] {Path.GetFileName(projectFolder)}: served {indexEntries.Count} entries from FRESH+COMPLETE sessions-index.json");
+                return indexEntries;
             }
 
             var derived = DeriveEntriesFromJsonl(projectFolder, fallbackProjectPath);
             Debug.WriteLine(
-                $"[SessionDiscovery] {Path.GetFileName(projectFolder)}: served {derived.Count} entries DERIVED from JSONL (index stale/absent)");
+                $"[SessionDiscovery] {Path.GetFileName(projectFolder)}: served {derived.Count} entries DERIVED from JSONL (index stale/incomplete/absent)");
             return derived;
         }
 
         /// <summary>
-        /// The index is fresh only when it exists AND no JSONL transcript in the
-        /// folder is newer than it. A single newer JSONL means the index is
-        /// missing at least that session, so we fall through to derivation.
+        /// The index may be trusted as a fast-path ONLY when it is both fresh AND
+        /// complete:
+        /// <list type="bullet">
+        /// <item>FRESH — STRICTLY newer than every JSONL in the folder. An mtime tie
+        /// is treated as stale: a JSONL written in the same clock tick as the index
+        /// may not be reflected in it.</item>
+        /// <item>COMPLETE — every session-UUID JSONL on disk appears in the index. A
+        /// fresh-but-partial index (regenerated, lagging, or clock-skewed) would
+        /// otherwise be served as authoritative and silently HIDE real sessions —
+        /// exactly the source-of-truth hole this repair exists to close. Freshness
+        /// (mtime) alone is not a proxy for coverage.</item>
+        /// </list>
+        /// Either check failing → derive from JSONL.
         /// </summary>
-        private static bool IsIndexFresh(string projectFolder, string indexPath)
+        private static bool IndexIsTrustworthy(string projectFolder, string indexPath, List<SessionEntry> indexEntries)
         {
-            if (!File.Exists(indexPath))
-                return false;
-
             long indexMtime;
             try
             {
@@ -283,11 +305,24 @@ namespace MultiTerminal.MCPServer.Services
                 return false;
             }
 
+            var indexedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in indexEntries)
+            {
+                if (!string.IsNullOrEmpty(e.SessionId))
+                    indexedIds.Add(e.SessionId);
+            }
+
             try
             {
                 foreach (var jsonl in Directory.EnumerateFiles(projectFolder, "*.jsonl"))
                 {
-                    if (File.GetLastWriteTimeUtc(jsonl).Ticks > indexMtime)
+                    // Tie or newer JSONL => the index is stale.
+                    if (File.GetLastWriteTimeUtc(jsonl).Ticks >= indexMtime)
+                        return false;
+
+                    // A session JSONL the index doesn't list => the index is incomplete.
+                    var id = Path.GetFileNameWithoutExtension(jsonl);
+                    if (SessionFileNamePattern.IsMatch(id) && !indexedIds.Contains(id))
                         return false;
                 }
             }
@@ -355,12 +390,25 @@ namespace MultiTerminal.MCPServer.Services
                 return null;
 
             long mtimeTicks;
+            long sizeBytes;
             try
             {
-                mtimeTicks = File.GetLastWriteTimeUtc(jsonlPath).Ticks;
+                var fi = new FileInfo(jsonlPath);
+                mtimeTicks = fi.LastWriteTimeUtc.Ticks;
+                sizeBytes = fi.Length;
             }
             catch
             {
+                return null;
+            }
+
+            // Resource-exhaustion guard: skip a pathologically large transcript
+            // rather than fully materializing it (CWE-400). Bounded by the same
+            // mtime key, so a later shrink re-derives normally.
+            if (sizeBytes > MaxJsonlBytes)
+            {
+                Debug.WriteLine(
+                    $"[SessionDiscovery] skipping oversized transcript ({sizeBytes} bytes > {MaxJsonlBytes}): {Path.GetFileName(jsonlPath)}");
                 return null;
             }
 
@@ -428,13 +476,18 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (CacheLock)
             {
+                // Bound process-wide growth. A full clear is acceptable: the mtime
+                // gate re-derives on demand, so this only forfeits a one-time reparse
+                // of whatever was cached — never correctness.
+                if (JsonlCache.Count >= MaxCacheEntries)
+                    JsonlCache.Clear();
                 JsonlCache[jsonlPath] = new CachedJsonlEntry { MtimeTicks = mtimeTicks, Entry = entry };
             }
 
             return entry;
         }
 
-        private static DiscoveredSession ProjectEntry(SessionEntry entry, string identity, string fallbackProjectPath)
+        private static DiscoveredSession ToDiscoveredSession(SessionEntry entry, string identity, string fallbackProjectPath)
         {
             return new DiscoveredSession
             {

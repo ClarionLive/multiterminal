@@ -342,7 +342,7 @@ namespace MultiTerminal.Services
                 args.Add(branchName);
             }
 
-            var (exitCode, stdout, stderr) = await GitExec.RunAsync(repoRoot, GitExec.WorktreeAddTimeoutMs, args.ToArray()).ConfigureAwait(false);
+            var (exitCode, stdout, stderr) = await GitExec.RunAsync(repoRoot, GitExec.SlowOpTimeoutMs, args.ToArray()).ConfigureAwait(false);
             if (exitCode != 0)
             {
                 throw new InvalidOperationException(

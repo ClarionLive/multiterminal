@@ -116,28 +116,79 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void FreshIndex_IsUsed_AsFastPath()
+        public void FreshIndex_IsUsed_AsFastPath_WhenComplete()
         {
             // One real JSONL on disk...
-            WriteSession("[Alice]: real session");
+            var path = WriteSession("[Alice]: real session");
+            var uuid = Path.GetFileNameWithoutExtension(path);
 
-            // ...and a FRESH sessions-index.json (newer than every JSONL) claiming
-            // two sessions. The fresh fast-path must serve the index verbatim (2),
-            // not re-derive from the single JSONL.
+            // ...and a FRESH sessions-index.json that COVERS that JSONL (its uuid is
+            // present) plus one index-only extra. Fresh AND complete => the fast-path
+            // serves the index verbatim (2), not the single derived JSONL.
             var indexPath = Path.Combine(_projectFolder, "sessions-index.json");
             File.WriteAllText(indexPath, JsonSerializer.Serialize(new
             {
                 version = 1,
                 entries = new[]
                 {
-                    new { sessionId = "22222222-2222-2222-2222-222222222222", firstPrompt = "[Alice]: idx one" },
-                    new { sessionId = "33333333-3333-3333-3333-333333333333", firstPrompt = "[Bob]: idx two" }
+                    new { sessionId = uuid, firstPrompt = "[Alice]: idx covers the on-disk session" },
+                    new { sessionId = "33333333-3333-3333-3333-333333333333", firstPrompt = "[Bob]: index-only extra" }
                 }
             }));
             File.SetLastWriteTimeUtc(indexPath, DateTime.UtcNow.AddHours(1));
 
             var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
             Assert.Equal(2, sessions.Count);
+        }
+
+        [Fact]
+        public void FreshButIncompleteIndex_DerivesFromJsonl()
+        {
+            // Two JSONL sessions on disk...
+            var p1 = WriteSession("[Alice]: s1");
+            WriteSession("[Bob]: s2");
+            var uuid1 = Path.GetFileNameWithoutExtension(p1);
+
+            // ...but a FRESH index (newer than both) that lists only ONE of them.
+            // Freshness alone is NOT coverage: an incomplete index would silently
+            // hide the second session, so it must be rejected and derivation win (2).
+            var indexPath = Path.Combine(_projectFolder, "sessions-index.json");
+            File.WriteAllText(indexPath, JsonSerializer.Serialize(new
+            {
+                version = 1,
+                entries = new[] { new { sessionId = uuid1, firstPrompt = "[Alice]: s1" } }
+            }));
+            File.SetLastWriteTimeUtc(indexPath, DateTime.UtcNow.AddHours(1));
+
+            var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
+            Assert.Equal(2, sessions.Count);
+        }
+
+        [Fact]
+        public void MtimeTie_IsTreatedAsStale_DerivesFromJsonl()
+        {
+            // One JSONL, and an index that COVERS it (+ an extra) but shares its
+            // EXACT mtime. A tie is treated as stale — a JSONL written in the same
+            // clock tick as the index may not be reflected in it — so derivation
+            // wins (1), not the index (2).
+            var p1 = WriteSession("[Alice]: s1");
+            var uuid1 = Path.GetFileNameWithoutExtension(p1);
+            var indexPath = Path.Combine(_projectFolder, "sessions-index.json");
+            File.WriteAllText(indexPath, JsonSerializer.Serialize(new
+            {
+                version = 1,
+                entries = new[]
+                {
+                    new { sessionId = uuid1, firstPrompt = "[Alice]: s1" },
+                    new { sessionId = "44444444-4444-4444-4444-444444444444", firstPrompt = "[X]: extra" }
+                }
+            }));
+            var tie = new DateTime(2026, 5, 1, 12, 0, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(p1, tie);
+            File.SetLastWriteTimeUtc(indexPath, tie);
+
+            var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
+            Assert.Single(sessions);
         }
     }
 }

@@ -253,7 +253,7 @@ namespace MultiTerminal.Services
                 }
 
                 var commitResult = await GitExec.RunAsync(
-                    repoRoot, "commit", "-m", $"chore: project.json bookkeeping for {taskId.Substring(0, Math.Min(8, taskId.Length))}").ConfigureAwait(false);
+                    repoRoot, GitExec.SlowOpTimeoutMs, "commit", "-m", $"chore: project.json bookkeeping for {taskId.Substring(0, Math.Min(8, taskId.Length))}").ConfigureAwait(false);
                 if (commitResult.ExitCode != 0)
                 {
                     return new MergeResult
@@ -284,8 +284,32 @@ namespace MultiTerminal.Services
                 };
             }
 
+            // Mutating op: use the larger slow-op budget so a legitimately slow
+            // merge on a big repo isn't false-killed. GIT_TERMINAL_PROMPT=0 already
+            // fails credential-prompt hangs fast, so this budget is for slow-but-real
+            // merges, not for tolerating hangs — the two mechanisms compose.
             var mergeRunResult = await GitExec.RunAsync(
-                repoRoot, "merge", "--no-edit", branchName).ConfigureAwait(false);
+                repoRoot, GitExec.SlowOpTimeoutMs, "merge", "--no-edit", branchName).ConfigureAwait(false);
+            if (mergeRunResult.TimedOut)
+            {
+                // A killed merge is UNKNOWN, not a conflict — never collapse it into
+                // HadConflicts. Abort to clean up any half-applied state; if abort
+                // ALSO fails the checkout may be half-merged, which we surface LOUDLY
+                // (IndeterminateState) instead of proceeding silently.
+                var abort = await GitExec.RunAsync(repoRoot, "merge", "--abort").ConfigureAwait(false);
+                bool cleanedUp = abort.ExitCode == 0 && !abort.TimedOut;
+                return new MergeResult
+                {
+                    Success = false,
+                    Merged = false,
+                    TimedOut = true,
+                    IndeterminateState = !cleanedUp,
+                    MergedInto = trunk,
+                    Stderr = cleanedUp
+                        ? $"git merge timed out after {GitExec.SlowOpTimeoutMs}ms and was killed (outcome UNKNOWN — not a conflict); merge --abort cleaned up the checkout. Retry the task-done flow."
+                        : $"INDETERMINATE STATE: git merge timed out after {GitExec.SlowOpTimeoutMs}ms and was killed, AND merge --abort then failed (exit {abort.ExitCode}: {abort.Stderr.Trim()}). Main checkout may be left HALF-MERGED — manual cleanup required before retrying."
+                };
+            }
             if (mergeRunResult.ExitCode != 0)
             {
                 // Conflict (or other merge error) — abort to keep main clean.
@@ -457,7 +481,7 @@ namespace MultiTerminal.Services
                 // dangling administrative entry.
                 await GitExec.RunAsync(repoRoot, "worktree", "remove", "--force", transientPath).ConfigureAwait(false);
                 await GitExec.RunAsync(repoRoot, "worktree", "prune").ConfigureAwait(false);
-                var add = await GitExec.RunAsync(repoRoot, GitExec.WorktreeAddTimeoutMs, "worktree", "add", transientPath, canonicalBranch).ConfigureAwait(false);
+                var add = await GitExec.RunAsync(repoRoot, GitExec.SlowOpTimeoutMs, "worktree", "add", transientPath, canonicalBranch).ConfigureAwait(false);
                 if (add.ExitCode != 0)
                 {
                     result.Success = false;
@@ -498,7 +522,24 @@ namespace MultiTerminal.Services
                         continue;
                     }
 
-                    var merge = await GitExec.RunAsync(canonicalWorktree, "merge", "--no-edit", helperBranch).ConfigureAwait(false);
+                    // Mutating op — larger slow-op budget (see MergeForTaskAsync).
+                    var merge = await GitExec.RunAsync(canonicalWorktree, GitExec.SlowOpTimeoutMs, "merge", "--no-edit", helperBranch).ConfigureAwait(false);
+                    if (merge.TimedOut)
+                    {
+                        // Killed merge is UNKNOWN, not a conflict. Abort to clean up;
+                        // if abort also fails the canonical worktree may be half-merged
+                        // — surface loudly (IndeterminateState), don't record it as a
+                        // conflict. Caller halts teardown and preserves branches.
+                        var abort = await GitExec.RunAsync(canonicalWorktree, "merge", "--abort").ConfigureAwait(false);
+                        bool cleanedUp = abort.ExitCode == 0 && !abort.TimedOut;
+                        result.Success = false;
+                        result.TimedOut = true;
+                        result.IndeterminateState = !cleanedUp;
+                        result.Stderr = cleanedUp
+                            ? $"integration of '{helperBranch}' into '{canonicalBranch}' timed out after {GitExec.SlowOpTimeoutMs}ms and was killed (outcome UNKNOWN — not a conflict); aborted. Retry."
+                            : $"INDETERMINATE STATE: integration of '{helperBranch}' timed out after {GitExec.SlowOpTimeoutMs}ms and was killed, AND merge --abort then failed (exit {abort.ExitCode}: {abort.Stderr.Trim()}). Canonical worktree may be HALF-MERGED — manual cleanup required.";
+                        return result;
+                    }
                     if (merge.ExitCode != 0)
                     {
                         // Conflict — abort to keep the canonical worktree clean, record
@@ -695,6 +736,26 @@ namespace MultiTerminal.Services
         /// <summary>True when the merge was aborted due to conflict.</summary>
         public bool HadConflicts { get; set; }
 
+        /// <summary>
+        /// True when the merge subprocess was KILLED by the GitExec timeout rather
+        /// than completing. The merge outcome is UNKNOWN — this is emphatically NOT
+        /// a conflict (<see cref="HadConflicts"/> stays false), because conflating a
+        /// timeout with a definitive conflict could drive destructive
+        /// conflict-resolution on a merge that would otherwise have succeeded.
+        /// Callers treat this as retry-later.
+        /// </summary>
+        public bool TimedOut { get; set; }
+
+        /// <summary>
+        /// True when a timed-out merge could NOT be cleaned up (the follow-up
+        /// <c>merge --abort</c> itself failed/timed out), so the main checkout may
+        /// be left HALF-MERGED. This is the loud, distinct hazard behind the
+        /// mutating-timeout case: callers MUST surface it visibly (activity feed /
+        /// Owner-visible signal) and must NOT proceed silently — a half-merged
+        /// checkout nobody knows about is the real danger.
+        /// </summary>
+        public bool IndeterminateState { get; set; }
+
         public string Stderr { get; set; }
 
         /// <summary>
@@ -719,6 +780,14 @@ namespace MultiTerminal.Services
 
         /// <summary>True when a helper merge conflicted (and was aborted).</summary>
         public bool HadConflicts { get; set; }
+
+        /// <summary>True when a helper merge was KILLED by the GitExec timeout
+        /// (outcome unknown — NOT a conflict). Retry-later.</summary>
+        public bool TimedOut { get; set; }
+
+        /// <summary>True when a timed-out helper merge could not be aborted, so the
+        /// canonical worktree may be left half-merged — surface loudly, don't proceed.</summary>
+        public bool IndeterminateState { get; set; }
 
         /// <summary>
         /// Helper branches integrated into the canonical branch (including those

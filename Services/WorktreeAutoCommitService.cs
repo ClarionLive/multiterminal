@@ -178,7 +178,9 @@ namespace MultiTerminal.Services
 
             string message = BuildCommitMessage(taskId, taskTitle, implementationSummary, agentName);
 
-            var commitResult = await GitExec.RunAsync(worktreePath, "commit", "-m", message).ConfigureAwait(false);
+            // Mutating op: larger slow-op budget so a legit slow commit (hooks,
+            // large tree) isn't false-killed at the read-op default.
+            var commitResult = await GitExec.RunAsync(worktreePath, GitExec.SlowOpTimeoutMs, "commit", "-m", message).ConfigureAwait(false);
             if (commitResult.ExitCode != 0)
             {
                 return new AutoCommitResult

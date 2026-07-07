@@ -53,12 +53,15 @@ namespace MultiTerminal.Services
         /// materializes a working tree) pass a larger explicit value.</summary>
         public const int DefaultTimeoutMs = 30000;
 
-        /// <summary>Timeout for genuinely slow operations that materialize a
-        /// working tree — chiefly <c>git worktree add</c>, which checks out every
-        /// tracked file and on a large repository can legitimately exceed the
-        /// default. A false timeout here would wrongly fail worktree creation, so
-        /// these sites pass this larger budget explicitly.</summary>
-        public const int WorktreeAddTimeoutMs = 120000;
+        /// <summary>Timeout for genuinely slow operations: those that materialize a
+        /// working tree (<c>git worktree add</c>) OR mutate repository state
+        /// (<c>git merge</c>, <c>git commit</c>). These can legitimately exceed the
+        /// default on a large repository, and a false timeout is worse than for a
+        /// read op — a killed mutation can leave the checkout in an indeterminate
+        /// state — so these sites pass this larger budget explicitly and branch on
+        /// <see cref="GitResult.TimedOut"/> rather than treating a timeout as a
+        /// genuine failure (e.g. a merge conflict).</summary>
+        public const int SlowOpTimeoutMs = 120000;
 
         /// <summary>
         /// Run git with the <see cref="DefaultTimeoutMs"/> timeout.
@@ -113,6 +116,21 @@ namespace MultiTerminal.Services
                 if (winner != exitTask)
                 {
                     try { proc.Kill(entireProcessTree: true); } catch { }
+
+                    // Confirm the tree actually died within a bounded window rather
+                    // than reporting "timed out and handled" before the kill lands.
+                    // If the process cannot be confirmed dead (Kill failed, partial
+                    // tree, detached helper children), log it — a surviving process
+                    // keeps consuming resources the caller believes are released.
+                    try
+                    {
+                        if (await Task.WhenAny(exitTask, Task.Delay(2000)).ConfigureAwait(false) != exitTask)
+                        {
+                            Debug.WriteLine(
+                                $"[GitExec] timeout kill for '{fileName}' not confirmed dead within 2s — process tree may survive");
+                        }
+                    }
+                    catch { }
 
                     // Distinguishable timeout — NOT a synthetic failure. The -1
                     // exit code matches the failure sentinel on purpose; callers
