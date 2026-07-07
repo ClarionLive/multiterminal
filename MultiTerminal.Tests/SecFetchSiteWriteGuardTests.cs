@@ -79,7 +79,8 @@ namespace MultiTerminal.Tests
 
         [Theory]
         [InlineData("https://evil.example")]
-        [InlineData("http://localhost:9999")] // same-site loopback-port write — rejected too
+        [InlineData("http://localhost:9999")]   // same-site loopback-port write — rejected too
+        [InlineData("http://mt-panels.local")]  // NEG TEST 1: static/guessable panel-ish host — rejected
         [InlineData("null")]
         public void Untrusted_origin_write_is_rejected(string origin)
         {

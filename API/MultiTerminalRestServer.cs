@@ -209,18 +209,24 @@ namespace MultiTerminal.API
                 builder.Services.AddProblemDetails();
                 builder.Services.AddExceptionHandler<RestApiExceptionHandler>();
 
-                // CORS (Eval P2 task c522764d, tightened in Eval P2c task f9697aac, PM ruling Z): a
-                // single strict ENUMERATED allowlist (see RestCorsOriginPolicy for the full rationale).
-                // The default policy (all controllers) admits ONLY the panel virtual-host origin
-                // (http://mt-panels.local) — the sole legitimate browser caller of :5050 by census
-                // (report 87db18a7) — and rejects everything else, including loopback origins (a class
-                // that would trust every local process's pages on every port) and the literal "null"
-                // that file:// / sandboxed opaque-origin iframes send. This is the READ boundary only;
-                // blind cross-site CSRF WRITES are handled by SecFetchSiteWriteGuardMiddleware below.
-                // NO AllowCredentials — the panels are credential-less.
+                // CORS (Eval P2 task c522764d, redesigned in Eval P2c task f9697aac — pipeline Run 1
+                // HIGH/LOW; see RestCorsOriginPolicy for the full rationale). Least-privilege scheme:
+                //  - DEFAULT policy: DENY all cross-origin (DenyAllOrigins). No controller needs a browser
+                //    origin by default, so the loopback-gated PAT/secret GETs (OwnerProfile /
+                //    SourceControlAccounts / MultiConnect) expose no ACAO to any browser origin.
+                //  - SCOPED policy (PanelReadPolicyName): the per-process, CSPRNG-random, non-resolvable
+                //    panel virtual-host origin, applied via [EnableCors] to TaskReportsController's report
+                //    GETs ONLY — the sole browser-read surface on :5050.
+                // This is the READ boundary only; blind cross-site CSRF WRITES are handled by
+                // SecFetchSiteWriteGuardMiddleware below. NO AllowCredentials — the panels are credential-less.
                 builder.Services.AddCors(options =>
                 {
                     options.AddDefaultPolicy(policy =>
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.DenyAllOrigins)
+                              .AllowAnyHeader()
+                              .AllowAnyMethod());
+
+                    options.AddPolicy(RestCorsOriginPolicy.PanelReadPolicyName, policy =>
                         policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsTrustedBrowserOrigin)
                               .AllowAnyHeader()
                               .AllowAnyMethod());

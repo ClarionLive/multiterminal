@@ -1731,9 +1731,17 @@
                     const data = await resp.json();
                     taskReportsCache[taskId] = { loading: false, reports: data.reports || [] };
                 } else {
+                    // Non-2xx: a real "no reports" is a 200 with an empty array, so a non-ok here is an
+                    // actual failure — surface it (task f9697aac) instead of silently showing 0 reports.
+                    console.error('[tasks-panel] report list fetch failed for ' + taskId + ': HTTP ' + resp.status);
                     taskReportsCache[taskId] = { loading: false, reports: [] };
                 }
             } catch(e) {
+                // A CORS denial (e.g. the :5050 allowlist no longer trusts this panel's origin) surfaces
+                // here as a fetch TypeError, NOT a non-ok response — so this catch is the loud signal for
+                // a future CORS/virtual-host regression rather than a silent empty-report list (f9697aac).
+                console.error('[tasks-panel] report list fetch error for ' + taskId +
+                    ' (possible CORS/origin regression — check the :5050 allowlist trusts this panel origin):', e);
                 taskReportsCache[taskId] = { loading: false, reports: [] };
             }
             // Re-render to show updated badges
@@ -1743,7 +1751,10 @@
         async function viewAgentReport(taskId, reportId) {
             try {
                 const resp = await fetch('http://localhost:5050/api/tasks/' + taskId + '/reports/' + reportId);
-                if (!resp.ok) return;
+                if (!resp.ok) {
+                    console.error('[tasks-panel] report fetch failed for ' + taskId + '/' + reportId + ': HTTP ' + resp.status);
+                    return;
+                }
                 const report = await resp.json();
                 let content;
                 if (report.report_type === 'html') {

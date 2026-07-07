@@ -1,4 +1,5 @@
 using System;
+using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
 
@@ -6,11 +7,12 @@ namespace MultiTerminal.API.Controllers
 {
     [ApiController]
     [Route("api/tasks/{taskId}/reports")]
-    // tasks-panel.html fetch()es the two GET report endpoints below. It used to be served over
-    // file:// (Origin "null"), which forced a scoped null-tolerant CORS carve-out here; task
-    // f9697aac migrated it onto the virtual-host origin (http://mt-panels.local), which the strict
-    // default CORS policy now allowlists, so these actions no longer need any [EnableCors] override.
-    // Every controller (incl. this one) is on the single strict default policy. See RestCorsOriginPolicy.
+    // tasks-panel.html (served from the per-process panel virtual host) fetch()es the two GET report
+    // endpoints below — the ONLY browser-read surface on :5050. They opt into the scoped PanelReads
+    // CORS policy (task f9697aac) so the panel origin can read them; every OTHER controller stays on
+    // the deny-all default and exposes no ACAO to any browser origin (least privilege — the secret
+    // GETs have no browser consumer). SaveReport (POST) is agent-only (HttpClient, no Origin) and is
+    // deliberately NOT annotated, so it too falls to the deny-all default. See RestCorsOriginPolicy.
     public class TaskReportsController : ControllerBase
     {
         private readonly MessageBroker _broker;
@@ -24,6 +26,7 @@ namespace MultiTerminal.API.Controllers
         /// GET /api/tasks/{taskId}/reports — List reports for a task (metadata only, no content)
         /// </summary>
         [HttpGet]
+        [EnableCors(RestCorsOriginPolicy.PanelReadPolicyName)] // panel virtual-host origin reads this
         public IActionResult GetReports(string taskId, [FromQuery] string agentName = null, [FromQuery] int limit = 50)
         {
             var reports = _broker.GetTaskReports(taskId, agentName, limit);
@@ -34,6 +37,7 @@ namespace MultiTerminal.API.Controllers
         /// GET /api/tasks/{taskId}/reports/{reportId} — Get full report content
         /// </summary>
         [HttpGet("{reportId}")]
+        [EnableCors(RestCorsOriginPolicy.PanelReadPolicyName)] // panel virtual-host origin reads this
         public IActionResult GetReport(string taskId, string reportId)
         {
             var report = _broker.GetTaskReport(reportId);
