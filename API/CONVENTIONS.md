@@ -30,3 +30,16 @@ field at the top level (`{success=true, id}` → `{ id }`). This is transparent 
 the MCP layer (`mcp/index.js` reads named fields + HTTP status, never `.success`)
 and to lenient PWA checks (`res.success !== false`). Update any strict consumer in
 the **same commit** — see the consumer notes on ticket 7ce19175.
+
+## Coverage (as of task 7ce19175)
+
+This convention is the **target** for the whole `:5050` surface, but 7ce19175's sweep
+was scoped to the `{success}`-envelope controllers (those the MCP layer / PWA / dual-surface
+gateway consume). **Migrated:** Spawn, Notifications, Tasks, TaskReports, AgentStats,
+ProjectContext, RemoteMode, AgentPanels, BrowserTabs, CodeGraph, Elicitations, Knowledge,
+Messaging, Office, Ripgrep, SessionLineage, SessionMemory, Wiki, XamlPreview, Terminals.
+
+**Not yet migrated** (still emit ad-hoc `{ error }` / old shapes — follow-up work, not
+covered by 7ce19175): BranchMetadata, Debug, Digest, Gateway, MultiConnect, OwnerProfile,
+SourceControlAccounts, Team, Worktrees (and PermissionRelayTest, DEBUG-only). New controllers
+should follow this contract from the start.
