@@ -1330,6 +1330,25 @@ get_latest_session(projectPath="H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal"
 clear_my_context(agentName="Alice", acknowledge=true)</code></pre>
   </div>
 
+  <!-- compact_my_context -->
+  <div class="tool-block" id="compact_my_context">
+    <h3>compact_my_context</h3>
+    <p>Compact YOUR OWN context by submitting <code>/compact</code> into your terminal (types <code>/compact</code> + Enter). Unlike <code>clear_my_context</code> (which wipes the conversation), <code>/compact</code> <strong>preserves a running summary</strong> — use it at a mid-work boundary to reclaim context without losing your place and keep going. Write continuation notes first (<code>update_task_continuation</code>): <code>/compact</code>'s auto-summary is lossy, so your notes stay the authoritative resume record. Single call — no <code>acknowledge</code> needed, since <code>/compact</code> is non-destructive. Make it the last action of your turn (it fires at turn end). <strong>compact</strong> = mid-work, keep going; <strong>clear</strong> = task-end, full reset. <strong>Targets your own terminal only</strong> — an explicit <code>agentName</code> that isn't you is rejected (compacting a different agent is a separate authorized tool).</p>
+    <h4>Parameters</h4>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>agentName</code></td><td>string</td><td>No</td><td>Your terminal/agent name. Omit to use <code>$MULTITERMINAL_NAME</code>. An explicit value that isn't your own identity is <strong>rejected</strong> — this tool self-targets only.</td></tr>
+        <tr><td><code>focus</code></td><td>string</td><td>No</td><td>Optional guidance appended to <code>/compact</code> steering what the summary must preserve (e.g. keep the active task ID, modified files, next step). Omit for a plain <code>/compact</code>. Sanitized to a single line before use.</td></tr>
+      </tbody>
+    </table>
+    <h4>Returns</h4>
+    <p>A best-effort confirmation that <code>/compact</code> (plus any self-targeted <code>focus</code> text) was <em>requested</em> — the inject is fire-and-forget, so verify on your next turn — with a notes-first + lossy-summary reminder.</p>
+    <h4>Example</h4>
+    <pre><code>// 1. write notes, then (omit agentName to self-target):
+compact_my_context(focus="keep active task ID, modified files, next step")</code></pre>
+  </div>
+
   <!-- ================================================================== -->
   <h2 id="browser">Browser Tabs</h2>
   <!-- ================================================================== -->
