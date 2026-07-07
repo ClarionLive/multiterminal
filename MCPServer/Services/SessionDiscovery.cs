@@ -60,19 +60,19 @@ namespace MultiTerminal.MCPServer.Services
         // the DB (tests, headless) — then identity falls back to transcript parsing.
         private readonly Func<string, string> _identityResolver;
 
-        // NOTE (task 4558fa6b, security): a leading "[Alice]:" in a transcript means
-        // Alice SENT a message to this terminal — NOT that this terminal IS Alice.
-        // Using it to attribute ownership mis-labels any session the resolver can't
-        // validate (foreign/unregistered/crafted), so the received-message pattern is
-        // deliberately NOT part of identity determination. Only ownership-safe markers
-        // below (self-registration / system-hook) are used.
+        // NOTE (task 4558fa6b, security): identity ownership is NOT inferred from
+        // free-form transcript text. Two spoofable patterns were removed — a leading
+        // "[Alice]:" (means Alice SENT to this terminal, not that it IS Alice) and a
+        // free-form "register as X" (any transcript containing "please register as
+        // Alice" would self-attribute). Both let a foreign/unregistered/crafted
+        // transcript spoof a team identity in the dropdown. Ownership now comes from
+        // the authoritative session_agent_map resolver; the ONLY transcript signal
+        // still trusted is the system-generated SessionStart hook marker below.
 
-        // Pattern 1: Explicit registration instruction
-        private static readonly Regex RegisterPattern = new Regex(
-            @"register\s+(?:as|with\s+name)\s+[""']?(\w+)",
-            RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-        // Pattern 2: System hook injection (if it appears in firstPrompt)
+        // The system-generated hook injection ("MULTITERMINAL: You are registered as
+        // X"). Unlike free-form prose this is emitted by MT's own SessionStart hook,
+        // so it's a trusted ownership marker (fallback for sessions the resolver
+        // doesn't know); genuinely-unknown sessions resolve to null (Unknown).
         private static readonly Regex SystemHookPattern = new Regex(
             @"MULTITERMINAL:\s*You\s+are\s+registered\s+as\s+(\w+)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -127,30 +127,25 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Extract the terminal's OWN identity from a firstPrompt using only
-        /// ownership-safe markers: the system-hook "registered as X" injection and
-        /// an explicit "register as X" instruction. The received-message pattern
-        /// ("[Alice]:") is deliberately NOT used — it means Alice sent to this
-        /// terminal, not that the terminal is Alice (task 4558fa6b, security). Returns
-        /// null when no ownership-safe marker is present; callers must treat null as
-        /// "unknown", never guessing an owner from who messaged the session.
+        /// Extract the terminal's OWN identity from a firstPrompt using ONLY the
+        /// system-generated SessionStart hook marker ("MULTITERMINAL: You are
+        /// registered as X"). Free-form transcript patterns are deliberately NOT used
+        /// for ownership — neither the received-message "[Alice]:" (Alice sent here ≠
+        /// is Alice) nor a free-form "register as X" (spoofable by incidental prose) —
+        /// because a foreign/crafted transcript could otherwise impersonate a team
+        /// identity (task 4558fa6b, security). Returns null when the trusted marker is
+        /// absent; callers MUST treat null as "unknown" (the authoritative owner comes
+        /// from session_agent_map, not the transcript).
         /// </summary>
         public static string ExtractIdentity(string firstPrompt)
         {
             if (string.IsNullOrEmpty(firstPrompt))
                 return null;
 
-            // System-hook injection: "MULTITERMINAL: You are registered as X" — the
-            // terminal IS X (ownership-safe).
+            // The only trusted transcript signal: MT's own SessionStart hook injection.
             var hookMatch = SystemHookPattern.Match(firstPrompt);
             if (hookMatch.Success)
                 return hookMatch.Groups[1].Value;
-
-            // Explicit self-registration: "register as X" — the terminal IS X
-            // (ownership-safe).
-            var registerMatch = RegisterPattern.Match(firstPrompt);
-            if (registerMatch.Success)
-                return registerMatch.Groups[1].Value;
 
             return null;
         }

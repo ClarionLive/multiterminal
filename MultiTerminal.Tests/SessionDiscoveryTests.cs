@@ -81,11 +81,12 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Derivation_ExtractsOwnershipSafeIdentity_FromFirstPrompt()
         {
-            // Ownership-safe self-registration markers ("register as X") — NOT the
-            // "[Name]:" sent-not-is pattern — are what the transcript fallback extracts.
-            WriteSession("register as Alice — working on the thing");
-            WriteSession("register as Alice again");
-            WriteSession("register as Bob");
+            // The only trusted transcript marker — MT's system-generated SessionStart
+            // hook injection — is what the fallback extracts. NOT free-form prose and
+            // NOT the "[Name]:" sent-not-is pattern.
+            WriteSession("MULTITERMINAL: You are registered as Alice");
+            WriteSession("MULTITERMINAL: You are registered as Alice (second session)");
+            WriteSession("MULTITERMINAL: You are registered as Bob");
 
             var discovery = new SessionDiscovery(_projectsRoot);
 
@@ -227,8 +228,8 @@ namespace MultiTerminal.Tests
             var pathA = WriteSession("[Zeta]: a message Zeta sent to this terminal");
             var uuidA = Path.GetFileNameWithoutExtension(pathA);
             // Session B: the resolver doesn't know it → falls back to the transcript's
-            // ownership-safe self-registration marker.
-            WriteSession("register as Alice");
+            // trusted system-hook marker.
+            WriteSession("MULTITERMINAL: You are registered as Alice");
 
             var lineage = new System.Collections.Generic.Dictionary<string, string> { [uuidA] = "Bob" };
             var discovery = new SessionDiscovery(_projectsRoot,
@@ -261,8 +262,8 @@ namespace MultiTerminal.Tests
         [Fact]
         public void ResolverThrows_DegradesToTranscriptFallback_WithoutBlankingAll()
         {
-            // A session with an ownership-safe marker...
-            WriteSession("register as Alice");
+            // A session with the trusted hook marker...
+            WriteSession("MULTITERMINAL: You are registered as Alice");
 
             // ...and a resolver that throws for EVERY session (e.g. transient DB
             // failure). It must NOT abort the whole pass and blank every identity —
@@ -272,6 +273,25 @@ namespace MultiTerminal.Tests
 
             var identities = discovery.DiscoverIdentitiesInProject(_projectPath);
             Assert.Contains("Alice", identities.Keys);
+        }
+
+        [Fact]
+        public void FreeFormRegisterText_NotAttributedAsOwner_WhenResolverUnknown()
+        {
+            // Incidental free-form prose that merely MENTIONS registering must NOT
+            // attribute ownership — otherwise a foreign/crafted transcript could spoof
+            // a team identity for an unmapped session. Only the resolver
+            // (session_agent_map) or the system hook marker determine ownership; this
+            // session has neither, so it stays Unknown / out of the dropdown
+            // (task 4558fa6b, security — Run 3).
+            WriteSession("please register as Alice before you start, and also register as Bob");
+
+            var discovery = new SessionDiscovery(_projectsRoot, sid => null);
+            var identities = discovery.DiscoverIdentitiesInProject(_projectPath);
+
+            Assert.DoesNotContain("Alice", identities.Keys);
+            Assert.DoesNotContain("Bob", identities.Keys);
+            Assert.Empty(identities);
         }
     }
 }
