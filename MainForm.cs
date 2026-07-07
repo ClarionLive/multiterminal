@@ -3555,13 +3555,16 @@ namespace MultiTerminal
 
             try
             {
-                // Resolve identity from the authoritative session_lineage store
-                // (register_session -> TaskDatabase.GetSessionAgentName) rather than
-                // the transcript, which doesn't reliably carry the terminal's own
-                // name. Falls back to transcript parsing for foreign/unknown sessions
-                // (task 4558fa6b).
+                // Resolve identity from the authoritative session_agent_map store
+                // (register_session -> TaskDatabase) rather than the transcript, which
+                // doesn't reliably carry the terminal's own name. Snapshot the whole
+                // map ONCE (one query) and resolve from the in-memory dict — avoids a
+                // per-session DB point-query (N+1) on this WinForms UI path, and makes
+                // the resolver non-throwing. Falls back to transcript parsing for
+                // foreign/unknown sessions (task 4558fa6b).
+                var agentMap = _mcpServer?.Broker?.TaskDb?.GetAllSessionAgentNames();
                 var discovery = new MCPServer.Services.SessionDiscovery(
-                    sid => _mcpServer?.Broker?.TaskDb?.GetSessionAgentName(sid));
+                    sid => (agentMap != null && agentMap.TryGetValue(sid, out var agent)) ? agent : null);
                 var discovered = discovery.DiscoverIdentitiesInProject(projectPath);
                 // Dictionary keys are identity names
                 identities.AddRange(discovered.Keys);

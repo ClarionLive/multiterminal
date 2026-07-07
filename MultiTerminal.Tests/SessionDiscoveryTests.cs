@@ -79,11 +79,13 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void Derivation_ExtractsIdentity_FromFirstPrompt()
+        public void Derivation_ExtractsOwnershipSafeIdentity_FromFirstPrompt()
         {
-            WriteSession("[Alice]: working on the thing");
-            WriteSession("[Alice]: another Alice session");
-            WriteSession("[Bob]: a Bob session");
+            // Ownership-safe self-registration markers ("register as X") — NOT the
+            // "[Name]:" sent-not-is pattern — are what the transcript fallback extracts.
+            WriteSession("register as Alice — working on the thing");
+            WriteSession("register as Alice again");
+            WriteSession("register as Bob");
 
             var discovery = new SessionDiscovery(_projectsRoot);
 
@@ -220,12 +222,13 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Identity_ResolverWins_OverTranscript_AndFallsBackWhenUnknown()
         {
-            // Session A: the transcript says "[Zeta]:" but the authoritative resolver
-            // (session_lineage) knows this session was owned by Bob.
-            var pathA = WriteSession("[Zeta]: transcript-derived name");
+            // Session A: the transcript starts "[Zeta]:" (a message Zeta SENT here —
+            // NOT ownership) but the authoritative resolver knows it was owned by Bob.
+            var pathA = WriteSession("[Zeta]: a message Zeta sent to this terminal");
             var uuidA = Path.GetFileNameWithoutExtension(pathA);
-            // Session B: the resolver doesn't know it → falls back to the transcript.
-            WriteSession("[Alice]: fallback name");
+            // Session B: the resolver doesn't know it → falls back to the transcript's
+            // ownership-safe self-registration marker.
+            WriteSession("register as Alice");
 
             var lineage = new System.Collections.Generic.Dictionary<string, string> { [uuidA] = "Bob" };
             var discovery = new SessionDiscovery(_projectsRoot,
@@ -233,9 +236,42 @@ namespace MultiTerminal.Tests
 
             var identities = discovery.DiscoverIdentitiesInProject(_projectPath);
 
-            Assert.Contains("Bob", identities.Keys);         // resolver won over transcript "Zeta"
-            Assert.DoesNotContain("Zeta", identities.Keys);  // transcript name NOT used when resolver knows
-            Assert.Contains("Alice", identities.Keys);       // fallback to transcript for the unknown session
+            Assert.Contains("Bob", identities.Keys);         // resolver won over the transcript
+            Assert.DoesNotContain("Zeta", identities.Keys);  // "[Zeta]:" is sent-not-is, never an owner
+            Assert.Contains("Alice", identities.Keys);       // ownership-safe fallback for the unknown session
+        }
+
+        [Fact]
+        public void SentNotIs_ReceivedMessageMarker_NotAttributedAsOwner_WhenResolverUnknown()
+        {
+            // "[Alice]:" means Alice SENT a message to this terminal — NOT that the
+            // terminal IS Alice. With no authoritative mapping, the session must NOT be
+            // attributed to Alice, or a foreign/crafted "[Alice]: ..." transcript could
+            // spoof identity (security, task 4558fa6b).
+            WriteSession("[Alice]: hello from Alice");
+
+            // Resolver is wired but returns null (session unknown) → ownership-safe fallback.
+            var discovery = new SessionDiscovery(_projectsRoot, sid => null);
+            var identities = discovery.DiscoverIdentitiesInProject(_projectPath);
+
+            Assert.DoesNotContain("Alice", identities.Keys);
+            Assert.Empty(identities);
+        }
+
+        [Fact]
+        public void ResolverThrows_DegradesToTranscriptFallback_WithoutBlankingAll()
+        {
+            // A session with an ownership-safe marker...
+            WriteSession("register as Alice");
+
+            // ...and a resolver that throws for EVERY session (e.g. transient DB
+            // failure). It must NOT abort the whole pass and blank every identity —
+            // each session degrades to its transcript fallback.
+            var discovery = new SessionDiscovery(_projectsRoot,
+                sid => throw new InvalidOperationException("transient DB failure"));
+
+            var identities = discovery.DiscoverIdentitiesInProject(_projectPath);
+            Assert.Contains("Alice", identities.Keys);
         }
     }
 }

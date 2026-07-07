@@ -60,18 +60,19 @@ namespace MultiTerminal.MCPServer.Services
         // the DB (tests, headless) — then identity falls back to transcript parsing.
         private readonly Func<string, string> _identityResolver;
 
-        // Pattern 1: Session received message FROM identity (e.g., "[Alice]: Hello")
-        // This means the session IS that identity
-        private static readonly Regex ReceivedMessagePattern = new Regex(
-            @"^\[(\w+)\]:",
-            RegexOptions.Compiled);
+        // NOTE (task 4558fa6b, security): a leading "[Alice]:" in a transcript means
+        // Alice SENT a message to this terminal — NOT that this terminal IS Alice.
+        // Using it to attribute ownership mis-labels any session the resolver can't
+        // validate (foreign/unregistered/crafted), so the received-message pattern is
+        // deliberately NOT part of identity determination. Only ownership-safe markers
+        // below (self-registration / system-hook) are used.
 
-        // Pattern 2: Explicit registration instruction
+        // Pattern 1: Explicit registration instruction
         private static readonly Regex RegisterPattern = new Regex(
             @"register\s+(?:as|with\s+name)\s+[""']?(\w+)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-        // Pattern 3: System hook injection (if it appears in firstPrompt)
+        // Pattern 2: System hook injection (if it appears in firstPrompt)
         private static readonly Regex SystemHookPattern = new Regex(
             @"MULTITERMINAL:\s*You\s+are\s+registered\s+as\s+(\w+)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -126,24 +127,27 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Extract identity name from a firstPrompt using multiple pattern matching.
+        /// Extract the terminal's OWN identity from a firstPrompt using only
+        /// ownership-safe markers: the system-hook "registered as X" injection and
+        /// an explicit "register as X" instruction. The received-message pattern
+        /// ("[Alice]:") is deliberately NOT used — it means Alice sent to this
+        /// terminal, not that the terminal is Alice (task 4558fa6b, security). Returns
+        /// null when no ownership-safe marker is present; callers must treat null as
+        /// "unknown", never guessing an owner from who messaged the session.
         /// </summary>
         public static string ExtractIdentity(string firstPrompt)
         {
             if (string.IsNullOrEmpty(firstPrompt))
                 return null;
 
-            // Priority 1: System hook pattern (most explicit)
+            // System-hook injection: "MULTITERMINAL: You are registered as X" — the
+            // terminal IS X (ownership-safe).
             var hookMatch = SystemHookPattern.Match(firstPrompt);
             if (hookMatch.Success)
                 return hookMatch.Groups[1].Value;
 
-            // Priority 2: Received message pattern (very reliable for MT sessions)
-            var messageMatch = ReceivedMessagePattern.Match(firstPrompt);
-            if (messageMatch.Success)
-                return messageMatch.Groups[1].Value;
-
-            // Priority 3: Explicit registration instruction
+            // Explicit self-registration: "register as X" — the terminal IS X
+            // (ownership-safe).
             var registerMatch = RegisterPattern.Match(firstPrompt);
             if (registerMatch.Success)
                 return registerMatch.Groups[1].Value;
@@ -167,9 +171,19 @@ namespace MultiTerminal.MCPServer.Services
         {
             if (_identityResolver != null && !string.IsNullOrEmpty(entry.SessionId))
             {
-                var resolved = _identityResolver(entry.SessionId);
-                if (!string.IsNullOrWhiteSpace(resolved))
-                    return resolved;
+                try
+                {
+                    var resolved = _identityResolver(entry.SessionId);
+                    if (!string.IsNullOrWhiteSpace(resolved))
+                        return resolved;
+                }
+                catch (Exception ex)
+                {
+                    // A resolver failure (e.g. transient DB unavailability) must degrade
+                    // THIS session to transcript fallback — never abort the whole
+                    // discovery pass and blank every identity.
+                    Debug.WriteLine($"[SessionDiscovery] identity resolver threw for {entry.SessionId}: {ex.Message}");
+                }
             }
             return ExtractIdentity(entry.FirstPrompt);
         }
@@ -263,15 +277,14 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            // Observable signal (adversary Run-1 MEDIUM): the SOURCE is fresh but
-            // identity EXTRACTION can still yield nothing when the identity marker
-            // lives outside the first user prompt on current transcripts. Make that
-            // "fresh sessions but zero identities" state loud instead of silent so
-            // it isn't mistaken for "no sessions." Extraction fix: follow-up 4558fa6b.
+            // Observable signal: make "fresh sessions but zero identities" loud so it
+            // isn't mistaken for "no sessions." With the resolver wired this should be
+            // rare — it means none of the sessions had a session_agent_map owner AND
+            // none carried an ownership-safe transcript marker.
             if (identities.Count == 0 && entries.Count > 0)
             {
                 Debug.WriteLine(
-                    $"[SessionDiscovery] {entries.Count} sessions derived but 0 identities extracted for '{projectPath}' — identity markers are outside the first user prompt on current transcripts (extraction tracked in follow-up 4558fa6b).");
+                    $"[SessionDiscovery] {entries.Count} sessions in '{projectPath}' but 0 identities resolved — no session_agent_map owner (resolver) and no ownership-safe transcript marker.");
             }
 
             return identities;
