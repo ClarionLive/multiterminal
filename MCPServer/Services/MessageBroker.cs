@@ -6185,15 +6185,28 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(agentName))
                 return null;
 
-            // Check in-memory cache first
-            var activeTask = _tasks.Values
-                .FirstOrDefault(t =>
+            // Check in-memory cache first. If a sibling-pause failed during SetTaskActive/ClaimTask, an
+            // agent can transiently have >1 active task (accepted limitation — the atomic pause+activate
+            // fix is follow-up 7c59c004). Make the resolution DETERMINISTIC and OBSERVABLE rather than
+            // silently nondeterministic (P5 pipeline Run 2 mitigation): log loudly and pick a stable winner.
+            // The DB fallback below orders by updated_at DESC (newest activation); the cache has no
+            // activation timestamp, so it uses a stable CreatedAt-desc / id tiebreak.
+            var actives = _tasks.Values
+                .Where(t =>
                     t.Assignee != null &&
                     t.Assignee.Equals(agentName, StringComparison.OrdinalIgnoreCase) &&
                     t.Status == "in_progress" &&
-                    t.SubStatus == "active");
+                    t.SubStatus == "active")
+                .OrderByDescending(t => t.CreatedAt)
+                .ThenBy(t => t.Id, StringComparer.Ordinal)
+                .ToList();
 
-            return activeTask ?? _taskDb.GetActiveTaskForAgent(agentName);
+            if (actives.Count > 1)
+            {
+                LogError($"GetMyActiveTask: {actives.Count} active tasks for '{agentName}' — single-active invariant violated (a sibling-pause likely failed; see follow-up 7c59c004). Resolving deterministically to '{actives[0].Id}'.");
+            }
+
+            return actives.FirstOrDefault() ?? _taskDb.GetActiveTaskForAgent(agentName);
         }
 
         /// <summary>

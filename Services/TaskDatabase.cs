@@ -3193,6 +3193,7 @@ namespace MultiTerminal.Services
                 WHERE assignee = @agentName
                   AND status = 'in_progress'
                   AND sub_status = 'active'
+                ORDER BY updated_at DESC
                 LIMIT 1
             ";
 

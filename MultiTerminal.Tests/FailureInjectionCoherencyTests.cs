@@ -128,6 +128,39 @@ namespace MultiTerminal.Tests
             Assert.Contains(report.Divergences, d => d.Contains(id));
         }
 
+        [Fact]
+        public void GetMyActiveTask_TwoActiveRows_ResolvesDeterministically_NewestUpdatedAtWins()
+        {
+            using var broker = new MessageBroker();   // schema created, cache empty
+            // Seed TWO active rows for one agent directly in the DB (the sibling-pause-failed two-active
+            // state that P5 pipeline Run 2 accepts as a documented gap), with distinct updated_at. The
+            // cache is empty (rows inserted post-load) so GetMyActiveTask resolves via the DB query, which
+            // now ORDERs BY updated_at DESC — deterministic, newest activation wins.
+            InsertActiveRow("older", "alice", new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+            InsertActiveRow("newer", "alice", new DateTime(2020, 1, 2, 0, 0, 0, DateTimeKind.Utc));
+
+            var a = broker.GetMyActiveTask("alice");
+            var b = broker.GetMyActiveTask("alice");
+
+            Assert.NotNull(a);
+            Assert.Equal(a.Id, b.Id);     // deterministic across calls (was a nondeterministic LIMIT 1)
+            Assert.Equal("newer", a.Id);  // newest updated_at wins
+        }
+
+        private void InsertActiveRow(string id, string assignee, DateTime updatedAt)
+        {
+            using var c = OpenRaw();
+            using var cmd = new SQLiteCommand(
+                "INSERT INTO tasks (id, title, status, assignee, sub_status, created_at, updated_at) " +
+                "VALUES (@id, @title, 'in_progress', @assignee, 'active', @created, @updated)", c);
+            cmd.Parameters.AddWithValue("@id", id);
+            cmd.Parameters.AddWithValue("@title", "task " + id);
+            cmd.Parameters.AddWithValue("@assignee", assignee);
+            cmd.Parameters.AddWithValue("@created", updatedAt);
+            cmd.Parameters.AddWithValue("@updated", updatedAt);
+            cmd.ExecuteNonQuery();
+        }
+
         private void InjectWriteFailure()
         {
             using var c = OpenRaw();
