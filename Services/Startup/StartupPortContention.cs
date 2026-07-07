@@ -76,10 +76,14 @@ namespace MultiTerminal.Services.Startup
                     return true;
                 }
 
+                // Message fallback for a future runtime that reshapes the exception. Match only
+                // ADDRESS-IN-USE-specific phrasings — NOT the generic "failed to bind", which
+                // Kestrel also emits for permission-denied binds and would misroute those to the
+                // port-contention path (task 4fec40e2 code-review finding). The structured
+                // SocketException/errno-10048 check above already covers the real-world case.
                 var msg = current.Message;
                 if (!string.IsNullOrEmpty(msg) &&
                     (msg.IndexOf("address already in use", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                     msg.IndexOf("failed to bind", StringComparison.OrdinalIgnoreCase) >= 0 ||
                      msg.IndexOf("only one usage of each socket address", StringComparison.OrdinalIgnoreCase) >= 0))
                 {
                     return true;
@@ -100,6 +104,32 @@ namespace MultiTerminal.Services.Startup
             return probe is { IsMultiTerminal: true }
                 ? PortContentionVerdict.MultiTerminalAlreadyRunning
                 : PortContentionVerdict.ForeignHolder;
+        }
+
+        /// <summary>
+        /// Classify, then cross-check a marker-positive probe against the real OS TCP owner.
+        /// The <see cref="HealthIdentity.ServiceMarker"/> is a public constant, so a hostile
+        /// process squatting on the port can echo it and return a fake PID/user in the body —
+        /// but it cannot fake which PID actually owns the socket. If the health-claimed PID
+        /// disagrees with the TCP-table owner PID, downgrade to <see cref="PortContentionVerdict.ForeignHolder"/>
+        /// so the user sees the OS-resolved holder instead of a spoofed "another MultiTerminal"
+        /// message (task 4fec40e2 security finding). When the owner PID can't be resolved
+        /// (<paramref name="holder"/> has no PID), the marker is trusted — a genuine MT is
+        /// normally resolvable, and failing closed on a transient lookup miss would misreport a
+        /// real second instance as foreign.
+        /// </summary>
+        public static PortContentionVerdict ClassifyWithOwner(HealthProbeResult probe, PortHolderInfo holder)
+        {
+            var verdict = Classify(probe);
+            if (verdict == PortContentionVerdict.MultiTerminalAlreadyRunning &&
+                holder is { HasPid: true } &&
+                probe?.Identity != null &&
+                probe.Identity.Pid != holder.Pid)
+            {
+                return PortContentionVerdict.ForeignHolder;
+            }
+
+            return verdict;
         }
 
         /// <summary>

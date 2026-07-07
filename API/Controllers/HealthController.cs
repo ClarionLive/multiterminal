@@ -14,14 +14,14 @@ namespace MultiTerminal.API.Controllers
     /// </para>
     /// </summary>
     [ApiController]
-    [Route("api")]
+    [Route("api/health")]
     public class HealthController : ControllerBase
     {
         /// <summary>
         /// Return the running host's identity fingerprint. The reported port is the
         /// connection's actual local port, so it stays correct regardless of config.
         /// </summary>
-        [HttpGet("health")]
+        [HttpGet]
         public IActionResult Health()
         {
             int port = HttpContext?.Connection?.LocalPort ?? 0;

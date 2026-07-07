@@ -1,4 +1,7 @@
+using System.IO;
+using System.Text;
 using System.Text.Json;
+using System.Threading.Tasks;
 using MultiTerminal.Services.Startup;
 using Xunit;
 
@@ -91,6 +94,50 @@ namespace MultiTerminal.Tests
             Assert.Equal(identity.Pid, result.Identity.Pid);
             Assert.True(result.Identity.Pid > 0);
             Assert.Equal(5050, result.Identity.Port);
+        }
+
+        // ---- Probe body cap (task 4fec40e2 security finding — hostile-holder OOM guard) ----
+
+        [Fact]
+        public async Task ReadCapped_truncates_oversized_body()
+        {
+            const int cap = 64 * 1024;
+            var big = new byte[cap * 3];
+            for (int i = 0; i < big.Length; i++)
+            {
+                big[i] = (byte)'a';
+            }
+
+            using var ms = new MemoryStream(big);
+            string result = await StartupHealthProbe.ReadCappedAsync(ms, cap);
+
+            // Never buffers more than the cap, no matter how much a hostile holder streams.
+            Assert.Equal(cap, result.Length);
+        }
+
+        [Fact]
+        public async Task ReadCapped_returns_small_body_whole()
+        {
+            var bytes = Encoding.UTF8.GetBytes("{\"service\":\"multiterminal-rest-api\"}");
+            using var ms = new MemoryStream(bytes);
+
+            string result = await StartupHealthProbe.ReadCappedAsync(ms, 64 * 1024);
+
+            Assert.Equal("{\"service\":\"multiterminal-rest-api\"}", result);
+        }
+
+        [Fact]
+        public async Task ReadCapped_then_parse_rejects_capped_giant_body()
+        {
+            // End-to-end: a giant non-identity body is capped then parsed → not MT.
+            var big = Encoding.UTF8.GetBytes(new string('x', 300_000));
+            using var ms = new MemoryStream(big);
+
+            string body = await StartupHealthProbe.ReadCappedAsync(ms, 64 * 1024);
+            var result = StartupHealthProbe.Parse(body);
+
+            Assert.True(result.Reached);
+            Assert.False(result.IsMultiTerminal);
         }
     }
 }

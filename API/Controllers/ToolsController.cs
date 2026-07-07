@@ -16,6 +16,7 @@ namespace MultiTerminal.API.Controllers
             {
                 new { method = "GET", path = "/", description = "Health check - API is running" },
                 new { method = "GET", path = "/health", description = "Health check with port info" },
+                new { method = "GET", path = "/api/health", description = "Identity fingerprint (app/version/pid/user/session) for the startup self-probe" },
                 new { method = "GET", path = "/api/tools", description = "List all available API endpoints (this endpoint)" },
 
                 // Messaging endpoints

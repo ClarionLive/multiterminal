@@ -692,6 +692,15 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 8: Wiring ServerError event");
                 _mcpServer.ServerError += (s, ex) =>
                 {
+                    // A :5050 "address already in use" bind failure is owned by the dedicated
+                    // port-contention path (TryStartRestServerWithContentionHandlingAsync →
+                    // classified Retry/Exit dialog). StartAsync raises ServerError before it
+                    // rethrows, so without this guard the user would see this raw stack-trace
+                    // dialog FIRST and the friendly one second — repeated on every Retry
+                    // (task 4fec40e2). Let the contention handler be the sole voice for that case.
+                    if (StartupPortContentionClassifier.IsAddressInUse(ex))
+                        return;
+
                     var errorMsg = $"MCP Server error: {ex.Message}\n\nStack Trace:\n{ex.StackTrace}";
                     _debugLogService.Error("MainForm", $"MCP Server error: {ex.Message}");
 
@@ -970,7 +979,11 @@ namespace MultiTerminal
                     }
                     catch (Exception exitEx)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Application.Exit during port-contention exit failed: {exitEx.Message}");
+                        // The window handle may not be created yet if the bind failed very early
+                        // (Invoke throws). Fall back to a hard exit so a held port can't leave a
+                        // headless dead-API process running (task 4fec40e2 debugger MEDIUM).
+                        System.Diagnostics.Debug.WriteLine($"[MainForm] Application.Exit during port-contention exit failed, forcing process exit: {exitEx.Message}");
+                        Environment.Exit(0);
                     }
 
                     return false;
@@ -986,10 +999,12 @@ namespace MultiTerminal
         private DialogResult ResolvePortContentionDialog(int port)
         {
             var probe = StartupHealthProbe.Probe(port);
-            var verdict = StartupPortContentionClassifier.Classify(probe);
-            PortHolderInfo holder = verdict == PortContentionVerdict.ForeignHolder
-                ? TcpPortOwnerLookup.Lookup(port)
-                : PortHolderInfo.Unknown;
+            // Always resolve the real OS owner: needed both to name a foreign holder AND to
+            // cross-check a marker-positive probe against the actual socket owner — a hostile
+            // process can echo our public marker but cannot fake which PID owns :5050
+            // (task 4fec40e2 security finding).
+            PortHolderInfo holder = TcpPortOwnerLookup.Lookup(port);
+            var verdict = StartupPortContentionClassifier.ClassifyWithOwner(probe, holder);
 
             string message = StartupPortContentionClassifier.BuildMessage(verdict, port, probe, holder);
             string caption = verdict == PortContentionVerdict.MultiTerminalAlreadyRunning

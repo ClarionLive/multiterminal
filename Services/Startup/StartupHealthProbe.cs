@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -17,6 +18,14 @@ namespace MultiTerminal.Services.Startup
         public const int DefaultTimeoutMs = 2000;
 
         /// <summary>
+        /// Hard cap on how many bytes of the probe response we read. A genuine health identity
+        /// is a few hundred bytes; a hostile process squatting on :5050 could stream a huge body
+        /// to exhaust memory during startup (the timeout bounds duration, not size). 64 KB is far
+        /// more than any identity payload and far too little to hurt.
+        /// </summary>
+        private const int MaxBodyBytes = 64 * 1024;
+
+        /// <summary>
         /// Probe the loopback health endpoint. Never throws: a timeout, connection reset,
         /// non-200, or non-MT body all resolve to a <see cref="HealthProbeResult"/> the
         /// classifier reads (unreached / not-MT → treated as unknown/foreign holder).
@@ -29,14 +38,22 @@ namespace MultiTerminal.Services.Startup
             try
             {
                 string url = $"http://127.0.0.1:{port}/api/health";
-                using var response = await client.GetAsync(url, cts.Token).ConfigureAwait(false);
+                // ResponseHeadersRead so we can inspect Content-Length and cap the body read
+                // BEFORE buffering a potentially hostile response (task 4fec40e2 security finding).
+                using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
                     // Something answered but not a healthy MT — reached, but not identified as MT.
                     return new HealthProbeResult { Reached = true, IsMultiTerminal = false };
                 }
 
-                string body = await response.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+                // Reject an oversized advertised body outright; otherwise read at most MaxBodyBytes.
+                if (response.Content.Headers.ContentLength is long len && len > MaxBodyBytes)
+                {
+                    return new HealthProbeResult { Reached = true, IsMultiTerminal = false };
+                }
+
+                string body = await ReadCappedAsync(response, cts.Token).ConfigureAwait(false);
                 return Parse(body);
             }
             catch (Exception)
@@ -52,6 +69,40 @@ namespace MultiTerminal.Services.Startup
         /// </summary>
         public static HealthProbeResult Probe(int port, int timeoutMs = DefaultTimeoutMs)
             => ProbeAsync(port, timeoutMs).GetAwaiter().GetResult();
+
+        /// <summary>
+        /// Read at most <see cref="MaxBodyBytes"/> from the response stream. A body that fills
+        /// the cap is simply truncated — Parse then fails to find a valid identity and reports
+        /// not-MT, which is the safe outcome for an oversized/hostile response.
+        /// </summary>
+        private static async Task<string> ReadCappedAsync(HttpResponseMessage response, CancellationToken ct)
+        {
+            using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            return await ReadCappedAsync(stream, MaxBodyBytes, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Read at most <paramref name="maxBytes"/> from <paramref name="stream"/>. Exposed
+        /// internally so the cap is unit-testable without a live socket. A stream longer than
+        /// the cap is truncated at the cap (Parse then reports not-MT — the safe outcome).
+        /// </summary>
+        internal static async Task<string> ReadCappedAsync(Stream stream, int maxBytes, CancellationToken ct = default)
+        {
+            var buffer = new byte[maxBytes];
+            int total = 0;
+            while (total < maxBytes)
+            {
+                int read = await stream.ReadAsync(buffer.AsMemory(total, maxBytes - total), ct).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                total += read;
+            }
+
+            return System.Text.Encoding.UTF8.GetString(buffer, 0, total);
+        }
 
         /// <summary>
         /// Parse a health body. A genuine MT host carries <see cref="HealthIdentity.ServiceMarker"/>

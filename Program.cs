@@ -66,7 +66,7 @@ namespace MultiTerminal
                 singleInstance.Dispose();
                 MessageBox.Show(
                     "MultiTerminal is already running in this session.\n\n" +
-                    "The existing window has been brought to the front.",
+                    "Switch to the existing window — this launch will now close.",
                     "MultiTerminal",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -147,10 +147,17 @@ namespace MultiTerminal
                 TryShowMainForm();
             };
 
-            Application.Run(mainForm);
-
-            // Release the single-instance slot on clean shutdown (task 4fec40e2).
-            singleInstance.Dispose();
+            try
+            {
+                Application.Run(mainForm);
+            }
+            finally
+            {
+                // Release the single-instance slot on shutdown even if the message loop threw
+                // (task 4fec40e2). The OS reclaims the named mutex on process exit regardless;
+                // the explicit release makes the intent clear.
+                singleInstance.Dispose();
+            }
         }
     }
 }

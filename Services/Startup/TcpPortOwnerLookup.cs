@@ -48,6 +48,7 @@ namespace MultiTerminal.Services.Startup
     {
         private const int AF_INET = 2;                 // IPv4 — Kestrel binds 127.0.0.1 (IPv4 loopback)
         private const int TCP_TABLE_OWNER_PID_ALL = 5; // TCP_TABLE_CLASS
+        private const uint ERROR_INSUFFICIENT_BUFFER = 122; // table grew between size probe and fetch
 
         /// <summary>
         /// Pure selection: from a set of decoded TCP rows, pick the PID that owns
@@ -122,41 +123,56 @@ namespace MultiTerminal.Services.Startup
         private static List<TcpTableRow> ReadIpv4TcpTable()
         {
             var result = new List<TcpTableRow>();
-            int bufferSize = 0;
 
-            // First call sizes the buffer.
-            _ = GetExtendedTcpTable(IntPtr.Zero, ref bufferSize, false, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-            if (bufferSize <= 0)
+            // The TCP table can grow between the size probe and the fetch, in which case the
+            // second call returns ERROR_INSUFFICIENT_BUFFER. Retry a few times, re-reading
+            // dwOutBufLen each attempt, so a busy machine doesn't silently degrade the holder
+            // to Unknown (task 4fec40e2 debugger finding).
+            for (int attempt = 0; attempt < 5; attempt++)
             {
-                return result;
-            }
+                int bufferSize = 0;
 
-            IntPtr tablePtr = Marshal.AllocHGlobal(bufferSize);
-            try
-            {
-                uint ret = GetExtendedTcpTable(tablePtr, ref bufferSize, false, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-                if (ret != 0)
+                // First call sizes the buffer.
+                _ = GetExtendedTcpTable(IntPtr.Zero, ref bufferSize, false, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+                if (bufferSize <= 0)
                 {
                     return result;
                 }
 
-                int numEntries = Marshal.ReadInt32(tablePtr);
-                IntPtr rowPtr = IntPtr.Add(tablePtr, 4); // skip dwNumEntries
-                int rowSize = Marshal.SizeOf<MIB_TCPROW_OWNER_PID>();
-
-                for (int i = 0; i < numEntries; i++)
+                IntPtr tablePtr = Marshal.AllocHGlobal(bufferSize);
+                try
                 {
-                    var row = Marshal.PtrToStructure<MIB_TCPROW_OWNER_PID>(rowPtr);
-                    result.Add(new TcpTableRow(
-                        (int)row.state,
-                        DecodePort(row.localPort),
-                        (int)row.owningPid));
-                    rowPtr = IntPtr.Add(rowPtr, rowSize);
+                    uint ret = GetExtendedTcpTable(tablePtr, ref bufferSize, false, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+                    if (ret == ERROR_INSUFFICIENT_BUFFER)
+                    {
+                        continue; // table grew — retry with a freshly-probed size
+                    }
+
+                    if (ret != 0)
+                    {
+                        return result;
+                    }
+
+                    int numEntries = Marshal.ReadInt32(tablePtr);
+                    IntPtr rowPtr = IntPtr.Add(tablePtr, 4); // skip dwNumEntries
+                    int rowSize = Marshal.SizeOf<MIB_TCPROW_OWNER_PID>();
+
+                    for (int i = 0; i < numEntries; i++)
+                    {
+                        var row = Marshal.PtrToStructure<MIB_TCPROW_OWNER_PID>(rowPtr);
+                        result.Add(new TcpTableRow(
+                            (int)row.state,
+                            DecodePort(row.localPort),
+                            (int)row.owningPid));
+                        rowPtr = IntPtr.Add(rowPtr, rowSize);
+                    }
+
+                    return result;
                 }
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(tablePtr);
+                finally
+                {
+                    Marshal.FreeHGlobal(tablePtr);
+                }
             }
 
             return result;

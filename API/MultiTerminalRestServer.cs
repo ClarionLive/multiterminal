@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
+using MultiTerminal.Services.Startup;
 
 namespace MultiTerminal.API
 {
@@ -35,6 +36,11 @@ namespace MultiTerminal.API
         private readonly MultiTerminal.Services.ProjectService _externalProjectService;
         private MultiTerminal.Services.Presence.PresenceAdapter _presenceAdapter;
         private bool _isDisposed;
+        // Guards the one-time subscription to the SHARED ProjectService.ProjectRegistered
+        // event. StartAsync can be re-invoked by the port-contention Retry loop (task
+        // 4fec40e2); without this, each retry would attach a duplicate handler to the shared
+        // ProjectService and they would all survive the eventual successful start.
+        private readonly OneTimeHook _projectRegisteredHook = new OneTimeHook();
 
         /// <summary>
         /// The message broker for routing messages between terminals.
@@ -295,7 +301,11 @@ namespace MultiTerminal.API
                     }
                 };
 
-                // Sync UI-created projects to MessageBroker/Database
+                // Sync UI-created projects to MessageBroker/Database.
+                // Routed through _projectRegisteredHook so a retried StartAsync (port-contention
+                // Retry loop, task 4fec40e2) cannot attach a duplicate handler to the SHARED
+                // ProjectService — the subscription fires once no matter how many attempts run.
+                _projectRegisteredHook.Run(() =>
                 projectService.ProjectRegistered += (sender, args) =>
                 {
                     try
@@ -326,7 +336,7 @@ namespace MultiTerminal.API
                     {
                         System.Diagnostics.Debug.WriteLine($"[ProjectSync] Failed to sync project: {ex.Message}");
                     }
-                };
+                });
 
                 // LEARNED message persistence now handled by knowledge_entries in multiterminal.db
 
@@ -407,6 +417,16 @@ namespace MultiTerminal.API
                 {
                     _isRunning = false;
                 }
+
+                // Unwind the pre-bind work so a retried StartAsync (port-contention Retry loop,
+                // task 4fec40e2) can't orphan an unstarted host, leave duplicate hourly timers
+                // running, or leak the DB-owning DI singletons the failed host built. The shared
+                // ProjectRegistered subscription is kept idempotent separately via
+                // _projectRegisteredHook, so it is intentionally NOT unwound here.
+                try { _staleTaskTimer?.Dispose(); _staleTaskTimer = null; } catch (Exception) { /* best-effort */ }
+                try { _staleAgentTimer?.Dispose(); _staleAgentTimer = null; } catch (Exception) { /* best-effort */ }
+                try { _host?.Dispose(); _host = null; } catch (Exception) { /* best-effort */ }
+
                 ServerError?.Invoke(this, ex);
                 throw;
             }
