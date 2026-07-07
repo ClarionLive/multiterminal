@@ -15,12 +15,11 @@ namespace MultiTerminal.MCPServer.Services
     /// <para>Owns the <c>_profiles</c> cache (single-owner-per-cache, per bb2b0104) and the profile write path
     /// (clone→mutate→persist→swap, from 1df2a534). The broker keeps its full public profile surface as
     /// one-line delegations to this service, and reaches back in as the service's <see cref="IProfileServiceHost"/>
-    /// (event raising + the IsTemporaryAgent naming utility). Because the terminal-registration region still
-    /// bootstraps profiles into the cache directly (auto-create on register, mark-offline on disconnect — a
-    /// pre-P5 bypass slated for e1643ccc), this service also exposes the NARROW cache primitives
-    /// (<see cref="TryGetProfile"/>, <see cref="ContainsProfile"/>, <see cref="TryAddProfile"/>) those
-    /// broker-side sites reach through, so <c>_profiles</c> stays single-owned without redesigning the
-    /// registration flow.</para>
+    /// (event raising + the IsTemporaryAgent naming utility). The terminal-registration region reaches the
+    /// cache through the read accessors (<see cref="TryGetProfile"/>, <see cref="ContainsProfile"/>) plus the
+    /// public write path (<see cref="InsertProfile"/> for auto-create, <see cref="MutateProfile"/> for
+    /// online/offline/team-lead field writes) — since e1643ccc converted registration onto the write path,
+    /// there is no cache-only add bypass, so a persist failure can never leave a profile in cache but not the DB.</para>
     /// </summary>
     internal sealed class ProfileService
     {
