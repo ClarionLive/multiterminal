@@ -39,25 +39,40 @@ namespace MultiTerminal.MCPServer.Services
     /// <para>Derivation is mtime-gated in-process (a static per-file cache keyed
     /// by path+mtime) so repeated calls re-parse only the JSONL files that
     /// actually changed — this class is instantiated ad-hoc per call, so the
-    /// cache is static to survive across those instances. No database dependency.</para>
+    /// cache is static to survive across those instances.</para>
+    ///
+    /// <para>Session METADATA is derived from the transcript, but the terminal
+    /// IDENTITY is resolved from the authoritative <c>session_agent_map</c> store via
+    /// an injected <c>Func&lt;sessionId,string&gt;</c> (a narrow resolver, not a raw
+    /// DB connection) — the transcript does not reliably carry the terminal's own
+    /// name. Transcript parsing (<see cref="ExtractIdentity"/>) is the fallback when
+    /// no resolver is wired or a session is unknown to it (task 4558fa6b).</para>
     /// </summary>
     public class SessionDiscovery
     {
         private readonly string _claudeProjectsPath;
         private readonly SessionSyncService _sync = new SessionSyncService();
 
-        // Pattern 1: Session received message FROM identity (e.g., "[Alice]: Hello")
-        // This means the session IS that identity
-        private static readonly Regex ReceivedMessagePattern = new Regex(
-            @"^\[(\w+)\]:",
-            RegexOptions.Compiled);
+        // Authoritative identity source: maps a session id to the terminal identity
+        // that owned it (register_session -> session_agent_map; see TaskDatabase.
+        // GetSessionAgentName). Injected as a narrow Func so the discovery layer
+        // stays testable and takes no raw DB connection. Null in contexts without
+        // the DB (tests, headless) — then identity falls back to transcript parsing.
+        private readonly Func<string, string> _identityResolver;
 
-        // Pattern 2: Explicit registration instruction
-        private static readonly Regex RegisterPattern = new Regex(
-            @"register\s+(?:as|with\s+name)\s+[""']?(\w+)",
-            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // NOTE (task 4558fa6b, security): identity ownership is NOT inferred from
+        // free-form transcript text. Two spoofable patterns were removed — a leading
+        // "[Alice]:" (means Alice SENT to this terminal, not that it IS Alice) and a
+        // free-form "register as X" (any transcript containing "please register as
+        // Alice" would self-attribute). Both let a foreign/unregistered/crafted
+        // transcript spoof a team identity in the dropdown. Ownership now comes from
+        // the authoritative session_agent_map resolver; the ONLY transcript signal
+        // still trusted is the system-generated SessionStart hook marker below.
 
-        // Pattern 3: System hook injection (if it appears in firstPrompt)
+        // The system-generated hook injection ("MULTITERMINAL: You are registered as
+        // X"). Unlike free-form prose this is emitted by MT's own SessionStart hook,
+        // so it's a trusted ownership marker (fallback for sessions the resolver
+        // doesn't know); genuinely-unknown sessions resolve to null (Unknown).
         private static readonly Regex SystemHookPattern = new Regex(
             @"MULTITERMINAL:\s*You\s+are\s+registered\s+as\s+(\w+)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -82,16 +97,18 @@ namespace MultiTerminal.MCPServer.Services
         private const long MaxJsonlBytes = 64L * 1024 * 1024; // 64 MB per transcript
         private const int MaxCacheEntries = 4000;
 
-        public SessionDiscovery()
+        public SessionDiscovery(Func<string, string> identityResolver = null)
         {
             // Default Claude projects path
             var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             _claudeProjectsPath = Path.Combine(userProfile, ".claude", "projects");
+            _identityResolver = identityResolver;
         }
 
-        public SessionDiscovery(string claudeProjectsPath)
+        public SessionDiscovery(string claudeProjectsPath, Func<string, string> identityResolver = null)
         {
             _claudeProjectsPath = claudeProjectsPath;
+            _identityResolver = identityResolver;
         }
 
         /// <summary>
@@ -110,29 +127,60 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Extract identity name from a firstPrompt using multiple pattern matching.
+        /// Extract the terminal's OWN identity from a firstPrompt using ONLY the
+        /// system-generated SessionStart hook marker ("MULTITERMINAL: You are
+        /// registered as X"). Free-form transcript patterns are deliberately NOT used
+        /// for ownership — neither the received-message "[Alice]:" (Alice sent here ≠
+        /// is Alice) nor a free-form "register as X" (spoofable by incidental prose) —
+        /// because a foreign/crafted transcript could otherwise impersonate a team
+        /// identity (task 4558fa6b, security). Returns null when the trusted marker is
+        /// absent; callers MUST treat null as "unknown" (the authoritative owner comes
+        /// from session_agent_map, not the transcript).
         /// </summary>
         public static string ExtractIdentity(string firstPrompt)
         {
             if (string.IsNullOrEmpty(firstPrompt))
                 return null;
 
-            // Priority 1: System hook pattern (most explicit)
+            // The only trusted transcript signal: MT's own SessionStart hook injection.
             var hookMatch = SystemHookPattern.Match(firstPrompt);
             if (hookMatch.Success)
                 return hookMatch.Groups[1].Value;
 
-            // Priority 2: Received message pattern (very reliable for MT sessions)
-            var messageMatch = ReceivedMessagePattern.Match(firstPrompt);
-            if (messageMatch.Success)
-                return messageMatch.Groups[1].Value;
-
-            // Priority 3: Explicit registration instruction
-            var registerMatch = RegisterPattern.Match(firstPrompt);
-            if (registerMatch.Success)
-                return registerMatch.Groups[1].Value;
-
             return null;
+        }
+
+        /// <summary>
+        /// Resolve the terminal identity that owned a session. The AUTHORITATIVE
+        /// source is <c>session_agent_map</c> (via the injected resolver, keyed by
+        /// session id) — MT records the identity at register_session time, whereas
+        /// the transcript does NOT reliably contain the terminal's own name (the
+        /// SessionStart-hook block is the literal <c>MULTITERMINAL_NAME=&lt;name&gt;</c>
+        /// placeholder, and a leading "[Alice]:" means Alice SENT to this terminal,
+        /// not that the terminal IS Alice). Transcript parsing
+        /// (<see cref="ExtractIdentity"/>) is therefore only a fallback for sessions
+        /// the resolver doesn't know (foreign/unregistered), or when no resolver is
+        /// wired (tests/headless).
+        /// </summary>
+        private string ResolveIdentity(SessionEntry entry)
+        {
+            if (_identityResolver != null && !string.IsNullOrEmpty(entry.SessionId))
+            {
+                try
+                {
+                    var resolved = _identityResolver(entry.SessionId);
+                    if (!string.IsNullOrWhiteSpace(resolved))
+                        return resolved;
+                }
+                catch (Exception ex)
+                {
+                    // A resolver failure (e.g. transient DB unavailability) must degrade
+                    // THIS session to transcript fallback — never abort the whole
+                    // discovery pass and blank every identity.
+                    Debug.WriteLine($"[SessionDiscovery] identity resolver threw for {entry.SessionId}: {ex.Message}");
+                }
+            }
+            return ExtractIdentity(entry.FirstPrompt);
         }
 
         /// <summary>
@@ -145,7 +193,7 @@ namespace MultiTerminal.MCPServer.Services
 
             foreach (var entry in GetProjectSessionEntries(projectPath))
             {
-                var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                var extractedIdentity = ResolveIdentity(entry);
                 if (extractedIdentity != null &&
                     extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                 {
@@ -175,7 +223,7 @@ namespace MultiTerminal.MCPServer.Services
         public List<DiscoveredSession> DiscoverAllSessionsInProject(string projectPath)
         {
             return GetProjectSessionEntries(projectPath)
-                .Select(e => ToDiscoveredSession(e, ExtractIdentity(e.FirstPrompt), projectPath))
+                .Select(e => ToDiscoveredSession(e, ResolveIdentity(e), projectPath))
                 .OrderByDescending(s => s.Modified)
                 .ToList();
         }
@@ -194,7 +242,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 foreach (var entry in GetEntriesForFolder(projectFolder, null))
                 {
-                    var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                    var extractedIdentity = ResolveIdentity(entry);
                     if (extractedIdentity != null &&
                         extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -217,22 +265,21 @@ namespace MultiTerminal.MCPServer.Services
             var entries = GetProjectSessionEntries(projectPath);
             foreach (var entry in entries.OrderByDescending(e => ParseDateTime(e.Modified)))
             {
-                var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                var extractedIdentity = ResolveIdentity(entry);
                 if (extractedIdentity != null && !identities.ContainsKey(extractedIdentity))
                 {
                     identities[extractedIdentity] = ToDiscoveredSession(entry, extractedIdentity, projectPath);
                 }
             }
 
-            // Observable signal (adversary Run-1 MEDIUM): the SOURCE is fresh but
-            // identity EXTRACTION can still yield nothing when the identity marker
-            // lives outside the first user prompt on current transcripts. Make that
-            // "fresh sessions but zero identities" state loud instead of silent so
-            // it isn't mistaken for "no sessions." Extraction fix: follow-up 4558fa6b.
+            // Observable signal: make "fresh sessions but zero identities" loud so it
+            // isn't mistaken for "no sessions." With the resolver wired this should be
+            // rare — it means none of the sessions had a session_agent_map owner AND
+            // none carried an ownership-safe transcript marker.
             if (identities.Count == 0 && entries.Count > 0)
             {
                 Debug.WriteLine(
-                    $"[SessionDiscovery] {entries.Count} sessions derived but 0 identities extracted for '{projectPath}' — identity markers are outside the first user prompt on current transcripts (extraction tracked in follow-up 4558fa6b).");
+                    $"[SessionDiscovery] {entries.Count} sessions in '{projectPath}' but 0 identities resolved — no session_agent_map owner (resolver) and no ownership-safe transcript marker.");
             }
 
             return identities;
