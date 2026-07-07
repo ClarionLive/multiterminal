@@ -68,10 +68,10 @@ namespace MultiTerminal.API
         }
 
         /// <summary>
-        /// True when the request is a state-changing method issued by a cross-site / same-site browser
-        /// context (or carrying a non-trusted Origin). A caller sending neither <c>Sec-Fetch-Site</c>
-        /// nor <c>Origin</c> — every non-browser client — returns false (allowed). Safe methods
-        /// (GET/HEAD/OPTIONS) are never guarded here (reads are CORS's job; OPTIONS is preflight).
+        /// True when the request is a state-changing method issued by an untrusted browser context.
+        /// A caller sending neither <c>Origin</c> nor a cross-site/same-site <c>Sec-Fetch-Site</c> —
+        /// every non-browser client — returns false (allowed). Safe methods (GET/HEAD/OPTIONS) are
+        /// never guarded here (reads are CORS's job; OPTIONS is preflight).
         /// </summary>
         internal static bool IsCrossSiteBrowserWrite(HttpRequest request)
         {
@@ -81,22 +81,23 @@ namespace MultiTerminal.API
             if (!IsUnsafeMethod(request.Method))
                 return false;
 
-            // Sec-Fetch-Site is set by all modern browsers. "cross-site" / "same-site" means a
-            // different-origin browsing context issued this write — refuse. "same-origin" / "none"
-            // (address-bar navigation) are the host's own UI — allow. A missing header is a
-            // non-browser caller — allow.
+            // Trust-first, mirroring the CORS read allowlist: an Origin from a trusted origin (the
+            // panel virtual host) may write. Checking trust BEFORE Sec-Fetch-Site matters because the
+            // panel is served cross-site to :5050 (its writes would carry Sec-Fetch-Site: cross-site),
+            // so a Sec-Fetch-Site-first check would wrongly reject a trusted write. (No panel writes
+            // today — the panel only GETs — but this keeps the read and write allowlists consistent.)
+            string origin = request.Headers["Origin"];
+            if (!string.IsNullOrEmpty(origin))
+                return !RestCorsOriginPolicy.IsTrustedBrowserOrigin(origin);
+
+            // No Origin header. Fall back to Fetch Metadata: "cross-site" / "same-site" means a
+            // different-origin browsing context issued this write (the CSRF form-POST path some
+            // browsers send without an Origin) — refuse. "same-origin" / "none" (address bar) and a
+            // missing header are non-browser or same-origin callers — allow.
             string fetchSite = request.Headers["Sec-Fetch-Site"];
             if (!string.IsNullOrEmpty(fetchSite) &&
                 (fetchSite.Equals("cross-site", StringComparison.OrdinalIgnoreCase) ||
                  fetchSite.Equals("same-site", StringComparison.OrdinalIgnoreCase)))
-                return true;
-
-            // Fallback for the rare browser path that omits Sec-Fetch-Site but still sends Origin
-            // (older engines, some form submissions): an Origin that is not a trusted origin
-            // (loopback or the panel virtual host) is a cross-origin browser write. A missing Origin
-            // is a non-browser caller (allowed).
-            string origin = request.Headers["Origin"];
-            if (!string.IsNullOrEmpty(origin) && !RestCorsOriginPolicy.IsTrustedBrowserOrigin(origin))
                 return true;
 
             return false;
