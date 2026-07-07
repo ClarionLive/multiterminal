@@ -3873,7 +3873,7 @@ namespace MultiTerminal.MCPServer.Services
         /// appended item is rebuilt from a whitelist (a non-empty "item" description plus a validated
         /// initial status); caller-supplied Done/Notes/AssignedTo/CycleCount/SortOrder are ignored so
         /// append can't forge audit history or bypass the transition state machine. The
-        /// read-modify-write is serialized under <see cref="_checklistMutationLock"/> (shared with the
+        /// read-modify-write is serialized under TaskService's checklist mutation lock (shared with the
         /// other checklist mutators) so it won't clobber a concurrent append/transition/assign, and it
         /// fails closed if persistence throws.
         /// </summary>

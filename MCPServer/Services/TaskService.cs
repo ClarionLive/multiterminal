@@ -115,7 +115,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] SaveTaskReport failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] SaveTaskReport failed: {ex.Message}");
                 return null;
             }
         }
@@ -500,7 +500,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Complexity analysis failed: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[TaskService] Complexity analysis failed: {ex.Message}");
                 }
             }
 
@@ -570,7 +570,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to auto-generate summary: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to auto-generate summary: {ex.Message}");
                 }
             }
 
@@ -608,7 +608,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to auto-generate summary for paused task: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to auto-generate summary for paused task: {ex.Message}");
                 }
             }
 
@@ -664,7 +664,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to auto-generate summary: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to auto-generate summary: {ex.Message}");
                 }
             }
 
@@ -786,7 +786,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to auto-generate summary: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to auto-generate summary: {ex.Message}");
                 }
             }
 
@@ -893,7 +893,7 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         shouldPrune = true;
                         System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Auto-commit for {taskId}: " +
+                            $"[TaskService] Auto-commit for {taskId}: " +
                             (commitResult.SkippedReason ?? $"committed {commitResult.CommitHash}"));
 
                         if (!string.IsNullOrEmpty(commitResult.SkippedReason))
@@ -929,7 +929,7 @@ namespace MultiTerminal.MCPServer.Services
                     else
                     {
                         System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Auto-commit for {taskId} FAILED: {commitResult.Stderr}");
+                            $"[TaskService] Auto-commit for {taskId} FAILED: {commitResult.Stderr}");
                         _host.RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
@@ -943,7 +943,7 @@ namespace MultiTerminal.MCPServer.Services
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Auto-commit threw for task {taskId}: {ex.Message}");
+                        $"[TaskService] Auto-commit threw for task {taskId}: {ex.Message}");
                     // Activity feed is broadcast to HUD/board/MCP clients; raw
                     // exception text often leaks absolute paths, branch names,
                     // or git command details. Keep the full message in
@@ -974,7 +974,7 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] CommitAndIntegrateHelpers threw for {taskId}: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[TaskService] CommitAndIntegrateHelpers threw for {taskId}: {ex.Message}");
                         proceedTeardown = false;
                     }
                     if (!proceedTeardown)
@@ -1028,7 +1028,7 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Enumerate prune paths for {taskId} failed: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[TaskService] Enumerate prune paths for {taskId} failed: {ex.Message}");
                     }
                     // Always include the canonical path (covers single-agent + the
                     // enumerate-failed fallback).
@@ -1059,7 +1059,7 @@ namespace MultiTerminal.MCPServer.Services
                     if (deferred)
                     {
                         System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Prune deferred for task {taskId} (broadcast timeout); janitor will retry.");
+                            $"[TaskService] Prune deferred for task {taskId} (broadcast timeout); janitor will retry.");
                         _host.RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
@@ -1083,7 +1083,7 @@ namespace MultiTerminal.MCPServer.Services
                         catch (Exception ex)
                         {
                             System.Diagnostics.Debug.WriteLine(
-                                $"[MessageBroker] Worktree prune failed for task {taskId}: {ex.Message}");
+                                $"[TaskService] Worktree prune failed for task {taskId}: {ex.Message}");
                             _host.RecordActivity(new ActivityEvent
                             {
                                 Terminal = task.Assignee ?? "System",
@@ -1136,7 +1136,7 @@ namespace MultiTerminal.MCPServer.Services
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Delete helper branch '{helperBranch}' failed for {taskId}: {ex.Message}");
+                            System.Diagnostics.Debug.WriteLine($"[TaskService] Delete helper branch '{helperBranch}' failed for {taskId}: {ex.Message}");
                         }
                     }
 
@@ -1175,16 +1175,16 @@ namespace MultiTerminal.MCPServer.Services
                     if (_host.TryGetProject(task.ProjectId, out var project) && !string.IsNullOrEmpty(project.Path))
                     {
                         _host.ChangelogService.AddChangelogEntry(task, project.Path);
-                        _host.LogTrace($"[MessageBroker] Generated changelog entry for task {taskId} in project {project.Name}");
+                        _host.LogTrace($"[TaskService] Generated changelog entry for task {taskId} in project {project.Name}");
                     }
                     else
                     {
-                        _host.LogTrace($"[MessageBroker] Skipping changelog: Project {task.ProjectId} has no path set");
+                        _host.LogTrace($"[TaskService] Skipping changelog: Project {task.ProjectId} has no path set");
                     }
                 }
                 catch (Exception ex)
                 {
-                    _host.LogTrace($"[MessageBroker] Failed to add changelog entry: {ex.Message}");
+                    _host.LogTrace($"[TaskService] Failed to add changelog entry: {ex.Message}");
                 }
             }
 
@@ -1896,7 +1896,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to create inbox notification: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to create inbox notification: {ex.Message}");
             }
 
             return new UpdateChecklistItemResult
@@ -2166,7 +2166,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-add helper '{actingAgent}' on task {taskId} failed: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[TaskService] Auto-add helper '{actingAgent}' on task {taskId} failed: {ex.Message}");
                 }
             }
 
@@ -2208,7 +2208,7 @@ namespace MultiTerminal.MCPServer.Services
                         // Persistence failed — the cache is left on the old id (coherent with the DB row),
                         // and we skip worktree creation under a binding the task row doesn't claim.
                         canCreateWorktree = false;
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist normalized ProjectId for task {taskId}: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to persist normalized ProjectId for task {taskId}: {ex.Message}");
                         _host.RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
@@ -2239,7 +2239,7 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Worktree create failed for task {taskId}: {ex.Message}");
+                        System.Diagnostics.Debug.WriteLine($"[TaskService] Worktree create failed for task {taskId}: {ex.Message}");
                         _host.RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
@@ -2306,7 +2306,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] TaskActiveChanged subscribers threw: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] TaskActiveChanged subscribers threw: {ex.Message}");
             }
 
             return new SetTaskActiveResult
@@ -2405,7 +2405,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] AddRelationship failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] AddRelationship failed: {ex.Message}");
                 return new AddRelationshipResult { Success = false, Error = ex.Message };
             }
         }
@@ -2423,7 +2423,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] RemoveRelationship failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] RemoveRelationship failed: {ex.Message}");
                 return new RemoveRelationshipResult { Success = false, Error = ex.Message };
             }
         }
@@ -2443,7 +2443,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetRelationships failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] GetRelationships failed: {ex.Message}");
                 return new GetRelationshipsResult { Success = false, Error = ex.Message };
             }
         }
@@ -2511,7 +2511,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] LinkFile failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] LinkFile failed: {ex.Message}");
                 return new LinkFileResult { Success = false, Error = ex.Message };
             }
         }
@@ -2529,7 +2529,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] UnlinkFile failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] UnlinkFile failed: {ex.Message}");
                 return new UnlinkFileResult { Success = false, Error = ex.Message };
             }
         }
@@ -2547,7 +2547,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetTaskFiles failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] GetTaskFiles failed: {ex.Message}");
                 return new GetTaskFilesResult { Success = false, Error = ex.Message };
             }
         }
@@ -2571,7 +2571,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetItemsLinkedToFile failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] GetItemsLinkedToFile failed: {ex.Message}");
                 return null;
             }
         }
@@ -3042,7 +3042,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to create helper_request inbox notification: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TaskService] Failed to create helper_request inbox notification: {ex.Message}");
             }
 
             return new RequestHelpResult { Success = true, Message = $"Help request sent to {helperName}" };
