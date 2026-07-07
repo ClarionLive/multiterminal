@@ -22,6 +22,24 @@ bodies, do not redesign. The broker keeps its full public surface, so callers ne
 6. **Shared state that other regions still read** (e.g. `_tasks` read by the project/attachment regions):
    expose read accessors on the service and rewire those broker-side readers to `_service.GetX(...)`.
 
+## Inventory gotchas (learned from the TaskService extraction)
+
+- **Grep for BOTH `_underscore` fields AND public-property collaborators.** A field-access grep
+  (`\b_[a-z]\w*`) finds `_tasks`/`_worktrees` but MISSES DI-set collaborators exposed as PascalCase
+  auto-properties (`public ActivityService ActivityService { get; set; }`, `SummaryService`,
+  `ComplexityDetector`, `ChangelogService`, `DefaultInboxRecipient`). The task region called five of
+  these with no underscore; they're outbound coupling too and belong on the host interface. Grep the
+  region for `[A-Z]\w+\.` bare-call/property access as well, and cross-check against the broker's
+  `public X Prop { get` declarations.
+- **The compiler is your final inventory.** No static pass is guaranteed complete — do the relocation,
+  build, and let each unresolved reference tell you what it is: (a) a host-interface member, (b) state
+  that moves too, or (c) a using. The TaskService move built with 23 errors, all one coherent class
+  (the missed PascalCase collaborators), and driving them to zero WAS the completeness proof. Trust the
+  build-error list over any hand-enumeration.
+- **Also grep the region's own privates for external callers.** A helper that lives in the region but
+  is called from OTHER regions (e.g. `IsTemporaryAgent`, `BroadcastTaskUpdate`) either stays broker-side
+  and is host-exposed, or moves and is made `public` so the outside callers reach it via `_service.`.
+
 ## What stays on the broker
 
 Anything owned by a DIFFERENT region: its cache (e.g. `_projects` — one owner per cache, per bb2b0104),
