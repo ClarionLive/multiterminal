@@ -108,14 +108,21 @@ function* walk(dir) {
     else if (e.endsWith('.cs') && !p.includes(`${sep}MultiTerminal.Tests${sep}`)) yield p;
   }
 }
-function codeLevelCount(file) {
+// Count code-level calls in a source text. Strips block comments FIRST (so a same-line
+// `/* note */ Debug.WriteLine(...)` in a converted file can't evade the census by starting with `/*`),
+// then strips line comments per line (so a trailing `// mentions Debug.WriteLine(x)` isn't miscounted).
+// Pure + exported-by-reference so the self-test can prove these evasions are closed.
+function countCallsInText(text) {
+  const noBlock = text.replace(/\/\*[\s\S]*?\*\//g, ' '); // remove /* ... */ (multi-line)
   let count = 0;
-  for (const raw of readFileSync(file, 'utf8').split('\n')) {
-    const t = raw.trim();
-    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue; // comment line
-    if (CALL.test(raw)) count++;
+  for (const raw of noBlock.split('\n')) {
+    const noLine = raw.replace(/\/\/.*$/, ''); // remove // line comment
+    if (CALL.test(noLine)) count++;
   }
   return count;
+}
+function codeLevelCount(file) {
+  return countCallsInText(readFileSync(file, 'utf8'));
 }
 const rel = (p) => p.slice(ROOT.length + 1).split(sep).join('/');
 const inDeferredDir = (r) => DEFERRED_DIRS.some((d) => r.startsWith(d));
@@ -151,7 +158,25 @@ if (process.argv.includes('--self-test')) {
     if (!ok) bad++;
     console.log(`${ok ? 'ok  ' : 'FAIL'} — ${c.why} (wantFail=${c.wantFail}, got=${got})`);
   }
-  console.log(bad ? `\nSELF-TEST FAILED (${bad})` : `\nSELF-TEST PASSED (${cases.length}/${cases.length})`);
+
+  // countCallsInText: prove the comment-evasion holes are closed (a census that a hidden call can
+  // slip past is a census that lies — the same bar we hold external scanners to).
+  const countCases = [
+    { t: 'Debug.WriteLine("ok");', want: 1, why: 'a plain call counts' },
+    { t: '/* note */ Debug.WriteLine("x");', want: 1, why: 'a same-line leading block comment cannot hide a real call' },
+    { t: 'foo(); // restored Debug.WriteLine(x)', want: 0, why: 'a trailing line-comment mention is not miscounted' },
+    { t: '/* Debug.WriteLine(inside) */', want: 0, why: 'a call token inside a block comment is not counted' },
+    { t: 'a();\n/* multi\nTrace.WriteLine(x)\nline */\nb();', want: 0, why: 'a call inside a multi-line block comment is not counted' },
+  ];
+  for (const c of countCases) {
+    const got = countCallsInText(c.t);
+    const ok = got === c.want;
+    if (!ok) bad++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'} — ${c.why} (want=${c.want}, got=${got})`);
+  }
+
+  const total = cases.length + countCases.length;
+  console.log(bad ? `\nSELF-TEST FAILED (${bad})` : `\nSELF-TEST PASSED (${total}/${total})`);
   process.exit(bad ? 1 : 0);
 }
 

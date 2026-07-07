@@ -90,15 +90,18 @@ namespace MultiTerminal.Services
         public DebugLogService DebugLogService { get; set; }
 
         private void Log(string msg)
-        {            DebugLogService?.Trace("TeamWatcher", msg);
+        {
+            DebugLogService?.Trace("TeamWatcher", msg);
         }
 
         private void LogInfo(string msg)
-        {            DebugLogService?.Info("TeamWatcher", msg);
+        {
+            DebugLogService?.Info("TeamWatcher", msg);
         }
 
         private void LogError(string msg)
-        {            DebugLogService?.Error("TeamWatcher", msg);
+        {
+            DebugLogService?.Error("TeamWatcher", msg);
         }
 
         public TeamWatcherService(string projectSlug)

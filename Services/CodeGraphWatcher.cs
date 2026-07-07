@@ -122,15 +122,18 @@ namespace MultiTerminal.Services
         // ─── Logging (mirrors TeamWatcherService:92-108) ─────────────────────
 
         private void Log(string msg)
-        {            DebugLogService?.Trace("CodeGraphWatcher", msg);
+        {
+            DebugLogService?.Trace("CodeGraphWatcher", msg);
         }
 
         private void LogInfo(string msg)
-        {            DebugLogService?.Info("CodeGraphWatcher", msg);
+        {
+            DebugLogService?.Info("CodeGraphWatcher", msg);
         }
 
         private void LogError(string msg)
-        {            DebugLogService?.Error("CodeGraphWatcher", msg);
+        {
+            DebugLogService?.Error("CodeGraphWatcher", msg);
         }
 
         // ─── Lifecycle ───────────────────────────────────────────────────────

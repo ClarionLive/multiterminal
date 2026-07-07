@@ -824,7 +824,7 @@ namespace MultiTerminal.MCPServer.Services
                     string offending = integ.ConflictBranches != null && integ.ConflictBranches.Count > 0
                         ? string.Join(", ", integ.ConflictBranches)
                         : "(see debug log)";
-                    DebugLogService?.Info("MessageBroker", $"Helper integration halted for {taskId}: {integ.Stderr}");
+                    DebugLogService?.Warning("MessageBroker", $"Helper integration halted for {taskId}: {integ.Stderr}");
                     RecordActivity(new ActivityEvent
                     {
                         Terminal = task.Assignee ?? "System",
@@ -1166,7 +1166,7 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         string sample = string.Join(", ", attributableDirty.Take(5))
                                         + (attributableDirty.Count > 5 ? ", ..." : "");
-                        DebugLogService?.Info("MessageBroker", $"Worktree backfill blocked for task {activeTask.Id}: {attributableDirty.Count} linked file(s) dirty at repo root ({sample}).");
+                        DebugLogService?.Warning("MessageBroker", $"Worktree backfill blocked for task {activeTask.Id}: {attributableDirty.Count} linked file(s) dirty at repo root ({sample}).");
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = activeTask.Assignee ?? agentName ?? "System",
@@ -1373,12 +1373,13 @@ namespace MultiTerminal.MCPServer.Services
 
         public MessageBroker()
         {
-            DebugLogService?.Trace("MessageBroker", "Constructor START");
+            // NOTE: DebugLogService is a DI-set property wired post-construction (MainForm ~499), so it
+            // is null throughout this ctor. The pre-sweep Trace.WriteLine "Constructor START / creating
+            // TaskDatabase" breadcrumbs here would now be permanent no-ops — dropped rather than left as
+            // dead code that reads like it logs. A hard TaskDatabase failure still surfaces (re-thrown).
             try
             {
-                DebugLogService?.Trace("MessageBroker", "About to create TaskDatabase");
                 _taskDb = new TaskDatabase();
-                DebugLogService?.Trace("MessageBroker", "TaskDatabase created");
             }
             catch (Exception ex)
             {

@@ -32,14 +32,24 @@ namespace MultiTerminal.Services
         private readonly object _fileLock = new object();
         private StreamWriter _logWriter;
 
-        // Background file-writer pipeline. _writeQueue is unbounded (Add never blocks the caller);
-        // the writer keeps up because draining is O(batch) with a single flush. Only populated when
-        // file logging actually initialized (_fileLoggingEnabled) so a failed log-file open doesn't
-        // grow the queue without bound.
+        // Background file-writer pipeline. _writeQueue is BOUNDED (capacity WriteQueueCapacity) so a
+        // log storm or a stalled disk can't grow it without bound and exhaust process memory — the old
+        // synchronous write imposed natural backpressure; the buffered writer must impose an explicit
+        // one. Callers use TryAdd (never Add) so they still NEVER block: when the queue is full the
+        // entry is DROPPED and counted. Only populated when file logging actually initialized
+        // (_fileLoggingEnabled) so a failed log-file open doesn't allocate a queue at all.
         private readonly BlockingCollection<DebugLogEntry> _writeQueue;
         private readonly Thread _writerThread;
         private readonly bool _fileLoggingEnabled;
         private const int WriterFlushIntervalMs = 1000;
+        private const int WriteQueueCapacity = 50000;
+
+        // Overload telemetry: entries dropped because _writeQueue was full. A silent drop is a log that
+        // lies (a storm becomes invisible in exactly the log you'd check), so the writer periodically
+        // emits a "N log entries dropped under load" line of its own. _droppedTotal is the running total;
+        // _droppedReported is what the writer has already announced.
+        private long _droppedTotal;
+        private long _droppedReported;
 
         /// <summary>
         /// Raised when a new log message is added (on UI thread-safe context).
@@ -67,15 +77,23 @@ namespace MultiTerminal.Services
         /// the c425e3a2 sweep's "downgrade hot-path noise to Trace" actually reduce Release volume.
         /// Defaults to Trace in Debug builds (everything visible) and Info in Release (Trace skipped).
         /// Settable at runtime so diagnostics can lower the floor in a Release session on demand.
+        /// Backed by a volatile field: it's read on every Log() call from many threads (broker,
+        /// watchers, timers) and written from a UI/diagnostic thread; volatile makes the cross-thread
+        /// visibility of a floor change explicit (a stale read is benign — enum reads are atomic).
         /// This does not regress any user-visible baseline: pre-sweep, Debug.WriteLine compiled out
         /// of Release entirely and Trace.WriteLine fired only to (empty) trace listeners, so there is
         /// no existing visible Trace output for the Info floor to hide.
         /// </summary>
 #if DEBUG
-        public DebugLogLevel MinimumLevel { get; set; } = DebugLogLevel.Trace;
+        private volatile DebugLogLevel _minimumLevel = DebugLogLevel.Trace;
 #else
-        public DebugLogLevel MinimumLevel { get; set; } = DebugLogLevel.Info;
+        private volatile DebugLogLevel _minimumLevel = DebugLogLevel.Info;
 #endif
+        public DebugLogLevel MinimumLevel
+        {
+            get => _minimumLevel;
+            set => _minimumLevel = value;
+        }
 
         /// <summary>
         /// The full path to the current session's log file.
@@ -121,7 +139,7 @@ namespace MultiTerminal.Services
             _fileLoggingEnabled = _logWriter != null;
             if (_fileLoggingEnabled)
             {
-                _writeQueue = new BlockingCollection<DebugLogEntry>(new ConcurrentQueue<DebugLogEntry>());
+                _writeQueue = new BlockingCollection<DebugLogEntry>(new ConcurrentQueue<DebugLogEntry>(), WriteQueueCapacity);
                 _writerThread = new Thread(WriterLoop)
                 {
                     IsBackground = true,
@@ -348,8 +366,14 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Hand a log entry to the background writer. Non-blocking: the caller never touches the
-        /// file. Silently drops if file logging is disabled or the queue is completed (dispose).
+        /// Hand a log entry to the background writer. Non-blocking by construction: TryAdd never
+        /// blocks (returns false immediately when the bounded queue is full) so a hot-path caller is
+        /// never stalled by a slow disk — the entry is dropped and counted instead, and the writer
+        /// later announces the drop count. Also safe after shutdown: TryAdd throws
+        /// InvalidOperationException after CompleteAdding and ObjectDisposedException after
+        /// Dispose — and ObjectDisposedException DERIVES FROM InvalidOperationException, so the single
+        /// catch below swallows BOTH shutdown races (a late log call can't escape an exception to its
+        /// caller). This is why there is no separate _isDisposed guard on the log path.
         /// </summary>
         private void EnqueueWrite(DebugLogEntry entry)
         {
@@ -357,11 +381,17 @@ namespace MultiTerminal.Services
 
             try
             {
-                _writeQueue.Add(entry);
+                if (!_writeQueue.TryAdd(entry))
+                {
+                    // Queue full (log storm / stalled writer): drop, don't block the caller. Counted;
+                    // the writer emits a periodic "N dropped under load" line so the loss is visible.
+                    System.Threading.Interlocked.Increment(ref _droppedTotal);
+                }
             }
             catch (InvalidOperationException)
             {
-                // Add-after-CompleteAdding during shutdown — safe to drop (writer is stopping).
+                // Add-after-CompleteAdding (InvalidOperationException) or add-after-Dispose
+                // (ObjectDisposedException, which derives from it) during shutdown — safe to drop.
             }
         }
 
@@ -387,6 +417,17 @@ namespace MultiTerminal.Services
                             while (_writeQueue.TryTake(out var more))
                             {
                                 _logWriter.WriteLine(more.ToFullString());
+                            }
+                            // If entries were dropped under load since the last announcement, record
+                            // the count here (written directly, not re-enqueued — a re-enqueue could
+                            // itself be dropped, and we already hold the writer lock).
+                            long dropped = System.Threading.Interlocked.Read(ref _droppedTotal);
+                            if (dropped > _droppedReported)
+                            {
+                                _logWriter.WriteLine(new DebugLogEntry(
+                                    "DebugLogService", DebugLogLevel.Warning,
+                                    $"{dropped - _droppedReported} log entr(y/ies) dropped under load (write queue full, cap {WriteQueueCapacity}); {dropped} total dropped this session").ToFullString());
+                                _droppedReported = dropped;
                             }
                             _logWriter.Flush();
                         }
