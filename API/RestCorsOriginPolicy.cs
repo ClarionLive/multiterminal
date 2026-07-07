@@ -4,55 +4,63 @@ using System.Net;
 namespace MultiTerminal.API
 {
     /// <summary>
-    /// CORS origin allowlists for the :5050 REST surface (Eval P2 item 3, task c522764d).
-    /// Replaces the previous <c>AllowAnyOrigin()</c> policy with a two-tier scheme:
+    /// CORS origin allowlist for the :5050 REST surface. Originally introduced in Eval P2
+    /// (task c522764d) as a two-tier scheme with a null-tolerant carve-out; tightened to a
+    /// single strict allowlist in Eval P2c (task f9697aac) once the one browser fetch caller
+    /// (tasks-panel.html) was migrated off <c>file://</c> onto a real virtual-host origin.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Default policy</b> (all controllers) — <see cref="IsLoopbackOrigin"/>: loopback origins only
-    /// (localhost / 127.0.0.1 / [::1], any scheme or port). The literal "null" origin is NOT allowed.
-    /// This blocks the drive-by remote-web-page CSRF/exfil READ threat that <c>AllowAnyOrigin</c> left
-    /// open (e.g. https://evil.example, and — critically — a hostile sandboxed iframe whose opaque
-    /// origin serializes to "null").
+    /// <b>Single default policy</b> (all controllers) — <see cref="IsTrustedBrowserOrigin"/>: loopback
+    /// origins (localhost / 127.0.0.1 / [::1], any scheme or port) PLUS the panel virtual-host origin
+    /// <see cref="PanelHosting.Origin"/>. Every other origin — including the literal "null" that
+    /// <c>file://</c> and sandboxed (opaque-origin) iframes send — is rejected. This is the READ
+    /// boundary: a disallowed origin receives no <c>Access-Control-Allow-Origin</c> header, so the
+    /// browser refuses to expose any response body (including token-returning GETs) to the calling
+    /// page's JavaScript.
     /// </para>
     /// <para>
-    /// <b>Scoped null-tolerant policy</b> (<see cref="FilePanelPolicyName"/>, applied via
-    /// <c>[EnableCors]</c> to <c>TaskReportsController</c> only) — <see cref="IsAllowedOrigin"/>:
-    /// loopback origins PLUS the literal "null" origin. This exists solely because the one WebView2
-    /// panel that fetch()es :5050 — <c>TasksPanel/tasks-panel.html</c> — is loaded via file:// so its
-    /// fetch Origin serializes to "null", and the endpoints it hits live on TaskReportsController
-    /// (GET /api/tasks/{id}/reports[/{reportId}]). No WebView2 virtual-host origins exist today
-    /// (no SetVirtualHostNameToFolderMapping anywhere), so a strict hostname allowlist would break
-    /// that panel. Scoping "null" to this ONE controller (per PM ruling A on c522764d) shrinks the
-    /// interim null-origin read-window from the whole ~20-endpoint API down to the reports controller.
+    /// The previous scoped null-tolerant policy (<c>FilePanelNullTolerant</c>) and its
+    /// <c>IsAllowedOrigin</c> predicate were removed in f9697aac: the sole reason "null" was tolerated
+    /// was the <c>file://</c> tasks-panel, which now loads from <see cref="PanelHosting.Origin"/> and so
+    /// sends a real, allowlisted Origin on its report fetches. Tolerating "null" was a residual read
+    /// exposure (reachable by any local <c>file://</c> page or an <c>allow-scripts</c> sandboxed iframe),
+    /// and it is now closed.
     /// </para>
     /// <para>
-    /// A hostile page CAN reach a null-origin fetch via a sandboxed iframe, so even this scoped
-    /// tolerance is a residual read exposure on TaskReportsController until ticket f9697aac lands:
-    /// f9697aac migrates tasks-panel.html to a real virtual-host origin, drops "null" entirely, adds a
-    /// global Sec-Fetch-Site write-guard, and retires the <see cref="Controllers.CrossOriginBrowserGuard"/>
-    /// sprinkles. CORS is a READ boundary, not a write boundary — blind cross-origin writes are handled
-    /// by that f9697aac Sec-Fetch-Site guard, not here.
+    /// CORS is a READ boundary, not a write boundary — the browser sends the request regardless of the
+    /// policy and only gates the caller's ability to READ the response. Blind cross-site CSRF WRITES are
+    /// therefore handled separately by <see cref="SecFetchSiteWriteGuardMiddleware"/>, not here.
     /// </para>
     /// <para>
-    /// Neither policy sets AllowCredentials (null-origin + credentials is a CORS footgun; the panels
-    /// are credential-less). Non-browser callers (Node MCP, PowerShell, curl) send no Origin header,
-    /// so CORS never applies to them — they are unaffected by either predicate. The loopback check
-    /// mirrors <see cref="Controllers.CrossOriginBrowserGuard"/> for consistency (both retired jointly
-    /// in f9697aac).
+    /// Neither the policy nor the guard sets AllowCredentials — the panels are credential-less.
+    /// Non-browser callers (Node MCP, PowerShell, curl, HttpClient) send no Origin header, so CORS never
+    /// applies to them; they are unaffected by this predicate.
     /// </para>
     /// </remarks>
     internal static class RestCorsOriginPolicy
     {
         /// <summary>
-        /// Name of the scoped, null-tolerant CORS policy. Applied via <c>[EnableCors]</c> to the one
-        /// controller the file:// tasks-panel actually fetches (TaskReportsController).
+        /// Default-policy predicate: true for loopback origins (via <see cref="IsLoopbackOrigin"/>) and
+        /// for the panel virtual-host origin (<see cref="PanelHosting.Origin"/>). Rejects "null", empty,
+        /// unparseable, and every other origin (fail closed). Also the trusted-origin test the
+        /// <see cref="SecFetchSiteWriteGuardMiddleware"/> shares, so the READ allowlist and the WRITE
+        /// allowlist can never desync.
         /// </summary>
-        public const string FilePanelPolicyName = "FilePanelNullTolerant";
+        public static bool IsTrustedBrowserOrigin(string origin)
+        {
+            if (string.IsNullOrEmpty(origin))
+                return false;
+
+            if (string.Equals(origin, PanelHosting.Origin, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return IsLoopbackOrigin(origin);
+        }
 
         /// <summary>
-        /// Default-policy predicate: true only for loopback origins (localhost / 127.0.0.1 / [::1],
-        /// any scheme or port). Rejects "null", empty, and unparseable origins (fail closed).
+        /// True only for loopback origins (localhost / 127.0.0.1 / [::1], any scheme or port).
+        /// Rejects "null", empty, and unparseable origins (fail closed).
         /// </summary>
         public static bool IsLoopbackOrigin(string origin)
         {
@@ -66,23 +74,6 @@ namespace MultiTerminal.API
                 return true;
 
             return IPAddress.TryParse(uri.Host, out var ip) && IPAddress.IsLoopback(ip);
-        }
-
-        /// <summary>
-        /// Scoped-policy predicate: loopback origins (via <see cref="IsLoopbackOrigin"/>) PLUS the
-        /// literal "null" origin (the file:// tasks-panel caller). See the class remarks for why
-        /// "null" is tolerated here and only here, and its retirement path (f9697aac).
-        /// </summary>
-        public static bool IsAllowedOrigin(string origin)
-        {
-            if (string.IsNullOrEmpty(origin))
-                return false;
-
-            // file:// / data: / sandboxed-iframe contexts send the literal "null" origin.
-            if (string.Equals(origin, "null", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            return IsLoopbackOrigin(origin);
         }
     }
 }

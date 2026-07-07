@@ -1,5 +1,4 @@
 using System;
-using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Mvc;
 using MultiTerminal.MCPServer.Services;
 
@@ -7,12 +6,11 @@ namespace MultiTerminal.API.Controllers
 {
     [ApiController]
     [Route("api/tasks/{taskId}/reports")]
-    // Eval P2 item 3 (task c522764d): the file:// tasks-panel.html fetch()es ONLY the two GET
-    // report endpoints below, so the scoped null-tolerant CORS policy is applied at the ACTION
-    // level to those GETs only — NOT the controller. SaveReport (POST) is agent-only (HttpClient,
-    // no Origin header → CORS N/A) and stays on the strict loopback-only default policy, so a
-    // null-origin browser POST (report injection) is rejected. Every other controller also uses
-    // the strict default. See RestCorsOriginPolicy.
+    // tasks-panel.html fetch()es the two GET report endpoints below. It used to be served over
+    // file:// (Origin "null"), which forced a scoped null-tolerant CORS carve-out here; task
+    // f9697aac migrated it onto the virtual-host origin (http://mt-panels.local), which the strict
+    // default CORS policy now allowlists, so these actions no longer need any [EnableCors] override.
+    // Every controller (incl. this one) is on the single strict default policy. See RestCorsOriginPolicy.
     public class TaskReportsController : ControllerBase
     {
         private readonly MessageBroker _broker;
@@ -26,7 +24,6 @@ namespace MultiTerminal.API.Controllers
         /// GET /api/tasks/{taskId}/reports — List reports for a task (metadata only, no content)
         /// </summary>
         [HttpGet]
-        [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)] // file:// tasks-panel reads this (Origin: null)
         public IActionResult GetReports(string taskId, [FromQuery] string agentName = null, [FromQuery] int limit = 50)
         {
             var reports = _broker.GetTaskReports(taskId, agentName, limit);
@@ -37,7 +34,6 @@ namespace MultiTerminal.API.Controllers
         /// GET /api/tasks/{taskId}/reports/{reportId} — Get full report content
         /// </summary>
         [HttpGet("{reportId}")]
-        [EnableCors(RestCorsOriginPolicy.FilePanelPolicyName)] // file:// tasks-panel reads this (Origin: null)
         public IActionResult GetReport(string taskId, string reportId)
         {
             var report = _broker.GetTaskReport(reportId);

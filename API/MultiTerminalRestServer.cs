@@ -209,26 +209,20 @@ namespace MultiTerminal.API
                 builder.Services.AddProblemDetails();
                 builder.Services.AddExceptionHandler<RestApiExceptionHandler>();
 
-                // CORS (Eval P2 item 3, task c522764d): replace AllowAnyOrigin with a two-tier
-                // allowlist (see RestCorsOriginPolicy for the full rationale + retirement path f9697aac).
-                //  - DEFAULT policy (all controllers): loopback origins ONLY, no "null". Blocks the
-                //    drive-by remote-web-page CSRF/exfil READ threat AllowAnyOrigin left open —
-                //    including a hostile sandboxed iframe whose opaque origin serializes to "null".
-                //  - NAMED policy (FilePanelPolicyName): loopback + "null", applied via [EnableCors]
-                //    to TaskReportsController only — the one controller the file:// tasks-panel.html
-                //    actually fetches. Scoping "null" to that controller (PM ruling A) shrinks the
-                //    interim null-origin read-window from the whole API to a single controller.
-                // NOTE: intentionally NO AllowCredentials on either policy — the panels are
-                // credential-less, and null-origin + credentials is a CORS footgun.
+                // CORS (Eval P2 task c522764d, tightened in Eval P2c task f9697aac): a single strict
+                // allowlist (see RestCorsOriginPolicy for the full rationale). The default policy
+                // (all controllers) admits loopback origins PLUS the panel virtual-host origin
+                // (http://mt-panels.local) and rejects everything else — including the literal "null"
+                // that file:// and sandboxed opaque-origin iframes send. The former null-tolerant
+                // carve-out (FilePanelNullTolerant, scoped to TaskReportsController) was removed once
+                // tasks-panel.html migrated off file:// onto the virtual host, so no caller needs "null".
+                // This is the READ boundary only; blind cross-site CSRF WRITES are handled by
+                // SecFetchSiteWriteGuardMiddleware below. NO AllowCredentials — the panels are
+                // credential-less.
                 builder.Services.AddCors(options =>
                 {
                     options.AddDefaultPolicy(policy =>
-                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsLoopbackOrigin)
-                              .AllowAnyHeader()
-                              .AllowAnyMethod());
-
-                    options.AddPolicy(RestCorsOriginPolicy.FilePanelPolicyName, policy =>
-                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsAllowedOrigin)
+                        policy.SetIsOriginAllowed(RestCorsOriginPolicy.IsTrustedBrowserOrigin)
                               .AllowAnyHeader()
                               .AllowAnyMethod());
                 });
