@@ -295,8 +295,10 @@ namespace MultiTerminal.Services
                 // A killed merge is UNKNOWN, not a conflict — never collapse it into
                 // HadConflicts. Abort to clean up any half-applied state; if abort
                 // ALSO fails the checkout may be half-merged, which we surface LOUDLY
-                // (IndeterminateState) instead of proceeding silently.
-                var abort = await GitExec.RunAsync(repoRoot, "merge", "--abort").ConfigureAwait(false);
+                // (IndeterminateState) instead of proceeding silently. Give the abort
+                // the slow-op budget too: a 30s-timed-out abort would flip cleanedUp
+                // false and raise a spurious HALF-MERGED alarm on a merely-slow abort.
+                var abort = await GitExec.RunAsync(repoRoot, GitExec.SlowOpTimeoutMs, "merge", "--abort").ConfigureAwait(false);
                 bool cleanedUp = abort.ExitCode == 0 && !abort.TimedOut;
                 return new MergeResult
                 {
@@ -529,8 +531,10 @@ namespace MultiTerminal.Services
                         // Killed merge is UNKNOWN, not a conflict. Abort to clean up;
                         // if abort also fails the canonical worktree may be half-merged
                         // — surface loudly (IndeterminateState), don't record it as a
-                        // conflict. Caller halts teardown and preserves branches.
-                        var abort = await GitExec.RunAsync(canonicalWorktree, "merge", "--abort").ConfigureAwait(false);
+                        // conflict. Caller halts teardown and preserves branches. Slow-op
+                        // budget on the abort (see MergeForTaskAsync) to avoid a spurious
+                        // HALF-MERGED alarm on a merely-slow abort.
+                        var abort = await GitExec.RunAsync(canonicalWorktree, GitExec.SlowOpTimeoutMs, "merge", "--abort").ConfigureAwait(false);
                         bool cleanedUp = abort.ExitCode == 0 && !abort.TimedOut;
                         result.Success = false;
                         result.TimedOut = true;

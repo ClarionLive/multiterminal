@@ -312,6 +312,7 @@ namespace MultiTerminal.MCPServer.Services
                     indexedIds.Add(e.SessionId);
             }
 
+            var diskIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 foreach (var jsonl in Directory.EnumerateFiles(projectFolder, "*.jsonl"))
@@ -322,13 +323,27 @@ namespace MultiTerminal.MCPServer.Services
 
                     // A session JSONL the index doesn't list => the index is incomplete.
                     var id = Path.GetFileNameWithoutExtension(jsonl);
-                    if (SessionFileNamePattern.IsMatch(id) && !indexedIds.Contains(id))
-                        return false;
+                    if (SessionFileNamePattern.IsMatch(id))
+                    {
+                        diskIds.Add(id);
+                        if (!indexedIds.Contains(id))
+                            return false;
+                    }
                 }
             }
             catch
             {
                 return false;
+            }
+
+            // Trust must be EXACT, not just a superset: an index entry whose JSONL
+            // no longer exists on disk is a phantom session (deleted/stale) — since
+            // JSONL is the source of truth, returning it would fabricate a session
+            // with no transcript. Any indexed id not backed by a file => derive.
+            foreach (var id in indexedIds)
+            {
+                if (!diskIds.Contains(id))
+                    return false;
             }
 
             return true;

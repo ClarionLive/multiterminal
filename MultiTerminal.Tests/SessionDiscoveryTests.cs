@@ -116,29 +116,28 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void FreshIndex_IsUsed_AsFastPath_WhenComplete()
+        public void FreshIndex_IsUsed_AsFastPath_WhenExactAndFresh()
         {
-            // One real JSONL on disk...
-            var path = WriteSession("[Alice]: real session");
+            // One JSONL on disk whose CONTENT says Alice...
+            var path = WriteSession("[Alice]: from jsonl content");
             var uuid = Path.GetFileNameWithoutExtension(path);
 
-            // ...and a FRESH sessions-index.json that COVERS that JSONL (its uuid is
-            // present) plus one index-only extra. Fresh AND complete => the fast-path
-            // serves the index verbatim (2), not the single derived JSONL.
+            // ...and a FRESH index that EXACTLY covers it (same id set on disk, no
+            // phantom) but records a DIFFERENT firstPrompt. If the fast-path serves
+            // the index, the returned session carries the index's firstPrompt rather
+            // than the derived one — that is how we prove the index was used and not
+            // re-derived (the counts would otherwise be identical).
             var indexPath = Path.Combine(_projectFolder, "sessions-index.json");
             File.WriteAllText(indexPath, JsonSerializer.Serialize(new
             {
                 version = 1,
-                entries = new[]
-                {
-                    new { sessionId = uuid, firstPrompt = "[Alice]: idx covers the on-disk session" },
-                    new { sessionId = "33333333-3333-3333-3333-333333333333", firstPrompt = "[Bob]: index-only extra" }
-                }
+                entries = new[] { new { sessionId = uuid, firstPrompt = "[Zeta]: served from the fresh index" } }
             }));
             File.SetLastWriteTimeUtc(indexPath, DateTime.UtcNow.AddHours(1));
 
             var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
-            Assert.Equal(2, sessions.Count);
+            var only = Assert.Single(sessions);
+            Assert.Contains("served from the fresh index", only.FirstPrompt);
         }
 
         [Fact]
@@ -186,6 +185,33 @@ namespace MultiTerminal.Tests
             var tie = new DateTime(2026, 5, 1, 12, 0, 0, DateTimeKind.Utc);
             File.SetLastWriteTimeUtc(p1, tie);
             File.SetLastWriteTimeUtc(indexPath, tie);
+
+            var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
+            Assert.Single(sessions);
+        }
+
+        [Fact]
+        public void FreshButSupersetIndex_DerivesFromJsonl()
+        {
+            // One real JSONL on disk...
+            var p1 = WriteSession("[Alice]: real");
+            var uuid1 = Path.GetFileNameWithoutExtension(p1);
+
+            // ...and a FRESH index that COVERS it but ALSO lists a phantom session
+            // whose JSONL no longer exists. Trust must be EXACT, not just a superset:
+            // an indexed session with no transcript on disk would be a fabricated row,
+            // so the index is rejected and derivation wins (1), not the 2-entry index.
+            var indexPath = Path.Combine(_projectFolder, "sessions-index.json");
+            File.WriteAllText(indexPath, JsonSerializer.Serialize(new
+            {
+                version = 1,
+                entries = new[]
+                {
+                    new { sessionId = uuid1, firstPrompt = "[Alice]: real" },
+                    new { sessionId = "55555555-5555-5555-5555-555555555555", firstPrompt = "[Ghost]: deleted transcript" }
+                }
+            }));
+            File.SetLastWriteTimeUtc(indexPath, DateTime.UtcNow.AddHours(1));
 
             var sessions = new SessionDiscovery(_projectsRoot).DiscoverAllSessionsInProject(_projectPath);
             Assert.Single(sessions);
