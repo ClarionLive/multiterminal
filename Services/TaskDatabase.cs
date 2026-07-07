@@ -1528,6 +1528,78 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Atomically pause the assignee's currently-active task(s) AND activate <paramref name="taskId"/>
+        /// in ONE transaction (7c59c004). Either both writes land or neither: a sibling-pause failure rolls
+        /// the activation back, so the tasks table can never hold two rows <c>sub_status='active'</c> for one
+        /// assignee (the failure mode 1df2a534 could only mitigate at read time). Returns the ids ACTUALLY
+        /// paused (DB-authoritative) so the caller can swap their cache entries and report them. Throws — with
+        /// the transaction rolled back, nothing changed — if the target row is missing or no longer
+        /// <c>in_progress</c> at activation time.
+        /// <para>Scope boundary (Alice's ruling): this transaction spans DB STATE ONLY. Git/worktree
+        /// side-effects are the caller's POST-commit, best-effort concern and are deliberately NOT in here —
+        /// a worktree failure must never roll back a committed activation.</para>
+        /// </summary>
+        public List<string> SetTaskActiveTransactional(string taskId, string assignee, DateTime pausedAt)
+        {
+            using var gate = LockConn();
+            using var tx = _connection.BeginTransaction();
+            try
+            {
+                // 1) Capture the active siblings (excluding the target) inside the txn — the authoritative set
+                //    to pause + hand back for the cache swap.
+                var paused = new List<string>();
+                const string selectSql = @"
+                    SELECT id FROM tasks
+                    WHERE assignee = @assignee AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
+                using (var sel = new SQLiteCommand(selectSql, _connection, tx))
+                {
+                    sel.Parameters.AddWithValue("@assignee", (object)assignee ?? DBNull.Value);
+                    sel.Parameters.AddWithValue("@taskId", taskId);
+                    using var reader = sel.ExecuteReader();
+                    while (reader.Read()) paused.Add(reader.GetString(0));
+                }
+
+                // 2) Pause them.
+                if (paused.Count > 0)
+                {
+                    const string pauseSql = @"
+                        UPDATE tasks SET sub_status = 'paused', paused_at = @pausedAt, updated_at = @now
+                        WHERE assignee = @assignee AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
+                    using var pause = new SQLiteCommand(pauseSql, _connection, tx);
+                    pause.Parameters.AddWithValue("@assignee", (object)assignee ?? DBNull.Value);
+                    pause.Parameters.AddWithValue("@taskId", taskId);
+                    pause.Parameters.AddWithValue("@pausedAt", pausedAt);
+                    pause.Parameters.AddWithValue("@now", DateTime.UtcNow);
+                    pause.ExecuteNonQuery();
+                }
+
+                // 3) Activate the target — still requiring in_progress, so a task that went done/deleted
+                //    between the caller's validation and here fails the whole transaction.
+                const string activateSql = @"
+                    UPDATE tasks SET sub_status = 'active', paused_at = NULL, updated_at = @now
+                    WHERE id = @taskId AND status = 'in_progress'";
+                using (var activate = new SQLiteCommand(activateSql, _connection, tx))
+                {
+                    activate.Parameters.AddWithValue("@taskId", taskId);
+                    activate.Parameters.AddWithValue("@now", DateTime.UtcNow);
+                    if (activate.ExecuteNonQuery() == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Task {taskId} not found or not in_progress at activation time.");
+                    }
+                }
+
+                tx.Commit();
+                return paused;
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
+        }
+
+        /// <summary>
         /// Delete a task by ID.
         /// </summary>
         public void DeleteTask(string taskId)
