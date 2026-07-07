@@ -58,8 +58,11 @@ namespace MultiTerminal.Services
 
         public OracleService(Action<string, string> log = null, DebugLogService debugLogService = null)
         {
-            _log = log ?? ((source, msg) => Debug.WriteLine($"[{source}] {msg}"));
             _debugLogService = debugLogService;
+            // Fallback when no external logger is injected: route to the buffered DebugLogService if
+            // one was provided (null-safe no-op otherwise). Previously an unbuffered debug write that
+            // compiled out of Release builds.
+            _log = log ?? ((source, msg) => _debugLogService?.Info(source, msg));
         }
 
         /// <summary>

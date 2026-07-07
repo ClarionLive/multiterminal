@@ -89,7 +89,7 @@ namespace MultiTerminal.Services
                 var firstFilePath = filesResult.Files.Count > 0 ? filesResult.Files[0].FilePath : null;
                 var firstRepoRoot = !string.IsNullOrEmpty(firstFilePath) ? FindGitRoot(firstFilePath) : null;
                 var reviewBase = ResolveTaskReviewBase(taskId, firstRepoRoot);
-                Debug.WriteLine($"[CodeReviewService] reviewBase for {taskId}: hasBranch={reviewBase.HasBranch}, baseRef={reviewBase.BaseRef ?? "<null>"}, branchTip={reviewBase.BranchTipRef ?? "<null>"}, error={reviewBase.Error ?? "<null>"}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"reviewBase for {taskId}: hasBranch={reviewBase.HasBranch}, baseRef={reviewBase.BaseRef ?? "<null>"}, branchTip={reviewBase.BranchTipRef ?? "<null>"}, error={reviewBase.Error ?? "<null>"}");
 
                 // Build the file-list payload. Pre-serialize so the popup form can
                 // stuff the raw JSON into its data message without a second
@@ -158,7 +158,7 @@ namespace MultiTerminal.Services
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[CodeReviewService] agent-report fetch failed: {ex.Message}");
+                    _broker.DebugLogService?.Error("CodeReviewService", $"agent-report fetch failed: {ex.Message}");
                     // Non-fatal — popup renders without overlay summaries.
                 }
 
@@ -173,7 +173,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] GetCodeReviewData failed: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"GetCodeReviewData failed: {ex.Message}");
                 return null;
             }
         }
@@ -315,7 +315,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] GetCodeReviewData(working-tree) failed: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"GetCodeReviewData(working-tree) failed: {ex.Message}");
                 return null;
             }
         }
@@ -419,7 +419,7 @@ namespace MultiTerminal.Services
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[CodeReviewService] WrapInQuickTask projectId resolve failed: {ex.Message} — falling through with null projectId");
+                    _broker.DebugLogService?.Error("CodeReviewService", $"WrapInQuickTask projectId resolve failed: {ex.Message} — falling through with null projectId");
                 }
             }
 
@@ -468,7 +468,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] WrapInQuickTask threw: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"WrapInQuickTask threw: {ex.Message}");
                 return new WrapInQuickTaskResult { Ok = false, Error = ex.Message };
             }
         }
@@ -505,7 +505,7 @@ namespace MultiTerminal.Services
                 // F7: reject before parse if oversized — bounds parser allocation.
                 if (verdict == "fail" && !string.IsNullOrEmpty(reviewNotesJson) && reviewNotesJson.Length > MaxReviewNotesJsonBytes)
                 {
-                    Debug.WriteLine($"[CodeReviewService] reviewNotesJson too large ({reviewNotesJson.Length} bytes); rejecting before parse");
+                    _broker.DebugLogService?.Warning("CodeReviewService", $"reviewNotesJson too large ({reviewNotesJson.Length} bytes); rejecting before parse");
                     return new VerdictResult { Ok = false, Error = "review notes payload exceeded size limit" };
                 }
 
@@ -547,13 +547,13 @@ namespace MultiTerminal.Services
                             if (!snapshotPersisted)
                             {
                                 snapshotErrorDetail = "broker.SaveTaskReport returned no id";
-                                Debug.WriteLine("[CodeReviewService] review-notes snapshot returned no id (broker save failed) — aborting Pass; ReviewNotes preserved for retry");
+                                _broker.DebugLogService?.Error("CodeReviewService", "review-notes snapshot returned no id (broker save failed) — aborting Pass; ReviewNotes preserved for retry");
                             }
                         }
                         catch (Exception snapEx)
                         {
                             snapshotErrorDetail = snapEx.Message;
-                            Debug.WriteLine($"[CodeReviewService] review-notes snapshot save failed: {snapEx.Message} — aborting Pass; ReviewNotes preserved for retry");
+                            _broker.DebugLogService?.Error("CodeReviewService", $"review-notes snapshot save failed: {snapEx.Message} — aborting Pass; ReviewNotes preserved for retry");
                         }
                         if (!snapshotPersisted)
                         {
@@ -635,7 +635,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] HandleVerdict error: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"HandleVerdict error: {ex.Message}");
                 return new VerdictResult { Ok = false, Error = ex.Message };
             }
         }
@@ -1108,7 +1108,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] ResolveTaskReviewBase failed for {taskId}: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"ResolveTaskReviewBase failed for {taskId}: {ex.Message}");
                 return new ReviewBase { HasBranch = true, Error = $"Failed to resolve review base: {ex.Message}" };
             }
         }
@@ -1250,7 +1250,7 @@ namespace MultiTerminal.Services
         {
             public bool HasBranch;
             public string BaseRef;       // merge-base SHA the diff is anchored at
-            public string BranchTipRef;  // branch name; informational (Debug.WriteLine and error strings)
+            public string BranchTipRef;  // branch name; informational (surfaced in logs and error strings)
             public string BranchTipSha;  // pinned commit SHA — passed to `git diff` so concurrent ref mutations can't skew results
             public string WorktreePath;  // cwd for git ops on the task branch; pathspecs are relative to this
             public string Error;         // populated when HasBranch=true but resolution failed
@@ -1314,7 +1314,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] Git diff failed for {filePath}: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"Git diff failed for {filePath}: {ex.Message}");
                 return null;
             }
         }
@@ -1418,7 +1418,7 @@ namespace MultiTerminal.Services
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CodeReviewService] GetFullFileContent failed for {filePath}: {ex.Message}");
+                _broker.DebugLogService?.Error("CodeReviewService", $"GetFullFileContent failed for {filePath}: {ex.Message}");
                 return null;
             }
         }

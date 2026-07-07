@@ -45,7 +45,7 @@ namespace MultiTerminal.MCPServer.Services
         {
             if (_listenerTask != null)
             {
-                System.Diagnostics.Trace.WriteLine("[HttpWebhookService] Already started");
+                _broker.DebugLogService?.Trace("HttpWebhookService", "Already started");
                 return;
             }
 
@@ -54,11 +54,11 @@ namespace MultiTerminal.MCPServer.Services
                 _listener.Start();
                 _cancellationTokenSource = new CancellationTokenSource();
                 _listenerTask = Task.Run(() => ListenAsync(_cancellationTokenSource.Token));
-                System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] Started on http://localhost:{Port}/");
+                _broker.DebugLogService?.Trace("HttpWebhookService", $"Started on http://localhost:{Port}/");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] Failed to start: {ex.Message}");
+                _broker.DebugLogService?.Error("HttpWebhookService", $"Failed to start: {ex.Message}");
                 throw;
             }
         }
@@ -74,7 +74,7 @@ namespace MultiTerminal.MCPServer.Services
                 _listener.Stop();
                 // Don't block waiting for the listener task — cancellation + Stop()
                 // is sufficient. The process exit failsafe handles any stragglers.
-                System.Diagnostics.Trace.WriteLine("[HttpWebhookService] Stopped");
+                _broker.DebugLogService?.Trace("HttpWebhookService", "Stopped");
             }
         }
 
@@ -94,7 +94,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] Error accepting request: {ex.Message}");
+                    _broker.DebugLogService?.Error("HttpWebhookService", $"Error accepting request: {ex.Message}");
                 }
             }
         }
@@ -106,7 +106,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] {request.HttpMethod} {request.Url.AbsolutePath}");
+                _broker.DebugLogService?.Trace("HttpWebhookService", $"{request.HttpMethod} {request.Url.AbsolutePath}");
 
                 // Handle /agent-ready endpoint
                 if (request.Url.AbsolutePath == "/agent-ready" && request.HttpMethod == "POST")
@@ -130,7 +130,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] Error handling request: {ex.Message}");
+                _broker.DebugLogService?.Error("HttpWebhookService", $"Error handling request: {ex.Message}");
                 await SendResponseAsync(response, 500, "Internal Server Error");
             }
         }
@@ -172,7 +172,7 @@ namespace MultiTerminal.MCPServer.Services
                 return;
             }
 
-            System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] Agent ready: {agentName} (docId: {docId})");
+            _broker.DebugLogService?.Trace("HttpWebhookService", $"Agent ready: {agentName} (docId: {docId})");
 
             // Mark agent as ready in broker
             var success = _broker.MarkAgentReady(agentName, docId);
@@ -270,7 +270,7 @@ namespace MultiTerminal.MCPServer.Services
                 return;
             }
 
-            System.Diagnostics.Trace.WriteLine($"[HttpWebhookService] Message webhook: {messageId} from {from} to {to}");
+            _broker.DebugLogService?.Trace("HttpWebhookService", $"Message webhook: {messageId} from {from} to {to}");
 
             // Deliver message via broker
             var success = await _broker.DeliverMessageViaWebhook(messageId, to, from, content);

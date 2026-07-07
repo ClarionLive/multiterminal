@@ -90,21 +90,15 @@ namespace MultiTerminal.Services
         public DebugLogService DebugLogService { get; set; }
 
         private void Log(string msg)
-        {
-            Debug.WriteLine($"[TeamWatcher] [{DateTime.Now:HH:mm:ss.fff}] {msg}");
-            DebugLogService?.Trace("TeamWatcher", msg);
+        {            DebugLogService?.Trace("TeamWatcher", msg);
         }
 
         private void LogInfo(string msg)
-        {
-            Debug.WriteLine($"[TeamWatcher] [{DateTime.Now:HH:mm:ss.fff}] {msg}");
-            DebugLogService?.Info("TeamWatcher", msg);
+        {            DebugLogService?.Info("TeamWatcher", msg);
         }
 
         private void LogError(string msg)
-        {
-            Debug.WriteLine($"[TeamWatcher] [{DateTime.Now:HH:mm:ss.fff}] {msg}");
-            DebugLogService?.Error("TeamWatcher", msg);
+        {            DebugLogService?.Error("TeamWatcher", msg);
         }
 
         public TeamWatcherService(string projectSlug)
