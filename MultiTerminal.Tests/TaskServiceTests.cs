@@ -117,6 +117,65 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
+        // ── 7c59c004 atomicity capstone ──────────────────────────────────────────────────────────────
+
+        [Fact]
+        public async System.Threading.Tasks.Task PerTaskLock_SerializesConcurrentDifferentFieldWrites_NoLostUpdate()
+        {
+            // The field-level lost update (item 2): two writers concurrently mutate DIFFERENT fields of the
+            // SAME task. Each write-path cycle clones the cached task and SaveTask persists the FULL row, so
+            // without the per-task lock a stale clone's full-row write clobbers the other writer's field and
+            // the later swap loses it. With the lock the read-modify-write serializes, so the last write of
+            // EACH field survives. Hammered to make the interleave overwhelmingly likely on the old path.
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            const int N = 300;
+
+            var w1 = System.Threading.Tasks.Task.Run(() =>
+            {
+                for (int i = 0; i < N; i++) _svc.UpdateTaskPlan(id, "plan-" + i, "diana");
+            });
+            var w2 = System.Threading.Tasks.Task.Run(() =>
+            {
+                for (int i = 0; i < N; i++) _svc.UpdateTaskContinuation(id, "notes-" + i, "diana");
+            });
+            await System.Threading.Tasks.Task.WhenAll(w1, w2);
+
+            var final = _svc.GetTask(id);
+            Assert.Equal("plan-" + (N - 1), final.Plan);                 // writer 1's field not clobbered
+            Assert.Equal("notes-" + (N - 1), final.ContinuationNotes);   // writer 2's field not clobbered
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);          // cache ≡ DB throughout
+        }
+
+        [Fact]
+        public void SetTaskActiveTransactional_RollsBackPause_WhenActivationTargetNotInProgress()
+        {
+            // Item 0: the pause+activate must be atomic. Seed an active task A for an assignee and a target B
+            // that is NOT in_progress, then drive the DB transaction directly: the activation UPDATE (guarded
+            // on status='in_progress') affects 0 rows and throws, so the sibling-pause of A must ROLL BACK.
+            // Fails safe (A stays active) instead of open (A paused with nothing active).
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "todo", Assignee = "diana", SubStatus = null, CreatedAt = DateTime.UtcNow });
+
+            Assert.Throws<InvalidOperationException>(() => _db.SetTaskActiveTransactional("B", "diana", DateTime.UtcNow));
+
+            Assert.Equal("active", _db.GetTask("A").SubStatus);  // pause rolled back — A still active
+            Assert.Equal("todo", _db.GetTask("B").Status);       // B untouched
+        }
+
+        [Fact]
+        public void SetTaskActiveTransactional_PausesSiblingAndActivates_Atomically()
+        {
+            // Happy path: activating B atomically pauses the assignee's active sibling A and activates B.
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "in_progress", Assignee = "diana", SubStatus = "paused", CreatedAt = DateTime.UtcNow });
+
+            var paused = _db.SetTaskActiveTransactional("B", "diana", DateTime.UtcNow);
+
+            Assert.Contains("A", paused);
+            Assert.Equal("active", _db.GetTask("B").SubStatus);
+            Assert.Equal("paused", _db.GetTask("A").SubStatus);
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
