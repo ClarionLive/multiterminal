@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using MultiTerminal.Services;
+using MultiTerminal.Services.Startup;
 
 namespace MultiTerminal
 {
@@ -51,6 +52,24 @@ namespace MultiTerminal
                     "Unsupported Windows Version",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+                return;
+            }
+
+            // Single-instance guard (task 4fec40e2): acquire a per-session (Local\) mutex
+            // BEFORE any UI. If another MultiTerminal already owns this session's slot,
+            // bring its window forward and exit cleanly rather than starting a second host
+            // that would only collide on :5050. Held for the whole process; released on exit.
+            var singleInstance = SingleInstanceGuard.Acquire();
+            if (!singleInstance.IsPrimary)
+            {
+                SingleInstanceGuard.ActivateExistingInstance();
+                singleInstance.Dispose();
+                MessageBox.Show(
+                    "MultiTerminal is already running in this session.\n\n" +
+                    "The existing window has been brought to the front.",
+                    "MultiTerminal",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
                 return;
             }
 
@@ -129,6 +148,9 @@ namespace MultiTerminal
             };
 
             Application.Run(mainForm);
+
+            // Release the single-instance slot on clean shutdown (task 4fec40e2).
+            singleInstance.Dispose();
         }
     }
 }
