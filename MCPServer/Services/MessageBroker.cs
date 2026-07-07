@@ -16,7 +16,7 @@ namespace MultiTerminal.MCPServer.Services
     /// Routes messages between terminals and maintains message queues.
     /// Supports SQLite persistence for reliable delivery with retry.
     /// </summary>
-    public class MessageBroker : IDisposable, IRemoteModeSink, ITaskServiceHost
+    public class MessageBroker : IDisposable, IRemoteModeSink, ITaskServiceHost, IProfileServiceHost
     {
         private bool _isDisposed;
 
@@ -31,6 +31,13 @@ namespace MultiTerminal.MCPServer.Services
         // back in as the service's ITaskServiceHost (event raising, activity/inbox, project resolution,
         // worktree lifecycle). Constructed in the ctor after _taskDb + the worktree services exist.
         private readonly TaskService _taskService;
+
+        // Team-member profile cache + CRUD + write path were extracted to ProfileService (ticket 86f3fd21,
+        // the second broker region — validates the extraction template). The broker keeps its full public
+        // profile surface as one-line delegations and reaches back in as the service's IProfileServiceHost
+        // (event raising + IsTemporaryAgent). The terminal-registration region reaches the relocated
+        // _profiles cache through the service's narrow accessors (TryGetProfile/ContainsProfile/TryAddProfile).
+        private readonly ProfileService _profileService;
         private readonly TaskDatabase _taskDb;
         private readonly MultiTerminal.Services.WorktreeManager _worktrees;
         private readonly MultiTerminal.Services.WorktreeAutoCommitService _autoCommit;
@@ -55,8 +62,7 @@ namespace MultiTerminal.MCPServer.Services
         private readonly ProjectDatabase _projectDb;
         public ProjectDatabase ProjectDatabase => _projectDb;
 
-        // Team member profile storage
-        private readonly ConcurrentDictionary<string, TeamMemberProfile> _profiles = new ConcurrentDictionary<string, TeamMemberProfile>();
+        // Team member profile storage: relocated to ProfileService (ticket 86f3fd21). See _profileService.
 
         // Office agent tracking (for Office Panel animation - not registered terminals)
         private readonly ConcurrentDictionary<string, OfficeAgentInfo> _officeAgents = new ConcurrentDictionary<string, OfficeAgentInfo>();
@@ -1409,6 +1415,10 @@ namespace MultiTerminal.MCPServer.Services
             // activity/inbox, project resolution and worktree lifecycle route back through the broker.
             _taskService = new TaskService(_taskDb, this);
 
+            // Profile cache/CRUD owner (ticket 86f3fd21, second region). `this` is the IProfileServiceHost —
+            // event raising + IsTemporaryAgent route back through the broker.
+            _profileService = new ProfileService(_taskDb, this);
+
             try
             {
                 _projectDb = new ProjectDatabase();
@@ -1457,7 +1467,7 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                LoadPersistedProfiles();
+                _profileService.LoadPersistedProfiles();
             }
             catch (Exception ex)
             {
@@ -1565,6 +1575,15 @@ namespace MultiTerminal.MCPServer.Services
 
         void ITaskServiceHost.CleanupTaskAttachments(string taskId) => CleanupTaskAttachments(taskId);
 
+        // IProfileServiceHost — the narrow collaborator surface ProfileService (ticket 86f3fd21, second
+        // region) reaches back through. The ProfilesUpdated event STAYS declared on the broker; the service
+        // raises it via this wrapper → RaiseSafe. Logs are stamped "ProfileService" (mirrors the TaskService
+        // retag, so a moved log line no longer misattributes to [MessageBroker]).
+        void IProfileServiceHost.RaiseProfilesUpdated(List<TeamMemberProfile> profiles) => RaiseSafe(ProfilesUpdated, profiles);
+        void IProfileServiceHost.LogError(string message) => DebugLogService?.Error("ProfileService", message);
+        void IProfileServiceHost.LogInfo(string message) => DebugLogService?.Info("ProfileService", message);
+        bool IProfileServiceHost.IsTemporaryAgent(string name) => IsTemporaryAgent(name);
+
         /// <summary>
         /// Load projects from the database into memory.
         /// </summary>
@@ -1583,27 +1602,6 @@ namespace MultiTerminal.MCPServer.Services
             catch (Exception ex)
             {
                 DebugLogService?.Error("MessageBroker", $"Failed to load projects: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Load team member profiles from the database into memory.
-        /// </summary>
-        private void LoadPersistedProfiles()
-        {
-            try
-            {
-                var profiles = _taskDb.LoadAllProfiles();
-                // Write-path bypass (P5): startup bootstrap seed from the DB, not a mutation (see LoadPersistedTasks).
-                foreach (var profile in profiles)
-                {
-                    _profiles.TryAdd(profile.Id, profile);
-                }
-                DebugLogService?.Info("MessageBroker", $"Loaded {profiles.Count} profiles from database");
-            }
-            catch (Exception ex)
-            {
-                DebugLogService?.Error("MessageBroker", $"Failed to load profiles: {ex.Message}");
             }
         }
 
@@ -1768,7 +1766,7 @@ namespace MultiTerminal.MCPServer.Services
                 try
                 {
                     // Mark OLD profile offline
-                    if (_profiles.TryGetValue(oldName, out var oldProfile))
+                    if (_profileService.TryGetProfile(oldName, out var oldProfile))
                     {
                         oldProfile.IsOnline = false;
                         oldProfile.UpdatedAt = DateTime.UtcNow;
@@ -1780,7 +1778,7 @@ namespace MultiTerminal.MCPServer.Services
                     // Skip profile creation for temporary agents (e.g. "Agent Alice")
                     if (!IsTemporaryAgent(newName))
                     {
-                        if (_profiles.TryGetValue(newName, out var newProfile))
+                        if (_profileService.TryGetProfile(newName, out var newProfile))
                         {
                             newProfile.IsOnline = true;
                             newProfile.UpdatedAt = DateTime.UtcNow;
@@ -1799,7 +1797,7 @@ namespace MultiTerminal.MCPServer.Services
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
-                            _profiles.TryAdd(newName, newProfile);
+                            _profileService.TryAddProfile(newProfile);
                             _taskDb.SaveProfile(newProfile);
                             DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
                         }
@@ -1858,7 +1856,7 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
                     {
-                        if (!_profiles.ContainsKey(name))
+                        if (!_profileService.ContainsProfile(name))
                         {
                             var newProfile = new TeamMemberProfile
                             {
@@ -1869,15 +1867,18 @@ namespace MultiTerminal.MCPServer.Services
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
-                            _profiles.TryAdd(name, newProfile);
+                            _profileService.TryAddProfile(newProfile);
                             _taskDb.SaveProfile(newProfile);
                             DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
                         }
                         else if (isTeamLead)
                         {
                             // Update existing profile's IsTeamLead flag
-                            _profiles[name].IsTeamLead = true;
-                            _taskDb.SaveProfile(_profiles[name]);
+                            if (_profileService.TryGetProfile(name, out var leadProfile))
+                            {
+                                leadProfile.IsTeamLead = true;
+                                _taskDb.SaveProfile(leadProfile);
+                            }
                         }
 
                         // Set profile online now that terminal is registering
@@ -1927,7 +1928,7 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
                     {
-                        if (!_profiles.ContainsKey(name))
+                        if (!_profileService.ContainsProfile(name))
                         {
                             var newProfile = new TeamMemberProfile
                             {
@@ -1938,15 +1939,18 @@ namespace MultiTerminal.MCPServer.Services
                                 CreatedAt = DateTime.UtcNow,
                                 UpdatedAt = DateTime.UtcNow
                             };
-                            _profiles.TryAdd(name, newProfile);
+                            _profileService.TryAddProfile(newProfile);
                             _taskDb.SaveProfile(newProfile);
                             DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
                         }
                         else if (isTeamLead)
                         {
                             // Update existing profile's IsTeamLead flag
-                            _profiles[name].IsTeamLead = true;
-                            _taskDb.SaveProfile(_profiles[name]);
+                            if (_profileService.TryGetProfile(name, out var leadProfile))
+                            {
+                                leadProfile.IsTeamLead = true;
+                                _taskDb.SaveProfile(leadProfile);
+                            }
                         }
 
                         // Set profile online now that terminal is registering
@@ -2053,13 +2057,13 @@ namespace MultiTerminal.MCPServer.Services
                     _taskDb.SetProfileOffline(terminal.Name);
 
                     // Update in-memory profile
-                    if (_profiles.TryGetValue(terminal.Name, out var profile))
+                    if (_profileService.TryGetProfile(terminal.Name, out var profile))
                     {
                         profile.IsOnline = false;
                         profile.UpdatedAt = DateTime.UtcNow;
                     }
 
-                    BroadcastProfileUpdate();
+                    _profileService.BroadcastProfileUpdate();
                 }
                 catch (Exception ex)
                 {
@@ -2172,7 +2176,7 @@ namespace MultiTerminal.MCPServer.Services
                 if (IsTemporaryAgent(t.Name)) return false;
 
                 // Check if profile exists and is online
-                if (_profiles.TryGetValue(t.Name, out var profile))
+                if (_profileService.TryGetProfile(t.Name, out var profile))
                 {
                     return profile.IsOnline;
                 }
@@ -4578,276 +4582,26 @@ namespace MultiTerminal.MCPServer.Services
 
         #region Profile Methods
 
-        /// <summary>
-        /// Create a new team member profile.
-        /// </summary>
+        // Team-member profile cache + CRUD + write path were extracted to ProfileService (ticket 86f3fd21,
+        // second broker region). The broker keeps the full public profile surface below as one-line
+        // delegations — controllers/panels are untouched. Private helpers (Mutate/Insert/DeleteProfileInternal,
+        // BroadcastProfileUpdate, LoadPersistedProfiles) moved with the region; the terminal-registration
+        // region reaches the relocated cache through _profileService's narrow accessors.
         public CreateProfileResult CreateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null, bool? isTeamLead = null)
-        {
-            if (string.IsNullOrWhiteSpace(id))
-            {
-                return new CreateProfileResult { Success = false, Error = "Profile ID is required" };
-            }
+            => _profileService.CreateProfile(id, displayName, avatarUrl, role, bio, skills, interests, projectIds, agentInstructions, preferredModel, isTeamLead);
 
-            if (_profiles.ContainsKey(id))
-            {
-                return new CreateProfileResult { Success = false, Error = $"Profile already exists: {id}" };
-            }
-
-            var profile = new TeamMemberProfile
-            {
-                Id = id,
-                DisplayName = displayName,
-                AvatarUrl = avatarUrl,
-                Role = role,
-                Bio = bio,
-                AgentInstructions = agentInstructions,
-                PreferredModel = preferredModel ?? "sonnet",
-                IsTeamLead = isTeamLead ?? false,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow
-            };
-
-            if (skills != null) profile.SetSkills(skills);
-            if (interests != null) profile.SetInterests(interests);
-            if (projectIds != null) profile.SetProjectIds(projectIds);
-
-            // Persist-before-cache (write path): on a durable-write failure the profile never enters the
-            // cache, and we return Success=false instead of the pre-P5 swallow-and-succeed.
-            try
-            {
-                InsertProfileInternal(profile);
-            }
-            catch (Exception ex)
-            {
-                LogError($"CreateProfile: persist failed for {id}: {ex.Message}");
-                return new CreateProfileResult { Success = false, Error = $"Failed to persist profile: {ex.Message}" };
-            }
-
-            BroadcastProfileUpdate();
-
-            return new CreateProfileResult { Success = true, ProfileId = id };
-        }
-
-        /// <summary>
-        /// Update an existing team member profile. Only provided fields are updated.
-        /// </summary>
         public UpdateProfileResult UpdateProfile(string id, string displayName, string avatarUrl, string role, string bio, List<string> skills, List<string> interests, List<string> projectIds = null, string agentInstructions = null, string preferredModel = null, bool? isTeamLead = null)
-        {
-            if (!_profiles.ContainsKey(id))
-            {
-                return new UpdateProfileResult { Success = false, Error = $"Profile not found: {id}" };
-            }
+            => _profileService.UpdateProfile(id, displayName, avatarUrl, role, bio, skills, interests, projectIds, agentInstructions, preferredModel, isTeamLead);
 
-            // Write path: clone → mutate → persist → swap. A persist failure keeps the cached profile
-            // (coherent) and returns Success=false instead of the pre-P5 swallow-and-succeed.
-            try
-            {
-                MutateProfileInternal(id, p =>
-                {
-                    // Update only provided fields (null means don't change).
-                    if (displayName != null) p.DisplayName = displayName;
-                    if (avatarUrl != null) p.AvatarUrl = avatarUrl;
-                    if (role != null) p.Role = role;
-                    if (bio != null) p.Bio = bio;
-                    if (skills != null) p.SetSkills(skills);
-                    if (interests != null) p.SetInterests(interests);
-                    if (projectIds != null) p.SetProjectIds(projectIds);
-                    if (agentInstructions != null) p.AgentInstructions = agentInstructions;
-                    if (preferredModel != null) p.PreferredModel = preferredModel;
-                    if (isTeamLead.HasValue) p.IsTeamLead = isTeamLead.Value;
-                    p.UpdatedAt = DateTime.UtcNow;
-                });
-            }
-            catch (Exception ex)
-            {
-                LogError($"UpdateProfile: persist failed for {id}: {ex.Message}");
-                return new UpdateProfileResult { Success = false, Error = $"Failed to persist profile update: {ex.Message}" };
-            }
+        public GetProfileResult GetProfile(string id) => _profileService.GetProfile(id);
 
-            BroadcastProfileUpdate();
+        public ListProfilesResult ListProfiles() => _profileService.ListProfiles();
 
-            return new UpdateProfileResult { Success = true };
-        }
+        public DeleteProfileResult DeleteProfile(string id) => _profileService.DeleteProfile(id);
 
-        /// <summary>
-        /// Get a team member profile by ID.
-        /// </summary>
-        public GetProfileResult GetProfile(string id)
-        {
-            if (_profiles.TryGetValue(id, out var profile))
-            {
-                return new GetProfileResult { Success = true, Profile = profile };
-            }
+        public SetProfileStatusResult SetProfileOnline(string id) => _profileService.SetProfileOnline(id);
 
-            return new GetProfileResult { Success = false, Error = $"Profile not found: {id}" };
-        }
-
-        /// <summary>
-        /// List all team member profiles.
-        /// </summary>
-        public ListProfilesResult ListProfiles()
-        {
-            var profiles = _profiles.Values
-                .Where(p => !IsTemporaryAgent(p.Id))
-                .OrderBy(p => p.DisplayName ?? p.Id)
-                .ToList();
-            return new ListProfilesResult { Success = true, Profiles = profiles };
-        }
-
-        /// <summary>
-        /// Delete a team member profile.
-        /// </summary>
-        public DeleteProfileResult DeleteProfile(string id)
-        {
-            if (!_profiles.ContainsKey(id))
-            {
-                return new DeleteProfileResult { Success = false, Error = $"Profile not found: {id}" };
-            }
-
-            // Write path: DB-delete before cache-remove (via DeleteProfileInternal). A failed delete keeps
-            // the profile in both stores rather than dropping it from the UI only.
-            try
-            {
-                DeleteProfileInternal(id);
-            }
-            catch (Exception ex)
-            {
-                LogError($"DeleteProfile: persist failed for {id}: {ex.Message}");
-                return new DeleteProfileResult { Success = false, Error = $"Failed to delete profile: {ex.Message}" };
-            }
-
-            BroadcastProfileUpdate();
-
-            return new DeleteProfileResult { Success = true };
-        }
-
-        /// <summary>
-        /// Set a profile's online status to true.
-        /// Called by SessionStart hook when Claude session starts.
-        /// </summary>
-        public SetProfileStatusResult SetProfileOnline(string id)
-        {
-            try
-            {
-                // Auto-create profile if it doesn't exist (persist-before-cache via the write path).
-                if (!_profiles.ContainsKey(id))
-                {
-                    InsertProfileInternal(new TeamMemberProfile
-                    {
-                        Id = id,
-                        DisplayName = id,
-                        IsOnline = true,
-                        CreatedAt = DateTime.UtcNow,
-                        UpdatedAt = DateTime.UtcNow
-                    });
-                    _taskDb.SetProfileOnline(id);
-                    DebugLogService?.Info("MessageBroker", $"Auto-created profile: {id}");
-                }
-                else
-                {
-                    // Targeted online-flag write as the persist step + coherent cache swap.
-                    MutateProfileInternal(id, p =>
-                    {
-                        p.IsOnline = true;
-                        p.UpdatedAt = DateTime.UtcNow;
-                    }, _ => _taskDb.SetProfileOnline(id));
-                }
-
-                BroadcastProfileUpdate();
-                DebugLogService?.Info("MessageBroker", $"Set profile online: {id}");
-
-                return new SetProfileStatusResult { Success = true };
-            }
-            catch (Exception ex)
-            {
-                DebugLogService?.Error("MessageBroker", $"Failed to set profile online: {ex.Message}");
-                return new SetProfileStatusResult { Success = false, Error = ex.Message };
-            }
-        }
-
-        /// <summary>
-        /// Set a profile's online status to false.
-        /// Called by SessionEnd hook when Claude session ends.
-        /// </summary>
-        public SetProfileStatusResult SetProfileOffline(string id)
-        {
-            try
-            {
-                // If cached, swap coherently with the offline-flag write as the persist step; if not
-                // cached, still write the DB flag (matches pre-P5, which always wrote it).
-                if (MutateProfileInternal(id, p =>
-                {
-                    p.IsOnline = false;
-                    p.UpdatedAt = DateTime.UtcNow;
-                }, _ => _taskDb.SetProfileOffline(id)) == null)
-                {
-                    _taskDb.SetProfileOffline(id);
-                }
-
-                BroadcastProfileUpdate();
-                DebugLogService?.Info("MessageBroker", $"Set profile offline: {id}");
-
-                return new SetProfileStatusResult { Success = true };
-            }
-            catch (Exception ex)
-            {
-                DebugLogService?.Error("MessageBroker", $"Failed to set profile offline: {ex.Message}");
-                return new SetProfileStatusResult { Success = false, Error = ex.Message };
-            }
-        }
-
-        /// <summary>
-        /// Broadcast profile updates to all clients.
-        /// </summary>
-        private void BroadcastProfileUpdate()
-        {
-            var profiles = _profiles.Values.OrderBy(p => p.DisplayName ?? p.Id).ToList();
-            RaiseSafe(ProfilesUpdated, profiles);
-        }
-
-        // Profile write path (P5 / 1df2a534) — clone → mutate → persist → swap, the mirror of the task /
-        // project paths. `persist` defaults to a full-row SaveProfile; pass a custom action for a targeted
-        // column write (e.g. the online-flag writers). Neither helper broadcasts (the caller decides).
-        private TeamMemberProfile MutateProfileInternal(string id, Action<TeamMemberProfile> mutate, Action<TeamMemberProfile> persist = null)
-        {
-            if (!_profiles.TryGetValue(id, out var current))
-            {
-                return null;
-            }
-
-            var updated = current.Clone();
-            mutate(updated);
-            if (persist != null)
-            {
-                persist(updated);
-            }
-            else
-            {
-                _taskDb.SaveProfile(updated);   // persist FIRST
-            }
-
-            _profiles[id] = updated;   // swap into cache only after the DB write succeeded
-            return updated;
-        }
-
-        private TeamMemberProfile InsertProfileInternal(TeamMemberProfile profile)
-        {
-            _taskDb.SaveProfile(profile);   // persist FIRST
-            _profiles[profile.Id] = profile;   // add to cache only after the DB write succeeded
-            return profile;
-        }
-
-        private bool DeleteProfileInternal(string id)
-        {
-            if (!_profiles.ContainsKey(id))
-            {
-                return false;
-            }
-
-            _taskDb.DeleteProfile(id);        // delete from DB FIRST
-            _profiles.TryRemove(id, out _);   // remove from cache only after the DB delete succeeded
-            return true;
-        }
+        public SetProfileStatusResult SetProfileOffline(string id) => _profileService.SetProfileOffline(id);
 
         #endregion
 

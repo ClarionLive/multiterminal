@@ -13,13 +13,16 @@
 // the DB gate in verify-taskdb-gate.mjs). Ratified bypasses are ENUMERATED here, never inferred; the
 // follow-up ticket e1643ccc converts RegisterTerminal/UnregisterTerminal off the list, shrinking it over time.
 //
-// TWO FILES since ticket e7e89f4b (broker decomposition): the Kanban-task cache + CRUD + write-path helpers
+// THREE FILES since the broker decomposition: the Kanban-task cache + CRUD + write-path helpers
 // (MutateTaskInternal/TryMutateTask/Insert/Delete + the LoadPersistedTasks/ReorderTask/SetTaskActive task
-// bypasses) were RELOCATED to TaskService.cs; the project/profile helpers stay in MessageBroker.cs. The
-// census scans BOTH files with the union allowlist — the load-bearing point Alice flagged: if it kept
-// scanning only MessageBroker.cs it would go SILENTLY GREEN on an emptied broker while a raw _tasks write in
-// TaskService.cs sailed through. A concrete negative fixture (a TaskService-shaped raw _tasks write in a
-// non-allowlisted method) proves the check still falsifies post-extraction.
+// bypasses) were RELOCATED to TaskService.cs (e7e89f4b); the team-member-profile cache + CRUD + write-path
+// helpers (MutateProfileInternal/Insert/Delete + LoadPersistedProfiles) were RELOCATED to ProfileService.cs
+// (86f3fd21, the second region). The project helpers still live in MessageBroker.cs. The census scans ALL
+// THREE files with the union allowlist — the load-bearing point Alice flagged: if it kept scanning only the
+// files a region hasn't left yet it would go SILENTLY GREEN on an emptied broker while a raw _tasks/_profiles
+// write in the relocated service sailed through. Concrete negative fixtures (a TaskService-shaped raw _tasks
+// write AND a ProfileService-shaped raw _profiles write, each in a non-allowlisted method) prove the check
+// still falsifies post-extraction.
 //
 // Detection runs on CODE-ONLY text (comments and string literals are masked), so a doc comment that names
 // _taskDb.SaveTask never counts.
@@ -40,9 +43,10 @@ const args = process.argv.slice(2);
 const doSelfTest = args.includes('--self-test');
 
 const REPO_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1'), '..');
-// Both write-path source files (ticket e7e89f4b split the task region into TaskService.cs). The census
-// scans the union so a relocated write can't escape the check by moving files.
-const TARGETS = ['MCPServer/Services/MessageBroker.cs', 'MCPServer/Services/TaskService.cs'];
+// All write-path source files (e7e89f4b split the task region into TaskService.cs; 86f3fd21 split the profile
+// region into ProfileService.cs). The census scans the union so a relocated write can't escape the check by
+// moving files.
+const TARGETS = ['MCPServer/Services/MessageBroker.cs', 'MCPServer/Services/TaskService.cs', 'MCPServer/Services/ProfileService.cs'];
 
 // Methods permitted to contain a core persist / raw cache write.
 const WRITE_PATH_HELPERS = new Set([
@@ -59,6 +63,9 @@ const NAMED_BYPASSES = new Set([
   'LoadPersistedTasks',      // startup bootstrap seed FROM the DB (not a mutation)
   'LoadPersistedProjects',   // startup bootstrap seed
   'LoadPersistedProfiles',   // startup bootstrap seed
+  'TryAddProfile',           // ProfileService cache-add primitive serving the RegisterTerminal bootstrap bypass
+                             //   (paired with the broker-side _taskDb.SaveProfile); removed with RegisterTerminal
+                             //   when e1643ccc adopts the write path. Relocated from the broker by 86f3fd21.
   'ReorderTask',             // sort_order via dedicated column writers + bulk rebalance + cache refresh FROM db
   'DeleteProject',           // canonical unregister via ProjectService + coherent cache-restore-on-failure
   'SetTaskActive',           // project-id self-heal SaveTask (its own revert-on-failure), rest via the write path
@@ -211,6 +218,26 @@ function selfTest() {
       name: 'post-extraction: the relocated write-path helper (MutateTaskInternal) PASSES',
       expectOk: true,
       src: `class TaskService {\n        private KanbanTask MutateTaskInternal(string id) {\n            _taskDb.SaveTask(updated);\n            _tasks[id] = updated;\n            return updated;\n        }\n}`,
+    },
+    {
+      // 86f3fd21 second-region safety-net: the profile write path moved to ProfileService.cs. Prove the
+      // census still falsifies on a raw _profiles write in a ProfileService method that ISN'T an allowlisted
+      // helper/bypass — the same "silently green on an emptied broker" hole, now for the profile cache.
+      name: 'post-extraction: raw _profiles write in a non-allowlisted ProfileService method FAILS',
+      expectOk: false,
+      src: `class ProfileService {\n        public void SneakyRelocatedProfileWrite(string id, TeamMemberProfile p) {\n            _profiles[id] = p;\n        }\n}`,
+    },
+    {
+      name: 'post-extraction: the relocated profile write-path helper (MutateProfileInternal) PASSES',
+      expectOk: true,
+      src: `class ProfileService {\n        private TeamMemberProfile MutateProfileInternal(string id) {\n            _taskDb.SaveProfile(updated);\n            _profiles[id] = updated;\n            return updated;\n        }\n}`,
+    },
+    {
+      // The cross-region-writer primitive (86f3fd21): TryAddProfile is the narrow cache-add the broker-side
+      // RegisterTerminal bypass now reaches through. It is an allowlisted named bypass, so its raw TryAdd PASSES.
+      name: 'post-extraction: TryAddProfile cache-add primitive PASSES (allowlisted named bypass)',
+      expectOk: true,
+      src: `class ProfileService {\n        public bool TryAddProfile(TeamMemberProfile profile) {\n            return _profiles.TryAdd(profile.Id, profile);\n        }\n}`,
     },
   ];
 
