@@ -268,7 +268,6 @@ namespace MultiTerminal.Controls
             catch (Exception ex)
             {
                 _debugLogService?.Trace("TaskHud", $"OpenLifecycle failed for taskId='{taskId}': {ex.Message}");
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.HandleOpenLifecycle] Failed for taskId='{taskId}': {ex.Message}");
             }
         }
 
@@ -310,7 +309,6 @@ namespace MultiTerminal.Controls
             }
 
             _debugLogService?.Trace("TaskHud", $"Initialize: terminal='{_terminalName}' broker ready, refreshing task");
-            System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.Initialize] terminal='{_terminalName}' broker ready, refreshing task");
 
             // Refresh immediately in case a task is already active
             RefreshTask();
@@ -326,12 +324,12 @@ namespace MultiTerminal.Controls
             {
                 // Broker not yet set — store so Initialize() can pick it up
                 _pendingTerminalName = terminalName;
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.SetTerminalName] Broker not ready yet, queuing terminal name '{terminalName}'");
+                _debugLogService?.Trace("TaskHud", $"SetTerminalName: Broker not ready yet, queuing terminal name '{terminalName}'");
                 return;
             }
 
             _terminalName = terminalName;
-            System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.SetTerminalName] Updated terminal name to '{terminalName}', refreshing");
+            _debugLogService?.Trace("TaskHud", $"SetTerminalName: Updated terminal name to '{terminalName}', refreshing");
             RefreshTask();
         }
 
@@ -458,11 +456,10 @@ namespace MultiTerminal.Controls
             int totalTasks = allTasks?.Count ?? 0;
 
             _debugLogService?.Trace("TaskHud", $"FindActiveTask: terminal='{_terminalName}' totalTasks={totalTasks}");
-            System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] terminal='{_terminalName}' totalTasks={totalTasks}");
 
             if (allTasks == null || allTasks.Count == 0)
             {
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] No tasks available");
+                _debugLogService?.Trace("TaskHud", $"FindActiveTask: No tasks available");
                 return null;
             }
 
@@ -473,14 +470,14 @@ namespace MultiTerminal.Controls
                 var task = allTasks.FirstOrDefault(t => t.Id == activity.TaskId);
                 if (task != null && task.Status == "in_progress")
                 {
-                    System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] PRIMARY match: task='{task.Title}' via ActivityService");
+                    _debugLogService?.Trace("TaskHud", $"FindActiveTask: PRIMARY match: task='{task.Title}' via ActivityService");
                     return task;
                 }
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] PRIMARY miss: activity taskId='{activity.TaskId}' not found or not in_progress");
+                _debugLogService?.Trace("TaskHud", $"FindActiveTask: PRIMARY miss: activity taskId='{activity.TaskId}' not found or not in_progress");
             }
             else
             {
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] PRIMARY miss: no activity for terminal '{_terminalName}'");
+                _debugLogService?.Trace("TaskHud", $"FindActiveTask: PRIMARY miss: no activity for terminal '{_terminalName}'");
             }
 
             // Secondary: find the explicitly active task assigned to this terminal
@@ -490,10 +487,10 @@ namespace MultiTerminal.Controls
                 t.SubStatus == "active");
             if (activeTask != null)
             {
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] SECONDARY match: task='{activeTask.Title}' via SubStatus=active");
+                _debugLogService?.Trace("TaskHud", $"FindActiveTask: SECONDARY match: task='{activeTask.Title}' via SubStatus=active");
                 return activeTask;
             }
-            System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] SECONDARY miss: no in_progress+active task for '{_terminalName}'");
+            _debugLogService?.Trace("TaskHud", $"FindActiveTask: SECONDARY miss: no in_progress+active task for '{_terminalName}'");
 
             // Tertiary: any in_progress task assigned to this terminal
             var tertiaryTask = allTasks.FirstOrDefault(t =>
@@ -501,13 +498,13 @@ namespace MultiTerminal.Controls
                 t.Status == "in_progress");
             if (tertiaryTask != null)
             {
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] TERTIARY match: task='{tertiaryTask.Title}'");
+                _debugLogService?.Trace("TaskHud", $"FindActiveTask: TERTIARY match: task='{tertiaryTask.Title}'");
             }
             else
             {
                 // Log all in_progress tasks to help diagnose assignee mismatches
                 var inProgressTasks = allTasks.Where(t => t.Status == "in_progress").ToList();
-                System.Diagnostics.Trace.WriteLine($"[TaskHudRenderer.FindActiveTask] TERTIARY miss: no match. In-progress tasks ({inProgressTasks.Count}): {string.Join(", ", inProgressTasks.Select(t => $"'{t.Title}' assignee='{t.Assignee}'"))}");
+                _debugLogService?.Trace("TaskHud", $"FindActiveTask: TERTIARY miss: no match. In-progress tasks ({inProgressTasks.Count}): {string.Join(", ", inProgressTasks.Select(t => $"'{t.Title}' assignee='{t.Assignee}'"))}");
             }
             return tertiaryTask;
         }

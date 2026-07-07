@@ -164,8 +164,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.OnBranchOutcomeUpdated] {ex.GetType().Name}: {ex.Message}");
+                _broker?.DebugLogService?.Error(
+                    "HudGit", $"OnBranchOutcomeUpdated: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -216,8 +216,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.OnWorktreeReady] {ex.GetType().Name}: {ex.Message}");
+                _broker?.DebugLogService?.Error(
+                    "HudGit", $"OnWorktreeReady: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -262,8 +262,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.HandleWorktreeReady] {ex.GetType().Name}: {ex.Message}");
+                _broker?.DebugLogService?.Error(
+                    "HudGit", $"HandleWorktreeReady: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -338,8 +338,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.ResolveProjectIdFromPath] {ex.GetType().Name}: {ex.Message}");
+                _broker?.DebugLogService?.Error(
+                    "HudGit", $"ResolveProjectIdFromPath: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -381,8 +381,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.TryResolveRegisteredProjectPath] {ex.GetType().Name}: {ex.Message}");
+                _broker?.DebugLogService?.Error(
+                    "HudGit", $"TryResolveRegisteredProjectPath: {ex.GetType().Name}: {ex.Message}");
             }
             return null;
         }
@@ -476,8 +476,12 @@ namespace MultiTerminal.Controls
 
             if (!IsAllowedWorktree(newPath))
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.SwitchToRepo] Rejected non-allowlisted path: {newPath}");
+                // Raw path omitted from this Release-visible Warning (4c86f18d: user filesystem paths are
+                // sensitive data; the event itself is the signal). Full path available at Trace if needed.
+                _broker?.DebugLogService?.Warning(
+                    "HudGit", "SwitchToRepo: rejected non-allowlisted path");
+                _broker?.DebugLogService?.Trace(
+                    "HudGit", $"SwitchToRepo: rejected path was: {newPath}");
                 return;
             }
 
@@ -518,8 +522,12 @@ namespace MultiTerminal.Controls
                 && !string.Equals(_projectPath, _originalProjectPath, StringComparison.OrdinalIgnoreCase)
                 && !IsAllowedWorktree(_projectPath))
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.UpdateWorktreeAllowlist] Current path '{_projectPath}' is no longer in the validated worktree set — reverting to original '{_originalProjectPath}'.");
+                // Paths omitted from this Release-visible Warning (4c86f18d: filesystem paths are sensitive);
+                // the revert event is the signal, full paths at Trace.
+                _broker?.DebugLogService?.Warning(
+                    "HudGit", "UpdateWorktreeAllowlist: current path no longer in the validated worktree set — reverting to original");
+                _broker?.DebugLogService?.Trace(
+                    "HudGit", $"UpdateWorktreeAllowlist: reverting '{_projectPath}' → '{_originalProjectPath}'");
                 PersistSelectedRepo(_originalProjectPath, _originalProjectPath); // removes key
                 UnsubscribeCurrent();
                 _projectPath = _originalProjectPath;
@@ -559,7 +567,8 @@ namespace MultiTerminal.Controls
         /// key is hashed off the canonical original project path so that
         /// switching between projects doesn't cross-contaminate.
         /// </summary>
-        private static string TryRestoreSelectedRepo(string originalProjectPath)
+        // Instance (not static) so the benign settings-persistence catch can reach the _broker sink (4c86f18d).
+        private string TryRestoreSelectedRepo(string originalProjectPath)
         {
             if (string.IsNullOrEmpty(originalProjectPath)) return null;
             try
@@ -572,8 +581,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.TryRestoreSelectedRepo] {ex.Message}");
+                _broker?.DebugLogService?.Warning(
+                    "HudGit", $"TryRestoreSelectedRepo: {ex.Message}");
                 return null;
             }
         }
@@ -584,7 +593,8 @@ namespace MultiTerminal.Controls
         /// <paramref name="originalProjectPath"/>, the key is removed so the
         /// "no override" default is restored cleanly.
         /// </summary>
-        private static void PersistSelectedRepo(string originalProjectPath, string selectedRepoPath)
+        // Instance (not static) so the benign settings-persistence catch can reach the _broker sink (4c86f18d).
+        private void PersistSelectedRepo(string originalProjectPath, string selectedRepoPath)
         {
             if (string.IsNullOrEmpty(originalProjectPath)) return;
             try
@@ -602,8 +612,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.PersistSelectedRepo] {ex.Message}");
+                _broker?.DebugLogService?.Warning(
+                    "HudGit", $"PersistSelectedRepo: {ex.Message}");
             }
         }
 
@@ -744,8 +754,8 @@ namespace MultiTerminal.Controls
                         }
                         catch (Exception refreshEx)
                         {
-                            System.Diagnostics.Trace.WriteLine(
-                                $"[HudGitRenderer.refresh] hard-reset failed, falling back: {refreshEx.GetType().Name}: {refreshEx.Message}");
+                            _broker?.DebugLogService?.Error(
+                                "HudGit", $"refresh: hard-reset failed, falling back: {refreshEx.GetType().Name}: {refreshEx.Message}");
                             _ = RefreshAsync();
                         }
                         break;
@@ -894,7 +904,7 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleSetBranchOutcome] Failed for branch='{branchName}': {ex.Message}");
+                _broker?.DebugLogService?.Error("HudGit", $"HandleSetBranchOutcome: Failed for branch='{branchName}': {ex.Message}");
                 NotifyFailed(ex.Message ?? ex.GetType().Name);
             }
         }
@@ -1000,7 +1010,7 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleCreateQuickTask] Failed for filePath='{filePath}': {ex.Message}");
+                _broker?.DebugLogService?.Error("HudGit", $"HandleCreateQuickTask: Failed for filePath='{filePath}': {ex.Message}");
                 NotifyFailed(ex.Message ?? ex.GetType().Name);
             }
         }
@@ -1139,7 +1149,7 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleCreateQuickTaskBulk] Failed for title='{title}', count={relativePaths.Count}: {ex.Message}");
+                _broker?.DebugLogService?.Error("HudGit", $"HandleCreateQuickTaskBulk: Failed for title='{title}', count={relativePaths.Count}: {ex.Message}");
                 NotifyFailed(ex.Message ?? ex.GetType().Name);
             }
         }
@@ -1157,7 +1167,7 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.HandleOpenLifecycle] Failed for taskId='{taskId}': {ex.Message}");
+                _broker?.DebugLogService?.Error("HudGit", $"HandleOpenLifecycle: Failed for taskId='{taskId}': {ex.Message}");
             }
         }
 
@@ -1195,8 +1205,12 @@ namespace MultiTerminal.Controls
                 if (!string.IsNullOrEmpty(registered)
                     && !string.Equals(registered, _projectPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    System.Diagnostics.Trace.WriteLine(
-                        $"[HudGitRenderer.ApplyProject] Bound path '{_projectPath}' no longer exists; rebinding to registered project path '{registered}'.");
+                    // Paths omitted from this Release-visible Warning (4c86f18d: filesystem paths are
+                    // sensitive); the rebind event is the signal, full paths at Trace.
+                    _broker?.DebugLogService?.Warning(
+                        "HudGit", "ApplyProject: bound path no longer exists; rebinding to registered project path");
+                    _broker?.DebugLogService?.Trace(
+                        "HudGit", $"ApplyProject: rebinding '{_projectPath}' → '{registered}'");
                     _projectPath = registered;
                 }
             }
@@ -1276,9 +1290,11 @@ namespace MultiTerminal.Controls
                 // Most likely ObjectDisposedException from BeginInvoke if Dispose
                 // ran between the IsDisposed check above and the BeginInvoke call.
                 // Benign (UnsubscribeCurrent in Dispose ensures this is the last
-                // event we'll see) but log so a real issue isn't lost.
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.OnRepoStateChanged] {ex.GetType().Name}: {ex.Message}");
+                // event we'll see) but log so a real issue isn't lost. Warning, not
+                // Error: this fires on a git-state event and the common case is a
+                // harmless dispose-race ObjectDisposedException (4c86f18d).
+                _broker?.DebugLogService?.Warning(
+                    "HudGit", $"OnRepoStateChanged: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -1466,7 +1482,7 @@ namespace MultiTerminal.Controls
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.RefreshAsync] outcome pre-fetch: {ex.Message}");
+                            brokerCaptured?.DebugLogService?.Error("HudGit", $"RefreshAsync: outcome pre-fetch: {ex.Message}");
                         }
                     }
 
@@ -1511,7 +1527,7 @@ namespace MultiTerminal.Controls
                                 }
                                 catch (Exception ex)
                                 {
-                                    System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.RefreshAsync] linkedTasks lookup for branch='{b.Name}': {ex.Message}");
+                                    brokerCaptured?.DebugLogService?.Error("HudGit", $"RefreshAsync: linkedTasks lookup for branch='{b.Name}': {ex.Message}");
                                 }
                             }
 
@@ -1643,7 +1659,7 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[HudGitRenderer.RefreshAsync] {ex.Message}");
+                _broker?.DebugLogService?.Error("HudGit", $"RefreshAsync: {ex.Message}");
             }
         }
 
@@ -1706,8 +1722,8 @@ namespace MultiTerminal.Controls
             // healthy state. Adversary HIGH, Run 5.
             if (untrackedDirRoots.Length == 0 && porcelainEntryCount < statusList.Count)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    "[HudGitRenderer] GetUntrackedDirRoots returned empty but porcelain count "
+                broker?.DebugLogService?.Trace(
+                    "HudGit", "GetUntrackedDirRoots returned empty but porcelain count "
                     + $"({porcelainEntryCount}) < recursed count ({statusList.Count}) for repo '{svcRepoRoot}'. "
                     + "LibGit2Sharp trailing-slash contract may have changed — porcelain-folded "
                     + "tree rendering disabled. See task 046f2dea.");
@@ -1858,15 +1874,15 @@ namespace MultiTerminal.Controls
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Trace.WriteLine(
-                                $"[HudGitRenderer.BuildWorkingChanges] auto-link task lookup failed for '{relPath}' -> '{link.TaskId}': {ex.Message}");
+                            broker?.DebugLogService?.Error(
+                                "HudGit", $"BuildWorkingChanges: auto-link task lookup failed for '{relPath}' -> '{link.TaskId}': {ex.Message}");
                             continue;
                         }
 
                         if (task == null)
                         {
-                            System.Diagnostics.Trace.WriteLine(
-                                $"[HudGitRenderer.BuildWorkingChanges] auto-link skipped — task '{link.TaskId}' not found on board (file '{relPath}').");
+                            broker?.DebugLogService?.Warning(
+                                "HudGit", $"BuildWorkingChanges: auto-link skipped — task '{link.TaskId}' not found on board (file '{relPath}').");
                             continue;
                         }
 
@@ -1876,8 +1892,8 @@ namespace MultiTerminal.Controls
                         if (string.IsNullOrEmpty(repoProjectId)
                             || !string.Equals(task.ProjectId, repoProjectId, StringComparison.OrdinalIgnoreCase))
                         {
-                            System.Diagnostics.Trace.WriteLine(
-                                $"[HudGitRenderer.BuildWorkingChanges] auto-link skipped — task '{link.TaskId}' project '{task.ProjectId ?? "<null>"}' does not match repo project '{repoProjectId ?? "<unresolved>"}' (file '{relPath}').");
+                            broker?.DebugLogService?.Warning(
+                                "HudGit", $"BuildWorkingChanges: auto-link skipped — task '{link.TaskId}' project '{task.ProjectId ?? "<null>"}' does not match repo project '{repoProjectId ?? "<unresolved>"}' (file '{relPath}').");
                             continue;
                         }
 
@@ -1904,8 +1920,8 @@ namespace MultiTerminal.Controls
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Trace.WriteLine(
-                                $"[HudGitRenderer.BuildWorkingChanges] auto-link write failed for '{relPath}' -> '{link.TaskId}': {ex.Message}");
+                            broker?.DebugLogService?.Error(
+                                "HudGit", $"BuildWorkingChanges: auto-link write failed for '{relPath}' -> '{link.TaskId}': {ex.Message}");
                             continue;
                         }
 
@@ -2010,8 +2026,8 @@ namespace MultiTerminal.Controls
                 try { worktreeOwnerTask = broker.GetTask(linkedTaskId); }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine(
-                        $"[HudGitRenderer.BuildWorkingChanges] worktree-owner task lookup failed for '{linkedTaskId}': {ex.Message}");
+                    broker?.DebugLogService?.Error(
+                        "HudGit", $"BuildWorkingChanges: worktree-owner task lookup failed for '{linkedTaskId}': {ex.Message}");
                     worktreeOwnerTask = null;
                 }
             }
@@ -2092,8 +2108,8 @@ namespace MultiTerminal.Controls
                 try { branchTask = broker.GetTask(branchTaskId); }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine(
-                        $"[HudGitRenderer.BuildWorkingChanges] branch-name task lookup failed for '{branchTaskId}' (branch '{branchName}'): {ex.Message}");
+                    broker?.DebugLogService?.Error(
+                        "HudGit", $"BuildWorkingChanges: branch-name task lookup failed for '{branchTaskId}' (branch '{branchName}'): {ex.Message}");
                 }
 
                 if (branchTask != null)
@@ -2138,8 +2154,8 @@ namespace MultiTerminal.Controls
                     }
                     else
                     {
-                        System.Diagnostics.Trace.WriteLine(
-                            $"[HudGitRenderer.BuildWorkingChanges] branch-name attribution skipped — task '{branchTaskId}' status '{bStatus ?? "<null>"}' / project '{bProjectId ?? "<null>"}' vs repo '{repoProjectId ?? "<unresolved>"}' (branch '{branchName}').");
+                        broker?.DebugLogService?.Warning(
+                            "HudGit", $"BuildWorkingChanges: branch-name attribution skipped — task '{branchTaskId}' status '{bStatus ?? "<null>"}' / project '{bProjectId ?? "<null>"}' vs repo '{repoProjectId ?? "<unresolved>"}' (branch '{branchName}').");
                     }
                 }
             }
@@ -2324,8 +2340,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.ResolveProjectIdForRepo] Path.GetFullPath failed for '{repoRoot}': {ex.Message}");
+                broker?.DebugLogService?.Error(
+                    "HudGit", $"ResolveProjectIdForRepo: Path.GetFullPath failed for '{repoRoot}': {ex.Message}");
                 return null;
             }
 
@@ -2385,8 +2401,8 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[HudGitRenderer.ResolveProjectIdForRepo] registry walk failed for '{canonicalRepoRoot}': {ex.Message}");
+                broker?.DebugLogService?.Error(
+                    "HudGit", $"ResolveProjectIdForRepo: registry walk failed for '{canonicalRepoRoot}': {ex.Message}");
                 return null;
             }
 

@@ -386,6 +386,7 @@ namespace MultiTerminal
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
             _projectPanel.SetGatewayService(_gatewayService);
+            _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
 
             // Create panel instances early so they can be restored from layout
             // They will be initialized with MCP broker later in InitializeMcpServerAndChatPanel
@@ -5481,7 +5482,7 @@ namespace MultiTerminal
             _debugLogService?.Info("CreateAgentPanel", $"Embedding agent '{agentName}' in terminal '{targetTerminal.TabText}'");
 
             var slot = targetTerminal.EmbeddedAgentPanel.AddAgentSlot(agentName);
-            var control = new AgentPanelControl { Dock = DockStyle.Fill };
+            var control = new AgentPanelControl { Dock = DockStyle.Fill, DebugLogService = _debugLogService };
             slot.Controls.Add(control);
             control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
             control.ApplyTheme(_currentTheme == TerminalTheme.Dark);

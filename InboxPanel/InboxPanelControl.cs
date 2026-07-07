@@ -95,17 +95,17 @@ namespace MultiTerminal.InboxPanel
             }
             catch (OperationCanceledException)
             {
-                System.Diagnostics.Debug.WriteLine("Inbox panel WebView2 init cancelled (shutdown).");
+                _broker?.DebugLogService?.Warning("InboxPanel", "Inbox panel WebView2 init cancelled (shutdown).");
                 _isInitializing = false;
             }
             catch (Exception ex) when (_isShuttingDown || IsDisposed || Disposing)
             {
-                System.Diagnostics.Debug.WriteLine($"Inbox panel WebView2 init failed during shutdown: {ex.Message}");
+                _broker?.DebugLogService?.Error("InboxPanel", $"Inbox panel WebView2 init failed during shutdown: {ex.Message}");
                 _isInitializing = false;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Inbox panel WebView2 init failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("InboxPanel", $"Inbox panel WebView2 init failed: {ex.Message}");
                 _isInitializing = false;
             }
         }
@@ -123,14 +123,14 @@ namespace MultiTerminal.InboxPanel
 
             // Load the HTML using robust path searching
             var htmlPath = GetHtmlPath();
-            System.Diagnostics.Debug.WriteLine($"Inbox panel HTML path: {htmlPath}");
+            _broker?.DebugLogService?.Info("InboxPanel", $"Inbox panel HTML path: {htmlPath}");
             if (File.Exists(htmlPath))
             {
                 _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri);
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"Inbox panel HTML NOT FOUND at: {htmlPath}");
+                _broker?.DebugLogService?.Warning("InboxPanel", $"Inbox panel HTML NOT FOUND at: {htmlPath}");
                 _webView.CoreWebView2.NavigateToString(
                     $"<html><body><h1>Inbox panel HTML not found</h1><p>Searched: {htmlPath}</p></body></html>");
             }
@@ -222,7 +222,7 @@ namespace MultiTerminal.InboxPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Inbox panel message error: {ex.Message}");
+                _broker?.DebugLogService?.Error("InboxPanel", $"Inbox panel message error: {ex.Message}");
             }
         }
 
@@ -251,7 +251,7 @@ namespace MultiTerminal.InboxPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Inbox panel SendInboxData error: {ex.Message}");
+                _broker?.DebugLogService?.Error("InboxPanel", $"Inbox panel SendInboxData error: {ex.Message}");
             }
         }
 
@@ -289,7 +289,7 @@ namespace MultiTerminal.InboxPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Inbox panel PostMessage error: {ex.Message}");
+                _broker?.DebugLogService?.Error("InboxPanel", $"Inbox panel PostMessage error: {ex.Message}");
             }
         }
 

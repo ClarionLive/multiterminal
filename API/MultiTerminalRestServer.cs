@@ -305,11 +305,11 @@ namespace MultiTerminal.API
                         };
 
                         _broker.RecordActivity(activityEvent, alreadyPersisted: true);
-                        System.Diagnostics.Debug.WriteLine($"[ActivityFeed→UI] {entry.ActivityType}: {entry.Summary}");
+                        _broker?.DebugLogService?.Trace("ActivityFeed→UI", $"{entry.ActivityType}: {entry.Summary}");
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[ActivityFeed→UI] Failed to forward event: {ex.Message}");
+                        _broker?.DebugLogService?.Error("ActivityFeed→UI", $"Failed to forward event: {ex.Message}");
                     }
                 };
 
@@ -342,12 +342,12 @@ namespace MultiTerminal.API
                                 // than reject the create as a duplicate — set allowReuseExisting.
                                 _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path,
                                     allowReuseExisting: true);
-                                System.Diagnostics.Debug.WriteLine($"[ProjectSync] Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
+                                _broker?.DebugLogService?.Info("ProjectSync", $"Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
                             }
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[ProjectSync] Failed to sync project: {ex.Message}");
+                            _broker?.DebugLogService?.Error("ProjectSync", $"Failed to sync project: {ex.Message}");
                         }
                     };
                 });
@@ -368,7 +368,7 @@ namespace MultiTerminal.API
                     TimeSpan.FromHours(1),
                     TimeSpan.FromHours(1)
                 );
-                System.Diagnostics.Debug.WriteLine("[API] Stale task timer started (hourly checks)");
+                _broker?.DebugLogService?.Info("API", "Stale task timer started (hourly checks)");
 
                 // Start periodic stale office agent cleanup (every 5 minutes)
                 _staleAgentTimer = new System.Threading.Timer(
@@ -377,7 +377,7 @@ namespace MultiTerminal.API
                     TimeSpan.FromMinutes(5),
                     TimeSpan.FromMinutes(5)
                 );
-                System.Diagnostics.Debug.WriteLine("[API] Stale office agent timer started (5-minute checks)");
+                _broker?.DebugLogService?.Info("API", "Stale office agent timer started (5-minute checks)");
 
                 // MCP registry seeding/sync removed — gateway is now source of truth for server selection.
 
@@ -418,7 +418,7 @@ namespace MultiTerminal.API
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[API] Presence adapter failed to start: {ex.Message}");
+                    _broker?.DebugLogService?.Error("API", $"Presence adapter failed to start: {ex.Message}");
                 }
 
                 ServerStarted?.Invoke(this, EventArgs.Empty);
@@ -488,7 +488,7 @@ namespace MultiTerminal.API
                     }
                     catch (OperationCanceledException)
                     {
-                        System.Diagnostics.Debug.WriteLine("[API] Shutdown timed out, forcing dispose");
+                        _broker?.DebugLogService?.Warning("API", "Shutdown timed out, forcing dispose");
                     }
 
                     _host.Dispose();
@@ -515,7 +515,7 @@ namespace MultiTerminal.API
                 var staleResults = _staleService.CheckAndFlagStaleTasks();
                 if (staleResults.Count > 0)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[API] Periodic check: Flagged {staleResults.Count} stale tasks");
+                    _broker?.DebugLogService?.Trace("API", $"Periodic check: Flagged {staleResults.Count} stale tasks");
 
                     foreach (var result in staleResults)
                     {
@@ -533,7 +533,7 @@ namespace MultiTerminal.API
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[API] Periodic stale task check failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("API", $"Periodic stale task check failed: {ex.Message}");
             }
         }
 
@@ -546,12 +546,12 @@ namespace MultiTerminal.API
                 var removed = _broker?.CleanupStaleOfficeAgents(30);
                 if (removed != null && removed.Count > 0)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[API] Stale agent cleanup: Removed {removed.Count} ghost agent(s)");
+                    _broker?.DebugLogService?.Trace("API", $"Stale agent cleanup: Removed {removed.Count} ghost agent(s)");
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[API] Stale agent cleanup failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("API", $"Stale agent cleanup failed: {ex.Message}");
             }
         }
 

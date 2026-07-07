@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.MCPServer.Models;
+using MultiTerminal.Services;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.ActivityPanel
@@ -63,6 +64,11 @@ namespace MultiTerminal.ActivityPanel
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
+
+        /// <summary>
+        /// Debug log sink, wired from the owning ActivityPanelDocument once its broker is available.
+        /// </summary>
+        public DebugLogService DebugLogService { get; set; }
 
         public ActivityPanelRenderer()
         {
@@ -171,7 +177,7 @@ namespace MultiTerminal.ActivityPanel
                 switch (message.Type)
                 {
                     case "ready":
-                        System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] JS 'ready' received! Pending messages: {_pendingMessages.Count}");
+                        DebugLogService?.Info("ActivityPanel", $"JS 'ready' received! Pending messages: {_pendingMessages.Count}");
                         _isInitialized = true;
                         _isInitializing = false;
                         SendMessage($"theme:{(_isDarkTheme ? "dark" : "light")}");
@@ -179,10 +185,10 @@ namespace MultiTerminal.ActivityPanel
                         while (_pendingMessages.Count > 0)
                         {
                             var pendingMsg = _pendingMessages.Dequeue();
-                            System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] Flushing queued message: {pendingMsg.Substring(0, Math.Min(60, pendingMsg.Length))}...");
+                            DebugLogService?.Trace("ActivityPanel", $"Flushing queued message: {pendingMsg.Substring(0, Math.Min(60, pendingMsg.Length))}...");
                             _webView.CoreWebView2.PostWebMessageAsString(pendingMsg);
                         }
-                        System.Diagnostics.Debug.WriteLine("[ActivityRenderer] Firing Ready event");
+                        DebugLogService?.Info("ActivityPanel", "Firing Ready event");
                         Ready?.Invoke(this, EventArgs.Empty);
                         break;
 
@@ -204,21 +210,21 @@ namespace MultiTerminal.ActivityPanel
                         break;
 
                     case "refresh":
-                        System.Diagnostics.Debug.WriteLine("[ActivityRenderer] Manual refresh requested");
+                        DebugLogService?.Info("ActivityPanel", "Manual refresh requested");
                         RefreshRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "createTask":
                         var title = ExtractJsonString(json, "title");
                         var description = ExtractJsonString(json, "description");
-                        System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] Create task requested: {title}");
+                        DebugLogService?.Info("ActivityPanel", $"Create task requested: {title}");
                         TaskCreateRequested?.Invoke(this, new TaskCreateRequestArgs(title, description));
                         break;
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanelRenderer] Error handling message: {ex.Message}");
+                DebugLogService?.Error("ActivityPanel", $"Error handling message: {ex.Message}");
             }
         }
 
@@ -226,13 +232,13 @@ namespace MultiTerminal.ActivityPanel
         {
             if (_webView?.CoreWebView2 != null && _isInitialized)
             {
-                System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] SendMessage: Posting to WebView2 - {message.Substring(0, Math.Min(80, message.Length))}...");
+                DebugLogService?.Trace("ActivityPanel", $"SendMessage: Posting to WebView2 - {message.Substring(0, Math.Min(80, message.Length))}...");
                 _webView.CoreWebView2.PostWebMessageAsString(message);
             }
             else
             {
                 // Queue message to send when WebView2 is ready
-                System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] SendMessage: QUEUING (WebView2 not ready) - {message.Substring(0, Math.Min(80, message.Length))}...");
+                DebugLogService?.Trace("ActivityPanel", $"SendMessage: QUEUING (WebView2 not ready) - {message.Substring(0, Math.Min(80, message.Length))}...");
                 _pendingMessages.Enqueue(message);
             }
         }
@@ -278,7 +284,7 @@ namespace MultiTerminal.ActivityPanel
             sb.Append("]");
 
             SendMessage($"profiles:{sb}");
-            System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] Sent {profiles?.Count ?? 0} profiles to UI");
+            DebugLogService?.Trace("ActivityPanel", $"Sent {profiles?.Count ?? 0} profiles to UI");
         }
 
         /// <summary>
@@ -287,7 +293,7 @@ namespace MultiTerminal.ActivityPanel
         /// </summary>
         public void ShowTeamActivity(List<TerminalActivity> activities)
         {
-            System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] ShowTeamActivity called with {activities?.Count ?? 0} activities, IsInitialized={_isInitialized}");
+            DebugLogService?.Trace("ActivityPanel", $"ShowTeamActivity called with {activities?.Count ?? 0} activities, IsInitialized={_isInitialized}");
 
             var sb = new StringBuilder();
             sb.Append("[");
@@ -327,13 +333,13 @@ namespace MultiTerminal.ActivityPanel
             // Skip sending if nothing meaningful has changed - avoids UI flashing
             if (currentHash == _lastTeamDataHash)
             {
-                System.Diagnostics.Debug.WriteLine("[ActivityRenderer] ShowTeamActivity: Data unchanged, skipping update");
+                DebugLogService?.Trace("ActivityPanel", "ShowTeamActivity: Data unchanged, skipping update");
                 return;
             }
             _lastTeamDataHash = currentHash;
 
             var msg = $"team:{jsonData}";
-            System.Diagnostics.Debug.WriteLine($"[ActivityRenderer] Sending team message ({msg.Length} chars)");
+            DebugLogService?.Trace("ActivityPanel", $"Sending team message ({msg.Length} chars)");
             SendMessage(msg);
         }
 

@@ -110,7 +110,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[SessionMemory] Index-project failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("SessionMemory", $"Index-project failed: {ex.Message}");
                 return Problem(detail: "Indexing failed", statusCode: 500);
             }
 

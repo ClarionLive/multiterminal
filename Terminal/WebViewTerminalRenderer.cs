@@ -8,6 +8,7 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using MultiTerminal.Services;
 
 namespace MultiTerminal.Terminal
 {
@@ -86,6 +87,12 @@ namespace MultiTerminal.Terminal
         // Retry configuration for Enter key (configurable for testing)
         private int _maxEnterRetries = 8; // ~15 seconds total: 500ms + 1s + 2s + 4s + 8s
         private int _initialRetryDelayMs = 500;
+
+        /// <summary>
+        /// Debug log sink, wired by the owning TerminalControl. Null until wired, so all
+        /// call sites use the null-conditional.
+        /// </summary>
+        public DebugLogService DebugLogService { get; set; }
 
         /// <summary>
         /// Event fired when terminal data is received from user input.
@@ -220,7 +227,7 @@ namespace MultiTerminal.Terminal
 
                 // Load terminal HTML
                 string htmlPath = GetTerminalHtmlPath();
-                System.Diagnostics.Debug.WriteLine("Terminal HTML path: " + htmlPath);
+                DebugLogService?.Info("WebViewTerminalRenderer", "Terminal HTML path: " + htmlPath);
                 if (File.Exists(htmlPath))
                 {
                     // Append a cache-busting query (file mtime) so WebView2 can never
@@ -284,7 +291,7 @@ namespace MultiTerminal.Terminal
 
         private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine("Navigation completed, success: " + e.IsSuccess);
+            DebugLogService?.Info("WebViewTerminalRenderer", "Navigation completed, success: " + e.IsSuccess);
             if (!e.IsSuccess)
             {
                 ShowError("Failed to load terminal: " + e.WebErrorStatus);
@@ -298,7 +305,7 @@ namespace MultiTerminal.Terminal
             try
             {
                 string json = e.WebMessageAsJson;
-                System.Diagnostics.Debug.WriteLine("WebView message: " + json);
+                DebugLogService?.Trace("WebViewTerminalRenderer", "WebView message: " + json);
 
                 // Parse the JSON message
                 var message = ParseJsonMessage(json);
@@ -349,7 +356,7 @@ namespace MultiTerminal.Terminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("WebView message error: " + ex.Message);
+                DebugLogService?.Error("WebViewTerminalRenderer", "WebView message error: " + ex.Message);
             }
         }
 
@@ -415,7 +422,7 @@ namespace MultiTerminal.Terminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("Input decode error: " + ex.Message);
+                DebugLogService?.Error("WebViewTerminalRenderer", "Input decode error: " + ex.Message);
             }
         }
 
@@ -478,7 +485,7 @@ namespace MultiTerminal.Terminal
                 catch (Exception ex)
                 {
                     // Clipboard can be locked by another process; copy is best-effort.
-                    System.Diagnostics.Debug.WriteLine("Clipboard.SetText failed: " + ex.Message);
+                    DebugLogService?.Error("WebViewTerminalRenderer", "Clipboard.SetText failed: " + ex.Message);
                 }
             }
         }
@@ -563,7 +570,7 @@ namespace MultiTerminal.Terminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("Write error: " + ex.Message);
+                DebugLogService?.Error("WebViewTerminalRenderer", "Write error: " + ex.Message);
             }
         }
 
@@ -612,7 +619,7 @@ namespace MultiTerminal.Terminal
         {
             if (!_isInitialized || _webView?.CoreWebView2 == null)
             {
-                System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] TypeInputViaXterm: Not initialized");
+                DebugLogService?.Trace("WebViewTerminalRenderer", "TypeInputViaXterm: Not initialized");
                 return;
             }
 
@@ -628,7 +635,7 @@ namespace MultiTerminal.Terminal
             string fullText = text + ending;
             string base64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(fullText));
 
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] TypeInputViaXterm: charDelay={charDelayMs}ms, text=\"{text}\", bytes={fullText.Length}");
+            DebugLogService?.Trace("WebViewTerminalRenderer", $"TypeInputViaXterm: charDelay={charDelayMs}ms, text=\"{text}\", bytes={fullText.Length}");
 
             _webView.CoreWebView2.PostWebMessageAsString($"typeInput:{charDelayMs}:{base64}");
         }
@@ -642,7 +649,7 @@ namespace MultiTerminal.Terminal
         {
             _maxEnterRetries = Math.Max(1, Math.Min(20, maxRetries)); // Clamp to reasonable range
             _initialRetryDelayMs = Math.Max(100, Math.Min(5000, initialDelayMs)); // Clamp to 100ms-5s
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Enter retry configured: maxRetries={_maxEnterRetries}, initialDelay={_initialRetryDelayMs}ms");
+            DebugLogService?.Info("WebViewTerminalRenderer", $"Enter retry configured: maxRetries={_maxEnterRetries}, initialDelay={_initialRetryDelayMs}ms");
         }
 
         /// <summary>
@@ -741,12 +748,11 @@ namespace MultiTerminal.Terminal
         {
             if (!_isInitialized || _webView?.CoreWebView2 == null)
             {
-                System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] SendEnterWithRetryAsync: Not initialized");
+                DebugLogService?.Trace("WebViewTerminalRenderer", "SendEnterWithRetryAsync: Not initialized");
                 return false;
             }
 
-            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] SendEnterWithRetryAsync starting (maxRetries={maxRetries})");
+            DebugLogService?.Trace("WebViewTerminalRenderer", $"SendEnterWithRetryAsync starting (maxRetries={maxRetries})");
 
             // Progressive escalation: Try different methods based on attempt number
             // Attempts 1-2: Method 1 (JS without focus) - handles 87% case
@@ -756,7 +762,7 @@ namespace MultiTerminal.Terminal
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] SendEnterWithRetryAsync cancelled at attempt {attempt}");
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"SendEnterWithRetryAsync cancelled at attempt {attempt}");
                     return false;
                 }
 
@@ -775,14 +781,14 @@ namespace MultiTerminal.Terminal
                 {
                     // Method 1: JS without focus (attempts 0-1)
                     methodName = "Method 1 (JS without focus)";
-                    System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Attempt {attempt + 1}/{maxRetries}: {methodName}");
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"Attempt {attempt + 1}/{maxRetries}: {methodName}");
                     enterSent = await TrySendEnterViaJsAsync();
                 }
                 else if (attempt < 5)
                 {
                     // Method 2: Focus + JS (attempts 2-4)
                     methodName = "Method 2 (focus + JS)";
-                    System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Attempt {attempt + 1}/{maxRetries}: {methodName}");
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"Attempt {attempt + 1}/{maxRetries}: {methodName}");
 
                     try
                     {
@@ -792,7 +798,7 @@ namespace MultiTerminal.Terminal
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Method 2 exception: {ex.Message}");
+                        DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 2 exception: {ex.Message}");
                         enterSent = false;
                     }
                 }
@@ -800,7 +806,7 @@ namespace MultiTerminal.Terminal
                 {
                     // Method 3: SendInput API (attempts 5-7)
                     methodName = "Method 3 (SendInput API)";
-                    System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Attempt {attempt + 1}/{maxRetries}: {methodName}");
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"Attempt {attempt + 1}/{maxRetries}: {methodName}");
 
                     try
                     {
@@ -808,14 +814,14 @@ namespace MultiTerminal.Terminal
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Method 3 exception: {ex.Message}");
+                        DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 3 exception: {ex.Message}");
                         enterSent = false;
                     }
                 }
 
                 if (!enterSent)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Attempt {attempt + 1}: {methodName} failed to send Enter");
+                    DebugLogService?.Trace("WebViewTerminalRenderer", $"Attempt {attempt + 1}: {methodName} failed to send Enter");
                     // Continue to next attempt
                     continue;
                 }
@@ -823,11 +829,11 @@ namespace MultiTerminal.Terminal
                 // Success! The JavaScript side (for Method 1) now verifies cursor movement
                 // before sending acknowledgment, so we can trust that the Enter was processed.
                 // For Method 2 and 3, the Enter key was sent via focus or SendInput API.
-                System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] ✅ {methodName} succeeded! Enter key processed.");
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"✅ {methodName} succeeded! Enter key processed.");
                 return true;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] ❌ All {maxRetries} attempts failed with progressive escalation");
+            DebugLogService?.Error("WebViewTerminalRenderer", $"❌ All {maxRetries} attempts failed with progressive escalation");
             return false;
         }
 
@@ -843,20 +849,19 @@ namespace MultiTerminal.Terminal
         {
             if (!_isInitialized || _webView?.CoreWebView2 == null)
             {
-                System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] SendEnterWithFallbackAsync: Not initialized");
+                DebugLogService?.Trace("WebViewTerminalRenderer", "SendEnterWithFallbackAsync: Not initialized");
                 return false;
             }
 
-            var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] SendEnterWithFallbackAsync starting");
+            DebugLogService?.Trace("WebViewTerminalRenderer", $"SendEnterWithFallbackAsync starting");
 
             // Method 1: Try JS sendEnter (current approach)
             if (await TrySendEnterViaJsAsync())
             {
-                System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] Method 1 (JS sendEnter) succeeded");
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 1 (JS sendEnter) succeeded");
                 return true;
             }
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] Method 1 (JS sendEnter) failed, trying Method 2");
+            DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 1 (JS sendEnter) failed, trying Method 2");
 
             // Method 2: Focus window explicitly, then JS retry
             await FocusTerminalWindowAsync();
@@ -864,20 +869,20 @@ namespace MultiTerminal.Terminal
 
             if (await TrySendEnterViaJsAsync())
             {
-                System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] Method 2 (focus + JS) succeeded");
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 2 (focus + JS) succeeded");
                 return true;
             }
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] Method 2 (focus + JS) failed, trying Method 3");
+            DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 2 (focus + JS) failed, trying Method 3");
 
             // Method 3: Windows SendInput API (OS-level keyboard simulation)
             var sendInputResult = await SendEnterViaSendInputAsync();
             if (sendInputResult)
             {
-                System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] Method 3 (SendInput) succeeded");
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"Method 3 (SendInput) succeeded");
                 return true;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] [{timestamp}] All Enter key methods failed!");
+            DebugLogService?.Error("WebViewTerminalRenderer", $"All Enter key methods failed!");
             return false;
         }
 
@@ -898,12 +903,12 @@ namespace MultiTerminal.Terminal
             // Log TaskCompletionSource timeout explicitly for monitoring
             if (completed == timeout)
             {
-                System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] ⚠️ TaskCompletionSource TIMEOUT after 3000ms - Enter acknowledgment not received");
+                DebugLogService?.Trace("WebViewTerminalRenderer", "⚠️ TaskCompletionSource TIMEOUT after 3000ms - Enter acknowledgment not received");
                 return false;
             }
 
             var result = _enterAckTcs.Task.Result;
-            System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] TaskCompletionSource completed successfully (result={result})");
+            DebugLogService?.Trace("WebViewTerminalRenderer", $"TaskCompletionSource completed successfully (result={result})");
             return result;
         }
 
@@ -914,7 +919,7 @@ namespace MultiTerminal.Terminal
         {
             if (_webView?.CoreWebView2 == null) return;
 
-            System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] 🎯 Focus state change: Requesting terminal focus");
+            DebugLogService?.Trace("WebViewTerminalRenderer", "🎯 Focus state change: Requesting terminal focus");
 
             // Get the parent form's handle
             var form = FindForm();
@@ -922,20 +927,20 @@ namespace MultiTerminal.Terminal
             {
                 var handle = form.Handle;
                 NativeMethods.FocusWindow(handle);
-                System.Diagnostics.Debug.WriteLine($"[WebViewTerminalRenderer] Focus state change: Form window focused (handle={handle})");
+                DebugLogService?.Trace("WebViewTerminalRenderer", $"Focus state change: Form window focused (handle={handle})");
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] ⚠️ Focus state change: Parent form not found");
+                DebugLogService?.Warning("WebViewTerminalRenderer", "⚠️ Focus state change: Parent form not found");
             }
 
             // Also focus xterm.js via JS message
             _webView.CoreWebView2.PostWebMessageAsString("focus:");
-            System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] Focus state change: xterm.js focus message sent");
+            DebugLogService?.Trace("WebViewTerminalRenderer", "Focus state change: xterm.js focus message sent");
 
             // Small delay to let focus settle
             await System.Threading.Tasks.Task.Delay(50);
-            System.Diagnostics.Debug.WriteLine("[WebViewTerminalRenderer] ✅ Focus state change complete (50ms settle time)");
+            DebugLogService?.Trace("WebViewTerminalRenderer", "✅ Focus state change complete (50ms settle time)");
         }
 
         /// <summary>

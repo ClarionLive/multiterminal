@@ -147,7 +147,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[TerminalsController] Stream error: {ex.Message}");
+                _broker?.DebugLogService?.Error("TerminalsController", $"Stream error: {ex.Message}");
 
                 if (webSocket.State == WebSocketState.Open)
                 {

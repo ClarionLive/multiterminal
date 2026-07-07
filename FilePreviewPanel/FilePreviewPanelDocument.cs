@@ -262,7 +262,6 @@ namespace MultiTerminal.FilePreviewPanel
             catch (Exception ex)
             {
                 _debugLog?.Error("FilePreview", $"SendFileContent JSON error: {ex.Message}");
-                System.Diagnostics.Debug.WriteLine($"[FilePreviewPanel] SendFileContent error: {ex.Message}");
             }
         }
 

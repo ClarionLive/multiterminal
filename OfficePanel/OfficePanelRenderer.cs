@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using MultiTerminal.Services;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.OfficePanel
@@ -54,6 +55,8 @@ namespace MultiTerminal.OfficePanel
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
+
+        public DebugLogService DebugLogService { get; set; }
 
         public OfficePanelRenderer()
         {
@@ -162,7 +165,7 @@ namespace MultiTerminal.OfficePanel
                 switch (message.Type)
                 {
                     case "ready":
-                        System.Diagnostics.Debug.WriteLine($"[OfficeRenderer] JS 'ready' received! Pending messages: {_pendingMessages.Count}");
+                        DebugLogService?.Info("OfficeRenderer", $"JS 'ready' received! Pending messages: {_pendingMessages.Count}");
                         _isInitialized = true;
                         _isInitializing = false;
                         SendMessage($"theme:{(_isDarkTheme ? "dark" : "light")}");
@@ -170,13 +173,13 @@ namespace MultiTerminal.OfficePanel
                         while (_pendingMessages.Count > 0)
                         {
                             var pendingMsg = _pendingMessages.Dequeue();
-                            System.Diagnostics.Debug.WriteLine($"[OfficeRenderer] Flushing queued message: {pendingMsg.Substring(0, Math.Min(60, pendingMsg.Length))}...");
+                            DebugLogService?.Trace("OfficeRenderer", $"Flushing queued message: {pendingMsg.Substring(0, Math.Min(60, pendingMsg.Length))}...");
                             _webView.CoreWebView2.PostWebMessageAsString(pendingMsg);
                         }
                         _webView.ZoomFactorChanged += (s, e) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
                         if (Math.Abs(_pendingZoom - 1.0) > 0.01)
                             _webView.ZoomFactor = _pendingZoom;
-                        System.Diagnostics.Debug.WriteLine("[OfficeRenderer] Firing Ready event");
+                        DebugLogService?.Info("OfficeRenderer", "Firing Ready event");
                         Ready?.Invoke(this, EventArgs.Empty);
                         break;
 
@@ -187,7 +190,7 @@ namespace MultiTerminal.OfficePanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[OfficePanelRenderer] Error handling message: {ex.Message}");
+                DebugLogService?.Error("OfficePanelRenderer", $"Error handling message: {ex.Message}");
             }
         }
 
@@ -195,13 +198,13 @@ namespace MultiTerminal.OfficePanel
         {
             if (_webView?.CoreWebView2 != null && _isInitialized)
             {
-                System.Diagnostics.Debug.WriteLine($"[OfficeRenderer] SendMessage: Posting to WebView2 - {message.Substring(0, Math.Min(80, message.Length))}...");
+                DebugLogService?.Trace("OfficeRenderer", $"SendMessage: Posting to WebView2 - {message.Substring(0, Math.Min(80, message.Length))}...");
                 _webView.CoreWebView2.PostWebMessageAsString(message);
             }
             else
             {
                 // Queue message to send when WebView2 is ready
-                System.Diagnostics.Debug.WriteLine($"[OfficeRenderer] SendMessage: QUEUING (WebView2 not ready) - {message.Substring(0, Math.Min(80, message.Length))}...");
+                DebugLogService?.Trace("OfficeRenderer", $"SendMessage: QUEUING (WebView2 not ready) - {message.Substring(0, Math.Min(80, message.Length))}...");
                 _pendingMessages.Enqueue(message);
             }
         }
