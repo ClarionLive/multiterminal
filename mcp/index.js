@@ -49,9 +49,11 @@ function isValidProjectId(id) {
 // '/' and '.'), so a hostile or malformed arg like "../tasks/<id>" becomes
 // "..%2Ftasks%2F<id>" — the URL parser will NOT normalize %2F into a separator,
 // so it can't escape its intended route into a sibling resource (ticket 6dcf3fa2;
-// delete_project precedent ec97c446). A path segment is never legitimately empty,
-// so nullish is rejected to fail fast rather than emit "/undefined" or an empty
-// "//" segment. NOTE: query-string VALUES are not path segments — build those
+// delete_project precedent ec97c446). A path segment is never legitimately empty
+// or a bare dot, so nullish AND ""/"."/".." are rejected to fail fast rather than
+// emit "/undefined", an empty "//" segment, or a route-normalizing dot segment
+// (see the in-body comment for why "." / ".." need an explicit reject even after
+// encoding). NOTE: query-string VALUES are not path segments — build those
 // with URLSearchParams (or encodeURIComponent per-value), never with seg().
 // The pathEncoding.test.mjs gate asserts every path-segment interpolation in an
 // api template literal goes through this function.
@@ -2611,7 +2613,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_tasks": {
         const status = args.status || "all";
         const includeQuickTasks = args.includeQuickTasks === true;
-        const tasks = await apiCall(`/api/tasks?status=${encodeURIComponent(status)}&includeQuickTasks=${includeQuickTasks}`);
+        const tasks = await apiCall(`/api/tasks?status=${encodeURIComponent(status)}&includeQuickTasks=${encodeURIComponent(includeQuickTasks)}`);
         return {
           content: [
             {
@@ -3613,7 +3615,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             fileName = nonCurrent[0].name;
           }
           const lines = args.count || 200;
-          let query = `?lines=${lines}`;
+          let query = `?lines=${encodeURIComponent(lines)}`;
           if (args.search) query += `&search=${encodeURIComponent(args.search)}`;
           const result = await apiCall(`/api/debug/files/${seg(fileName)}${query}`);
           const header = `📋 Log File: ${result.file} (${result.totalLines} lines)\n\n`;
@@ -3623,7 +3625,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const count = Math.min(args.count || 50, 500);
         const offset = args.offset || 0;
-        let query = `?count=${count}&offset=${encodeURIComponent(offset)}`;
+        let query = `?count=${encodeURIComponent(count)}&offset=${encodeURIComponent(offset)}`;
         if (args.source) query += `&source=${encodeURIComponent(args.source)}`;
         if (args.level) query += `&level=${encodeURIComponent(args.level)}`;
         if (args.search) query += `&search=${encodeURIComponent(args.search)}`;

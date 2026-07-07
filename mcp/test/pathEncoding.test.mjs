@@ -1,24 +1,30 @@
 // Falsifiable gate for the path-parameter encoding sweep (ticket 6dcf3fa2).
 //
 // The vulnerability class: a user/arg-controlled value interpolated into an
-// apiCall() URL PATH SEGMENT without encoding. Node's WHATWG URL parser
-// normalizes "." / ".." dot-segments, so an unencoded segment can escape or
-// collapse the intended route. The sweep routes every path-segment interpolation
-// through seg(), which rejects bare dot/empty segments and encodeURIComponent's
-// everything else.
+// apiCall() URL without being neutralized. Two sub-classes:
+//   • PATH SEGMENT (`/${x}`) — the WHATWG URL parser normalizes "." / ".."
+//     segments, so an unencoded segment can escape/collapse the route. Sanctioned
+//     form: `/${seg(x)}` (seg rejects bare dot/empty and encodeURIComponent's).
+//   • QUERY VALUE (`?k=${x}` / `&k=${x}`) — an unencoded value can inject extra
+//     `&k=v` pairs (query-param injection). Sanctioned form:
+//     `k=${encodeURIComponent(x)}`.
 //
-// This file has TWO jobs:
-//   1. A SOURCE-SCAN gate (extract mcp/index.js as text, never import it — that
-//      would boot the MCP server) asserting no api-path segment interpolation is
-//      raw. The scanner walks whole template literals (escape-aware), NOT lines,
-//      so a multi-line literal or a variable-built endpoint cannot hide a raw
-//      interpolation from the census. (Pipeline Run 1 adversary [medium]: a
-//      line-based scanner shares the sweep's blind spot; the gate is the
-//      regression barrier for this class, so it must not lie by construction.)
+// This file has TWO gates:
+//   1. A SOURCE CENSUS (reads mcp/index.js as text, never imports it — importing
+//      would boot the MCP server) asserting NO raw path segment and NO raw keyed
+//      query value survives. The census is STRUCTURAL, not name-based: it finds
+//      raw interpolations by shape, regardless of param name. That property is
+//      load-bearing — every census miss on this ticket came from hand-enumerating
+//      by name (e.g. "lines" hid because the name wasn't on a list). It walks
+//      WHOLE template literals (escape-aware, brace-matched) so a multi-line
+//      literal, a variable-built endpoint, a nested-template expression, or a
+//      seg()-prefixed-but-not-seg()-wrapped expression cannot slip past. "Safe"
+//      means the interpolation is EXACTLY seg(...)/encodeURIComponent(...) wrapping
+//      the whole expression — not merely starting with it (Run 2 adversary
+//      [medium]: a prefix match is falsifiable in the wrong direction).
 //   2. A BEHAVIOR gate that EXTRACTS the shipped seg() (regex + eval, pinning the
-//      real implementation like projectId.test.mjs pins PROJECT_ID_RE) and proves
-//      the dot-segment traversal is reproduced-then-blocked. (Run 1 Codex
-//      security-auditor [critical]: encodeURIComponent does not encode ".".)
+//      real implementation) and proves the dot-segment traversal is
+//      reproduced-then-blocked (Run 1 Codex security [critical]).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -29,14 +35,22 @@ const indexPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", 
 const src = readFileSync(indexPath, "utf8");
 
 // ---------------------------------------------------------------------------
-// Escape-aware template-literal extractor.
+// Escape-aware template-literal extractor. A naive /`[^`]*`/ mispairs on this
+// file (it has template literals with ESCAPED backticks — markdown fences in
+// tool output). This walker honors "\\" escapes and ${} nesting depth, so it
+// delimits whole literals — including multi-line ones — correctly.
 //
-// A naive /`[^`]*`/ match mispairs on this file because it contains template
-// literals with ESCAPED backticks (markdown code fences in tool output). This
-// walker honors "\\" escapes and tracks ${...} nesting depth, so it delimits
-// whole literals correctly — including multi-line ones. That is what lets the
-// scan below cover a path spread across lines or assembled into an `endpoint`
-// variable, closing the line-based blind spot.
+// KNOWN RESIDUALS (documented, no instance in the current file):
+//   • REGEX LITERALS are not modeled. A future /re/ containing a backtick or an
+//     unbalanced quote placed before an api literal could desync the walk. (Run 2
+//     code-reviewer NIT.)
+//   • SPLIT /api/ PREFIX: an endpoint whose "/api/" lives in a separate variable
+//     and is concatenated into a template that itself lacks "/api/"
+//     (`const b="/api/tasks"; apiCall(`${b}/${raw}/x`)`) is not covered, because
+//     the census scopes to literals that contain "/api/" (or are query fragments)
+//     to avoid false-flagging display strings like `${done}/${total}`.
+// Both would need value-flow/AST analysis. Called out so the gate's boundary is
+// honest rather than implied-total.
 // ---------------------------------------------------------------------------
 function extractTemplateLiterals(source) {
   const lits = [];
@@ -49,8 +63,8 @@ function extractTemplateLiterals(source) {
       let depth = 0;
       while (j < n) {
         const d = source[j];
-        if (d === "\\") { j += 2; continue; }              // escaped char (incl. \`)
-        if (d === "`" && depth === 0) { j++; break; }        // closing backtick
+        if (d === "\\") { j += 2; continue; }
+        if (d === "`" && depth === 0) { j++; break; }
         if (d === "$" && source[j + 1] === "{") { depth++; j += 2; continue; }
         if (d === "}" && depth > 0) { depth--; j++; continue; }
         j++;
@@ -58,7 +72,6 @@ function extractTemplateLiterals(source) {
       lits.push(source.slice(i, j));
       i = j;
     } else if (c === '"' || c === "'") {
-      // Skip a regular string so a backtick inside it can't open a false literal.
       let j = i + 1;
       while (j < n) {
         const d = source[j];
@@ -78,135 +91,218 @@ function extractTemplateLiterals(source) {
   return lits;
 }
 
-// A path segment is an interpolation immediately preceded by "/": `/${expr}`.
-// The one sanctioned form is `/${seg(...)}`. Everything else in path position
-// (raw args, bare encodeURIComponent, anything) is a violation. Query-string
-// interpolations (?x=${y}, &x=${y}, or a `${query}` var appended after the path)
-// are preceded by "?", "=", "&", or a word char — never "/" — so they are out of
-// scope by construction (the query string cannot route-traverse).
-function findRawApiPathSegments(source) {
+// Every ${...} interpolation in a literal, brace-matched (so a nested template or
+// object expression is captured WHOLE, never truncated/skipped), tagged with the
+// char immediately before "$" — which classifies its position:
+//   "/" => path segment,  "=" => keyed query value,  "?"/"&" => whole querystring
+//   (e.g. ?${params.toString()} — a URLSearchParams builder, exempt),  else => n/a.
+function findInterpolations(lit) {
+  const out = [];
+  for (let i = 0; i < lit.length; i++) {
+    if (lit[i] === "$" && lit[i + 1] === "{") {
+      const before = i > 0 ? lit[i - 1] : "";
+      let depth = 0;
+      let j = i + 1;
+      for (; j < lit.length; j++) {
+        if (lit[j] === "{") depth++;
+        else if (lit[j] === "}") { depth--; if (depth === 0) break; }
+      }
+      out.push({ before, expr: lit.slice(i + 2, j).trim() });
+      i = j;
+    }
+  }
+  return out;
+}
+
+// True iff `expr` is EXACTLY a single call to `fname` wrapping the WHOLE
+// expression — i.e. it starts with `fname(` and that call's matching close paren
+// is the last character. This is the fix for the prefix-match bypass: it rejects
+// `seg(id) + '/' + raw` (close paren is not last) and anything that only begins
+// with the sanctioned call.
+function wrapsWhole(expr, fname) {
+  if (!expr.startsWith(fname + "(")) return false;
+  let depth = 0;
+  for (let i = fname.length; i < expr.length; i++) {
+    const c = expr[i];
+    if (c === "(") depth++;
+    else if (c === ")") { depth--; if (depth === 0) return i === expr.length - 1; }
+  }
+  return false;
+}
+
+// A literal participates in the census if it is an api endpoint (contains /api/)
+// or a query fragment (starts with `?` or `&`, e.g. `?lines=...`, `&skip=...`).
+// Non-URL display strings (`${done}/${total}`) are neither, so they're skipped —
+// which is why the path rule can't false-flag them.
+function inScope(lit) {
+  return lit.includes("/api/") || /^`[?&]/.test(lit);
+}
+
+function findViolations(source) {
   const violations = [];
   for (const lit of extractTemplateLiterals(source)) {
-    if (!lit.includes("/api/")) continue;
-    const re = /\/\$\{([^{}]+)\}/g;
-    let m;
-    while ((m = re.exec(lit)) !== null) {
-      const expr = m[1].trim();
-      if (!expr.startsWith("seg(")) {
-        violations.push({ expr, lit: lit.replace(/\s+/g, " ").slice(0, 100) });
+    if (!inScope(lit)) continue;
+    const isApi = lit.includes("/api/");
+    for (const { before, expr } of findInterpolations(lit)) {
+      if (before === "/") {
+        // Path segment. Only api literals have real route segments; a "/${}" in a
+        // bare query fragment isn't a route position.
+        if (isApi && !wrapsWhole(expr, "seg")) {
+          violations.push({ kind: "path", expr, lit: squash(lit) });
+        }
+      } else if (before === "=") {
+        // Keyed query value (?k=${x} / &k=${x}). Must be encodeURIComponent-wrapped.
+        if (!wrapsWhole(expr, "encodeURIComponent")) {
+          violations.push({ kind: "query", expr, lit: squash(lit) });
+        }
       }
+      // before "?" or "&" (whole querystring, e.g. URLSearchParams) => exempt.
     }
   }
   return violations;
 }
 
-function countSafeApiPathSegments(source) {
-  let n = 0;
+function squash(lit) {
+  return lit.replace(/\s+/g, " ").slice(0, 110);
+}
+
+function countSafe(source) {
+  let pathSeg = 0;
+  let queryVal = 0;
   for (const lit of extractTemplateLiterals(source)) {
-    if (!lit.includes("/api/")) continue;
-    const re = /\/\$\{\s*seg\(/g;
-    while (re.exec(lit) !== null) n++;
+    if (!inScope(lit)) continue;
+    const isApi = lit.includes("/api/");
+    for (const { before, expr } of findInterpolations(lit)) {
+      if (before === "/" && isApi && wrapsWhole(expr, "seg")) pathSeg++;
+      else if (before === "=" && wrapsWhole(expr, "encodeURIComponent")) queryVal++;
+    }
   }
-  return n;
+  return { pathSeg, queryVal };
 }
 
 // ===========================================================================
-// Gate 1 — source scan: no raw path-segment interpolation survives
+// Gate 1 — structural census over mcp/index.js
 // ===========================================================================
 
-test("no raw path-segment interpolation survives in mcp/index.js", () => {
-  const violations = findRawApiPathSegments(src);
+test("no raw path segment or keyed query value survives in mcp/index.js", () => {
+  const violations = findViolations(src);
   assert.deepEqual(
     violations,
     [],
-    "Every apiCall path segment must go through seg(). Raw interpolations found:\n" +
-      violations.map((v) => `  ${v.expr}  |  ${v.lit}`).join("\n")
+    "Every apiCall path segment must be seg()-wrapped and every keyed query value " +
+      "encodeURIComponent-wrapped. Raw interpolations found:\n" +
+      violations.map((v) => `  [${v.kind}] ${v.expr}  |  ${v.lit}`).join("\n")
   );
 });
 
-test("scanner reaches the whole file (non-vacuous — many seg() sites detected)", () => {
-  const safe = countSafeApiPathSegments(src);
-  assert.ok(safe >= 60, `expected >= 60 seg()-wrapped api path segments, found ${safe}`);
+test("census reaches the whole file (non-vacuous — many wrapped sites detected)", () => {
+  const { pathSeg, queryVal } = countSafe(src);
+  assert.ok(pathSeg >= 60, `expected >= 60 seg()-wrapped path segments, found ${pathSeg}`);
+  assert.ok(queryVal >= 10, `expected >= 10 encodeURIComponent-wrapped query values, found ${queryVal}`);
 });
 
-// ---- Falsifiability of the SCANNER (same code, crafted inputs) ----
+// ---- PATH falsifiability (same census code, crafted inputs) ----
 
-test("scanner FLAGS a raw path segment (single-line negative fixture)", () => {
-  const raw = 'const x = await apiCall(`/api/tasks/${args.taskId}/status`, "PATCH");';
-  const v = findRawApiPathSegments(raw);
+test("census FLAGS a raw path segment (single-line)", () => {
+  const raw = 'await apiCall(`/api/tasks/${args.taskId}/status`, "PATCH");';
+  const v = findViolations(raw);
   assert.equal(v.length, 1);
+  assert.equal(v[0].kind, "path");
   assert.equal(v[0].expr, "args.taskId");
 });
 
-test("scanner FLAGS a raw segment in a MULTI-LINE api template (the line-based blind spot)", () => {
-  // /api/ on one physical line, the raw interpolation on the next. A line-based
-  // scanner skips the second line (no /api/ on it) and misses this. The
-  // whole-literal walker must catch it — this is the regression the hardening buys.
+test("census FLAGS a raw segment in a MULTI-LINE api template (line-based blind spot)", () => {
   const multiline = "await apiCall(`/api/tasks\n/${args.taskId}/status`);";
-  const v = findRawApiPathSegments(multiline);
-  assert.equal(v.length, 1, "multi-line raw path segment must be flagged");
+  const v = findViolations(multiline);
+  assert.equal(v.length, 1);
   assert.equal(v[0].expr, "args.taskId");
 });
 
-test("scanner FLAGS a raw segment in a variable-built endpoint literal", () => {
-  // Endpoint assembled into a variable then passed to apiCall. As long as the
-  // literal itself carries /api/, the whole-literal scan covers it — which is
-  // exactly the shape of the 5 real endpoint/rendpoint/path/latestUrl builders.
+test("census FLAGS a raw segment in a variable-built endpoint literal", () => {
   const varbuilt = "const endpoint = `/api/projects/${args.projectId}/agents`; await apiCall(endpoint);";
-  const v = findRawApiPathSegments(varbuilt);
-  assert.equal(v.length, 1);
-  assert.equal(v[0].expr, "args.projectId");
+  assert.equal(findViolations(varbuilt).length, 1);
 });
 
-test("scanner is not fooled by an ESCAPED-backtick literal preceding an api call", () => {
-  // Mirrors the real file: a markdown literal with an escaped backtick, then a
-  // raw api path. A naive `[^`]*` pairing mispairs here and would miss the raw
-  // segment; the escape-aware walker must still flag it.
+test("census is not fooled by an ESCAPED-backtick literal preceding an api call", () => {
   const tricky = "const md = `run \\`cmd\\` now`;\nawait apiCall(`/api/tasks/${args.taskId}`);";
-  const v = findRawApiPathSegments(tricky);
+  const v = findViolations(tricky);
   assert.equal(v.length, 1);
   assert.equal(v[0].expr, "args.taskId");
 });
 
-test("scanner PASSES a properly seg()-wrapped path", () => {
-  const safe = 'const x = await apiCall(`/api/tasks/${seg(args.taskId)}/status`, "PATCH");';
-  assert.equal(findRawApiPathSegments(safe).length, 0);
+test("census FLAGS seg() used as a PREFIX, not wrapping the whole segment (Run 2 bypass)", () => {
+  // The prefix-match hole: expression STARTS with seg( but appends a raw fragment.
+  // args.raw contributes an unencoded '/' + value at runtime — must be flagged.
+  const bypass = "await apiCall(`/api/tasks/${seg(args.taskId) + '/' + args.raw}/status`);";
+  const v = findViolations(bypass);
+  assert.equal(v.length, 1, "seg()-prefixed-but-not-wrapping expression must be flagged");
+  assert.equal(v[0].kind, "path");
 });
 
-test("scanner FLAGS only the raw segment in a mixed multi-segment path", () => {
+test("census FLAGS a raw segment hidden in a NESTED template expression (brace-skip bypass)", () => {
+  // The old /[^{}]+/ regex could not match an interpolation containing braces, so
+  // it SKIPPED (didn't report) it. Brace-matched extraction captures it whole; the
+  // inner `${raw}` value is not seg()-wrapped -> flagged.
+  const nested = "await apiCall(`/api/tasks/${`${args.raw}`}/status`);";
+  const v = findViolations(nested);
+  assert.equal(v.length, 1, "nested-template raw segment must be flagged, not skipped");
+});
+
+test("census PASSES a properly seg()-wrapped path", () => {
+  const safe = 'await apiCall(`/api/tasks/${seg(args.taskId)}/status`, "PATCH");';
+  assert.equal(findViolations(safe).length, 0);
+});
+
+test("census FLAGS only the raw segment in a mixed multi-segment path", () => {
   const mixed = 'await apiCall(`/api/tasks/${seg(args.taskId)}/checklist/${args.itemIndex}/transition`);';
-  const v = findRawApiPathSegments(mixed);
+  const v = findViolations(mixed);
   assert.equal(v.length, 1);
   assert.equal(v[0].expr, "args.itemIndex");
 });
 
-test("scanner ignores query-string interpolations (not path segments)", () => {
-  const q = 'await apiCall(`/api/tasks/inbox/${seg(args.userId)}?unreadOnly=${x}&limit=${y}`);';
-  assert.equal(findRawApiPathSegments(q).length, 0);
+// ---- QUERY falsifiability + M1 retro-detection ----
+
+test("census FLAGS a raw keyed query value", () => {
+  const rawq = "await apiCall(`/api/tasks/${seg(args.taskId)}/reports?limit=${args.limit}`);";
+  const v = findViolations(rawq);
+  assert.equal(v.length, 1);
+  assert.equal(v[0].kind, "query");
+  assert.equal(v[0].expr, "args.limit");
 });
 
-test("scanner ignores non-api display strings with ${a}/${b} shapes", () => {
+test("RETRO-DETECTION: the hardened census would have caught the M1 bug (?lines=${...})", () => {
+  // The exact pre-M1 shape: debug_logs' file branch built the query in a
+  // `?`-prefixed fragment var. A name-based enumeration missed "lines"; the
+  // STRUCTURAL census flags it because the value is not encodeURIComponent-wrapped.
+  // A census that couldn't have found the hand-found bug isn't done (Alice, Run 2).
+  const preM1 = "const lines = args.count || 200;\n          let query = `?lines=${lines}`;";
+  const v = findViolations(preM1);
+  assert.equal(v.length, 1, "the M1 raw query injection must be structurally detected");
+  assert.equal(v[0].kind, "query");
+  assert.equal(v[0].expr, "lines");
+});
+
+test("census PASSES an encodeURIComponent-wrapped query value", () => {
+  const safeq = "await apiCall(`/api/x/${seg(a)}/reports?limit=${encodeURIComponent(args.limit || 50)}`);";
+  assert.equal(findViolations(safeq).length, 0);
+});
+
+test("census EXEMPTS a whole-querystring URLSearchParams interpolation (?${params.toString()})", () => {
+  const usp = "await apiCall(`/api/knowledge/search?${params.toString()}`);";
+  assert.equal(findViolations(usp).length, 0);
+});
+
+test("census ignores non-api / non-query display strings with ${a}/${b} shapes", () => {
   const display = "text += `\\n📊 Checklist Progress: ${summary.done}/${summary.total} done`;";
-  assert.equal(findRawApiPathSegments(display).length, 0);
+  assert.equal(findViolations(display).length, 0);
 });
-
-// KNOWN RESIDUAL (documented, no instance in the current file): an endpoint
-// whose /api/ prefix lives in a SEPARATE variable and is concatenated in —
-// e.g. `const base = "/api/tasks"; apiCall(`${base}/${args.raw}/x`)`. The inner
-// literal `${base}/${args.raw}/x` carries no "/api/", so the scan skips it, and
-// `${args.raw}` is preceded by "/" but never inspected. Catching that requires
-// value-flow/AST analysis. It is called out here so a future maintainer knows
-// the census assumes the /api/ prefix appears literally in the same template as
-// the interpolation (true for all 77 current api literals, incl. the 5
-// variable-built endpoints, whose literals each contain /api/ inline).
 
 // ===========================================================================
 // Gate 2 — behavior: the shipped seg() blocks the dot-segment traversal class
 // ===========================================================================
 
 // Extract and pin the REAL seg() from source (like projectId.test.mjs pins
-// PROJECT_ID_RE), so this proves the shipped implementation — not a copy that
-// could drift. seg() uses only globals (String, encodeURIComponent, Error).
+// PROJECT_ID_RE), proving the shipped implementation — not a copy that could drift.
 const segMatch = src.match(/function seg\(value\) \{[\s\S]*?\n\}/);
 assert.ok(segMatch, "seg(value) function not found in mcp/index.js — did it move or get renamed?");
 const seg = new Function(`${segMatch[0]}; return seg;`)();
@@ -218,35 +314,29 @@ test("seg() rejects the bare dot/empty segments that encodeURIComponent leaves i
 });
 
 test("seg() reproduces-then-blocks the '..' route-escape (the [critical])", () => {
-  // REPRODUCE the vulnerability with the naive encoding the sweep replaced:
-  // encodeURIComponent does NOT encode ".", so the URL parser collapses "..".
   const naive = "http://h/api/tasks/" + encodeURIComponent("..") + "/status";
   assert.equal(new URL(naive).pathname, "/api/status",
     "sanity: the unguarded encoding really does normalize '..' into a route escape");
-  // BLOCK: the shipped seg() cannot produce that segment at all.
   assert.throws(() => seg(".."), "seg('..') must refuse to build the escaping segment");
 });
 
 test("seg() reproduces-then-blocks the '.' route-collapse", () => {
   const naive = "http://h/api/tasks/" + encodeURIComponent(".") + "/status";
   assert.equal(new URL(naive).pathname, "/api/tasks/status",
-    "sanity: unguarded '.' drops the /tasks/ segment's successor boundary");
+    "sanity: unguarded '.' collapses the segment");
   assert.throws(() => seg("."), "seg('.') must refuse to build the collapsing segment");
 });
 
 test("seg() keeps a slash-bearing payload as ONE encoded segment (URL-parse proof)", () => {
-  // '../x' is not a bare dot segment, so seg() encodes it rather than throwing.
-  // The proof the route is intact: the pathname still contains the /tasks/
-  // segment and the payload stays a single %2F-encoded segment (no normalization).
   const url = new URL("http://h/api/tasks/" + seg("../x") + "/status");
   assert.equal(url.pathname, "/api/tasks/..%2Fx/status");
   assert.ok(url.pathname.includes("/tasks/"), "intended /tasks/ segment preserved");
 });
 
 test("seg() passes ordinary values through, encoding reserved chars", () => {
-  assert.equal(seg("2d9643b7"), "2d9643b7");                 // hex short id — no-op
-  assert.equal(seg("a b"), "a%20b");                          // space encoded
-  assert.equal(seg(0), "0");                                  // itemIndex:0 is valid, not nullish
+  assert.equal(seg("2d9643b7"), "2d9643b7");
+  assert.equal(seg("a b"), "a%20b");
+  assert.equal(seg(0), "0");
   assert.equal(seg("3138ca72-4462-4ffd-a955-4049a76ad6c0"), "3138ca72-4462-4ffd-a955-4049a76ad6c0");
 });
 
