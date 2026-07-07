@@ -107,29 +107,41 @@ namespace MultiTerminal.Services.Startup
         }
 
         /// <summary>
-        /// Classify, then cross-check a marker-positive probe against the real OS TCP owner.
-        /// The <see cref="HealthIdentity.ServiceMarker"/> is a public constant, so a hostile
-        /// process squatting on the port can echo it and return a fake PID/user in the body —
-        /// but it cannot fake which PID actually owns the socket. If the health-claimed PID
-        /// disagrees with the TCP-table owner PID, downgrade to <see cref="PortContentionVerdict.ForeignHolder"/>
-        /// so the user sees the OS-resolved holder instead of a spoofed "another MultiTerminal"
-        /// message (task 4fec40e2 security finding). When the owner PID can't be resolved
-        /// (<paramref name="holder"/> has no PID), the marker is trusted — a genuine MT is
-        /// normally resolvable, and failing closed on a transient lookup miss would misreport a
-        /// real second instance as foreign.
+        /// Classify, then verify a marker-positive probe against the REAL OS-resolved socket owner.
+        /// <para>
+        /// Both the <see cref="HealthIdentity.ServiceMarker"/> and the body PID are
+        /// attacker-controllable — a hostile process squatting on the port can echo the public
+        /// marker AND report its own PID (which would match the TCP owner). The one thing it cannot
+        /// fake is which <em>process</em> the OS says owns the socket. So trust "another
+        /// MultiTerminal" ONLY when the OS-resolved owner is verifiably a MultiTerminal process
+        /// (its image name matches <paramref name="expectedProcessName"/>); otherwise downgrade to
+        /// <see cref="PortContentionVerdict.ForeignHolder"/> and show the OS-resolved identity.
+        /// </para>
+        /// <para>
+        /// This FAILS CLOSED: an unresolvable owner (no PID / no name) is not proof of a genuine
+        /// second instance, so it is treated as foreign. A real same-session second launch is caught
+        /// by the mutex before this path; a genuine cross-session MultiTerminal's image name is
+        /// normally readable, so this rarely misfires for a real instance (task 4fec40e2 — the
+        /// marker-spoof window flagged by both cross-model gates).
+        /// </para>
         /// </summary>
-        public static PortContentionVerdict ClassifyWithOwner(HealthProbeResult probe, PortHolderInfo holder)
+        public static PortContentionVerdict ClassifyWithOwner(HealthProbeResult probe, PortHolderInfo holder, string expectedProcessName)
         {
             var verdict = Classify(probe);
-            if (verdict == PortContentionVerdict.MultiTerminalAlreadyRunning &&
-                holder is { HasPid: true } &&
-                probe?.Identity != null &&
-                probe.Identity.Pid != holder.Pid)
+            if (verdict != PortContentionVerdict.MultiTerminalAlreadyRunning)
             {
-                return PortContentionVerdict.ForeignHolder;
+                return verdict;
             }
 
-            return verdict;
+            bool ownerIsMultiTerminal =
+                holder is { HasPid: true } &&
+                !string.IsNullOrEmpty(holder.ProcessName) &&
+                !string.IsNullOrEmpty(expectedProcessName) &&
+                string.Equals(holder.ProcessName, expectedProcessName, StringComparison.OrdinalIgnoreCase);
+
+            return ownerIsMultiTerminal
+                ? PortContentionVerdict.MultiTerminalAlreadyRunning
+                : PortContentionVerdict.ForeignHolder;
         }
 
         /// <summary>

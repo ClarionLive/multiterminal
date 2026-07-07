@@ -99,7 +99,7 @@ namespace MultiTerminal.Tests
         // ---- Probe body cap (task 4fec40e2 security finding — hostile-holder OOM guard) ----
 
         [Fact]
-        public async Task ReadCapped_truncates_oversized_body()
+        public async Task ReadCapped_truncates_and_flags_oversized_body()
         {
             const int cap = 64 * 1024;
             var big = new byte[cap * 3];
@@ -109,35 +109,38 @@ namespace MultiTerminal.Tests
             }
 
             using var ms = new MemoryStream(big);
-            string result = await StartupHealthProbe.ReadCappedAsync(ms, cap);
+            var (body, truncated) = await StartupHealthProbe.ReadCappedAsync(ms, cap);
 
-            // Never buffers more than the cap, no matter how much a hostile holder streams.
-            Assert.Equal(cap, result.Length);
+            // Never buffers more than the cap, no matter how much a hostile holder streams...
+            Assert.Equal(cap, body.Length);
+            // ...and reports the overflow so the caller can reject it as not-MT.
+            Assert.True(truncated);
         }
 
         [Fact]
-        public async Task ReadCapped_returns_small_body_whole()
+        public async Task ReadCapped_returns_small_body_whole_not_truncated()
         {
             var bytes = Encoding.UTF8.GetBytes("{\"service\":\"multiterminal-rest-api\"}");
             using var ms = new MemoryStream(bytes);
 
-            string result = await StartupHealthProbe.ReadCappedAsync(ms, 64 * 1024);
+            var (body, truncated) = await StartupHealthProbe.ReadCappedAsync(ms, 64 * 1024);
 
-            Assert.Equal("{\"service\":\"multiterminal-rest-api\"}", result);
+            Assert.Equal("{\"service\":\"multiterminal-rest-api\"}", body);
+            Assert.False(truncated);
         }
 
         [Fact]
-        public async Task ReadCapped_then_parse_rejects_capped_giant_body()
+        public async Task ReadCapped_body_exactly_at_cap_is_not_truncated()
         {
-            // End-to-end: a giant non-identity body is capped then parsed → not MT.
-            var big = Encoding.UTF8.GetBytes(new string('x', 300_000));
-            using var ms = new MemoryStream(big);
+            // Boundary: a body exactly the size of the cap with nothing after it is complete.
+            const int cap = 1024;
+            var exact = Encoding.UTF8.GetBytes(new string('a', cap));
+            using var ms = new MemoryStream(exact);
 
-            string body = await StartupHealthProbe.ReadCappedAsync(ms, 64 * 1024);
-            var result = StartupHealthProbe.Parse(body);
+            var (body, truncated) = await StartupHealthProbe.ReadCappedAsync(ms, cap);
 
-            Assert.True(result.Reached);
-            Assert.False(result.IsMultiTerminal);
+            Assert.Equal(cap, body.Length);
+            Assert.False(truncated);
         }
     }
 }

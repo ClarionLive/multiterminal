@@ -235,6 +235,12 @@ namespace MultiTerminal.API
 
                 var app = builder.Build();
 
+                // Assign _host immediately after Build (NOT after the wiring below) so the catch's
+                // dispose unwinds the built app/container even if a failure occurs during the
+                // service-resolution/wiring between here and the bind — otherwise those DB-owning
+                // DI singletons would leak on a pre-bind failure (task 4fec40e2 adversary finding).
+                _host = app;
+
                 // Exception handler must be first so it catches exceptions from all downstream
                 // middleware and controllers (Eval P2 item 1, task c522764d). Produces RFC 7807
                 // ProblemDetails 500s via the registered ProblemDetails service; RestApiExceptionHandler
@@ -306,36 +312,38 @@ namespace MultiTerminal.API
                 // Retry loop, task 4fec40e2) cannot attach a duplicate handler to the SHARED
                 // ProjectService — the subscription fires once no matter how many attempts run.
                 _projectRegisteredHook.Run(() =>
-                projectService.ProjectRegistered += (sender, args) =>
                 {
-                    try
+                    projectService.ProjectRegistered += (sender, args) =>
                     {
-                        var fileProject = args.Project;
-                        var dbProject = new MCPServer.Models.Project
+                        try
                         {
-                            Id = fileProject.Id,
-                            Name = fileProject.Name,
-                            Description = fileProject.Description ?? "",
-                            Path = fileProject.Path,
-                            CreatedBy = "UI",
-                            CreatedAt = fileProject.CreatedAt,
-                            UpdatedAt = DateTime.UtcNow
-                        };
+                            var fileProject = args.Project;
+                            var dbProject = new MCPServer.Models.Project
+                            {
+                                Id = fileProject.Id,
+                                Name = fileProject.Name,
+                                Description = fileProject.Description ?? "",
+                                Path = fileProject.Path,
+                                CreatedBy = "UI",
+                                CreatedAt = fileProject.CreatedAt,
+                                UpdatedAt = DateTime.UtcNow
+                            };
 
-                        if (_broker.GetProject(dbProject.Id).Success == false)
-                        {
-                            // This hook fires *after* ProjectService.RegisterProject wrote
-                            // .claude/project.json. The broker must reuse that ID rather
-                            // than reject the create as a duplicate — set allowReuseExisting.
-                            _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path,
-                                allowReuseExisting: true);
-                            System.Diagnostics.Debug.WriteLine($"[ProjectSync] Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
+                            if (_broker.GetProject(dbProject.Id).Success == false)
+                            {
+                                // This hook fires *after* ProjectService.RegisterProject wrote
+                                // .claude/project.json. The broker must reuse that ID rather
+                                // than reject the create as a duplicate — set allowReuseExisting.
+                                _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path,
+                                    allowReuseExisting: true);
+                                System.Diagnostics.Debug.WriteLine($"[ProjectSync] Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
+                            }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[ProjectSync] Failed to sync project: {ex.Message}");
-                    }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[ProjectSync] Failed to sync project: {ex.Message}");
+                        }
+                    };
                 });
 
                 // LEARNED message persistence now handled by knowledge_entries in multiterminal.db
@@ -373,8 +381,6 @@ namespace MultiTerminal.API
                 // Simple health check endpoint
                 app.MapGet("/", () => "MultiTerminal REST API is running");
                 app.MapGet("/health", () => new { status = "ok", port = _port });
-
-                _host = app;
 
                 await _host.StartAsync(cancellationToken);
 
@@ -426,6 +432,11 @@ namespace MultiTerminal.API
                 try { _staleTaskTimer?.Dispose(); _staleTaskTimer = null; } catch (Exception) { /* best-effort */ }
                 try { _staleAgentTimer?.Dispose(); _staleAgentTimer = null; } catch (Exception) { /* best-effort */ }
                 try { _host?.Dispose(); _host = null; } catch (Exception) { /* best-effort */ }
+                // The disposed host's DI container owned the ActivityFeedService the broker was
+                // wired to; drop the stale reference so nothing can touch that disposed,
+                // DB-owning instance during the Retry window. A successful retry re-wires it
+                // (task 4fec40e2 debugger defense-in-depth).
+                try { if (_broker != null) { _broker.ActivityFeedService = null; } } catch (Exception) { /* best-effort */ }
 
                 ServerError?.Invoke(this, ex);
                 throw;

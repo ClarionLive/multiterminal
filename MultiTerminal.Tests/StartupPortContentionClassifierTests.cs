@@ -78,56 +78,68 @@ namespace MultiTerminal.Tests
             Assert.False(StartupPortContentionClassifier.IsAddressInUse(ex));
         }
 
-        // ---- ClassifyWithOwner: cross-check the spoofable marker against the real TCP owner ----
+        // ---- ClassifyWithOwner: verify a marker-positive probe against the OS-resolved OWNER ----
+        // The marker + body PID are attacker-controllable; only the OS-resolved owner PROCESS NAME
+        // is trustworthy. These assert the fail-CLOSED policy (task 4fec40e2 security finding).
+
+        private const string SelfName = "MultiTerminal";
 
         [Fact]
-        public void ClassifyWithOwner_downgrades_spoofed_marker_when_pid_mismatches()
+        public void ClassifyWithOwner_trusts_marker_when_owner_process_is_multiterminal()
         {
-            // A hostile holder echoes the marker but reports a fake PID; the TCP owner PID is its
-            // real PID → mismatch → treat as foreign (task 4fec40e2 security finding).
-            var probe = new HealthProbeResult
-            {
-                Reached = true,
-                IsMultiTerminal = true,
-                Identity = new HealthIdentity { Pid = 1111 },
-            };
-            var holder = new PortHolderInfo { Pid = 2222, ProcessName = "evil" };
-            Assert.Equal(PortContentionVerdict.ForeignHolder, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder));
-        }
-
-        [Fact]
-        public void ClassifyWithOwner_trusts_marker_when_pid_matches()
-        {
-            var probe = new HealthProbeResult
-            {
-                Reached = true,
-                IsMultiTerminal = true,
-                Identity = new HealthIdentity { Pid = 4321 },
-            };
+            var probe = MarkerProbe(pid: 4321);
             var holder = new PortHolderInfo { Pid = 4321, ProcessName = "MultiTerminal" };
-            Assert.Equal(PortContentionVerdict.MultiTerminalAlreadyRunning, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder));
+            Assert.Equal(PortContentionVerdict.MultiTerminalAlreadyRunning, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, SelfName));
         }
 
         [Fact]
-        public void ClassifyWithOwner_trusts_marker_when_owner_pid_unknown()
+        public void ClassifyWithOwner_process_name_match_is_case_insensitive()
         {
-            // A transient TCP-lookup miss must not misreport a real second instance as foreign.
-            var probe = new HealthProbeResult
-            {
-                Reached = true,
-                IsMultiTerminal = true,
-                Identity = new HealthIdentity { Pid = 4321 },
-            };
-            Assert.Equal(PortContentionVerdict.MultiTerminalAlreadyRunning, StartupPortContentionClassifier.ClassifyWithOwner(probe, PortHolderInfo.Unknown));
+            var probe = MarkerProbe(pid: 4321);
+            var holder = new PortHolderInfo { Pid = 4321, ProcessName = "multiterminal" };
+            Assert.Equal(PortContentionVerdict.MultiTerminalAlreadyRunning, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, SelfName));
+        }
+
+        [Fact]
+        public void ClassifyWithOwner_downgrades_spoofer_that_echoes_marker_and_matching_pid()
+        {
+            // The key spoof: a hostile holder echoes the marker AND reports its OWN pid (so the pid
+            // matches the TCP owner) — but its process name isn't MultiTerminal → foreign.
+            var probe = MarkerProbe(pid: 9090);
+            var holder = new PortHolderInfo { Pid = 9090, ProcessName = "python" };
+            Assert.Equal(PortContentionVerdict.ForeignHolder, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, SelfName));
+        }
+
+        [Fact]
+        public void ClassifyWithOwner_fails_closed_when_owner_unresolved()
+        {
+            // Fail CLOSED: an unresolvable owner is not proof of a genuine second instance.
+            var probe = MarkerProbe(pid: 4321);
+            Assert.Equal(PortContentionVerdict.ForeignHolder, StartupPortContentionClassifier.ClassifyWithOwner(probe, PortHolderInfo.Unknown, SelfName));
+        }
+
+        [Fact]
+        public void ClassifyWithOwner_fails_closed_when_owner_name_unresolved()
+        {
+            var probe = MarkerProbe(pid: 4321);
+            var holder = new PortHolderInfo { Pid = 4321, ProcessName = null };
+            Assert.Equal(PortContentionVerdict.ForeignHolder, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, SelfName));
         }
 
         [Fact]
         public void ClassifyWithOwner_foreign_stays_foreign()
         {
             var probe = new HealthProbeResult { Reached = true, IsMultiTerminal = false };
-            var holder = new PortHolderInfo { Pid = 2222 };
-            Assert.Equal(PortContentionVerdict.ForeignHolder, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder));
+            var holder = new PortHolderInfo { Pid = 2222, ProcessName = "MultiTerminal" };
+            Assert.Equal(PortContentionVerdict.ForeignHolder, StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, SelfName));
         }
+
+        private static HealthProbeResult MarkerProbe(int pid) => new HealthProbeResult
+        {
+            Reached = true,
+            IsMultiTerminal = true,
+            Identity = new HealthIdentity { Pid = pid },
+        };
 
         // ---- Classify: probe result → verdict ----
 

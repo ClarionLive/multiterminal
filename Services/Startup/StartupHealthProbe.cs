@@ -53,7 +53,14 @@ namespace MultiTerminal.Services.Startup
                     return new HealthProbeResult { Reached = true, IsMultiTerminal = false };
                 }
 
-                string body = await ReadCappedAsync(response, cts.Token).ConfigureAwait(false);
+                var (body, truncated) = await ReadCappedAsync(response, cts.Token).ConfigureAwait(false);
+                if (truncated)
+                {
+                    // Body ran past the cap (e.g. a padded response with no honest Content-Length):
+                    // a real identity is tiny, so treat it as not-MT rather than parse it.
+                    return new HealthProbeResult { Reached = true, IsMultiTerminal = false };
+                }
+
                 return Parse(body);
             }
             catch (Exception)
@@ -75,18 +82,20 @@ namespace MultiTerminal.Services.Startup
         /// the cap is simply truncated — Parse then fails to find a valid identity and reports
         /// not-MT, which is the safe outcome for an oversized/hostile response.
         /// </summary>
-        private static async Task<string> ReadCappedAsync(HttpResponseMessage response, CancellationToken ct)
+        private static async Task<(string Body, bool Truncated)> ReadCappedAsync(HttpResponseMessage response, CancellationToken ct)
         {
             using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
             return await ReadCappedAsync(stream, MaxBodyBytes, ct).ConfigureAwait(false);
         }
 
         /// <summary>
-        /// Read at most <paramref name="maxBytes"/> from <paramref name="stream"/>. Exposed
-        /// internally so the cap is unit-testable without a live socket. A stream longer than
-        /// the cap is truncated at the cap (Parse then reports not-MT — the safe outcome).
+        /// Read at most <paramref name="maxBytes"/> from <paramref name="stream"/>, reporting whether
+        /// the body ran PAST the cap (Truncated). Exposed internally so the cap is unit-testable
+        /// without a live socket. A truncated body is treated as not-MT by the caller — a genuine
+        /// identity is tiny, so a body that fills the cap (especially with no honest Content-Length)
+        /// is hostile/padded, not a real health response (task 4fec40e2).
         /// </summary>
-        internal static async Task<string> ReadCappedAsync(Stream stream, int maxBytes, CancellationToken ct = default)
+        internal static async Task<(string Body, bool Truncated)> ReadCappedAsync(Stream stream, int maxBytes, CancellationToken ct = default)
         {
             var buffer = new byte[maxBytes];
             int total = 0;
@@ -101,7 +110,16 @@ namespace MultiTerminal.Services.Startup
                 total += read;
             }
 
-            return System.Text.Encoding.UTF8.GetString(buffer, 0, total);
+            bool truncated = false;
+            if (total == maxBytes)
+            {
+                // Cap filled exactly — probe one more byte to learn whether the body exceeded it.
+                var extra = new byte[1];
+                int more = await stream.ReadAsync(extra.AsMemory(0, 1), ct).ConfigureAwait(false);
+                truncated = more > 0;
+            }
+
+            return (System.Text.Encoding.UTF8.GetString(buffer, 0, total), truncated);
         }
 
         /// <summary>

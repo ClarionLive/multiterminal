@@ -1004,7 +1004,21 @@ namespace MultiTerminal
             // process can echo our public marker but cannot fake which PID owns :5050
             // (task 4fec40e2 security finding).
             PortHolderInfo holder = TcpPortOwnerLookup.Lookup(port);
-            var verdict = StartupPortContentionClassifier.ClassifyWithOwner(probe, holder);
+            // Verify a marker-positive probe against the OS-resolved owner's process identity,
+            // NOT the spoofable HTTP body (task 4fec40e2). A genuine second MultiTerminal owns the
+            // socket under this same executable name; a foreign squatter does not.
+            string expectedProcessName;
+            try
+            {
+                using var self = System.Diagnostics.Process.GetCurrentProcess();
+                expectedProcessName = self.ProcessName;
+            }
+            catch (Exception)
+            {
+                expectedProcessName = "MultiTerminal";
+            }
+
+            var verdict = StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, expectedProcessName);
 
             string message = StartupPortContentionClassifier.BuildMessage(verdict, port, probe, holder);
             string caption = verdict == PortContentionVerdict.MultiTerminalAlreadyRunning
