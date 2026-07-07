@@ -161,11 +161,11 @@ namespace MultiTerminal
             LoadSettings();
             ApplyTheme(isInitialLoad: true);
 
-            System.Diagnostics.Trace.WriteLine("[MainForm] Calling InitializeMcpServerAndChatPanel...");
+            _debugLogService?.Trace("MainForm", "Calling InitializeMcpServerAndChatPanel...");
             // Initialize MCP server BEFORE RestoreSession so panels can be properly initialized
             // when restored from layout (panels need broker for WebView2 initialization)
             InitializeMcpServerAndChatPanel();
-            System.Diagnostics.Trace.WriteLine("[MainForm] InitializeMcpServerAndChatPanel completed");
+            _debugLogService?.Trace("MainForm", "InitializeMcpServerAndChatPanel completed");
 
             // Launch companion processes (ClaudeRemote, Caddy, etc.) in background
             // Uses the shared instance from the REST server so the API controller sees tracked PIDs
@@ -174,11 +174,11 @@ namespace MultiTerminal
 
             // Defer RestoreSession to after the form is shown to avoid blocking the constructor
             // This prevents WebView2 initialization from blocking the UI thread during startup
-            System.Diagnostics.Trace.WriteLine("[MainForm] Deferring RestoreSession until form is shown...");
-            System.Diagnostics.Trace.WriteLine("[MainForm] Constructor completed, exiting...");
+            _debugLogService?.Trace("MainForm", "Deferring RestoreSession until form is shown...");
+            _debugLogService?.Trace("MainForm", "Constructor completed, exiting...");
             this.Shown += (s, e) =>
             {
-                System.Diagnostics.Trace.WriteLine("[MainForm] ===== SHOWN EVENT FIRED =====");
+                _debugLogService?.Trace("MainForm", "===== SHOWN EVENT FIRED =====");
                 ShowOwnerProfileDialogIfNeeded();
                 RestoreSession();
                 StartWorktreeJanitor();
@@ -218,24 +218,24 @@ namespace MultiTerminal
                                             RelatedId = relatedId,
                                         });
                                     }
-                                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[Janitor] activity log failed: {ex.Message}"); }
+                                    catch (Exception ex) { _debugLogService?.Error("Janitor", $"activity log failed: {ex.Message}"); }
                                 },
                                 tryDeferredPruneRetry: id => broker.TryDeferredPruneRetryAsync(id),
                                 tryMergeForTask: (id, root) => broker.TryAutoMergeForTaskAsync(id, root)).GetAwaiter().GetResult();
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[Janitor] Sweep threw: {ex.Message}");
+                            _debugLogService?.Error("Janitor", $"Sweep threw: {ex.Message}");
                         }
                     },
                     state: null,
                     dueTime: TimeSpan.FromSeconds(30),
                     period: TimeSpan.FromMinutes(5));
-                System.Diagnostics.Trace.WriteLine("[MainForm] Worktree janitor timer started (30s startup, 5m cadence).");
+                _debugLogService?.Trace("MainForm", "Worktree janitor timer started (30s startup, 5m cadence).");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Failed to start worktree janitor: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Failed to start worktree janitor: {ex.Message}");
             }
         }
 
@@ -256,16 +256,16 @@ namespace MultiTerminal
                     _ =>
                     {
                         try { broker.CheckIdleRemoteAutoOn(); }
-                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[IdleRemote] check threw: {ex.Message}"); }
+                        catch (Exception ex) { _debugLogService?.Error("IdleRemote", $"check threw: {ex.Message}"); }
                     },
                     state: null,
                     dueTime: TimeSpan.FromSeconds(60),
                     period: TimeSpan.FromSeconds(60));
-                System.Diagnostics.Trace.WriteLine("[MainForm] Idle remote-mode watcher started (60s cadence, default 30m threshold).");
+                _debugLogService?.Trace("MainForm", "Idle remote-mode watcher started (60s cadence, default 30m threshold).");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Failed to start idle remote-mode watcher: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Failed to start idle remote-mode watcher: {ex.Message}");
             }
         }
 
@@ -322,21 +322,21 @@ namespace MultiTerminal
             _gridManager = new GridLayoutManager(_dockPanel);
 
             // Initialize services
-            System.Diagnostics.Trace.WriteLine("[MainForm] Creating PromptService...");
+            _debugLogService?.Trace("MainForm", "Creating PromptService...");
             _promptService = new PromptService();
-            System.Diagnostics.Trace.WriteLine("[MainForm] Creating ProjectService...");
+            _debugLogService?.Trace("MainForm", "Creating ProjectService...");
             _projectService = new ProjectService();
             _projectService.RegistryChangedExternally += OnRegistryChangedExternally;
-            System.Diagnostics.Trace.WriteLine("[MainForm] Creating SessionIndexingService...");
+            _debugLogService?.Trace("MainForm", "Creating SessionIndexingService...");
             _sessionIndexingService = new SessionIndexingService();
-            System.Diagnostics.Trace.WriteLine("[MainForm] Creating TaskDatabase for chat persistence...");
+            _debugLogService?.Trace("MainForm", "Creating TaskDatabase for chat persistence...");
             _chatTaskDatabase = new TaskDatabase();
             // bb2b0104: these services now open and own their OWN connection to multiterminal.db
             // (one owner per connection) instead of borrowing _chatTaskDatabase's handle. Disposed
             // in Dispose(bool). _chatTaskDatabase remains solely the chat-message persistence instance.
             _ownerProfileService = new OwnerProfileService();
             _sourceControlAccountService = new SourceControlAccountService();
-            System.Diagnostics.Trace.WriteLine("[MainForm] TaskDatabase created successfully");
+            _debugLogService?.Trace("MainForm", "TaskDatabase created successfully");
 
             // One-time migration: seed the legacy single GitHub account into the new
             // multi-account store. Idempotent + wrapped in try/catch so it never blocks startup.
@@ -461,7 +461,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[MainForm] Legacy GitHub account migration failed: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Legacy GitHub account migration failed: {ex.Message}");
                 _debugLogService?.Info("MainForm", $"Legacy GitHub account migration failed: {ex.Message}");
             }
         }
@@ -474,32 +474,32 @@ namespace MultiTerminal
 
             try
             {
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 1: About to create REST API server");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 1: About to create REST API server");
                 // Create REST API server. Pass MainForm's existing _projectService so the REST DI
                 // shares the ONE ProjectService instance the CodeGraphWatcher subscribes to (G8) —
                 // otherwise the container creates a second instance and project-creation events
                 // (ProjectUpdated) fire on an instance the watcher never hears.
                 _mcpServer = new MultiTerminalRestServer(5050, _projectService);
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 2: REST API server created");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 2: REST API server created");
 
                 if (_mcpServer == null)
                 {
                     throw new InvalidOperationException("Failed to create MCP server instance");
                 }
 
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 3: Checking Broker");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 3: Checking Broker");
                 if (_mcpServer.Broker == null)
                 {
                     throw new InvalidOperationException("MCP server Broker is null after construction");
                 }
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 4: Broker is not null");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 4: Broker is not null");
 
                 // Wire up debug logging service
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 5: About to wire up debug logging");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 5: About to wire up debug logging");
                 _mcpServer.Broker.DebugLogService = _debugLogService;
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 6: About to call _debugLogService.Info");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 6: About to call _debugLogService.Info");
                 _debugLogService.Info("MainForm", "MCP Server created, debug logging initialized");
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 7: Debug logging initialized");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 7: Debug logging initialized");
 
                 // Wire up SessionLineageService — uses the broker's shared TaskDatabase
                 _mcpServer.Broker.SessionLineageService = new Services.SessionLineageService(_mcpServer.Broker.TaskDb);
@@ -584,7 +584,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] session_agent_map cleanup failed: {ex.Message}");
+                    _debugLogService?.Error("MainForm", $"session_agent_map cleanup failed: {ex.Message}");
                 }
 
                 // One-time cleanup: remove orphan empty note-tab rows that older
@@ -641,7 +641,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] orphan note-tab purge failed: {ex.Message}");
+                    _debugLogService?.Error("MainForm", $"orphan note-tab purge failed: {ex.Message}");
                 }
 
                 // Auto-sync Claude Code sessions on startup (background, non-blocking)
@@ -689,7 +689,7 @@ namespace MultiTerminal
 
                 // Note: Profiles are set to offline in MessageBroker constructor before loading
 
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 8: Wiring ServerError event");
+                _debugLogService?.Error("InitializeMcpServerAndChatPanel", "Step 8: Wiring ServerError event");
                 _mcpServer.ServerError += (s, ex) =>
                 {
                     // A :5050 "address already in use" bind failure is owned by the dedicated
@@ -717,28 +717,28 @@ namespace MultiTerminal
                 };
 
                 // Initialize panels with MCP broker (panels were created in InitializeDockPanel)
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 9: Checking chat panel");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 9: Checking chat panel");
                 if (_chatPanel == null)
                 {
                     throw new InvalidOperationException("Chat panel is null - InitializeDockPanel may not have run");
                 }
 
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 10: Initializing chat panel");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 10: Initializing chat panel");
                 _chatPanel.Initialize(_mcpServer.Broker);
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 11: Wiring chat panel events");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 11: Wiring chat panel events");
                 _chatPanel.InjectRequested += OnChatInjectRequested;
                 _chatPanel.ReplyRequested += OnChatReplyRequested;
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 12: Initializing tasks panel");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 12: Initializing tasks panel");
                 _tasksPanel.SetDebugLogService(_debugLogService);
                 _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 13: Wiring tasks panel events");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 13: Wiring tasks panel events");
                 _tasksPanel.InjectRequested += OnChatInjectRequested; // Reuse same inject handler
 
                 // Save zoom level to settings whenever user ctrl+wheels in a standalone panel
                 _tasksPanel.ZoomChanged += (s, zoom) => _settings?.SetTasksPanelZoom(zoom);
                 _chatPanel.ZoomChanged += (s, zoom) => _settings?.SetChatPanelZoom(zoom);
 
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Initializing inbox panel");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Initializing inbox panel");
                 _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
 
                 // Initialize dashboard header alongside other panels (not deferred — deferring
@@ -746,13 +746,13 @@ namespace MultiTerminal
                 _dashboardHeader?.Initialize(_mcpServer.Broker);
 
                 // Persist chat messages to database
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 14: Wiring MessageSent event");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 14: Wiring MessageSent event");
                 _mcpServer.Broker.MessageSent += OnChatMessageSent;
 
                 // Push notification support - map terminal IDs to documents
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 15: Wiring TerminalRegistered event");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 15: Wiring TerminalRegistered event");
                 _mcpServer.Broker.TerminalRegistered += OnMcpTerminalRegistered;
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 16: Setting OnMessageDelivery");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 16: Setting OnMessageDelivery");
                 _mcpServer.Broker.OnMessageDelivery = OnMcpMessageDelivery;
 
                 // Browser tab support - route tab requests to correct terminal
@@ -778,26 +778,26 @@ namespace MultiTerminal
                 _mcpServer.Broker.TerminalInjectRequested += OnBrokerTerminalInjectRequested;
 
                 // Wire up spawn callback for programmatic terminal spawning
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 17: Checking SpawnService");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 17: Checking SpawnService");
                 if (_mcpServer.SpawnService == null)
                 {
                     throw new InvalidOperationException("SpawnService is null");
                 }
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 18: Setting OnSpawnRequested");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 18: Setting OnSpawnRequested");
                 _mcpServer.SpawnService.OnSpawnRequested = OnSpawnRequested;
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 19: All wiring complete");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 19: All wiring complete");
 
                 // Initialize HTTP webhook service for agent ready notifications
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 20: Creating HttpWebhookService");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 20: Creating HttpWebhookService");
                 _webhookService = new MCPServer.Services.HttpWebhookService(_mcpServer.Broker);
                 _webhookService.AgentReady += (s, args) =>
                 {
-                    System.Diagnostics.Trace.WriteLine($"[MainForm] Agent ready webhook received: {args.AgentName}");
+                    _debugLogService?.Trace("MainForm", $"Agent ready webhook received: {args.AgentName}");
                     _debugLogService.Info("MainForm", $"Agent {args.AgentName} sent ready notification via webhook");
                 };
                 _webhookService.Start();
-                System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 21: HttpWebhookService started on http://localhost:5000/");
+                _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 21: HttpWebhookService started on http://localhost:5000/");
 
                 // Start native agent team watcher
                 InitializeTeamWatcher();
@@ -836,7 +836,7 @@ namespace MultiTerminal
                         }
                         catch (Exception crEx)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[MainForm] Session memory crash recovery failed: {crEx.Message}");
+                            _debugLogService?.Error("MainForm", $"Session memory crash recovery failed: {crEx.Message}");
                         }
 
                         // Wire terminal stream resolver: resolves any terminal identifier
@@ -868,8 +868,7 @@ namespace MultiTerminal
                             // the fallback only; MultiRemote:Port in appsettings.json wins.
                             _remoteGateway = CreateGatewayHost();
                             await _remoteGateway.StartAsync();
-                            System.Diagnostics.Debug.WriteLine(
-                                $"[MainForm] MultiRemote gateway started on {_remoteGateway.Url}");
+                            _debugLogService?.Info("MainForm", $"MultiRemote gateway started on {_remoteGateway.Url}");
 
                             // Wire the Multi-Connect restart hook (task 642c14e3, item 2) so the
                             // Settings tab / config endpoints can re-apply restart-required fields
@@ -879,8 +878,7 @@ namespace MultiTerminal
                         }
                         catch (Exception gwEx)
                         {
-                            System.Diagnostics.Debug.WriteLine(
-                                $"[MainForm] MultiRemote gateway failed to start: {gwEx.Message}");
+                            _debugLogService?.Error("MainForm", $"MultiRemote gateway failed to start: {gwEx.Message}");
                         }
 
                         Invoke(new Action(() =>
@@ -894,7 +892,7 @@ namespace MultiTerminal
                             // Refresh projects dropdown now that ProjectService is wired to broker
                             _tasksPanel?.RefreshProjects();
                             var successMsg = $"MCP Server started successfully on port {_mcpServer.Port} at {_mcpServer.Url}";
-                            System.Diagnostics.Debug.WriteLine(successMsg);
+                            _debugLogService?.Info("MainForm", successMsg);
 
                             // Also write to status (if status bar exists, we'll add it later)
                             Text = $"MultiTerminal - REST API: Running on port {_mcpServer.Port}";
@@ -912,7 +910,7 @@ namespace MultiTerminal
                                            $"Inner Stack Trace:\n{ex.InnerException.StackTrace}";
                         }
 
-                        System.Diagnostics.Debug.WriteLine(detailedError);
+                        _debugLogService?.Error("MainForm", detailedError);
                         Invoke(new Action(() =>
                         {
                             MessageBox.Show(detailedError + "\n\nThe Chat feature will not be available.",
@@ -942,7 +940,7 @@ namespace MultiTerminal
                 }
                 catch { }
 
-                System.Diagnostics.Debug.WriteLine(errorMsg);
+                _debugLogService?.Error("MainForm", errorMsg);
                 MessageBox.Show(errorMsg + $"\n\nLog file: {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal", "startup-error.log")}\n\nThe Chat feature will not be available.",
                     "MCP Server Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -965,7 +963,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex) when (StartupPortContentionClassifier.IsAddressInUse(ex))
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] :5050 bind failed (address already in use): {ex.Message}");
+                    _debugLogService?.Error("MainForm", $":5050 bind failed (address already in use): {ex.Message}");
 
                     if (ResolvePortContentionDialog(_mcpServer.Port) == DialogResult.Retry)
                     {
@@ -982,7 +980,7 @@ namespace MultiTerminal
                         // The window handle may not be created yet if the bind failed very early
                         // (Invoke throws). Fall back to a hard exit so a held port can't leave a
                         // headless dead-API process running (task 4fec40e2 debugger MEDIUM).
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Application.Exit during port-contention exit failed, forcing process exit: {exitEx.Message}");
+                        _debugLogService?.Error("MainForm", $"Application.Exit during port-contention exit failed, forcing process exit: {exitEx.Message}");
                         Environment.Exit(0);
                     }
 
@@ -1036,7 +1034,7 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 // If we can't even show the dialog (e.g. no window handle yet), default to exit.
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Port-contention dialog failed to show: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Port-contention dialog failed to show: {ex.Message}");
                 result = DialogResult.Cancel;
             }
 
@@ -1078,8 +1076,8 @@ namespace MultiTerminal
                 _remoteGateway = null;
                 if (old != null)
                 {
-                    try { await old.StopAsync().ConfigureAwait(false); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Gateway stop during restart failed: {ex.Message}"); }
-                    try { old.Dispose(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Gateway dispose during restart failed: {ex.Message}"); }
+                    try { await old.StopAsync().ConfigureAwait(false); } catch (Exception ex) { _debugLogService?.Error("MainForm", $"Gateway stop during restart failed: {ex.Message}"); }
+                    try { old.Dispose(); } catch (Exception ex) { _debugLogService?.Error("MainForm", $"Gateway dispose during restart failed: {ex.Message}"); }
                 }
 
                 // Reconstruct with the same live service singletons the original used. Port is the
@@ -1092,8 +1090,7 @@ namespace MultiTerminal
                     fresh = CreateGatewayHost();
                     await fresh.StartAsync().ConfigureAwait(false);
                     _remoteGateway = fresh;
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MainForm] MultiRemote gateway restarted on {fresh.Url}");
+                    _debugLogService?.Info("MainForm", $"MultiRemote gateway restarted on {fresh.Url}");
                     fresh = null;
                 }
                 finally
@@ -1162,7 +1159,7 @@ namespace MultiTerminal
 
                 void Log(string msg) {
                     var line = $"{DateTime.Now:HH:mm:ss.fff} {msg}\n";
-                    System.Diagnostics.Debug.WriteLine($"[ChatSave] {msg}");
+                    _debugLogService?.Info("ChatSave", $"{msg}");
                     try { System.IO.File.AppendAllText(logPath, line); } catch { }
                 }
 
@@ -1212,7 +1209,7 @@ namespace MultiTerminal
 
             if (targetDoc?.Terminal == null)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] TerminalInjectRequested: no live terminal for agent '{e.AgentName}'");
+                _debugLogService?.Info("MainForm", $"TerminalInjectRequested: no live terminal for agent '{e.AgentName}'");
                 return;
             }
 
@@ -1224,8 +1221,8 @@ namespace MultiTerminal
             if (string.Equals(e.Kind, "submit", StringComparison.OrdinalIgnoreCase))
             {
                 _ = targetDoc.InjectInputAsync(e.Text).ContinueWith(
-                    t => System.Diagnostics.Debug.WriteLine(
-                        $"[MainForm] TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
+                    t => _debugLogService?.Error("MainForm",
+                        $"TerminalInjectRequested(submit) for '{e.AgentName}' faulted: {t.Exception?.GetBaseException().Message}"),
                     System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
                 return;
             }
@@ -1247,7 +1244,7 @@ namespace MultiTerminal
             var terminal = _mcpServer.Broker.GetTerminal(e.TerminalId);
             if (terminal == null)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] BrowserTabRequested: terminal not found: {e.TerminalId}");
+                _debugLogService?.Warning("MainForm", $"BrowserTabRequested: terminal not found: {e.TerminalId}");
                 return;
             }
 
@@ -1269,7 +1266,7 @@ namespace MultiTerminal
 
             if (targetDoc == null)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] BrowserTabRequested: no TerminalDocument found for {e.TerminalId}");
+                _debugLogService?.Info("MainForm", $"BrowserTabRequested: no TerminalDocument found for {e.TerminalId}");
                 return;
             }
 
@@ -1439,7 +1436,7 @@ namespace MultiTerminal
             // subagents that should not change the parent terminal's tab or appear in activity
             if (IsTemporaryAgent(e.Name))
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Ignoring temporary agent registration: {e.Name}");
+                _debugLogService?.Info("MainForm", $"Ignoring temporary agent registration: {e.Name}");
                 return;
             }
 
@@ -1475,7 +1472,7 @@ namespace MultiTerminal
             // in quick succession and _lastActiveTerminal pointed to the wrong tab.
             if (targetDoc == null)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Terminal '{e.Name}' (id={e.Id}, docId={e.DocId}) could not be mapped to any TerminalDocument — channel/inbox delivery still works.");
+                _debugLogService?.Info("MainForm", $"Terminal '{e.Name}' (id={e.Id}, docId={e.DocId}) could not be mapped to any TerminalDocument — channel/inbox delivery still works.");
             }
 
             // SWAPDIAG (task ab32897c): header-swap diagnostic. Captures, per registration,
@@ -1530,8 +1527,7 @@ namespace MultiTerminal
                 && !string.IsNullOrEmpty(targetDoc.OriginalAgentName)
                 && !targetDoc.OriginalAgentName.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MainForm] Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) resolved to a document already bound to '{targetDoc.OriginalAgentName}' (docId={targetDoc.DocId}, title='{targetDoc.CustomTitle}'). Refusing to clobber it; re-resolving to this terminal's own document.");
+                _debugLogService?.Info("MainForm", $"Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) resolved to a document already bound to '{targetDoc.OriginalAgentName}' (docId={targetDoc.DocId}, title='{targetDoc.CustomTitle}'). Refusing to clobber it; re-resolving to this terminal's own document.");
 
                 // Re-resolve to THIS terminal's OWN document, keyed by the un-clobberable
                 // stable identity FIRST: a freshly-launched terminal's own doc is already
@@ -1548,8 +1544,7 @@ namespace MultiTerminal
 
                 if (targetDoc == null)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MainForm] No document matches '{e.Name}' — skipping tab/identity update to avoid clobbering another terminal.");
+                    _debugLogService?.Warning("MainForm", $"No document matches '{e.Name}' — skipping tab/identity update to avoid clobbering another terminal.");
                 }
             }
 
@@ -1593,7 +1588,7 @@ namespace MultiTerminal
                 "idle",
                 "Just connected"
             );
-            System.Diagnostics.Debug.WriteLine($"[MainForm] Terminal registered: {e.Name}, seeded initial activity");
+            _debugLogService?.Info("MainForm", $"Terminal registered: {e.Name}, seeded initial activity");
 
             // ORACLE BOOTSTRAP: When Oracle registers its channel, send it the digest processing message.
             // Only send once per app session to avoid duplicate digest tasks on crash restarts.
@@ -1643,7 +1638,7 @@ namespace MultiTerminal
         {
             try
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Spawn requested: {agentName} ({agentType}) in {workingDir}");
+                _debugLogService?.Info("MainForm", $"Spawn requested: {agentName} ({agentType}) in {workingDir}");
 
                 // Oracle is always-on — reject spawn requests, it's managed by OracleService
                 if (agentName.Equals(OracleService.OracleName, StringComparison.OrdinalIgnoreCase))
@@ -1683,7 +1678,7 @@ namespace MultiTerminal
                         // Always spawn with fresh session to avoid stale context from previous work
                         // The auto-submit logic below will handle the "initializing..." prompt automatically
                         string claudeCommand = "claude --dangerously-skip-permissions";
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Spawning {agentName} with fresh session");
+                        _debugLogService?.Info("MainForm", $"Spawning {agentName} with fresh session");
                         _debugLogService.Info("MainForm", $"Spawning {agentName} with fresh session (no context pollution)");
 
                         // Spawn with Claude Code auto-run (resume if session exists, otherwise new session)
@@ -1815,7 +1810,7 @@ namespace MultiTerminal
 
         private async Task<bool> OnMcpMessageDelivery(string messageId, string recipientId, string sender, string message)
         {
-            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MainForm] OnMcpMessageDelivery ENTRY: messageId={messageId}, from={sender}, to={recipientId}");
+            _debugLogService?.Trace("MainForm", $"OnMcpMessageDelivery ENTRY: messageId={messageId}, from={sender}, to={recipientId}");
             _debugLogService.Trace("MainForm", $"OnMcpMessageDelivery: messageId={messageId}, from={sender}, to={recipientId}, msg={message.Substring(0, Math.Min(50, message.Length))}...");
 
             // Check for duplicate - if we've delivered this message recently, skip it
@@ -1895,18 +1890,18 @@ namespace MultiTerminal
             lock (_injectionLock)
             {
                 _messageQueue.Enqueue((messageId, recipientId, sender, message, completionSource));
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MainForm] Message {messageId} queued. Queue size: {_messageQueue.Count}, InProgress: {_injectionInProgress}");
+                _debugLogService?.Trace("MainForm", $"Message {messageId} queued. Queue size: {_messageQueue.Count}, InProgress: {_injectionInProgress}");
                 _debugLogService.Trace("MainForm", $"Message {messageId} queued with completion tracking. Queue size: {_messageQueue.Count}, InProgress: {_injectionInProgress}");
                 if (!_injectionInProgress)
                 {
                     _injectionInProgress = true;
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MainForm] Starting ProcessNextMessage");
+                    _debugLogService?.Trace("MainForm", $"Starting ProcessNextMessage");
                     _debugLogService.Trace("MainForm", "Starting ProcessNextMessage");
                     ProcessNextMessage();
                 }
                 else
                 {
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MainForm] Injection already in progress, message will wait in queue");
+                    _debugLogService?.Trace("MainForm", $"Injection already in progress, message will wait in queue");
                     _debugLogService.Trace("MainForm", "Injection already in progress, message will wait in queue");
                 }
             }
@@ -2722,10 +2717,10 @@ namespace MultiTerminal
             // Restore window state after form is shown
             this.Shown += (s, e) =>
             {
-                System.Diagnostics.Trace.WriteLine("[MainForm] Shown event #1: Setting WindowState...");
-                System.Diagnostics.Trace.WriteLine($"[MainForm] Shown event #1: Saved state is {savedState}");
+                _debugLogService?.Trace("MainForm", "Shown event #1: Setting WindowState...");
+                _debugLogService?.Trace("MainForm", $"Shown event #1: Saved state is {savedState}");
                 WindowState = savedState;
-                System.Diagnostics.Trace.WriteLine("[MainForm] Shown event #1: WindowState set successfully");
+                _debugLogService?.Trace("MainForm", "Shown event #1: WindowState set successfully");
                 // MCP server now initialized earlier in constructor (before RestoreSession)
             };
 
@@ -2837,7 +2832,7 @@ namespace MultiTerminal
             foreach (var info in _embeddedAgentMap.Values.ToList())
             {
                 try { info.Control?.ApplyTheme(_currentTheme.IsDark); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Embedded agent theme error: {ex.Message}"); }
+                catch (Exception ex) { _debugLogService?.Error("MainForm", $"Embedded agent theme error: {ex.Message}"); }
             }
 
             // Update all open lifecycle board windows
@@ -2893,17 +2888,17 @@ namespace MultiTerminal
 
         public void AddNewTerminal(string workingDirectory = null, float? fontSize = null, bool forceTabMode = false, string identityName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, bool atomicIdentityUniqueness = false)
         {
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] ===== START =====");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] workingDirectory: '{workingDirectory ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] fontSize: {fontSize?.ToString() ?? "null"}");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] forceTabMode: {forceTabMode}");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] identityName: '{identityName ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] autoRunCommand: '{autoRunCommand ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] projectId: '{projectId ?? "null"}'");
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] isTeamLead: '{isTeamLead}'");
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Creating TerminalDocument...");
+            _debugLogService?.Trace("AddNewTerminal", "===== START =====");
+            _debugLogService?.Trace("AddNewTerminal", $"workingDirectory: '{workingDirectory ?? "null"}'");
+            _debugLogService?.Trace("AddNewTerminal", $"fontSize: {fontSize?.ToString() ?? "null"}");
+            _debugLogService?.Trace("AddNewTerminal", $"forceTabMode: {forceTabMode}");
+            _debugLogService?.Trace("AddNewTerminal", $"identityName: '{identityName ?? "null"}'");
+            _debugLogService?.Trace("AddNewTerminal", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
+            _debugLogService?.Trace("AddNewTerminal", $"projectId: '{projectId ?? "null"}'");
+            _debugLogService?.Trace("AddNewTerminal", $"isTeamLead: '{isTeamLead}'");
+            _debugLogService?.Trace("AddNewTerminal", "Creating TerminalDocument...");
             var doc = new TerminalDocument();
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] TerminalDocument created");
+            _debugLogService?.Trace("AddNewTerminal", "TerminalDocument created");
 
             doc.Terminal.SetDebugLogService(_debugLogService);
             doc.SetDebugLogService(_debugLogService); // Enable status bar logging
@@ -2936,7 +2931,7 @@ namespace MultiTerminal
             int maxTabs = _settings?.GetMaxTabsPerGrid() ?? 3;
             var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Showing terminal in DockPanel (maxGrids: {maxGrids}, maxTabs: {maxTabs}, forceTab: {forceTabMode})...");
+            _debugLogService?.Trace("AddNewTerminal", $"Showing terminal in DockPanel (maxGrids: {maxGrids}, maxTabs: {maxTabs}, forceTab: {forceTabMode})...");
             if (forceTabMode)
             {
                 doc.Show(_dockPanel, DockState.Document);
@@ -2986,7 +2981,7 @@ namespace MultiTerminal
                     }
                 }
             }
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Terminal shown in DockPanel");
+            _debugLogService?.Trace("AddNewTerminal", "Terminal shown in DockPanel");
 
             // When called with no launch parameters, show the start screen instead of starting a shell.
             // Any meaningful parameter (directory, identity, command, project) triggers immediate start.
@@ -2997,12 +2992,12 @@ namespace MultiTerminal
 
             // Register with MCP server AFTER adding to DockPanel so the
             // TerminalRegistered event handler can find this doc by DocId
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Registering terminal with MCP server...");
+            _debugLogService?.Trace("AddNewTerminal", "Registering terminal with MCP server...");
             if (_mcpServer?.Broker != null)
             {
                 if (!string.IsNullOrEmpty(identityName))
                 {
-                    System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Identity name provided: '{identityName}'");
+                    _debugLogService?.Trace("AddNewTerminal", $"Identity name provided: '{identityName}'");
 
                     // Apply team lead naming convention: "Team Lead {Name} - {3-digit random}"
                     if (isTeamLead)
@@ -3012,21 +3007,21 @@ namespace MultiTerminal
                         string suffix = Random.Shared.Next(100, 999).ToString();
 #pragma warning restore CA5394
                         identityName = $"Team Lead {identityName} - {suffix}";
-                        System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Team lead naming applied: '{identityName}'");
+                        _debugLogService?.Trace("AddNewTerminal", $"Team lead naming applied: '{identityName}'");
                     }
 
                     terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead, atomicIdentityUniqueness);
-                    System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] PreRegisterTerminalWithName returned: '{terminalName}'");
+                    _debugLogService?.Trace("AddNewTerminal", $"PreRegisterTerminalWithName returned: '{terminalName}'");
                 }
                 else if (hasLaunchParams)
                 {
-                    System.Diagnostics.Trace.WriteLine("[AddNewTerminal] No identity name, using 'Unassigned'");
+                    _debugLogService?.Trace("AddNewTerminal", "No identity name, using 'Unassigned'");
                     terminalName = "Unassigned";
                     _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
                 }
                 // else: start screen tab — no MCP registration yet; happens when user launches a project
             }
-            System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Terminal registered as: '{terminalName ?? "null"}'");
+            _debugLogService?.Trace("AddNewTerminal", $"Terminal registered as: '{terminalName ?? "null"}'");
 
             if (hasLaunchParams)
             {
@@ -3041,19 +3036,19 @@ namespace MultiTerminal
                 // claude starts. Falls through to `dir` when no worktree is in play.
                 dir = ResolveSpawnDir(terminalName, dir, out string taskWorktreePath);
 
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Starting terminal...");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   dir: '{dir}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   terminalName: '{terminalName}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   autoRunCommand: '{autoRunCommand ?? "null"}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal]   taskWorktreePath: '{taskWorktreePath ?? "null"}'");
-                System.Diagnostics.Trace.WriteLine($"[AddNewTerminal] Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead}, gatewayProfile='{gatewayProfile ?? "null"}', taskWorktreePath='{taskWorktreePath ?? "null"}')...");
+                _debugLogService?.Trace("AddNewTerminal", $"Starting terminal...");
+                _debugLogService?.Trace("AddNewTerminal", $"dir: '{dir}'");
+                _debugLogService?.Trace("AddNewTerminal", $"terminalName: '{terminalName}'");
+                _debugLogService?.Trace("AddNewTerminal", $"autoRunCommand: '{autoRunCommand ?? "null"}'");
+                _debugLogService?.Trace("AddNewTerminal", $"taskWorktreePath: '{taskWorktreePath ?? "null"}'");
+                _debugLogService?.Trace("AddNewTerminal", $"Calling doc.StartTerminal('{dir}', '{terminalName}', '{autoRunCommand ?? "null"}', '{spawnerName ?? "null"}', '{projectId ?? "null"}', isTeamLead={isTeamLead}, gatewayProfile='{gatewayProfile ?? "null"}', taskWorktreePath='{taskWorktreePath ?? "null"}')...");
                 doc.StartTerminal(dir, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
-                System.Diagnostics.Trace.WriteLine("[AddNewTerminal] doc.StartTerminal returned");
+                _debugLogService?.Trace("AddNewTerminal", "doc.StartTerminal returned");
             }
             else
             {
                 // No launch params: show start screen so user can pick a project
-                System.Diagnostics.Trace.WriteLine("[AddNewTerminal] No launch params — showing start screen");
+                _debugLogService?.Trace("AddNewTerminal", "No launch params — showing start screen");
                 doc.ShowStartScreen();
             }
 
@@ -3069,12 +3064,12 @@ namespace MultiTerminal
             }
 
             // Focus the new terminal and track it as last active
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Focusing terminal...");
+            _debugLogService?.Trace("AddNewTerminal", "Focusing terminal...");
             doc.Activate();
             if (!doc.IsStartScreenVisible)
                 doc.FocusTerminal();
             _lastActiveTerminal = doc;
-            System.Diagnostics.Trace.WriteLine("[AddNewTerminal] Completed");
+            _debugLogService?.Trace("AddNewTerminal", "Completed");
         }
 
         /// <summary>
@@ -3136,28 +3131,28 @@ namespace MultiTerminal
         /// </summary>
         private void OnStartScreenProjectLaunched(object sender, StartScreenLaunchEventArgs e)
         {
-            System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] ===== ENTER ===== projectId='{e?.ProjectId}'");
+            _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] ===== ENTER ===== projectId='{e?.ProjectId}'");
             if (sender is not TerminalDocument doc)
             {
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] sender is not TerminalDocument: {sender?.GetType().Name ?? "null"}");
+                _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] sender is not TerminalDocument: {sender?.GetType().Name ?? "null"}");
                 return;
             }
-            System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] sender doc: DocId='{doc.DocId}' InstanceId={doc.InstanceId} HashCode={doc.GetHashCode()} CustomTitle='{doc.CustomTitle}' TabText='{doc.TabText}' Text='{doc.Text}'");
+            _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] sender doc: DocId='{doc.DocId}' InstanceId={doc.InstanceId} HashCode={doc.GetHashCode()} CustomTitle='{doc.CustomTitle}' TabText='{doc.TabText}' Text='{doc.Text}'");
 
             try
             {
                 var project = _sharedProjectDatabase?.GetRichProject(e.ProjectId);
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] _sharedProjectDatabase.GetRichProject('{e.ProjectId}') returned: {(project == null ? "NULL" : $"id='{project.Id}' name='{project.Name}' sourcePath='{project.SourcePath}' path='{project.Path}'")}");
+                _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] _sharedProjectDatabase.GetRichProject('{e.ProjectId}') returned: {(project == null ? "NULL" : $"id='{project.Id}' name='{project.Name}' sourcePath='{project.SourcePath}' path='{project.Path}'")}");
                 if (project == null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[StartScreen] Project not found: {e.ProjectId}");
+                    _debugLogService?.Warning("StartScreen", $"Project not found: {e.ProjectId}");
                     return;
                 }
 
                 // Sanity check: requested ID must equal returned ID
                 if (!string.Equals(project.Id, e.ProjectId, StringComparison.Ordinal))
                 {
-                    System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] *** ID MISMATCH *** requested='{e.ProjectId}' returned='{project.Id}' name='{project.Name}'");
+                    _debugLogService?.Warning("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] *** ID MISMATCH *** requested='{e.ProjectId}' returned='{project.Id}' name='{project.Name}'");
                 }
 
                 // Update last opened timestamp
@@ -3169,7 +3164,7 @@ namespace MultiTerminal
                 var kind = !string.IsNullOrEmpty(e.TerminalKindOverride)
                     ? TerminalKindHelper.ParseOrDefault(e.TerminalKindOverride)
                     : TerminalKindHelper.ParseOrDefault(project.DefaultTerminal);
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Resolved kind='{kind}' (override='{e.TerminalKindOverride ?? "(none)"}' projectDefault='{project.DefaultTerminal ?? "(none)"}')");
+                _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Resolved kind='{kind}' (override='{e.TerminalKindOverride ?? "(none)"}' projectDefault='{project.DefaultTerminal ?? "(none)"}')");
 
                 // Build launch command for the chosen kind. BuildCommand dispatches to
                 // BuildClaudeCommand/BuildCodexCommand; the Codex path also refreshes
@@ -3182,7 +3177,7 @@ namespace MultiTerminal
 
                 string launchDir = launchCmd.WorkingDirectory;
                 string autoRunCommand = launchCmd.AutoRunCommand;
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}' kind='{kind}'");
+                _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] LaunchCommandBuilder: workingDir='{launchDir}' autoRun='{autoRunCommand}' for project name='{project.Name}' id='{project.Id}' kind='{kind}'");
 
                 // Register terminal before starting (start screen tabs are unregistered).
                 // Identity: team lead if set; else for Codex use the configured default agent
@@ -3249,17 +3244,17 @@ namespace MultiTerminal
                                 gatewayProfile = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
                         }
                     }
-                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
+                    catch (Exception ex) { _debugLogService?.Error("StartScreen", $"MCP config sync failed: {ex.Message}"); }
                 }
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
                 // cd narrows to the worktree. Falls through to launchDir on no worktree.
                 launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath);
 
-                System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching project '{project.Name}' in {launchDir}");
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
+                _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}");
+                _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
                 doc.StartTerminal(launchDir, terminalName, autoRunCommand, projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile, taskWorktreePath: taskWorktreePath);
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
+                _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] After StartTerminal: doc.CustomTitle='{doc.CustomTitle}' doc.TabText='{doc.TabText}' doc.Text='{doc.Text}'");
 
                 // Apply current font size
                 float terminalFontSize = _settings?.GetTerminalFontSize() ?? 10f;
@@ -3271,7 +3266,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenProjectLaunched error: {ex.Message}");
+                _debugLogService?.Error("StartScreen", $"OnStartScreenProjectLaunched error: {ex.Message}");
                 doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
                 MessageBox.Show($"Failed to launch project: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -3305,7 +3300,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenOpenPowerShell error: {ex.Message}");
+                _debugLogService?.Error("StartScreen", $"OnStartScreenOpenPowerShell error: {ex.Message}");
                 doc.ShowStartScreen(); // Restore start screen so the tab isn't blank
                 MessageBox.Show($"Failed to open PowerShell: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -3366,7 +3361,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenJustClaude error: {ex.Message}");
+                _debugLogService?.Error("StartScreen", $"OnStartScreenJustClaude error: {ex.Message}");
                 doc.ShowStartScreen();
                 MessageBox.Show($"Failed to launch Claude: {ex.Message}", "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -3473,14 +3468,14 @@ namespace MultiTerminal
 
                         // Wait for Claude Code to settle after standard "initializing..." injection
                         await Task.Delay(3000);
-                        System.Diagnostics.Trace.WriteLine("[MainForm] New project flow: injecting /new-project");
+                        _debugLogService?.Trace("MainForm", "New project flow: injecting /new-project");
 
                         bool injected = await sourceDoc.InjectInputAsync("/new-project");
                         if (!injected)
                         {
-                            System.Diagnostics.Trace.WriteLine("[MainForm] /new-project JS injection failed, trying direct write");
+                            _debugLogService?.Error("MainForm", "/new-project JS injection failed, trying direct write");
                             try { sourceDoc.Terminal.Write("/new-project\r"); }
-                            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] /new-project fallback failed: {ex.Message}"); }
+                            catch (Exception ex) { _debugLogService?.Error("MainForm", $"/new-project fallback failed: {ex.Message}"); }
                         }
                     };
                     sourceDoc.ClaudeCodeDetected += newProjectHandler;
@@ -3500,7 +3495,7 @@ namespace MultiTerminal
                                 gatewayProfile2 = Services.GatewayIntegrationService.GetGatewayProfileName(project.Name);
                         }
                     }
-                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[StartScreen] MCP config sync failed: {ex.Message}"); }
+                    catch (Exception ex) { _debugLogService?.Error("StartScreen", $"MCP config sync failed: {ex.Message}"); }
                 }
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
@@ -3508,7 +3503,7 @@ namespace MultiTerminal
                 launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath2);
 
                 // Start terminal in project folder
-                System.Diagnostics.Trace.WriteLine($"[StartScreen] Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
+                _debugLogService?.Trace("StartScreen", $"Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
                 sourceDoc.StartTerminal(launchDir, terminalName, autoRunCommand,
                     projectId: project.Id, isTeamLead: isTeamLead, gatewayProfile: gatewayProfile2, taskWorktreePath: taskWorktreePath2);
 
@@ -3527,7 +3522,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] OnStartScreenNewProject error: {ex.Message}");
+                _debugLogService?.Error("StartScreen", $"OnStartScreenNewProject error: {ex.Message}");
                 sourceDoc.ShowStartScreen();
                 MessageBox.Show($"Failed to create project: {ex.Message}",
                     "New Project Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -3567,7 +3562,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Identity discovery failed: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Identity discovery failed: {ex.Message}");
             }
 
             // Also include the name pool for new identities
@@ -3619,7 +3614,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Pre-registration failed: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Pre-registration failed: {ex.Message}");
             }
 
             return null;
@@ -3704,7 +3699,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Pre-registration with name failed: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Pre-registration with name failed: {ex.Message}");
             }
 
             // Fallback to regular pre-registration if specific name fails
@@ -3980,7 +3975,7 @@ namespace MultiTerminal
 
         private void OnTerminalDirectoryChanged(object sender, DirectoryChangedEventArgs e)
         {
-            System.Diagnostics.Trace.WriteLine($"[OnTerminalDirectoryChanged] Directory changed to: {e.Directory}");
+            _debugLogService?.Trace("OnTerminalDirectoryChanged", $"Directory changed to: {e.Directory}");
             if (!string.IsNullOrEmpty(e.Directory))
             {
                 _settings?.SetLastDirectory(e.Directory);
@@ -3998,7 +3993,7 @@ namespace MultiTerminal
                     else
                     {
                         // Update current project and refresh panel
-                        System.Diagnostics.Trace.WriteLine("[OnTerminalDirectoryChanged] Refreshing project panel...");
+                        _debugLogService?.Trace("OnTerminalDirectoryChanged", "Refreshing project panel...");
                         _currentProject = project;
                         _projectPanel?.RefreshForProject(project);
                         RefreshDashboardProjectInfo();
@@ -4033,7 +4028,7 @@ namespace MultiTerminal
         private void OnProjectFileChanged(object sender, EventArgs e)
         {
             // project.json was created or modified - refresh the project panel
-            System.Diagnostics.Trace.WriteLine($"[MainForm] OnProjectFileChanged received from {sender}");
+            _debugLogService?.Trace("MainForm", $"OnProjectFileChanged received from {sender}");
             RefreshProjectPanel();
         }
 
@@ -4047,7 +4042,7 @@ namespace MultiTerminal
                 return;
             }
 
-            System.Diagnostics.Trace.WriteLine("[MainForm] Registry changed externally - refreshing project panel and tasks panel");
+            _debugLogService?.Trace("MainForm", "Registry changed externally - refreshing project panel and tasks panel");
             RefreshProjectPanel();
             _tasksPanel?.RefreshProjects();
         }
@@ -4061,7 +4056,7 @@ namespace MultiTerminal
                 return;
             }
 
-            System.Diagnostics.Trace.WriteLine("[MainForm] Claude Code detected in terminal");
+            _debugLogService?.Trace("MainForm", "Claude Code detected in terminal");
 
             // Get the terminal document
             var doc = sender as TerminalDocument;
@@ -4098,7 +4093,7 @@ namespace MultiTerminal
                 // Detection fires when "Claude Code" appears in output, but the input prompt
                 // may not be ready yet. Wait 1.5s for the prompt to appear.
                 await Task.Delay(1500);
-                System.Diagnostics.Trace.WriteLine("[MainForm] Post-detection delay complete, injecting 'initializing...' via TypeInput");
+                _debugLogService?.Trace("MainForm", "Post-detection delay complete, injecting 'initializing...' via TypeInput");
                 doc.TypeInput("initializing...", "cr", 20);
             }
         }
@@ -4294,7 +4289,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] OnActiveDocumentChanged error: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"OnActiveDocumentChanged error: {ex.Message}");
             }
         }
 
@@ -4365,7 +4360,7 @@ namespace MultiTerminal
             // Auto-initialization is handled by OnClaudeCodeDetected when Claude Code's output is detected.
             // This ensures injection happens AFTER Claude Code is ready, not just after WebView2 loads.
             // The _claudeCodeDetectedThisSession flag is reset in TerminalControl.DoStart() so the event fires for restarted terminals.
-            System.Diagnostics.Trace.WriteLine($"[MainForm.OnLaunchAsIdentityRequested] Terminal restarted for {terminalName}, waiting for Claude Code detection to auto-inject");
+            _debugLogService?.Trace("MainForm.OnLaunchAsIdentityRequested", $"Terminal restarted for {terminalName}, waiting for Claude Code detection to auto-inject");
         }
 
         private bool _sessionSaveCompleted;
@@ -4421,16 +4416,16 @@ namespace MultiTerminal
             // Stop the worktree janitor before any other shutdown work \u2014 its
             // timer thread should not fire mid-shutdown.
             try { _worktreeJanitorTimer?.Dispose(); _worktreeJanitorTimer = null; }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Janitor timer dispose: {ex.Message}"); }
+            catch (Exception ex) { _debugLogService?.Info("MainForm", $"Janitor timer dispose: {ex.Message}"); }
 
             try { _idleRemoteModeTimer?.Dispose(); _idleRemoteModeTimer = null; }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Idle remote-mode timer dispose: {ex.Message}"); }
+            catch (Exception ex) { _debugLogService?.Info("MainForm", $"Idle remote-mode timer dispose: {ex.Message}"); }
 
             // Close any live Code Review popups so their bounds/zoom get flushed
             // to SettingsService. The CloseAll call is idempotent \u2014 safe even if
             // a popup has already been closed manually.
             try { Dialogs.CodeReviewPopupManager.CloseAll(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[MainForm] Code Review popup CloseAll: {ex.Message}"); }
+            catch (Exception ex) { _debugLogService?.Info("MainForm", $"Code Review popup CloseAll: {ex.Message}"); }
 
             // Save session context for all active terminals before closing
             if (!_sessionSaveCompleted)
@@ -4475,7 +4470,7 @@ namespace MultiTerminal
                                     }
                                     catch (Exception ex)
                                     {
-                                        System.Diagnostics.Debug.WriteLine($"[MainForm] Session memory flush failed for {projectPath}: {ex.Message}");
+                                        _debugLogService?.Error("MainForm", $"Session memory flush failed for {projectPath}: {ex.Message}");
                                     }
                                 }
                             }
@@ -4484,7 +4479,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Session save failed: {ex.Message}");
+                    _debugLogService?.Error("MainForm", $"Session save failed: {ex.Message}");
                 }
 
                 Close(); // Re-trigger close, this time _sessionSaveCompleted is true so it proceeds
@@ -4514,7 +4509,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to save layout: {ex.Message}");
+                _debugLogService?.Error("MultiTerminal", $"Failed to save layout: {ex.Message}");
             }
 
             // Save all panel visibility and dock positions
@@ -4548,7 +4543,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to set profiles offline: {ex.Message}");
+                    _debugLogService?.Error("MultiTerminal", $"Failed to set profiles offline: {ex.Message}");
                 }
             }
 
@@ -4655,7 +4650,7 @@ namespace MultiTerminal
             try { panel.Dispose(); }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MultiTerminal] Failed to dispose panel: {ex.Message}");
+                _debugLogService?.Error("MultiTerminal", $"Failed to dispose panel: {ex.Message}");
             }
         }
 
@@ -4781,23 +4776,23 @@ namespace MultiTerminal
             try
             {
                 panel.Show(_dockPanel, dockState);
-                System.Diagnostics.Trace.WriteLine($"[RestoreSession] Restored {panelKey} at {dockState}");
+                _debugLogService?.Trace("RestoreSession", $"Restored {panelKey} at {dockState}");
                 return true;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[RestoreSession] Failed to restore {panelKey}: {ex.Message}");
+                _debugLogService?.Error("RestoreSession", $"Failed to restore {panelKey}: {ex.Message}");
                 return false;
             }
         }
 
         private void RestoreSession()
         {
-            System.Diagnostics.Trace.WriteLine("[RestoreSession] Starting...");
+            _debugLogService?.Trace("RestoreSession", "Starting...");
 
             _pendingTerminalSessions = _settings.GetSessionTerminals();
             int terminalCount = _pendingTerminalSessions?.Count ?? 0;
-            System.Diagnostics.Trace.WriteLine($"[RestoreSession] Session terminals: {terminalCount}");
+            _debugLogService?.Trace("RestoreSession", $"Session terminals: {terminalCount}");
 
             bool restoredFromXml = false;
             string layoutPath = _settings.GetLayoutFilePath();
@@ -4810,7 +4805,7 @@ namespace MultiTerminal
                     _terminalRestoreIndex = 0;
                     _dockPanel.LoadFromXml(layoutPath, GetContentFromPersistString);
                     restoredFromXml = true;
-                    System.Diagnostics.Trace.WriteLine("[RestoreSession] Restored layout from XML");
+                    _debugLogService?.Trace("RestoreSession", "Restored layout from XML");
 
                     // Apply themes to restored panels (LoadFromXml restores positions but not runtime state)
                     ApplyThemesToPanels();
@@ -4831,7 +4826,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[RestoreSession] XML restore failed, falling back to manual: {ex.Message}");
+                    _debugLogService?.Error("RestoreSession", $"XML restore failed, falling back to manual: {ex.Message}");
                     restoredFromXml = false;
                 }
             }
@@ -4841,7 +4836,7 @@ namespace MultiTerminal
             {
                 if (terminalCount == 0)
                 {
-                    System.Diagnostics.Trace.WriteLine("[RestoreSession] No session data, creating default terminal...");
+                    _debugLogService?.Trace("RestoreSession", "No session data, creating default terminal...");
                     AddNewTerminal();
                 }
                 else
@@ -4859,7 +4854,7 @@ namespace MultiTerminal
                     {
                         var preset = GridLayoutManager.GetRecommendedPreset(terminals.Count);
                         _gridManager.ApplyPreset(preset);
-                        System.Diagnostics.Trace.WriteLine($"[RestoreSession] Applied preset {preset} for {terminals.Count} terminals");
+                        _debugLogService?.Trace("RestoreSession", $"Applied preset {preset} for {terminals.Count} terminals");
                     }
 
                     // Focus the first terminal
@@ -4876,9 +4871,9 @@ namespace MultiTerminal
             }
 
             // Refresh project panel now that terminals have their directories
-            System.Diagnostics.Trace.WriteLine("[RestoreSession] Calling RefreshProjectPanel...");
+            _debugLogService?.Trace("RestoreSession", "Calling RefreshProjectPanel...");
             RefreshProjectPanel();
-            System.Diagnostics.Trace.WriteLine("[RestoreSession] RefreshProjectPanel returned");
+            _debugLogService?.Trace("RestoreSession", "RefreshProjectPanel returned");
 
             // Ensure Oracle is visible on launch. If the saved layout already restored her
             // dock/float position (via the "Oracle" factory case above), this is a no-op;
@@ -4887,9 +4882,9 @@ namespace MultiTerminal
             _oracleService?.EnsureVisible(GetSavedDockState("OraclePanel", DockState.Float));
 
             // Signal loading complete (splash will show main form when animation finishes)
-            System.Diagnostics.Trace.WriteLine("[RestoreSession] Invoking LoadingComplete event...");
+            _debugLogService?.Trace("RestoreSession", "Invoking LoadingComplete event...");
             LoadingComplete?.Invoke(this, EventArgs.Empty);
-            System.Diagnostics.Trace.WriteLine("[RestoreSession] LoadingComplete event invoked");
+            _debugLogService?.Trace("RestoreSession", "LoadingComplete event invoked");
 
             // Refresh dashboard with project info now that session is restored
             RefreshDashboardProjectInfo();
@@ -4906,7 +4901,7 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Session indexing error: {ex.Message}");
+                    _debugLogService?.Error("MainForm", $"Session indexing error: {ex.Message}");
                 }
             });
 
@@ -4915,14 +4910,14 @@ namespace MultiTerminal
             _messageQueueTimer.Interval = 2000; // 2 seconds
             _messageQueueTimer.Tick += OnMessageQueueTimerTick;
             _messageQueueTimer.Start();
-            System.Diagnostics.Debug.WriteLine("[MainForm] Message queue timer started (2 second interval)");
+            _debugLogService?.Info("MainForm", "Message queue timer started (2 second interval)");
 
             // Start session sync timer — imports completed JSONL sessions into session_lineage (every 30 seconds)
             _sessionSyncTimer = new System.Windows.Forms.Timer();
             _sessionSyncTimer.Interval = 30000; // 30 seconds
             _sessionSyncTimer.Tick += OnSessionSyncTimerTick;
             _sessionSyncTimer.Start();
-            System.Diagnostics.Debug.WriteLine("[MainForm] Session sync timer started (30 second interval)");
+            _debugLogService?.Info("MainForm", "Session sync timer started (30 second interval)");
         }
 
         /// <summary>
@@ -4933,18 +4928,18 @@ namespace MultiTerminal
             // Skip if already indexing
             if (_sessionIndexingService?.IsIndexing == true)
             {
-                System.Diagnostics.Debug.WriteLine("[MainForm] Session sync skipped - indexing already in progress");
+                _debugLogService?.Warning("MainForm", "Session sync skipped - indexing already in progress");
                 return;
             }
 
             var lineageService = _mcpServer?.Broker?.SessionLineageService;
             if (lineageService == null)
             {
-                System.Diagnostics.Debug.WriteLine("[MainForm] Session sync skipped - SessionLineageService not available");
+                _debugLogService?.Warning("MainForm", "Session sync skipped - SessionLineageService not available");
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine("[MainForm] Session sync timer triggered - starting background sync");
+            _debugLogService?.Trace("MainForm", "Session sync timer triggered - starting background sync");
 
             var debugLog = _debugLogService;
             var projectDb = _sharedProjectDatabase;
@@ -4997,7 +4992,7 @@ namespace MultiTerminal
         {
             if (_mcpServer?.Broker == null) return;
 
-            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MainForm] OnMessageQueueTimerTick ENTRY (2s timer fired)");
+            _debugLogService?.Trace("MainForm", $"OnMessageQueueTimerTick ENTRY (2s timer fired)");
 
             try
             {
@@ -5005,7 +5000,7 @@ namespace MultiTerminal
                 int delivered = await _mcpServer.Broker.ProcessPendingMessages();
                 if (delivered > 0)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MainForm] Message queue: {delivered} pending messages delivered");
+                    _debugLogService?.Trace("MainForm", $"Message queue: {delivered} pending messages delivered");
                 }
 
                 // Periodic cleanup of old messages (once per hour)
@@ -5016,13 +5011,13 @@ namespace MultiTerminal
                     int cleaned = _mcpServer.Broker.CleanupOldMessages(24);
                     if (cleaned > 0)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MainForm] Message queue: cleaned up {cleaned} old messages");
+                        _debugLogService?.Trace("MainForm", $"Message queue: cleaned up {cleaned} old messages");
                     }
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Message queue timer error: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Message queue timer error: {ex.Message}");
             }
         }
 
@@ -5631,7 +5626,7 @@ namespace MultiTerminal
 
                 _teamWatcher.TeamRemoved += (s, e) =>
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MainForm] Native team removed: {e.TeamName} (members: {string.Join(", ", e.MemberNames)})");
+                    _debugLogService?.Info("MainForm", $"Native team removed: {e.TeamName} (members: {string.Join(", ", e.MemberNames)})");
 
                     if (InvokeRequired)
                     {
@@ -5744,11 +5739,11 @@ namespace MultiTerminal
                 };
 
                 _teamWatcher.StartWatching();
-                System.Diagnostics.Debug.WriteLine($"[MainForm] TeamWatcherService started (slug: {projectSlug})");
+                _debugLogService?.Info("MainForm", $"TeamWatcherService started (slug: {projectSlug})");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] Error initializing TeamWatcher: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"Error initializing TeamWatcher: {ex.Message}");
             }
         }
 
@@ -6047,7 +6042,7 @@ namespace MultiTerminal
         /// <summary>
         private void RefreshProjectPanel([System.Runtime.CompilerServices.CallerMemberName] string caller = "")
         {
-            System.Diagnostics.Trace.WriteLine($"[RefreshProjectPanel] Called by: {caller}");
+            _debugLogService?.Trace("RefreshProjectPanel", $"Called by: {caller}");
             string workingDir = _lastActiveTerminal?.GetWorkingDirectory() ?? _settings?.GetLastDirectory();
 
             if (!string.IsNullOrEmpty(workingDir))
@@ -6099,7 +6094,7 @@ namespace MultiTerminal
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainForm] OnMcpJsonWriteRequested error: {ex.Message}");
+                _debugLogService?.Error("MainForm", $"OnMcpJsonWriteRequested error: {ex.Message}");
                 _projectPanel?.NotifyMcpJsonWriteResult(false, ex.Message);
             }
         }
@@ -6159,12 +6154,12 @@ namespace MultiTerminal
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ProjectPanel] MCP config sync failed: {ex.Message}");
+                    _debugLogService?.Error("ProjectPanel", $"MCP config sync failed: {ex.Message}");
                 }
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanel] MCP config sync skipped — workingDir is the user-profile fallback, not a distinct project root.");
+                _debugLogService?.Warning("ProjectPanel", $"MCP config sync skipped — workingDir is the user-profile fallback, not a distinct project root.");
             }
 
             // Atomic uniqueness for Codex non-team-lead launches so two concurrent
