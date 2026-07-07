@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using MultiTerminal.Services;
 
 namespace MultiTerminal.MCPServer.Services
 {
@@ -24,11 +26,25 @@ namespace MultiTerminal.MCPServer.Services
 
     /// <summary>
     /// Discovers Claude Code sessions and matches them to MultiTerminal identities.
-    /// Reads from ~/.claude/projects/*/sessions-index.json
+    ///
+    /// <para>Source of truth is the raw session JSONL under
+    /// <c>~/.claude/projects/&lt;proj&gt;/*.jsonl</c>. Each <c>&lt;uuid&gt;.jsonl</c>
+    /// file IS a session; its metadata is derived on demand via
+    /// <see cref="SessionSyncService.ParseSessionFile"/>. A
+    /// <c>sessions-index.json</c> is used ONLY as a fast-path when it is present
+    /// AND fresh (newer than every JSONL in the folder) — the Claude CLI stopped
+    /// writing that index in early 2026, so in practice discovery derives from
+    /// JSONL and the index is transparently ignored once stale (task cd8ca48c).</para>
+    ///
+    /// <para>Derivation is mtime-gated in-process (a static per-file cache keyed
+    /// by path+mtime) so repeated calls re-parse only the JSONL files that
+    /// actually changed — this class is instantiated ad-hoc per call, so the
+    /// cache is static to survive across those instances. No database dependency.</para>
     /// </summary>
     public class SessionDiscovery
     {
         private readonly string _claudeProjectsPath;
+        private readonly SessionSyncService _sync = new SessionSyncService();
 
         // Pattern 1: Session received message FROM identity (e.g., "[Alice]: Hello")
         // This means the session IS that identity
@@ -45,6 +61,19 @@ namespace MultiTerminal.MCPServer.Services
         private static readonly Regex SystemHookPattern = new Regex(
             @"MULTITERMINAL:\s*You\s+are\s+registered\s+as\s+(\w+)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        // A Claude session transcript is named "<session-uuid>.jsonl". Anything
+        // else in the project folder (partial writes with odd names, tooling
+        // scratch) is NOT a session — the misclassification guard rejects it.
+        private static readonly Regex SessionFileNamePattern = new Regex(
+            @"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            RegexOptions.Compiled);
+
+        // Process-wide, mtime-gated derivation cache. Keyed by absolute JSONL
+        // path; the entry is reused only while the file's mtime is unchanged.
+        private static readonly Dictionary<string, CachedJsonlEntry> JsonlCache =
+            new Dictionary<string, CachedJsonlEntry>(StringComparer.OrdinalIgnoreCase);
+        private static readonly object CacheLock = new object();
 
         public SessionDiscovery()
         {
@@ -107,50 +136,14 @@ namespace MultiTerminal.MCPServer.Services
         {
             var results = new List<DiscoveredSession>();
 
-            var folderName = GetProjectFolderName(projectPath);
-            if (folderName == null)
-                return results;
-
-            var projectFolder = Path.Combine(_claudeProjectsPath, folderName);
-            var indexPath = Path.Combine(projectFolder, "sessions-index.json");
-
-            if (!File.Exists(indexPath))
-                return results;
-
-            try
+            foreach (var entry in GetProjectSessionEntries(projectPath))
             {
-                var json = File.ReadAllText(indexPath);
-                var index = JsonSerializer.Deserialize<SessionsIndex>(json, new JsonSerializerOptions
+                var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                if (extractedIdentity != null &&
+                    extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                 {
-                    PropertyNameCaseInsensitive = true
-                });
-
-                if (index?.Entries == null)
-                    return results;
-
-                foreach (var entry in index.Entries)
-                {
-                    var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
-                    if (extractedIdentity != null &&
-                        extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        results.Add(new DiscoveredSession
-                        {
-                            SessionId = entry.SessionId,
-                            IdentityName = extractedIdentity,
-                            ProjectPath = entry.ProjectPath ?? index.OriginalPath,
-                            FirstPrompt = entry.FirstPrompt,
-                            Summary = entry.Summary,
-                            Created = ParseDateTime(entry.Created),
-                            Modified = ParseDateTime(entry.Modified),
-                            MessageCount = entry.MessageCount
-                        });
-                    }
+                    results.Add(ProjectEntry(entry, extractedIdentity, projectPath));
                 }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[SessionDiscovery] Error reading {indexPath}: {ex.Message}");
             }
 
             return results.OrderByDescending(s => s.Modified).ToList();
@@ -166,6 +159,21 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Discover ALL sessions in a project (no identity filter, one
+        /// <see cref="DiscoveredSession"/> per JSONL transcript). The row count
+        /// this returns equals the number of valid session JSONL files in the
+        /// project folder — the observable freshness invariant the JSONL-derived
+        /// index is verified against.
+        /// </summary>
+        public List<DiscoveredSession> DiscoverAllSessionsInProject(string projectPath)
+        {
+            return GetProjectSessionEntries(projectPath)
+                .Select(e => ProjectEntry(e, ExtractIdentity(e.FirstPrompt), projectPath))
+                .OrderByDescending(s => s.Modified)
+                .ToList();
+        }
+
+        /// <summary>
         /// Discover all sessions for an identity across all projects.
         /// </summary>
         public List<DiscoveredSession> DiscoverAllSessionsForIdentity(string identityName)
@@ -177,44 +185,14 @@ namespace MultiTerminal.MCPServer.Services
 
             foreach (var projectFolder in Directory.GetDirectories(_claudeProjectsPath))
             {
-                var indexPath = Path.Combine(projectFolder, "sessions-index.json");
-                if (!File.Exists(indexPath))
-                    continue;
-
-                try
+                foreach (var entry in GetEntriesForFolder(projectFolder, null))
                 {
-                    var json = File.ReadAllText(indexPath);
-                    var index = JsonSerializer.Deserialize<SessionsIndex>(json, new JsonSerializerOptions
+                    var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                    if (extractedIdentity != null &&
+                        extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
                     {
-                        PropertyNameCaseInsensitive = true
-                    });
-
-                    if (index?.Entries == null)
-                        continue;
-
-                    foreach (var entry in index.Entries)
-                    {
-                        var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
-                        if (extractedIdentity != null &&
-                            extractedIdentity.Equals(identityName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            results.Add(new DiscoveredSession
-                            {
-                                SessionId = entry.SessionId,
-                                IdentityName = extractedIdentity,
-                                ProjectPath = entry.ProjectPath ?? index.OriginalPath,
-                                FirstPrompt = entry.FirstPrompt,
-                                Summary = entry.Summary,
-                                Created = ParseDateTime(entry.Created),
-                                Modified = ParseDateTime(entry.Modified),
-                                MessageCount = entry.MessageCount
-                            });
-                        }
+                        results.Add(ProjectEntry(entry, extractedIdentity, null));
                     }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[SessionDiscovery] Error reading {indexPath}: {ex.Message}");
                 }
             }
 
@@ -229,16 +207,100 @@ namespace MultiTerminal.MCPServer.Services
         {
             var identities = new Dictionary<string, DiscoveredSession>(StringComparer.OrdinalIgnoreCase);
 
+            foreach (var entry in GetProjectSessionEntries(projectPath)
+                .OrderByDescending(e => ParseDateTime(e.Modified)))
+            {
+                var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
+                if (extractedIdentity != null && !identities.ContainsKey(extractedIdentity))
+                {
+                    identities[extractedIdentity] = ProjectEntry(entry, extractedIdentity, projectPath);
+                }
+            }
+
+            return identities;
+        }
+
+        /// <summary>
+        /// Resolve the session entries for a project path — fresh index fast-path
+        /// or JSONL derivation. Internal so the falsifiable file-count == row-count
+        /// test can assert against the raw entry set.
+        /// </summary>
+        internal List<SessionEntry> GetProjectSessionEntries(string projectPath)
+        {
             var folderName = GetProjectFolderName(projectPath);
             if (folderName == null)
-                return identities;
+                return new List<SessionEntry>();
 
             var projectFolder = Path.Combine(_claudeProjectsPath, folderName);
+            if (!Directory.Exists(projectFolder))
+                return new List<SessionEntry>();
+
+            return GetEntriesForFolder(projectFolder, projectPath);
+        }
+
+        /// <summary>
+        /// Core resolver: use <c>sessions-index.json</c> only when it is fresh
+        /// (newer than every JSONL in the folder); otherwise derive from the raw
+        /// JSONL transcripts. Logs which path served.
+        /// </summary>
+        private List<SessionEntry> GetEntriesForFolder(string projectFolder, string fallbackProjectPath)
+        {
             var indexPath = Path.Combine(projectFolder, "sessions-index.json");
+            if (IsIndexFresh(projectFolder, indexPath))
+            {
+                var fromIndex = TryLoadIndexEntries(indexPath);
+                if (fromIndex != null)
+                {
+                    Debug.WriteLine(
+                        $"[SessionDiscovery] {Path.GetFileName(projectFolder)}: served {fromIndex.Count} entries from FRESH sessions-index.json");
+                    return fromIndex;
+                }
+            }
 
+            var derived = DeriveEntriesFromJsonl(projectFolder, fallbackProjectPath);
+            Debug.WriteLine(
+                $"[SessionDiscovery] {Path.GetFileName(projectFolder)}: served {derived.Count} entries DERIVED from JSONL (index stale/absent)");
+            return derived;
+        }
+
+        /// <summary>
+        /// The index is fresh only when it exists AND no JSONL transcript in the
+        /// folder is newer than it. A single newer JSONL means the index is
+        /// missing at least that session, so we fall through to derivation.
+        /// </summary>
+        private static bool IsIndexFresh(string projectFolder, string indexPath)
+        {
             if (!File.Exists(indexPath))
-                return identities;
+                return false;
 
+            long indexMtime;
+            try
+            {
+                indexMtime = File.GetLastWriteTimeUtc(indexPath).Ticks;
+            }
+            catch
+            {
+                return false;
+            }
+
+            try
+            {
+                foreach (var jsonl in Directory.EnumerateFiles(projectFolder, "*.jsonl"))
+                {
+                    if (File.GetLastWriteTimeUtc(jsonl).Ticks > indexMtime)
+                        return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static List<SessionEntry> TryLoadIndexEntries(string indexPath)
+        {
             try
             {
                 var json = File.ReadAllText(indexPath);
@@ -246,35 +308,145 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     PropertyNameCaseInsensitive = true
                 });
-
-                if (index?.Entries == null)
-                    return identities;
-
-                foreach (var entry in index.Entries.OrderByDescending(e => ParseDateTime(e.Modified)))
-                {
-                    var extractedIdentity = ExtractIdentity(entry.FirstPrompt);
-                    if (extractedIdentity != null && !identities.ContainsKey(extractedIdentity))
-                    {
-                        identities[extractedIdentity] = new DiscoveredSession
-                        {
-                            SessionId = entry.SessionId,
-                            IdentityName = extractedIdentity,
-                            ProjectPath = entry.ProjectPath ?? index.OriginalPath,
-                            FirstPrompt = entry.FirstPrompt,
-                            Summary = entry.Summary,
-                            Created = ParseDateTime(entry.Created),
-                            Modified = ParseDateTime(entry.Modified),
-                            MessageCount = entry.MessageCount
-                        };
-                    }
-                }
+                return index?.Entries;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[SessionDiscovery] Error reading {indexPath}: {ex.Message}");
+                Debug.WriteLine($"[SessionDiscovery] Error reading {indexPath}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private List<SessionEntry> DeriveEntriesFromJsonl(string projectFolder, string fallbackProjectPath)
+        {
+            var entries = new List<SessionEntry>();
+
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(projectFolder, "*.jsonl");
+            }
+            catch
+            {
+                return entries;
             }
 
-            return identities;
+            foreach (var jsonlPath in files)
+            {
+                var entry = BuildEntryFromJsonl(jsonlPath, fallbackProjectPath);
+                if (entry != null)
+                    entries.Add(entry);
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// Derive one <see cref="SessionEntry"/> from a single JSONL transcript.
+        /// Returns null when the file is not a session (name isn't a UUID, or it
+        /// has no parseable messages — the schema sniff). A torn last line is
+        /// tolerated by <see cref="SessionSyncService.ParseSessionFile"/>, which
+        /// skips unparseable lines rather than failing the whole file.
+        /// </summary>
+        private SessionEntry BuildEntryFromJsonl(string jsonlPath, string fallbackProjectPath)
+        {
+            var sessionId = Path.GetFileNameWithoutExtension(jsonlPath);
+            if (string.IsNullOrEmpty(sessionId) || !SessionFileNamePattern.IsMatch(sessionId))
+                return null;
+
+            long mtimeTicks;
+            try
+            {
+                mtimeTicks = File.GetLastWriteTimeUtc(jsonlPath).Ticks;
+            }
+            catch
+            {
+                return null;
+            }
+
+            // mtime-gated cache: reuse the derived entry while the file is unchanged.
+            lock (CacheLock)
+            {
+                if (JsonlCache.TryGetValue(jsonlPath, out var cached) && cached.MtimeTicks == mtimeTicks)
+                    return cached.Entry;
+            }
+
+            var messages = _sync.ParseSessionFile(jsonlPath);
+            if (messages == null || messages.Count == 0)
+                return null; // schema sniff: nothing parseable -> not a usable session
+
+            string firstPrompt = null;
+            DateTime created = DateTime.MinValue;
+            foreach (var m in messages)
+            {
+                if (created == DateTime.MinValue && m.Timestamp != default)
+                    created = m.Timestamp;
+                if (firstPrompt == null &&
+                    string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(m.Content))
+                {
+                    firstPrompt = m.Content;
+                }
+            }
+            firstPrompt ??= messages[0].Content;
+
+            DateTime modified;
+            try
+            {
+                modified = File.GetLastWriteTime(jsonlPath);
+            }
+            catch
+            {
+                modified = created;
+            }
+
+            if (created == DateTime.MinValue)
+            {
+                try
+                {
+                    created = File.GetCreationTime(jsonlPath);
+                }
+                catch
+                {
+                    created = modified;
+                }
+            }
+
+            var entry = new SessionEntry
+            {
+                SessionId = sessionId,
+                FullPath = jsonlPath,
+                FileMtime = mtimeTicks,
+                FirstPrompt = firstPrompt,
+                Summary = null, // derived: CLI summary generation is out of scope
+                MessageCount = messages.Count,
+                Created = created.ToString("o"),
+                Modified = modified.ToString("o"),
+                ProjectPath = fallbackProjectPath,
+                IsSidechain = false
+            };
+
+            lock (CacheLock)
+            {
+                JsonlCache[jsonlPath] = new CachedJsonlEntry { MtimeTicks = mtimeTicks, Entry = entry };
+            }
+
+            return entry;
+        }
+
+        private static DiscoveredSession ProjectEntry(SessionEntry entry, string identity, string fallbackProjectPath)
+        {
+            return new DiscoveredSession
+            {
+                SessionId = entry.SessionId,
+                IdentityName = identity,
+                ProjectPath = entry.ProjectPath ?? fallbackProjectPath,
+                FirstPrompt = entry.FirstPrompt,
+                Summary = entry.Summary,
+                Created = ParseDateTime(entry.Created),
+                Modified = ParseDateTime(entry.Modified),
+                MessageCount = entry.MessageCount
+            };
         }
 
         private static DateTime ParseDateTime(string dateStr)
@@ -286,6 +458,12 @@ namespace MultiTerminal.MCPServer.Services
 
         #region JSON Models
 
+        private sealed class CachedJsonlEntry
+        {
+            public long MtimeTicks { get; set; }
+            public SessionEntry Entry { get; set; }
+        }
+
         private class SessionsIndex
         {
             public int Version { get; set; }
@@ -293,7 +471,7 @@ namespace MultiTerminal.MCPServer.Services
             public string OriginalPath { get; set; }
         }
 
-        private class SessionEntry
+        internal class SessionEntry
         {
             public string SessionId { get; set; }
             public string FullPath { get; set; }
