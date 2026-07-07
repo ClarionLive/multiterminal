@@ -49,7 +49,7 @@ namespace MultiTerminal.API.Controllers
         {
             var task = _broker.GetTask(taskId);
             if (task == null)
-                return NotFound(new { error = $"Task {taskId} not found" });
+                return Problem(detail: $"Task {taskId} not found", statusCode: 404);
 
             return Ok(task);
         }
@@ -62,7 +62,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetMyActiveTask(string agentName)
         {
             if (string.IsNullOrEmpty(agentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             var task = _broker.GetMyActiveTask(agentName);
             if (task == null)
@@ -113,7 +113,7 @@ namespace MultiTerminal.API.Controllers
             );
 
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             var task = _broker.GetTask(result.TaskId);
             return Ok(new { taskId = result.TaskId, task });
@@ -129,14 +129,14 @@ namespace MultiTerminal.API.Controllers
         public IActionResult CreateQuickTask([FromBody] CreateQuickTaskRequest request)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.Title))
-                return BadRequest(new { error = "Title required" });
+                return Problem(detail: "Title required", statusCode: 400);
 
             if (request.FilePaths == null || request.FilePaths.Count == 0)
-                return BadRequest(new { error = "At least one filePath is required (a quick-task must attribute to at least one file)" });
+                return Problem(detail: "At least one filePath is required (a quick-task must attribute to at least one file)", statusCode: 400);
 
             var createResult = _broker.CreateQuickTask(request.Title, request.CreatedBy, request.ProjectId);
             if (!createResult.Success)
-                return BadRequest(new { error = createResult.Error });
+                return Problem(detail: createResult.Error, statusCode: 400);
 
             var taskId = createResult.TaskId;
             var linkedFiles = new List<string>();
@@ -176,7 +176,7 @@ namespace MultiTerminal.API.Controllers
                         error = $"{linkError}. Rollback also failed: {ex.Message}. Orphan quick-task id={taskId} may need manual cleanup."
                     });
                 }
-                return BadRequest(new { error = $"{linkError}. Quick-task rolled back." });
+                return Problem(detail: $"{linkError}. Quick-task rolled back.", statusCode: 400);
             }
 
             var task = _broker.GetTask(taskId);
@@ -191,9 +191,10 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.UpdateTaskStatus(taskId, request.Status);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            // Non-empty body: the phone PWA's api() calls res.json() on 2xx, so a status change (which it reaches via a PUT compat shim) must return JSON, not an empty ack.
+            return Ok(new { status = request.Status });
         }
 
         /// <summary>
@@ -206,13 +207,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult RenameTask(string taskId, [FromBody] RenameTaskRequest request)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.NewTitle))
-                return BadRequest(new { error = "newTitle is required and cannot be empty" });
+                return Problem(detail: "newTitle is required and cannot be empty", statusCode: 400);
 
             var result = _broker.RenameTask(taskId, request.NewTitle, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -225,19 +226,19 @@ namespace MultiTerminal.API.Controllers
         public IActionResult ReorderTask(string taskId, [FromBody] ReorderTaskRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "Request body is required and must include newStatus + newSortOrder." });
+                return Problem(detail: "Request body is required and must include newStatus + newSortOrder.", statusCode: 400);
 
             // Reject NaN / ±Infinity at the ingress (the broker also guards).
             // Either poisons the sort_order column — SQL ordering against NaN
             // is undefined and Infinity defeats the rebalance midpoint formula.
             if (!double.IsFinite(request.NewSortOrder))
-                return BadRequest(new { error = $"newSortOrder must be a finite number (got {request.NewSortOrder})." });
+                return Problem(detail: $"newSortOrder must be a finite number (got {request.NewSortOrder}).", statusCode: 400);
 
             var result = _broker.ReorderTask(taskId, request.NewStatus, request.NewSortOrder, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -247,7 +248,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult DeleteTask(string taskId, [FromQuery] string deletedBy)
         {
             _broker.DeleteTask(taskId, deletedBy);
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -258,9 +259,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.ClaimTask(taskId, request.Assignee);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -271,9 +272,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = await _broker.AddHelper(taskId, request.Helper, request.AddedBy ?? "API");
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, helperCount = result.HelperCount });
+            return Ok(new { helperCount = result.HelperCount });
         }
 
         /// <summary>
@@ -284,9 +285,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.RemoveHelper(taskId, helperName);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, helperCount = result.HelperCount });
+            return Ok(new { helperCount = result.HelperCount });
         }
         // =============================================
         // Kanban Workflow: Enhanced Checklist Endpoints
@@ -300,9 +301,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.UpdateTaskChecklist(taskId, request.ChecklistJson);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -313,9 +314,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.AppendChecklistItems(taskId, request.ItemsJson);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -326,11 +327,10 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.TransitionChecklistItem(taskId, itemIndex, request.NewStatus, request.Notes, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new
             {
-                success = true,
                 itemName = result.ItemName,
                 previousStatus = result.PreviousStatus,
                 newStatus = result.NewStatus,
@@ -347,9 +347,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.AssignChecklistItem(taskId, itemIndex, request.Assignee);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -360,9 +360,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.UpdateTaskContinuation(taskId, request.ContinuationNotes, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -373,9 +373,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.UpdateTaskPlan(taskId, request.Plan, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -386,9 +386,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.UpdateTaskSummaryFields(taskId, request.ImplementationSummary, request.TestResults, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -403,13 +403,12 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.SetTaskActive(taskId, request.UpdatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             var branchCandidates = await BuildBranchCandidatesAsync(taskId).ConfigureAwait(false);
 
             return Ok(new
             {
-                success = true,
                 pausedTaskIds = result.PausedTaskIds,
                 pausedTaskTitles = result.PausedTaskTitles,
                 branchCandidates
@@ -490,7 +489,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetPickableTasks(string agentName)
         {
             if (string.IsNullOrEmpty(agentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             var allTasks = _broker.GetTasks(projectId: null);
 
@@ -548,7 +547,7 @@ namespace MultiTerminal.API.Controllers
         {
             var task = _broker.GetTask(taskId);
             if (task == null)
-                return NotFound(new { error = $"Task {taskId} not found" });
+                return Problem(detail: $"Task {taskId} not found", statusCode: 404);
 
             // Load helpers
             var helpers = _broker.LoadTaskHelpers(taskId);
@@ -601,9 +600,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.AddRelationship(taskId, request.TargetTaskId, request.Type, request.CreatedBy);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -614,9 +613,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.RemoveRelationship(taskId, relatedTaskId);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -627,9 +626,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.GetRelationships(taskId);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, relationships = result.Relationships });
+            return Ok(new { relationships = result.Relationships });
         }
 
         // =============================================
@@ -644,9 +643,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.LinkFile(taskId, request.FilePath, request.Description, request.LineStart, request.LineEnd, request.AddedBy, request.ChecklistItemIndex);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, fileCount = result.FileCount });
+            return Ok(new { fileCount = result.FileCount });
         }
 
         /// <summary>
@@ -657,9 +656,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.UnlinkFile(taskId, request.FilePath);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -670,9 +669,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.GetTaskFiles(taskId);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true, files = result.Files });
+            return Ok(new { files = result.Files });
         }
 
         // =============================================
@@ -696,7 +695,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult MarkInboxRead(string messageId)
         {
             _broker.MarkInboxRead(messageId);
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -706,7 +705,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult MarkAllInboxRead(string userId)
         {
             _broker.MarkAllInboxRead(userId);
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -716,7 +715,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult ReplyToInbox(string messageId, [FromBody] ReplyToInboxRequest request)
         {
             _broker.ReplyToInbox(messageId, request.ReplyText);
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -751,7 +750,7 @@ namespace MultiTerminal.API.Controllers
         {
             var data = _broker.GetAttachmentData(attachmentId);
             if (data == null)
-                return NotFound(new { error = "Attachment not found" });
+                return Problem(detail: "Attachment not found", statusCode: 404);
 
             return File(data.Value.Data, data.Value.MimeType, data.Value.FileName);
         }
@@ -764,7 +763,7 @@ namespace MultiTerminal.API.Controllers
         {
             var data = _broker.GetAttachmentData(attachmentId);
             if (data == null)
-                return NotFound(new { error = "Attachment not found" });
+                return Problem(detail: "Attachment not found", statusCode: 404);
 
             return Ok(new
             {
@@ -787,7 +786,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (FormatException)
             {
-                return BadRequest(new { error = "Invalid base64 data" });
+                return Problem(detail: "Invalid base64 data", statusCode: 400);
             }
 
             var result = _broker.AddAttachment(
@@ -799,7 +798,7 @@ namespace MultiTerminal.API.Controllers
                 request.AddedBy ?? "api");
 
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new { attachmentId = result.AttachmentId });
         }
@@ -812,9 +811,9 @@ namespace MultiTerminal.API.Controllers
         {
             var result = _broker.DeleteAttachment(attachmentId);
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok(new { success = true });
+            return Ok();
         }
     }
 
