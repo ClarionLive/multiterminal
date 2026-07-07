@@ -1515,20 +1515,35 @@ namespace MultiTerminal
             }
             catch { /* diagnostic only */ }
 
-            // 1:1 binding guard: if the resolved document is already confirmed-bound to a
-            // DIFFERENT agent identity, this registration belongs to another terminal — do
-            // NOT overwrite its title/identity. That cross-wire is what makes a second
+            // 1:1 binding guard: if the resolved document is already bound to a DIFFERENT
+            // agent identity, this registration belongs to another terminal — do NOT
+            // overwrite its title/identity. That cross-wire is what makes a second
             // terminal's name clobber the first's tab, and it also strands the first
             // terminal's HUD Git rebind (which is filtered by _originalAgentName). Re-resolve
             // to an as-yet unclaimed document matching this name so the registering terminal
             // still binds to its OWN tab; if none exists, skip the tab/identity update
             // (channel/inbox delivery still works via e.Id / e.Name).
+            //
+            // Effective identity (ab50355f): OriginalAgentName when promoted; otherwise fall
+            // back to the displayed CustomTitle. The fallback closes the PRE-PROMOTION window
+            // — a restored tab has CustomTitle from session state but no promotion yet
+            // (cycle-7 deliberately keeps the setter promotion-free), and a foreign
+            // registration carrying this doc's docId (inherited env) could relabel it before
+            // its own agent re-registered. "Unassigned" placeholders and empty titles stay
+            // unclaimed so the designed placeholder→name rename flow is unaffected.
+            string boundIdentity = !string.IsNullOrEmpty(targetDoc?.OriginalAgentName)
+                ? targetDoc.OriginalAgentName
+                : (!string.IsNullOrEmpty(targetDoc?.CustomTitle)
+                   && !targetDoc.CustomTitle.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
+                    ? targetDoc.CustomTitle
+                    : null);
+
             if (targetDoc != null
                 && !string.IsNullOrEmpty(e.Name)
-                && !string.IsNullOrEmpty(targetDoc.OriginalAgentName)
-                && !targetDoc.OriginalAgentName.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
+                && boundIdentity != null
+                && !boundIdentity.Equals(e.Name, StringComparison.OrdinalIgnoreCase))
             {
-                _debugLogService?.Info("MainForm", $"Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) resolved to a document already bound to '{targetDoc.OriginalAgentName}' (docId={targetDoc.DocId}, title='{targetDoc.CustomTitle}'). Refusing to clobber it; re-resolving to this terminal's own document.");
+                _debugLogService?.Info("MainForm", $"Registration collision: '{e.Name}' (id={e.Id}, docId={e.DocId}) resolved to a document already bound to '{boundIdentity}' (promoted='{targetDoc.OriginalAgentName ?? ""}', docId={targetDoc.DocId}, title='{targetDoc.CustomTitle}'). Refusing to clobber it; re-resolving to this terminal's own document.");
 
                 // Re-resolve to THIS terminal's OWN document, keyed by the un-clobberable
                 // stable identity FIRST: a freshly-launched terminal's own doc is already
