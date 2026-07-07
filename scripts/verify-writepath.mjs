@@ -70,6 +70,24 @@ const NAMED_BYPASSES = new Set([
 
 const ALLOWED = new Set([...WRITE_PATH_HELPERS, ...NAMED_BYPASSES]);
 
+// ── KNOWN UNLOCKED-WRITE EXPOSURES (enumerated, deferred — 7c59c004) ─────────────────────────────────
+// The single-write-path census guards the DB/cache DIVERGENCE invariant (clone→persist→swap). 7c59c004 added
+// per-task write LOCKS so concurrent same-task writers can't lose each other's field changes. That lock is
+// serialized at the TaskService write-path helpers (above). This census cannot mechanically detect a
+// read-modify-write that spans TWO calls in a DIFFERENT file (GetTask → mutate the returned CACHED reference
+// in place → SaveTask), so the ONE such exposure is NAMED here instead of prose-buried, tagged with its
+// hardening ticket. Close condition for 1f327236: remove this entry when CodeReviewService no longer mutates
+// a GetTask-returned reference in place (dedicated review-notes write method, or GetTask returns a snapshot).
+const KNOWN_UNLOCKED_EXPOSURES = [
+  {
+    site: 'Services/CodeReviewService.cs (GetTask@~499 → mutate cached ref → SaveTask@~524,569)',
+    exposure: 'External caller mutates the GetTask-returned cached KanbanTask in place before persisting via ' +
+              'the public TaskService.SaveTask; the in-place mutation is outside the per-task write lock, so a ' +
+              'concurrent MutateTaskInternal can still race it (field-level lost update / cache-ahead-of-DB).',
+    hardening: '1f327236',
+  },
+];
+
 // CORE PERSIST + RAW CACHE WRITE patterns (the divergence-creating writes). Targeted column/side-table
 // writers are deliberately excluded (see header).
 const MUTATION_PATTERNS = [
@@ -286,6 +304,12 @@ function realCheck() {
     process.exit(1);
   }
   console.log(`\nOK  ${totalMutations} core-persist/raw-cache write(s) across ${TARGETS.length} files, all allowlisted (${ALLOWED.size} allowed methods).`);
+  if (KNOWN_UNLOCKED_EXPOSURES.length) {
+    console.log(`\nKnown unlocked-write exposures (enumerated, deferred — NOT failures):`);
+    for (const e of KNOWN_UNLOCKED_EXPOSURES) {
+      console.log(`  - [${e.hardening}] ${e.site}\n      ${e.exposure}`);
+    }
+  }
   process.exit(0);
 }
 

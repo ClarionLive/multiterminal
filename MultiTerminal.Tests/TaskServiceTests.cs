@@ -176,6 +176,33 @@ namespace MultiTerminal.Tests
             Assert.Equal("paused", _db.GetTask("A").SubStatus);
         }
 
+        [Fact]
+        public async System.Threading.Tasks.Task SetTaskActive_ConcurrentSameAssignee_KeepsSingleActive_UnderBothLocks()
+        {
+            // F-B (7c59c004): two concurrent SetTaskActive calls for the SAME assignee contend on the
+            // per-assignee activation lock (outermost) AND the per-task locks (WithTaskLocks) — both tiers
+            // held together. The single-active-per-assignee invariant must hold under the storm: exactly one
+            // of {a,b} active and the other paused, never two active, never a lost pause. Also a deadlock
+            // probe — if the assignee/task lock ordering were invertible this would hang.
+            var a = _svc.CreateTask("A", "d", "diana").TaskId;
+            var b = _svc.CreateTask("B", "d", "diana").TaskId;
+            _svc.ClaimTask(a, "diana", null);
+            _svc.ClaimTask(b, "diana", null);
+            _svc.UpdateTaskStatus(a, "in_progress");
+            _svc.UpdateTaskStatus(b, "in_progress");
+
+            const int N = 150;
+            var t1 = System.Threading.Tasks.Task.Run(() => { for (int i = 0; i < N; i++) _svc.SetTaskActive(a, "diana"); });
+            var t2 = System.Threading.Tasks.Task.Run(() => { for (int i = 0; i < N; i++) _svc.SetTaskActive(b, "diana"); });
+            await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+            var finalA = _db.GetTask(a);
+            var finalB = _db.GetTask(b);
+            int activeCount = (finalA.SubStatus == "active" ? 1 : 0) + (finalB.SubStatus == "active" ? 1 : 0);
+            Assert.Equal(1, activeCount);                        // never two active, never zero
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);  // cache ≡ DB after the storm
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
