@@ -66,6 +66,9 @@ const NAMED_BYPASSES = new Set([
   'ReorderTask',             // sort_order via dedicated column writers + bulk rebalance + cache refresh FROM db
   'DeleteProject',           // canonical unregister via ProjectService + coherent cache-restore-on-failure
   'SetTaskActive',           // project-id self-heal SaveTask (its own revert-on-failure), rest via the write path
+  'ActivateExclusively',     // 7c59c004: the shared make-active primitive — relocated SetTaskActive swap. Multi-row
+                             // clone→swap (target + each paused sibling) AFTER the atomic pause-by-id txn
+                             // (SetTaskActiveTransactional) succeeds, under the assignee lock + per-task locks.
 ]);
 
 const ALLOWED = new Set([...WRITE_PATH_HELPERS, ...NAMED_BYPASSES]);
@@ -169,7 +172,12 @@ function maskCodeOnly(src) {
 // Index every method declaration (name + start offset). C# methods don't nest (local functions aside,
 // which don't declare our mutations), so the enclosing method of any offset is the nearest declaration
 // before it. Matches an access modifier + return type + name + '(' — good enough to anchor enclosure.
-const METHOD_DECL = /(?:^|\n)\s*(?:public|private|internal|protected)(?:\s+(?:static|async|override|virtual|sealed|new|unsafe))*\s+[\w<>,.\[\]?]+\s+(\w+)\s*\(/g;
+// The return type is EITHER a plain type token (List<T>, Foo?, string[], ...) OR a parenthesized TUPLE
+// (List<string> A, string B) — the tuple arm is load-bearing: without it a tuple-return method (e.g.
+// ActivateExclusively) is NOT indexed, and the census misattributes its cache writes to the preceding
+// decl (7c59c004 — this exact blind spot hid ActivateExclusively's swaps; the tuple negative fixture
+// in the self-test guards it). \s+ between the two spans the newline C# style splits tuple-sig + name onto.
+const METHOD_DECL = /(?:^|\n)\s*(?:public|private|internal|protected)(?:\s+(?:static|async|override|virtual|sealed|new|unsafe))*\s+(?:\([^)]*\)|[\w<>,.\[\]?]+)\s+(\w+)\s*\(/g;
 
 function indexMethods(code) {
   const methods = [];
@@ -297,6 +305,24 @@ function selfTest() {
       name: 'post-conversion: InsertProfile persist-first write-path helper PASSES',
       expectOk: true,
       src: `class ProfileService {\n        public TeamMemberProfile InsertProfile(TeamMemberProfile profile) {\n            _taskDb.SaveProfile(profile);\n            _profiles[profile.Id] = profile;\n            return profile;\n        }\n}`,
+    },
+    {
+      // 7c59c004 census-blind-spot close: a TUPLE-return method must be INDEXED so a raw write inside it is
+      // attributed to IT, not the preceding decl. This is the exact hole that hid ActivateExclusively's swaps
+      // at b9c046e (they were misattributed to the preceding AssigneeActivationLock). A raw _tasks write in a
+      // tuple-return, NON-allowlisted method MUST FAIL — if the METHOD_DECL tuple arm regresses, this flips to
+      // a false PASS and trips here.
+      name: 'tuple-return: raw _tasks write in a non-allowlisted tuple-return method FAILS',
+      expectOk: false,
+      src: `class TaskService {\n        private (List<string> A, string B) SneakyTupleWrite(string id, KanbanTask t) {\n            _tasks[id] = t;\n            return (null, null);\n        }\n}`,
+    },
+    {
+      // The positive side: once the tuple arm indexes it AND it's a NAMED_BYPASS, a write in the real shape —
+      // tuple signature split across a newline before the name, as ActivateExclusively is written — PASSES
+      // (correctly attributed to the allowlisted primitive, not the preceding decl).
+      name: 'tuple-return: raw _tasks write in the allowlisted multi-line tuple primitive (ActivateExclusively) PASSES',
+      expectOk: true,
+      src: `class TaskService {\n        private (List<string> A, string B)\n            ActivateExclusively(string id, KanbanTask t) {\n            _tasks[id] = t;\n            return (null, null);\n        }\n}`,
     },
   ];
 
