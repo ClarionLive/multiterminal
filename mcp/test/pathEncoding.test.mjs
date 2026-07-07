@@ -24,7 +24,7 @@
 //
 // ACCEPTED RESIDUALS (PM ruling, ticket 6dcf3fa2 — Owner's-behalf desk authority).
 // The census enforces the invariant for ALL single- and composite-interpolation
-// positions in path and keyed-query contexts. Three exotic-shape gaps remain and
+// positions in path and keyed-query contexts. Four exotic-shape gaps remain and
 // are ACCEPTED, not chased — each is defense-in-depth, not the primary control:
 // closing them would require a future author to (a) write a NEW raw interpolation
 // in the exotic shape, (b) get it past code review, AND (c) have no runtime test
@@ -36,8 +36,13 @@
 //     `${b}/${raw}`)`) is out of the census's /api/-in-literal scope (that scope
 //     is what prevents false-flagging display strings like `${done}/${total}`).
 //   • STRING-EMBEDDED PARENS/BRACES — the paren/brace matchers in wrapsWhole /
-//     findInterpolations don't skip string contents, so `seg(")")` or
+//     classifyInterpolations don't skip string contents, so `seg(")")` or
 //     `${seg(f("}"))}` could misclassify.
+//   • NON-TEMPLATE STRING CONCATENATION — an endpoint built by string-literal
+//     concatenation instead of a template literal (`apiCall("/api/tasks/" + raw)`)
+//     is outside this census entirely, which scans template literals only. The
+//     convention is that apiCall endpoints are template literals; no plain-string
+//     `/api/...` + interpolation endpoint exists in the file. (Run 4 adversary.)
 // None has an instance in the current file (the census reports 0 violations).
 import { test } from "node:test";
 import assert from "node:assert/strict";
