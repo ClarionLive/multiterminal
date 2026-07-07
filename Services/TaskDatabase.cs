@@ -1547,10 +1547,16 @@ namespace MultiTerminal.Services
             {
                 // 1) Capture the active siblings (excluding the target) inside the txn — the authoritative set
                 //    to pause + hand back for the cache swap.
+                // COLLATE NOCASE (7c59c004 Codex-caught HIGH): the C# agent-name domain compares assignees
+                // case-INSENSITIVELY (SetTaskActive discovers siblings with OrdinalIgnoreCase), so this SQL
+                // MUST match case-insensitively too — else "Diana"-active + "diana"-activated would leave both
+                // active (the transaction pausing only exact-case rows). ASCII agent names → NOCASE ≡ Ordinal
+                // IgnoreCase. The same fix is applied to the sibling assignee filters GetActiveTaskForAgent /
+                // GetStaleTasksForTerminal (one root, all tasks.assignee WHERE-filters).
                 var paused = new List<string>();
                 const string selectSql = @"
                     SELECT id FROM tasks
-                    WHERE assignee = @assignee AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
+                    WHERE assignee = @assignee COLLATE NOCASE AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
                 using (var sel = new SQLiteCommand(selectSql, _connection, tx))
                 {
                     sel.Parameters.AddWithValue("@assignee", (object)assignee ?? DBNull.Value);
@@ -1564,7 +1570,7 @@ namespace MultiTerminal.Services
                 {
                     const string pauseSql = @"
                         UPDATE tasks SET sub_status = 'paused', paused_at = @pausedAt, updated_at = @now
-                        WHERE assignee = @assignee AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
+                        WHERE assignee = @assignee COLLATE NOCASE AND status = 'in_progress' AND sub_status = 'active' AND id != @taskId";
                     using var pause = new SQLiteCommand(pauseSql, _connection, tx);
                     pause.Parameters.AddWithValue("@assignee", (object)assignee ?? DBNull.Value);
                     pause.Parameters.AddWithValue("@taskId", taskId);
@@ -3262,7 +3268,7 @@ namespace MultiTerminal.Services
             const string sql = @"
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at, project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
-                WHERE assignee = @agentName
+                WHERE assignee = @agentName COLLATE NOCASE
                   AND status = 'in_progress'
                   AND sub_status = 'active'
                 ORDER BY updated_at DESC
@@ -3472,7 +3478,7 @@ namespace MultiTerminal.Services
                 SELECT id, title, description, status, assignee, created_by, created_at, updated_at,
                        project_id, sub_status, paused_at, flagged_stale_at, stale_level, stale_notified_at, stale_response, priority, checklist_json, plan, implementation_summary, test_results, implementation_checklist_json, continuation_notes, auto_status, review_notes, is_quick_task, sort_order
                 FROM tasks
-                WHERE assignee = @assignee AND stale_level > 0
+                WHERE assignee = @assignee COLLATE NOCASE AND stale_level > 0
                 ORDER BY stale_level DESC, paused_at ASC
             ";
 

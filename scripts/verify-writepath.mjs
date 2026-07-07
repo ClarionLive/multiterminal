@@ -97,6 +97,17 @@ const KNOWN_UNLOCKED_EXPOSURES = [
               'routes through (ends the whack-a-mole). Pre-existing; not a 7c59c004 regression.',
     hardening: '651105b3',
   },
+  {
+    site: 'MCPServer/Services/TaskService.cs: ReorderTask rebalance (RebalanceSortOrder before the affected per-task locks)',
+    exposure: 'ReorderTask calls _taskDb.RebalanceSortOrder(column) OUTSIDE the affected tasks per-task locks. A ' +
+              'concurrent MutateTaskInternal on an affected sibling can clone the old cached SortOrder, then its ' +
+              'full-row SaveTask (sort_order = COALESCE(@sortOrder, sort_order)) persists the STALE rank after the ' +
+              'rebalance, undoing it for that row. SORT/DISPLAY-RANK ONLY — self-healing on the next reorder, cache ' +
+              'and DB stay coherent, NOT state corruption. Pre-existing (rebalance was never under per-task locks; ' +
+              "7c59c004's per-task lock is new). Full fix = hold all column locks across rebalance (heavy) or make " +
+              'rebalance the authoritative sort writer. Deferred.',
+    hardening: '503aa430',
+  },
 ];
 
 // CORE PERSIST + RAW CACHE WRITE patterns (the divergence-creating writes). Targeted column/side-table

@@ -1323,7 +1323,11 @@ namespace MultiTerminal.MCPServer.Services
                     // RebalanceSortOrder already persisted the DB ranks, so the persist step is a no-op — this
                     // is a lock-protected cache refresh FROM the DB. The DB read is done INSIDE the mutate
                     // lambda (i.e. under TaskWriteLock), NOT from a pre-lock snapshot, so a concurrent reorder
-                    // landing between read and swap can't leave a stale rank in the cache.
+                    // landing between read and swap can't leave a stale rank in the cache. KNOWN RESIDUAL
+                    // (503aa430, enumerated in verify-writepath.mjs): RebalanceSortOrder itself runs OUTSIDE
+                    // the affected tasks' per-task locks, so a concurrent full-row SaveTask (stale cloned
+                    // SortOrder via COALESCE) can still undo a rebalanced rank — SORT/display-rank only,
+                    // self-healing, coherent; deferred (heavy whole-column locking / rebalance-as-authoritative).
                     foreach (var affectedId in _tasks.Values.Where(t => t.Status == task.Status).Select(t => t.Id).ToList())
                     {
                         MutateTaskInternal(affectedId, x =>

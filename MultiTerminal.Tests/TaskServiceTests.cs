@@ -253,6 +253,32 @@ namespace MultiTerminal.Tests
             return n;
         }
 
+        [Fact]
+        public void SetTaskActiveTransactional_PausesCaseVariantAssignee()
+        {
+            // Codex-caught HIGH (7c59c004): the assignee comparison must be case-INSENSITIVE to match the C#
+            // agent-name domain (SetTaskActive discovers siblings with OrdinalIgnoreCase). Without COLLATE
+            // NOCASE, "Diana"-active + "diana"-activated leaves BOTH active (durable two-active).
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "Diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            _db.SaveTask(new KanbanTask { Id = "B", Title = "B", Status = "in_progress", Assignee = "diana", SubStatus = "paused", CreatedAt = DateTime.UtcNow });
+
+            var paused = _db.SetTaskActiveTransactional("B", "diana", DateTime.UtcNow);
+
+            Assert.Contains("A", paused);                        // "Diana" paused despite the casing difference
+            Assert.Equal("paused", _db.GetTask("A").SubStatus);
+            Assert.Equal("active", _db.GetTask("B").SubStatus);  // only B active — no durable two-active
+        }
+
+        [Fact]
+        public void GetActiveTaskForAgent_MatchesCaseVariantAssignee()
+        {
+            // Same root (sibling fix): the active-task resolution must find the row regardless of casing.
+            _db.SaveTask(new KanbanTask { Id = "A", Title = "A", Status = "in_progress", Assignee = "Diana", SubStatus = "active", CreatedAt = DateTime.UtcNow });
+            var active = _db.GetActiveTaskForAgent("diana");
+            Assert.NotNull(active);
+            Assert.Equal("A", active.Id);
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
