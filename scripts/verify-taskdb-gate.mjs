@@ -366,7 +366,11 @@ function censusViolations(sites, manifestFiles) {
 }
 
 // Walk the solution and record, per file, whether it opens directly and/or calls the factory.
-const SKIP_DIRS = new Set(['node_modules', 'bin', 'obj', '.git', '.claude', 'staged', 'Deploy', 'packages', 'TestResults', '.vs']);
+// Build artifacts + the test project are skipped. The census asserts the PRODUCTION one-owner-per-
+// multiterminal.db invariant; test code (P5 / 1df2a534) legitimately opens its OWN connection to the
+// ISOLATED temp DB (MULTITERMINAL_TEST_DB / MULTITERMINAL_TEST_MSGDB) to inspect schema/rows — that is
+// neither a borrowed handle nor a second owner of the real DB, so it is out of the census's scope.
+const SKIP_DIRS = new Set(['node_modules', 'bin', 'obj', '.git', '.claude', 'staged', 'Deploy', 'packages', 'TestResults', '.vs', 'MultiTerminal.Tests']);
 function scanOpenSites(root) {
   const sites = [];
   function walk(dir) {
