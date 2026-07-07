@@ -133,7 +133,7 @@ namespace MultiTerminal.DashboardHeader
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[DashboardHeader] WebView2 init failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("DashboardHeader", $"WebView2 init failed: {ex.Message}");
                 _isInitializing = false;
                 FireDashboardReadyIfNeeded();
             }
@@ -143,7 +143,7 @@ namespace MultiTerminal.DashboardHeader
         {
             if (!e.IsSuccess)
             {
-                System.Diagnostics.Debug.WriteLine($"[DashboardHeader] WebView2 init error: {e.InitializationException?.Message}");
+                _broker?.DebugLogService?.Error("DashboardHeader", $"WebView2 init error: {e.InitializationException?.Message}");
                 return;
             }
 
@@ -227,7 +227,7 @@ namespace MultiTerminal.DashboardHeader
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[DashboardHeader] Message error: {ex.Message}");
+                _broker?.DebugLogService?.Error("DashboardHeader", $"Message error: {ex.Message}");
             }
         }
 
@@ -379,7 +379,7 @@ namespace MultiTerminal.DashboardHeader
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[DashboardHeader] OnDashboardReady error: {ex.Message}");
+                _broker?.DebugLogService?.Error("DashboardHeader", $"OnDashboardReady error: {ex.Message}");
             }
         }
 

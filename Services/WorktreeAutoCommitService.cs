@@ -115,17 +115,17 @@ namespace MultiTerminal.Services
                 };
             }
 
-            var statusResult = await RunGitAsync(worktreePath, "status", "--porcelain").ConfigureAwait(false);
-            if (statusResult.exitCode != 0)
+            var statusResult = await GitExec.RunAsync(worktreePath, "status", "--porcelain").ConfigureAwait(false);
+            if (statusResult.ExitCode != 0)
             {
                 return new AutoCommitResult
                 {
                     Success = false,
-                    Stderr = $"git status failed: {statusResult.stderr.Trim()}"
+                    Stderr = $"git status failed: {statusResult.Stderr.Trim()}"
                 };
             }
 
-            var changedFiles = ParseChangedFiles(statusResult.stdout);
+            var changedFiles = ParseChangedFiles(statusResult.Stdout);
             if (changedFiles.Count == 0)
             {
                 return new AutoCommitResult
@@ -135,17 +135,17 @@ namespace MultiTerminal.Services
                 };
             }
 
-            var branchResult = await RunGitAsync(worktreePath, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
-            if (branchResult.exitCode != 0)
+            var branchResult = await GitExec.RunAsync(worktreePath, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+            if (branchResult.ExitCode != 0)
             {
                 return new AutoCommitResult
                 {
                     Success = false,
-                    Stderr = $"git rev-parse failed: {branchResult.stderr.Trim()}"
+                    Stderr = $"git rev-parse failed: {branchResult.Stderr.Trim()}"
                 };
             }
 
-            string currentBranch = branchResult.stdout.Trim();
+            string currentBranch = branchResult.Stdout.Trim();
             if (!string.Equals(currentBranch, record.BranchName, StringComparison.Ordinal))
             {
                 return new AutoCommitResult
@@ -166,31 +166,33 @@ namespace MultiTerminal.Services
             // starting with `-` from being interpreted as a flag.
             var addArgs = new List<string> { "add", "--" };
             addArgs.AddRange(changedFiles);
-            var addResult = await RunGitAsync(worktreePath, addArgs.ToArray()).ConfigureAwait(false);
-            if (addResult.exitCode != 0)
+            var addResult = await GitExec.RunAsync(worktreePath, addArgs.ToArray()).ConfigureAwait(false);
+            if (addResult.ExitCode != 0)
             {
                 return new AutoCommitResult
                 {
                     Success = false,
-                    Stderr = $"git add failed: {addResult.stderr.Trim()}"
+                    Stderr = $"git add failed: {addResult.Stderr.Trim()}"
                 };
             }
 
             string message = BuildCommitMessage(taskId, taskTitle, implementationSummary, agentName);
 
-            var commitResult = await RunGitAsync(worktreePath, "commit", "-m", message).ConfigureAwait(false);
-            if (commitResult.exitCode != 0)
+            // Mutating op: larger slow-op budget so a legit slow commit (hooks,
+            // large tree) isn't false-killed at the read-op default.
+            var commitResult = await GitExec.RunAsync(worktreePath, GitExec.SlowOpTimeoutMs, "commit", "-m", message).ConfigureAwait(false);
+            if (commitResult.ExitCode != 0)
             {
                 return new AutoCommitResult
                 {
                     Success = false,
-                    Stderr = $"git commit failed: {commitResult.stderr.Trim()}; stdout: {commitResult.stdout.Trim()}"
+                    Stderr = $"git commit failed: {commitResult.Stderr.Trim()}; stdout: {commitResult.Stdout.Trim()}"
                 };
             }
 
-            var hashResult = await RunGitAsync(worktreePath, "rev-parse", "HEAD").ConfigureAwait(false);
-            string commitHash = hashResult.exitCode == 0
-                ? hashResult.stdout.Trim()
+            var hashResult = await GitExec.RunAsync(worktreePath, "rev-parse", "HEAD").ConfigureAwait(false);
+            string commitHash = hashResult.ExitCode == 0
+                ? hashResult.Stdout.Trim()
                 : null;
 
             return new AutoCommitResult
@@ -279,30 +281,6 @@ namespace MultiTerminal.Services
             return files;
         }
 
-        private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(
-            string workingDir, params string[] args)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "git",
-                WorkingDirectory = workingDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            foreach (var arg in args)
-            {
-                psi.ArgumentList.Add(arg);
-            }
-
-            using var proc = new Process { StartInfo = psi };
-            proc.Start();
-            string stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-            string stderr = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
-            await proc.WaitForExitAsync().ConfigureAwait(false);
-            return (proc.ExitCode, stdout, stderr);
-        }
     }
 
     /// <summary>

@@ -63,6 +63,13 @@ namespace MultiTerminal.Dialogs
         private string _pendingPreselectFilePath;
         private EventHandler<CoreWebView2WebMessageReceivedEventArgs> _webMsgHandler;
 
+        /// <summary>
+        /// Exposes this instance's debug-log sink (wired in <see cref="Initialize"/>) so
+        /// <see cref="CodeReviewPopupManager"/>'s static bookkeeping methods (which hold a
+        /// form reference but no broker parameter, e.g. ApplyThemeToAll) can log against it.
+        /// </summary>
+        internal DebugLogService DebugLogService => _broker?.DebugLogService;
+
         /// <summary>Task ID this popup is bound to, or null in working-tree mode.</summary>
         public string TaskId => _taskId;
 
@@ -177,8 +184,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] EnsureCoreWebView2Async failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"EnsureCoreWebView2Async failed: {ex.Message}");
                 return;
             }
 
@@ -209,8 +215,7 @@ namespace MultiTerminal.Dialogs
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] code-review.html not found at {htmlPath}");
+                _broker?.DebugLogService?.Warning("CodeReviewPopup", $"code-review.html not found at {htmlPath}");
                 _webView.CoreWebView2.NavigateToString(BuildMissingAssetFallback(htmlPath));
             }
         }
@@ -373,12 +378,13 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] WebMessage parse failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"WebMessage parse failed: {ex.Message}");
             }
         }
 
-        private static void OnNewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs args)
+        // Non-static (was static) so the failure path can reach _broker's sink; the
+        // event subscription in Initialize/OnFormClosed still resolves fine via `this`.
+        private void OnNewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs args)
         {
             try
             {
@@ -386,8 +392,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] OnNewWindowRequested failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"OnNewWindowRequested failed: {ex.Message}");
             }
         }
 
@@ -438,8 +443,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] GetCodeReviewData failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"GetCodeReviewData failed: {ex.Message}");
             }
 
             var sb = new StringBuilder();
@@ -511,8 +515,7 @@ namespace MultiTerminal.Dialogs
                 try { QuickTaskCreated?.Invoke(this, taskId); }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Trace.WriteLine(
-                        $"[CodeReviewPopupForm] QuickTaskCreated subscriber threw: {ex.Message}");
+                    _broker?.DebugLogService?.Error("CodeReviewPopup", $"QuickTaskCreated subscriber threw: {ex.Message}");
                 }
             }
         }
@@ -576,8 +579,7 @@ namespace MultiTerminal.Dialogs
                         try { _webView?.CoreWebView2?.PostWebMessageAsJson(json); }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine(
-                                $"[CodeReviewPopupForm] PostWebMessageAsJson failed: {ex.Message}");
+                            _broker?.DebugLogService?.Error("CodeReviewPopup", $"PostWebMessageAsJson failed: {ex.Message}");
                         }
                     }));
                 }
@@ -588,8 +590,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] PostWebMessageAsJson failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"PostWebMessageAsJson failed: {ex.Message}");
             }
             await Task.CompletedTask;
         }
@@ -630,8 +631,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] ApplyPersistedBounds failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"ApplyPersistedBounds failed: {ex.Message}");
             }
         }
 
@@ -671,8 +671,7 @@ namespace MultiTerminal.Dialogs
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CodeReviewPopupForm] SaveBoundsAndZoom failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("CodeReviewPopup", $"SaveBoundsAndZoom failed: {ex.Message}");
             }
         }
 

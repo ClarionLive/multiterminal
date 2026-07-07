@@ -386,6 +386,7 @@ namespace MultiTerminal
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
             _projectPanel.SetGatewayService(_gatewayService);
+            _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
 
             // Create panel instances early so they can be restored from layout
             // They will be initialized with MCP broker later in InitializeMcpServerAndChatPanel
@@ -3555,7 +3556,16 @@ namespace MultiTerminal
 
             try
             {
-                var discovery = new MCPServer.Services.SessionDiscovery();
+                // Resolve identity from the authoritative session_agent_map store
+                // (register_session -> TaskDatabase) rather than the transcript, which
+                // doesn't reliably carry the terminal's own name. Snapshot the whole
+                // map ONCE (one query) and resolve from the in-memory dict — avoids a
+                // per-session DB point-query (N+1) on this WinForms UI path, and makes
+                // the resolver non-throwing. Falls back to transcript parsing for
+                // foreign/unknown sessions (task 4558fa6b).
+                var agentMap = _mcpServer?.Broker?.TaskDb?.GetAllSessionAgentNames();
+                var discovery = new MCPServer.Services.SessionDiscovery(
+                    sid => (agentMap != null && agentMap.TryGetValue(sid, out var agent)) ? agent : null);
                 var discovered = discovery.DiscoverIdentitiesInProject(projectPath);
                 // Dictionary keys are identity names
                 identities.AddRange(discovered.Keys);
@@ -5481,7 +5491,7 @@ namespace MultiTerminal
             _debugLogService?.Info("CreateAgentPanel", $"Embedding agent '{agentName}' in terminal '{targetTerminal.TabText}'");
 
             var slot = targetTerminal.EmbeddedAgentPanel.AddAgentSlot(agentName);
-            var control = new AgentPanelControl { Dock = DockStyle.Fill };
+            var control = new AgentPanelControl { Dock = DockStyle.Fill, DebugLogService = _debugLogService };
             slot.Controls.Add(control);
             control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
             control.ApplyTheme(_currentTheme == TerminalTheme.Dark);

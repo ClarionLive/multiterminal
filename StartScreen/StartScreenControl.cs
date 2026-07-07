@@ -56,6 +56,9 @@ namespace MultiTerminal.StartScreen
         private ProjectDatabase _projectDatabase;
         private ProjectService _projectService;
 
+        // ── Logging sink ──────────────────────────────────────────────────────
+        public DebugLogService DebugLogService { get; set; }
+
         // ── Public events ─────────────────────────────────────────────────────
 
         /// <summary>
@@ -159,6 +162,9 @@ namespace MultiTerminal.StartScreen
                 _webView.ZoomFactor = zoom;
         }
 
+        /// <summary>Wires the shared debug logging sink. Call once after construction.</summary>
+        public void SetDebugLogService(DebugLogService debugLogService) => DebugLogService = debugLogService;
+
         // ── WebView2 lifecycle ────────────────────────────────────────────────
 
         private async void OnHandleCreated(object sender, EventArgs e)
@@ -179,7 +185,7 @@ namespace MultiTerminal.StartScreen
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] WebView2 init failed: {ex.Message}");
+                DebugLogService?.Error("StartScreen", $"WebView2 init failed: {ex.Message}");
                 _isInitializing = false;
             }
         }
@@ -189,7 +195,7 @@ namespace MultiTerminal.StartScreen
             if (!e.IsSuccess)
             {
                 // CoreWebView2 is null on init failure — log and reset so Initialize() can retry
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] WebView2 init failed: {e.InitializationException?.Message}");
+                DebugLogService?.Error("StartScreen", $"WebView2 init failed: {e.InitializationException?.Message}");
                 _isInitializing = false;
                 return;
             }
@@ -201,7 +207,7 @@ namespace MultiTerminal.StartScreen
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] HTML not found at: {htmlPath}");
+                DebugLogService?.Warning("StartScreen", $"HTML not found at: {htmlPath}");
                 _webView.CoreWebView2.NavigateToString(
                     "<html><body style='background:#1a1a2e;color:#ccc;font-family:sans-serif;padding:2rem'>" +
                     $"<h2>Start screen HTML not found</h2><p>Searched: {System.Net.WebUtility.HtmlEncode(htmlPath)}</p></body></html>");
@@ -265,19 +271,19 @@ namespace MultiTerminal.StartScreen
                             // Optional per-click terminal override from the split-button dropdown.
                             // Null/empty means use the project's stored DefaultTerminal.
                             string terminalOverride = root.TryGetProperty("terminal", out var tEl) ? tEl.GetString() : null;
-                            System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] launch_project received: id='{projectId}' clickedName='{clickedName}' terminalOverride='{terminalOverride ?? "(none)"}' validLen={(projectId?.Length ?? -1)}");
+                            DebugLogService?.Trace("StartScreen", $"#PROJ# [StartScreenControl.OnWebMessageReceived] launch_project received: id='{projectId}' clickedName='{clickedName}' terminalOverride='{terminalOverride ?? "(none)"}' validLen={(projectId?.Length ?? -1)}");
                             // Cross-check with the cached list we sent to JS
                             try
                             {
                                 var all = _projectDatabase?.GetAllRichProjects();
                                 var match = all?.FirstOrDefault(p => p.Id == projectId);
-                                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] DB lookup from same db: id='{match?.Id ?? "NULL"}' name='{match?.Name ?? "NULL"}' path='{match?.SourcePath ?? match?.Path ?? "NULL"}'");
+                                DebugLogService?.Trace("StartScreen", $"#PROJ# [StartScreenControl.OnWebMessageReceived] DB lookup from same db: id='{match?.Id ?? "NULL"}' name='{match?.Name ?? "NULL"}' path='{match?.SourcePath ?? match?.Path ?? "NULL"}'");
                             }
-                            catch (Exception dbgEx) { System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] DB lookup threw: {dbgEx.Message}"); }
+                            catch (Exception dbgEx) { DebugLogService?.Error("StartScreen", $"#PROJ# [StartScreenControl.OnWebMessageReceived] DB lookup threw: {dbgEx.Message}"); }
                             // Validate: non-empty, GUID-length (36 chars max)
                             if (!string.IsNullOrEmpty(projectId) && projectId.Length <= 36)
                             {
-                                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.OnWebMessageReceived] Firing ProjectLaunched event with id='{projectId}' terminalOverride='{terminalOverride ?? "(none)"}'");
+                                DebugLogService?.Trace("StartScreen", $"#PROJ# [StartScreenControl.OnWebMessageReceived] Firing ProjectLaunched event with id='{projectId}' terminalOverride='{terminalOverride ?? "(none)"}'");
                                 ProjectLaunched?.Invoke(this, new StartScreenLaunchEventArgs(projectId, terminalOverride));
                             }
                         }
@@ -329,7 +335,7 @@ namespace MultiTerminal.StartScreen
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] Message handling error: {ex.Message}");
+                DebugLogService?.Error("StartScreen", $"Message handling error: {ex.Message}");
             }
         }
 
@@ -343,13 +349,13 @@ namespace MultiTerminal.StartScreen
             try
             {
                 var projects = _projectDatabase.GetAllRichProjects();
-                System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.SendProjectsToWebView] Sending {projects?.Count ?? 0} projects to JS");
+                DebugLogService?.Trace("StartScreen", $"#PROJ# [StartScreenControl.SendProjectsToWebView] Sending {projects?.Count ?? 0} projects to JS");
                 if (projects != null)
                 {
                     int dbgIdx = 0;
                     foreach (var dp in projects.Take(20))
                     {
-                        System.Diagnostics.Trace.WriteLine($"#PROJ# [StartScreenControl.SendProjectsToWebView]   [{dbgIdx++}] id='{dp.Id}' name='{dp.Name}' path='{dp.SourcePath ?? dp.Path}'");
+                        DebugLogService?.Trace("StartScreen", $"#PROJ# [StartScreenControl.SendProjectsToWebView]   [{dbgIdx++}] id='{dp.Id}' name='{dp.Name}' path='{dp.SourcePath ?? dp.Path}'");
                     }
                 }
                 var projectDtos = new List<object>();
@@ -386,7 +392,7 @@ namespace MultiTerminal.StartScreen
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] SendProjectsToWebView error: {ex.Message}");
+                DebugLogService?.Error("StartScreen", $"SendProjectsToWebView error: {ex.Message}");
             }
         }
 
@@ -417,7 +423,7 @@ namespace MultiTerminal.StartScreen
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[StartScreen] ToggleProjectPin error: {ex.Message}");
+                DebugLogService?.Error("StartScreen", $"ToggleProjectPin error: {ex.Message}");
             }
         }
 

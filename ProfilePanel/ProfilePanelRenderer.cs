@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.MCPServer.Models;
+using MultiTerminal.Services;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.ProfilePanel
@@ -54,6 +55,8 @@ namespace MultiTerminal.ProfilePanel
         /// Gets whether the renderer is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
+
+        public DebugLogService DebugLogService { get; set; }
 
         public ProfilePanelRenderer()
         {
@@ -161,13 +164,13 @@ namespace MultiTerminal.ProfilePanel
                 }
 
                 Ready?.Invoke(this, EventArgs.Empty);
-                System.Diagnostics.Trace.WriteLine("[ProfilePanel] Navigation completed, panel ready");
+                DebugLogService?.Trace("ProfilePanel", "Navigation completed, panel ready");
             }
             else
             {
                 _isInitializing = false;
                 ShowError($"Failed to load panel: {e.WebErrorStatus}");
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Navigation failed: {e.WebErrorStatus}");
+                DebugLogService?.Error("ProfilePanel", $"Navigation failed: {e.WebErrorStatus}");
             }
         }
 
@@ -181,18 +184,18 @@ namespace MultiTerminal.ProfilePanel
 
                 if (!root.TryGetProperty("type", out var typeElement))
                 {
-                    System.Diagnostics.Trace.WriteLine("[ProfilePanel] Message missing 'type' property");
+                    DebugLogService?.Warning("ProfilePanel", "Message missing 'type' property");
                     return;
                 }
 
                 string type = typeElement.GetString();
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Message received: {type}");
+                DebugLogService?.Trace("ProfilePanel", $"Message received: {type}");
 
                 switch (type)
                 {
                     case "ready":
                         // Page signals it's ready
-                        System.Diagnostics.Trace.WriteLine("[ProfilePanel] Page ready signal received");
+                        DebugLogService?.Trace("ProfilePanel", "Page ready signal received");
                         break;
 
                     case "getProfiles":
@@ -228,13 +231,13 @@ namespace MultiTerminal.ProfilePanel
                         break;
 
                     default:
-                        System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Unknown message type: {type}");
+                        DebugLogService?.Warning("ProfilePanel", $"Unknown message type: {type}");
                         break;
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error processing message: {ex.Message}");
+                DebugLogService?.Error("ProfilePanel", $"Error processing message: {ex.Message}");
             }
         }
 
@@ -288,7 +291,7 @@ namespace MultiTerminal.ProfilePanel
         {
             if (!_isInitialized)
             {
-                System.Diagnostics.Trace.WriteLine("[ProfilePanel] Not initialized yet, queueing profiles");
+                DebugLogService?.Trace("ProfilePanel", "Not initialized yet, queueing profiles");
                 return;
             }
 
@@ -311,11 +314,11 @@ namespace MultiTerminal.ProfilePanel
 
                 string json = JsonSerializer.Serialize(profileData);
                 PostMessageToPage($"profiles:{json}");
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Sent {profiles.Count} profiles to page");
+                DebugLogService?.Trace("ProfilePanel", $"Sent {profiles.Count} profiles to page");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error sending profiles: {ex.Message}");
+                DebugLogService?.Error("ProfilePanel", $"Error sending profiles: {ex.Message}");
             }
         }
 
@@ -344,11 +347,11 @@ namespace MultiTerminal.ProfilePanel
 
                 string json = JsonSerializer.Serialize(profileData);
                 PostMessageToPage($"profileCreated:{json}");
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Notified profile created: {profile.Id}");
+                DebugLogService?.Trace("ProfilePanel", $"Notified profile created: {profile.Id}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error notifying profile created: {ex.Message}");
+                DebugLogService?.Error("ProfilePanel", $"Error notifying profile created: {ex.Message}");
             }
         }
 
@@ -377,11 +380,11 @@ namespace MultiTerminal.ProfilePanel
 
                 string json = JsonSerializer.Serialize(profileData);
                 PostMessageToPage($"profileUpdated:{json}");
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Notified profile updated: {profile.Id}");
+                DebugLogService?.Trace("ProfilePanel", $"Notified profile updated: {profile.Id}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error notifying profile updated: {ex.Message}");
+                DebugLogService?.Error("ProfilePanel", $"Error notifying profile updated: {ex.Message}");
             }
         }
 
@@ -395,11 +398,11 @@ namespace MultiTerminal.ProfilePanel
             try
             {
                 PostMessageToPage($"profileDeleted:{id}");
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Notified profile deleted: {id}");
+                DebugLogService?.Trace("ProfilePanel", $"Notified profile deleted: {id}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error notifying profile deleted: {ex.Message}");
+                DebugLogService?.Error("ProfilePanel", $"Error notifying profile deleted: {ex.Message}");
             }
         }
 
@@ -426,7 +429,7 @@ namespace MultiTerminal.ProfilePanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProfilePanel] Error posting message: {ex.Message}");
+                DebugLogService?.Error("ProfilePanel", $"Error posting message: {ex.Message}");
             }
         }
 

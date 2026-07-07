@@ -26,6 +26,9 @@ namespace MultiTerminal.ProjectPanel
         private string _pendingMessage;
         private bool _isDarkTheme = true;
 
+        /// <summary>Unified debug log sink, propagated from <see cref="MultiTerminal.Docking.ProjectPanelDocument"/>.</summary>
+        public DebugLogService DebugLogService { get; set; }
+
         /// <summary>
         /// Event fired when a prompt should be pasted to the terminal.
         /// </summary>
@@ -343,7 +346,7 @@ namespace MultiTerminal.ProjectPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanelRenderer] Error handling message: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"Error handling message: {ex.Message}");
             }
         }
 
@@ -352,12 +355,12 @@ namespace MultiTerminal.ProjectPanel
             var msgPreview = message.Length > 50 ? message.Substring(0, 50) + "..." : message;
             if (_webView?.CoreWebView2 != null && _isInitialized)
             {
-                System.Diagnostics.Trace.WriteLine($"[ProjectPanelRenderer] SendMessage (immediate): {msgPreview}");
+                DebugLogService?.Trace("ProjectPanel", $"SendMessage (immediate): {msgPreview}");
                 _webView.CoreWebView2.PostWebMessageAsString(message);
             }
             else
             {
-                System.Diagnostics.Trace.WriteLine($"[ProjectPanelRenderer] SendMessage (queued): {msgPreview}");
+                DebugLogService?.Trace("ProjectPanel", $"SendMessage (queued): {msgPreview}");
                 _pendingMessage = message;
             }
         }
@@ -368,7 +371,7 @@ namespace MultiTerminal.ProjectPanel
         /// </summary>
         public void ShowProject(Project project, ProjectStats stats = null)
         {
-            System.Diagnostics.Trace.WriteLine($"[ProjectPanelRenderer] ShowProject called: {project?.Name ?? "null"}, IsInitialized={_isInitialized}");
+            DebugLogService?.Trace("ProjectPanel", $"ShowProject called: {project?.Name ?? "null"}, IsInitialized={_isInitialized}");
             var sb = new StringBuilder();
             sb.Append("{");
 
@@ -999,7 +1002,7 @@ namespace MultiTerminal.ProjectPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ProjectPanelRenderer] ParseJsonMessage failed: {ex.Message}");
+                DebugLogService?.Error("ProjectPanel", $"ParseJsonMessage failed: {ex.Message}");
             }
 
             return result;

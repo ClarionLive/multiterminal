@@ -477,8 +477,8 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine(
-                    $"[TasksController.BuildBranchCandidatesAsync] {ex.GetType().Name}: {ex.Message}");
+                _broker?.DebugLogService?.Trace("TasksController.BuildBranchCandidatesAsync",
+                    $"{ex.GetType().Name}: {ex.Message}");
                 return empty;
             }
         }

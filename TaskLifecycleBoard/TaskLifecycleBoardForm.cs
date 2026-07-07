@@ -155,7 +155,7 @@ namespace MultiTerminal.TaskLifecycleBoard
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Lifecycle board WebView2 init failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("TaskLifecycleBoard", $"Lifecycle board WebView2 init failed: {ex.Message}");
             }
         }
 
@@ -163,7 +163,7 @@ namespace MultiTerminal.TaskLifecycleBoard
         {
             if (!e.IsSuccess)
             {
-                System.Diagnostics.Debug.WriteLine("Lifecycle board WebView2 initialization failed.");
+                _broker?.DebugLogService?.Error("TaskLifecycleBoard", "Lifecycle board WebView2 initialization failed.");
                 return;
             }
 
@@ -188,7 +188,7 @@ namespace MultiTerminal.TaskLifecycleBoard
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine($"Lifecycle board HTML not found: {htmlPath}");
+                _broker?.DebugLogService?.Warning("TaskLifecycleBoard", $"Lifecycle board HTML not found: {htmlPath}");
             }
         }
 
@@ -401,7 +401,7 @@ namespace MultiTerminal.TaskLifecycleBoard
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Lifecycle board message error: {ex.Message}");
+                _broker?.DebugLogService?.Error("TaskLifecycleBoard", $"Lifecycle board message error: {ex.Message}");
             }
         }
 
@@ -823,7 +823,7 @@ namespace MultiTerminal.TaskLifecycleBoard
             }
             catch (FormatException)
             {
-                System.Diagnostics.Debug.WriteLine("Lifecycle board: invalid base64 data for attachment");
+                _broker?.DebugLogService?.Warning("TaskLifecycleBoard", "Lifecycle board: invalid base64 data for attachment");
                 return;
             }
 

@@ -139,7 +139,7 @@ namespace MultiTerminal.API.Controllers
                 // Best-effort scan: a transient git/DB failure surfaces as
                 // 'unavailable', never as a healthy-looking zero, and never as a 500
                 // (honours the documented contract; Debugger MEDIUM).
-                System.Diagnostics.Debug.WriteLine($"[WorktreesController] stranded scan failed: {ex.Message}");
+                _broker?.DebugLogService?.Error("WorktreesController", $"stranded scan failed: {ex.Message}");
                 return Ok(new { status = "unavailable", count = 0, skippedGroups = 0, dirs = Array.Empty<string>() });
             }
         }

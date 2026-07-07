@@ -72,7 +72,7 @@ namespace MultiTerminal.OfficePanel
 
         private void OnRendererReady(object sender, EventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnRendererReady fired, _messageBroker={(_messageBroker == null ? "NULL" : "OK")}");
+            _messageBroker?.DebugLogService?.Info("OfficePanel", $"OnRendererReady fired, _messageBroker={(_messageBroker == null ? "NULL" : "OK")}");
 
             // WebView2 is now ready - load initial data and start refresh timer
             RefreshData();
@@ -84,14 +84,14 @@ namespace MultiTerminal.OfficePanel
         /// </summary>
         private void OnDockStateChanged(object sender, EventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] DockStateChanged: DockState={DockState}, _messageBroker={(_messageBroker == null ? "NULL" : "OK")}");
+            _messageBroker?.DebugLogService?.Info("OfficePanel", $"DockStateChanged: DockState={DockState}, _messageBroker={(_messageBroker == null ? "NULL" : "OK")}");
 
             // When panel becomes visible, refresh data if we can
             if (DockState != DockState.Hidden && DockState != DockState.Unknown)
             {
                 if (_messageBroker != null && _renderer?.IsInitialized == true)
                 {
-                    System.Diagnostics.Debug.WriteLine("[OfficePanel] Panel now visible - refreshing data");
+                    _messageBroker?.DebugLogService?.Info("OfficePanel", "Panel now visible - refreshing data");
                     RefreshData();
                     StartRefreshTimer();
                 }
@@ -108,10 +108,17 @@ namespace MultiTerminal.OfficePanel
         /// </summary>
         public void Initialize(MessageBroker messageBroker, ActivityService activityService)
         {
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] Initialize called, messageBroker={(messageBroker == null ? "NULL" : "OK")}, activityService={(activityService == null ? "NULL" : "OK")}, renderer={(_renderer == null ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
-
             _messageBroker = messageBroker;
             _activityService = activityService;
+
+            // Log AFTER assigning _messageBroker so the sink is live on first init (4c86f18d: was logged
+            // before assignment and silently dropped on the first Initialize).
+            _messageBroker?.DebugLogService?.Info("OfficePanel", $"Initialize called, messageBroker={(messageBroker == null ? "NULL" : "OK")}, activityService={(activityService == null ? "NULL" : "OK")}, renderer={(_renderer == null ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
+
+            if (_renderer != null)
+            {
+                _renderer.DebugLogService = _messageBroker?.DebugLogService;
+            }
 
             if (_messageBroker != null)
             {
@@ -121,25 +128,25 @@ namespace MultiTerminal.OfficePanel
                 _messageBroker.TasksUpdated += OnTasksUpdated;
                 _messageBroker.OfficeAgentSpawned += OnOfficeAgentSpawned;
                 _messageBroker.OfficeAgentDeparted += OnOfficeAgentDeparted;
-                System.Diagnostics.Debug.WriteLine("[OfficePanel] Subscribed to MessageBroker events");
+                _messageBroker?.DebugLogService?.Info("OfficePanel", "Subscribed to MessageBroker events");
             }
 
             if (_activityService != null)
             {
                 _activityService.ActivityUpdated += OnActivityUpdated;
-                System.Diagnostics.Debug.WriteLine("[OfficePanel] Subscribed to ActivityUpdated events");
+                _messageBroker?.DebugLogService?.Info("OfficePanel", "Subscribed to ActivityUpdated events");
             }
 
             // If renderer is already initialized, load data and start timer now
             if (_renderer?.IsInitialized == true)
             {
-                System.Diagnostics.Debug.WriteLine("[OfficePanel] Renderer already ready, refreshing data now");
+                _messageBroker?.DebugLogService?.Info("OfficePanel", "Renderer already ready, refreshing data now");
                 RefreshData();
                 StartRefreshTimer();
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine("[OfficePanel] Renderer not ready yet, will load when Ready event fires");
+                _messageBroker?.DebugLogService?.Info("OfficePanel", "Renderer not ready yet, will load when Ready event fires");
             }
         }
 
@@ -154,7 +161,7 @@ namespace MultiTerminal.OfficePanel
             _refreshTimer = new Timer { Interval = 5000 };
             _refreshTimer.Tick += OnRefreshTimerTick;
             _refreshTimer.Start();
-            System.Diagnostics.Debug.WriteLine("[OfficePanel] Refresh timer started (5s interval)");
+            _messageBroker?.DebugLogService?.Info("OfficePanel", "Refresh timer started (5s interval)");
         }
 
         /// <summary>
@@ -168,7 +175,7 @@ namespace MultiTerminal.OfficePanel
                 _refreshTimer.Tick -= OnRefreshTimerTick;
                 _refreshTimer.Dispose();
                 _refreshTimer = null;
-                System.Diagnostics.Debug.WriteLine("[OfficePanel] Refresh timer stopped");
+                _messageBroker?.DebugLogService?.Info("OfficePanel", "Refresh timer stopped");
             }
         }
 
@@ -221,7 +228,7 @@ namespace MultiTerminal.OfficePanel
                         activity?.Activity ?? "Connected",
                         role);
                     _knownTerminalIds.Add(terminal.Id);
-                    System.Diagnostics.Debug.WriteLine($"[OfficePanel] RefreshData: Added {terminal.Name} ({terminal.Id}) as {role}");
+                    _messageBroker?.DebugLogService?.Trace("OfficePanel", $"RefreshData: Added {terminal.Name} ({terminal.Id}) as {role}");
                 }
             }
 
@@ -231,7 +238,7 @@ namespace MultiTerminal.OfficePanel
             {
                 _renderer.RemoveCharacter(id);
                 _knownTerminalIds.Remove(id);
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] RefreshData: Removed {id}");
+                _messageBroker?.DebugLogService?.Trace("OfficePanel", $"RefreshData: Removed {id}");
             }
 
             // Sync office agents (subagents that aren't registered terminals)
@@ -245,7 +252,7 @@ namespace MultiTerminal.OfficePanel
                     var agentId = "agent-" + agent.Name;
                     _renderer.AddCharacter(agentId, agent.Name, "", agent.Status ?? "working", "Working", "agent");
                     _knownAgentNames.Add(agent.Name);
-                    System.Diagnostics.Debug.WriteLine($"[OfficePanel] RefreshData: Added agent {agent.Name}");
+                    _messageBroker?.DebugLogService?.Trace("OfficePanel", $"RefreshData: Added agent {agent.Name}");
                 }
             }
 
@@ -256,7 +263,7 @@ namespace MultiTerminal.OfficePanel
                 var agentId = "agent-" + name;
                 _renderer.RemoveCharacter(agentId);
                 _knownAgentNames.Remove(name);
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] RefreshData: Removed agent {name}");
+                _messageBroker?.DebugLogService?.Trace("OfficePanel", $"RefreshData: Removed agent {name}");
             }
 
             // Update whiteboard task counts
@@ -321,7 +328,7 @@ namespace MultiTerminal.OfficePanel
                             {
                                 if (DateTime.UtcNow - startedAt > TimeSpan.FromSeconds(30))
                                 {
-                                    System.Diagnostics.Debug.WriteLine($"[OfficePanel] Ghost cleanup: {agentName} - no transcript after 30s, departing");
+                                    _messageBroker?.DebugLogService?.Trace("OfficePanel", $"Ghost cleanup: {agentName} - no transcript after 30s, departing");
                                     agentsToDepartNames.Add(agentName);
                                     agentIdsToRemove.Add(agentId);
                                 }
@@ -335,7 +342,7 @@ namespace MultiTerminal.OfficePanel
 
                     if (staleSeconds > 15)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[OfficePanel] Ghost cleanup: {agentName} transcript stale for {staleSeconds:F0}s, departing");
+                        _messageBroker?.DebugLogService?.Trace("OfficePanel", $"Ghost cleanup: {agentName} transcript stale for {staleSeconds:F0}s, departing");
                         agentsToDepartNames.Add(agentName);
                         agentIdsToRemove.Add(agentId);
                     }
@@ -361,13 +368,13 @@ namespace MultiTerminal.OfficePanel
                     }
 
                     File.WriteAllText(TrackingFilePath, JsonSerializer.Serialize(freshTracking, JsonOptions.UnicodeIndented));
-                    System.Diagnostics.Debug.WriteLine($"[OfficePanel] Ghost cleanup: removed {agentIdsToRemove.Count} ghost(s) from tracking file");
+                    _messageBroker?.DebugLogService?.Trace("OfficePanel", $"Ghost cleanup: removed {agentIdsToRemove.Count} ghost(s) from tracking file");
                 }
             }
             catch (Exception ex)
             {
                 // Don't let ghost cleanup errors affect the main refresh cycle
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] Ghost cleanup error: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("OfficePanel", $"Ghost cleanup error: {ex.Message}");
             }
         }
 
@@ -382,13 +389,13 @@ namespace MultiTerminal.OfficePanel
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnTerminalRegistered: {terminal.Name}");
+            _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnTerminalRegistered: {terminal.Name}");
 
             // Skip "Unassigned" placeholder terminals - they'll re-register with a real name
             // and we want the walk-in animation to play for the real name, not the placeholder
             if (terminal.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
             {
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] Skipping 'Unassigned' terminal");
+                _messageBroker?.DebugLogService?.Warning("OfficePanel", $"Skipping 'Unassigned' terminal");
                 return;
             }
 
@@ -396,7 +403,7 @@ namespace MultiTerminal.OfficePanel
             // that should not appear as characters in the office
             if (terminal.Name.StartsWith("Agent ", StringComparison.OrdinalIgnoreCase))
             {
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] Skipping temporary agent: {terminal.Name}");
+                _messageBroker?.DebugLogService?.Warning("OfficePanel", $"Skipping temporary agent: {terminal.Name}");
                 return;
             }
 
@@ -424,7 +431,7 @@ namespace MultiTerminal.OfficePanel
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnTerminalDisconnected: {terminal.Name}");
+            _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnTerminalDisconnected: {terminal.Name}");
             _renderer?.RemoveCharacter(terminal.Id);
             _knownTerminalIds.Remove(terminal.Id);
         }
@@ -444,7 +451,7 @@ namespace MultiTerminal.OfficePanel
             var terminal = _messageBroker?.GetTerminals()?.FirstOrDefault(t => t.Name == activity.Terminal);
             if (terminal != null)
             {
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnActivityUpdated: {activity.Terminal} -> {activity.Status}");
+                _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnActivityUpdated: {activity.Terminal} -> {activity.Status}");
                 _renderer?.UpdateCharacterState(terminal.Id, activity.Status ?? "idle", activity.Activity ?? "");
             }
         }
@@ -464,7 +471,7 @@ namespace MultiTerminal.OfficePanel
             var terminal = _messageBroker?.GetTerminals()?.FirstOrDefault(t => t.Name == message.From);
             if (terminal != null)
             {
-                System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnMessageSent: {message.From} says something");
+                _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnMessageSent: {message.From} says something");
                 _renderer?.UpdateCharacterState(terminal.Id, "working", "Reporting results");
                 _renderer?.ShowSpeechBubble(terminal.Id, message.Content, 4000);
             }
@@ -481,7 +488,7 @@ namespace MultiTerminal.OfficePanel
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnTasksUpdated: {tasks?.Count ?? 0} tasks");
+            _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnTasksUpdated: {tasks?.Count ?? 0} tasks");
 
             int todo = tasks?.Count(t => t.Status == "todo" || t.Status == "suggestion") ?? 0;
             int inProgress = tasks?.Count(t => t.Status == "in_progress") ?? 0;
@@ -501,7 +508,7 @@ namespace MultiTerminal.OfficePanel
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnOfficeAgentSpawned: {agent.Name} (by {agent.SpawnedBy})");
+            _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnOfficeAgentSpawned: {agent.Name} (by {agent.SpawnedBy})");
 
             var agentId = "agent-" + agent.Name;
             if (!_knownAgentNames.Contains(agent.Name))
@@ -522,7 +529,7 @@ namespace MultiTerminal.OfficePanel
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[OfficePanel] OnOfficeAgentDeparted: {agent.Name}");
+            _messageBroker?.DebugLogService?.Trace("OfficePanel", $"OnOfficeAgentDeparted: {agent.Name}");
 
             var agentId = "agent-" + agent.Name;
             _renderer?.RemoveCharacter(agentId);

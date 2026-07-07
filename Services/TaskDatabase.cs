@@ -4774,6 +4774,28 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Snapshot the entire session_agent_map (session_id -&gt; agent_name) in ONE
+        /// locked query. Identity discovery uses this so the dropdown-build path does
+        /// a single read instead of one point-query per session file — the N+1 the
+        /// per-session <see cref="GetSessionAgentName"/> would cause on a WinForms UI
+        /// path (task 4558fa6b).
+        /// </summary>
+        public Dictionary<string, string> GetAllSessionAgentNames()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using var gate = LockConn();
+            const string sql = "SELECT session_id, agent_name FROM session_agent_map WHERE session_id IS NOT NULL AND agent_name IS NOT NULL";
+            using var command = new SQLiteCommand(sql, _connection);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                map[reader.GetString(0)] = reader.GetString(1);
+            }
+
+            return map;
+        }
+
+        /// <summary>
         /// Returns the set of session IDs that are currently marked as active
         /// in the session_agent_map table (is_active = 1).
         /// </summary>

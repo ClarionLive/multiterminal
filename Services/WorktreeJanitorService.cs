@@ -229,6 +229,26 @@ namespace MultiTerminal.Services
                                 }
                             }
 
+                            // Mutating-timeout hazard (Eval P5 pipeline Run 2): a
+                            // timed-out merge is retry-later with an UNKNOWN outcome —
+                            // NOT an ordinary "branch still alive, merge it" pending
+                            // merge. And if the follow-up abort also failed, the checkout
+                            // may be HALF-MERGED. Surface both cases loudly and
+                            // distinctly rather than folding them into the generic
+                            // pending-merge line (or, worse, proceeding silently).
+                            if (retry != null && retry.TimedOut)
+                            {
+                                string tShort = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
+                                result.PendingMerges.Add(record.TaskId);
+                                recordActivity?.Invoke(
+                                    retry.IndeterminateState ? "janitor_merge_indeterminate" : "janitor_merge_timeout",
+                                    retry.IndeterminateState
+                                        ? $"HALF-MERGED checkout — MANUAL CLEANUP NEEDED for done task {tShort}: {retry.Stderr}"
+                                        : $"Auto-merge for done task {tShort} timed out and was rolled back; will retry next sweep. {retry.Stderr}",
+                                    record.TaskId);
+                                continue;
+                            }
+
                             // Surface the actual refusal/failure reason from the retry
                             // (task 90c2acc6, Codex adversary MEDIUM): the wrong-branch
                             // and fail-closed refusals carry an actionable Stderr (e.g.
@@ -499,14 +519,24 @@ namespace MultiTerminal.Services
 
         private static async Task<HashSet<string>> ListRegisteredWorktreePathsAsync(string repoRoot)
         {
-            var (exitCode, stdout, stderr) = await RunGitAsync(repoRoot, "worktree", "list", "--porcelain").ConfigureAwait(false);
-            if (exitCode != 0)
+            var result = await GitExec.RunAsync(repoRoot, "worktree", "list", "--porcelain").ConfigureAwait(false);
+            // A timed-out `git worktree list` yields NO reliable registered-path
+            // set. Treating that empty set as authoritative would make Pass 3 see
+            // every on-disk worktree as unregistered (stranded) and rmdir it. Throw
+            // a distinct TimeoutException so the caller's conservative catch skips
+            // this group and retries next sweep — timeout is retry-later, NOT
+            // stranded-worktree evidence.
+            if (result.TimedOut)
             {
-                throw new InvalidOperationException($"git worktree list exit {exitCode}: {stderr.Trim()}");
+                throw new TimeoutException($"git worktree list timed out for {repoRoot} — retry next sweep");
+            }
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"git worktree list exit {result.ExitCode}: {result.Stderr.Trim()}");
             }
 
             var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var line in stdout.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+            foreach (var line in result.Stdout.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 if (line.StartsWith("worktree ", StringComparison.Ordinal))
                 {
@@ -600,34 +630,17 @@ namespace MultiTerminal.Services
 
         private static async Task<bool> BranchExistsAsync(string repoRoot, string branchName)
         {
-            var (exitCode, stdout, _) = await RunGitAsync(repoRoot, "branch", "--list", branchName).ConfigureAwait(false);
-            return exitCode == 0 && !string.IsNullOrWhiteSpace(stdout);
-        }
-
-        private static async Task<(int exitCode, string stdout, string stderr)> RunGitAsync(
-            string workingDir, params string[] args)
-        {
-            var psi = new ProcessStartInfo
+            var result = await GitExec.RunAsync(repoRoot, "branch", "--list", branchName).ConfigureAwait(false);
+            // A timed-out branch check is NOT a "branch is gone" signal — returning
+            // false would let Pass 2 mishandle a still-alive branch. Throw so the
+            // per-record catch skips this record and retries next sweep.
+            if (result.TimedOut)
             {
-                FileName = "git",
-                WorkingDirectory = workingDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            foreach (var arg in args)
-            {
-                psi.ArgumentList.Add(arg);
+                throw new TimeoutException($"git branch --list timed out for {branchName} — retry next sweep");
             }
-
-            using var proc = new Process { StartInfo = psi };
-            proc.Start();
-            string stdout = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-            string stderr = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
-            await proc.WaitForExitAsync().ConfigureAwait(false);
-            return (proc.ExitCode, stdout, stderr);
+            return result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.Stdout);
         }
+
     }
 
     /// <summary>

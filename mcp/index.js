@@ -810,7 +810,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "clear_my_context",
-        description: "Clear YOUR OWN context by submitting /clear into your terminal (types '/clear' + Enter). ⚠️ This WIPES the conversation. BEFORE calling: write continuation notes (update_task_continuation) capturing where to resume — SessionStart then rebuilds you from those notes + the session summary. Only call at a clean continuation point YOU chose, never mid-step, and make it the LAST action of your turn. Two-step guard: call once to get a reminder, then again with acknowledge:true to actually clear. Use check_my_context to decide when (≥70% is the nudge threshold).",
+        description: "Clear YOUR OWN context by submitting /clear into your terminal (types '/clear' + Enter). ⚠️ This WIPES the conversation. BEFORE calling: write continuation notes (update_task_continuation) capturing where to resume — SessionStart then rebuilds you from those notes + the session summary. Only call at a clean continuation point YOU chose, never mid-step, and make it the LAST action of your turn. Two-step guard: call once to get a reminder, then again with acknowledge:true to actually clear. Use check_my_context to decide when (≥70% is the nudge threshold). This tool targets your OWN terminal ONLY: agentName defaults to $MULTITERMINAL_NAME, and an explicit agentName that isn't you is REJECTED with an error (omit agentName to self-target). Clearing a DIFFERENT agent is a separate authorized tool, not this one — same self-only standard as compact_my_context.",
         inputSchema: {
           type: "object",
           properties: {
@@ -821,6 +821,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             acknowledge: {
               type: "boolean",
               description: "Set true to confirm you have written continuation notes and are at a clean stopping point. Without it, the tool returns a reminder instead of clearing (guards against an accidental wipe).",
+            },
+          },
+        },
+      },
+      {
+        name: "compact_my_context",
+        description: "Compact YOUR OWN context by submitting /compact into your terminal (types '/compact' + Enter). Unlike clear_my_context (which WIPES the conversation), /compact PRESERVES a running summary — use it at a mid-work boundary to reclaim context WITHOUT losing your place and keep going. ⚠️ BEFORE calling: write continuation notes (update_task_continuation) — /compact's auto-summary is LOSSY, so your notes stay the authoritative record of where to resume. Make this the LAST action of your turn (/compact fires at turn end). Single call — no acknowledge needed, /compact is non-destructive (this is the key difference from clear_my_context's two-step guard). When to pick which: compact = mid-work, preserve summary and continue; clear = task-end, full reset. Use check_my_context to decide when (≥70% is the nudge threshold). This tool targets your OWN terminal ONLY: agentName defaults to $MULTITERMINAL_NAME, and an explicit agentName that isn't you is REJECTED with an error (omit agentName to self-target). Compacting a DIFFERENT agent is a separate authorized tool, not this one. (Legacy clear_my_context retrofits to this self-only standard in 6d406e84.)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agentName: {
+              type: "string",
+              description: "Your terminal/agent name. Omit to use $MULTITERMINAL_NAME.",
+            },
+            focus: {
+              type: "string",
+              description: "Optional guidance appended to /compact steering what the summary must preserve (e.g. 'keep the active task ID, modified files, and next step'). Omit for a plain /compact. Sanitized to a single line before use.",
             },
           },
         },
@@ -3075,15 +3092,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "clear_my_context": {
-        const clrName = args.agentName || process.env.MULTITERMINAL_NAME;
+        const selfName = process.env.MULTITERMINAL_NAME;
+        const clrName = args.agentName || selfName;
         if (!clrName) {
           return { content: [{ type: "text", text: "No agent name. Pass agentName or set MULTITERMINAL_NAME." }] };
+        }
+        // Own-terminal ONLY: reject an explicit agentName that isn't you. Mirrors
+        // compact_my_context's self-only guard (99af6a92) exactly — same layer, same shape,
+        // so the two inject tools are symmetric. clear WIPES the conversation, so forcing it
+        // on a sibling is a griefing vector (destroy a victim's context, no notes, not its
+        // chosen boundary). Reject BEFORE any POST — and before the acknowledge dance, since
+        // "write continuation notes" advice is nonsensical for a cross-terminal target.
+        // Clearing a DIFFERENT agent is a SEPARATE authorized tool (clear_agent), not a
+        // loosening of this one. (Retrofit of compact's standard to the legacy tool, 6d406e84.)
+        if (args.agentName && args.agentName !== selfName) {
+          return { content: [{ type: "text", text: `clear_my_context targets your OWN terminal only; got '${args.agentName}' but you are '${selfName || "(MULTITERMINAL_NAME unset)"}'. Omit agentName to self-target. Clearing a different agent needs a separate authorized tool, not this one.` }] };
         }
         if (!args.acknowledge) {
           return { content: [{ type: "text", text: `⚠️ clear_my_context will WIPE your conversation. Before clearing:\n1. Write continuation notes: update_task_continuation (where to resume, current file, next step).\n2. Make sure you're at a clean stopping point (not mid-step).\nThen call clear_my_context again with acknowledge:true — as the LAST action of your turn. SessionStart will rebuild you from your notes + the session summary.` }] };
         }
         await apiCall(`/api/terminals/${seg(clrName)}/submit`, "POST", { text: "/clear" });
-        return { content: [{ type: "text", text: `🧹 Submitted /clear to '${clrName}'. Your context will clear and SessionStart will reload from continuation notes + session summary. (If nothing happens, the terminal may not be resolvable by that name — check MULTITERMINAL_NAME.)` }] };
+        // Honest best-effort wording: the inject is fire-and-forget (TerminalsController.Submit
+        // returns OK once the inject is REQUESTED; MainForm fires InjectInputAsync without
+        // awaiting, and it can no-op for a stale/renamed/uninitialized terminal). Do not claim
+        // it definitely cleared. (Mirrors compact_my_context's reword, 99af6a92; unified in 6d406e84.)
+        return { content: [{ type: "text", text: `🧹 Requested '/clear' for '${clrName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, your context clears and SessionStart reloads from your continuation notes + session summary — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation).` }] };
+      }
+
+      case "compact_my_context": {
+        const selfName = process.env.MULTITERMINAL_NAME;
+        const cmpName = args.agentName || selfName;
+        if (!cmpName) {
+          return { content: [{ type: "text", text: "No agent name. Pass agentName or set MULTITERMINAL_NAME." }] };
+        }
+        // Own-terminal ONLY: reject an explicit agentName that isn't you. This tool is
+        // documented as "YOUR OWN context"; compacting ANOTHER agent mid-work (no notes,
+        // not its chosen boundary) would contradict that contract and let a caller
+        // continuation-poison a victim. Compacting a different agent is a SEPARATE authorized
+        // tool (compact_agent), not a loosening of this one. (Adversary-gate finding; legacy
+        // clear_my_context retrofits to this self-only standard in 6d406e84.)
+        if (args.agentName && args.agentName !== selfName) {
+          return { content: [{ type: "text", text: `compact_my_context targets your OWN terminal only; got '${args.agentName}' but you are '${selfName || "(MULTITERMINAL_NAME unset)"}'. Omit agentName to self-target. Compacting a different agent needs a separate authorized tool, not this one.` }] };
+        }
+        // Sanitize focus to a SINGLE line: strip CR/LF and other control chars so an
+        // embedded newline can't break the command boundary and inject a second terminal
+        // submission (e.g. "hint\n/clear" → /compact submits early, then /clear fires).
+        // The text is Write()'n to the ConPTY verbatim and Enter is sent separately
+        // (TerminalControl.InjectSingleInputAsync), so a raw newline would submit mid-string.
+        const focus = typeof args.focus === "string"
+          ? [...args.focus].map((ch) => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127) ? " " : ch).join("").replace(/ +/g, " ").trim()
+          : "";
+        const compactText = focus ? `/compact ${focus}` : "/compact";
+        await apiCall(`/api/terminals/${seg(cmpName)}/submit`, "POST", { text: compactText });
+        // Honest best-effort wording: the inject is fire-and-forget (TerminalsController.Submit
+        // returns OK once the inject is REQUESTED; MainForm fires InjectInputAsync without
+        // awaiting, and it can no-op for a stale/renamed/uninitialized terminal). Do not claim
+        // it definitely compacted. (Adversary-gate finding; shared clear_my_context reword in 6d406e84.)
+        return { content: [{ type: "text", text: `🗜️ Requested '${compactText}' for '${cmpName}' — submitted best-effort (the inject is fire-and-forget; a stale/renamed terminal or renderer hiccup can silently no-op). If it landed, the terminal compacts at turn end, preserving a summary (not a wipe) — verify on your next turn. Make sure you already wrote continuation notes (update_task_continuation); /compact's summary is lossy and your notes stay authoritative.` }] };
       }
 
       case "get_my_active_task": {

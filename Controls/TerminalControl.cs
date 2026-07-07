@@ -46,26 +46,23 @@ namespace MultiTerminal.Controls
         private DebugLogService _debugLogService;
 
         /// <summary>
-        /// Sets the debug log service for this terminal control.
+        /// Sets the debug log service for this terminal control and propagates it to the
+        /// renderer (created up front) and the ConPTY terminal (created lazily in DoStart,
+        /// so also set there once it exists).
         /// </summary>
         public void SetDebugLogService(DebugLogService debugLogService)
         {
             _debugLogService = debugLogService;
+            if (_renderer != null) _renderer.DebugLogService = debugLogService;
+            if (_terminal != null) _terminal.DebugLogService = debugLogService;
         }
 
         /// <summary>
-        /// Logs a trace message to DebugLogService if available, otherwise to Debug.WriteLine.
+        /// Logs a trace message to DebugLogService.
         /// </summary>
         private void LogTrace(string message)
         {
-            if (_debugLogService != null)
-            {
-                _debugLogService.Trace("TerminalControl", message);
-            }
-            else
-            {
-                System.Diagnostics.Debug.WriteLine($"[TerminalControl] {message}");
-            }
+            _debugLogService?.Trace("TerminalControl", message);
         }
 
         /// <summary>
@@ -265,13 +262,13 @@ namespace MultiTerminal.Controls
             _cols = Math.Max(1, _renderer.VisibleCols);
             _rows = Math.Max(1, _renderer.VisibleRows);
 
-            System.Diagnostics.Debug.WriteLine($"[TerminalControl] DoStart: launching ConPTY at {_cols}x{_rows} (renderer reported {_renderer.VisibleCols}x{_renderer.VisibleRows})");
+            _debugLogService?.Info("TerminalControl", $"DoStart: launching ConPTY at {_cols}x{_rows} (renderer reported {_renderer.VisibleCols}x{_renderer.VisibleRows})");
 
             // Apply theme
             _renderer.SetTheme(_pendingTheme);
 
             // Create and start terminal
-            _terminal = new ConPtyTerminal();
+            _terminal = new ConPtyTerminal { DebugLogService = _debugLogService };
             _terminal.DataReceived += OnTerminalDataReceived;
             _terminal.ProcessExited += OnTerminalProcessExited;
 
@@ -367,7 +364,6 @@ namespace MultiTerminal.Controls
         /// </summary>
         private async Task<bool> InjectSingleInputAsync(string text)
         {
-            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] InjectSingleInputAsync ENTRY: textLength={text?.Length ?? 0}");
             LogTrace("InjectSingleInputAsync called");
 
             if (string.IsNullOrEmpty(text) || _terminal == null)
@@ -379,7 +375,6 @@ namespace MultiTerminal.Controls
             // Write text WITHOUT newline (text appears in prompt field)
             LogTrace("Writing text to ConPTY pipe (no newline)...");
             _terminal.Write(text);
-            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] ConPTY write complete");
             LogTrace("Text written, now triggering Enter via xterm.js...");
 
             // Small delay to let text appear in prompt
@@ -411,7 +406,6 @@ namespace MultiTerminal.Controls
             {
                 LogTrace("Calling SendEnterViaXtermAsync...");
                 bool enterSuccess = await _renderer.SendEnterViaXtermAsync();
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] Enter key triggered, success={enterSuccess}");
                 LogTrace($"SendEnterViaXtermAsync completed with result: {enterSuccess}");
 
                 // Check if Enter key was successfully sent
@@ -430,7 +424,6 @@ namespace MultiTerminal.Controls
             // Small delay to let Enter key be processed
             await System.Threading.Tasks.Task.Delay(100);
 
-            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [TerminalControl] InjectSingleInputAsync EXIT: success=true");
             LogTrace("InjectSingleInputAsync completed successfully");
             return true;
         }
@@ -713,7 +706,7 @@ namespace MultiTerminal.Controls
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[TerminalControl] Input buffer error: {ex.Message}");
+                _debugLogService?.Error("TerminalControl", $"Input buffer error: {ex.Message}");
             }
         }
 

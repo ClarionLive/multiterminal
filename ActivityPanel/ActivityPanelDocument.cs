@@ -61,7 +61,7 @@ namespace MultiTerminal.ActivityPanel
 
         private void OnRendererReady(object sender, EventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] OnRendererReady fired, _activityService={((_activityService == null) ? "NULL" : "OK")}");
+            _messageBroker?.DebugLogService?.Info("ActivityPanel", $"OnRendererReady fired, _activityService={((_activityService == null) ? "NULL" : "OK")}");
 
             // WebView2 is now ready - load initial data
             RefreshActivity();
@@ -92,7 +92,7 @@ namespace MultiTerminal.ActivityPanel
 
         private void OnRefreshRequested(object sender, EventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine("[ActivityPanel] Manual refresh requested by user");
+            _messageBroker?.DebugLogService?.Info("ActivityPanel", "Manual refresh requested by user");
             RefreshActivity();
         }
 
@@ -106,7 +106,7 @@ namespace MultiTerminal.ActivityPanel
 
             if (_messageBroker == null || string.IsNullOrWhiteSpace(e.Title))
             {
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Cannot create task: no broker or empty title");
+                _messageBroker?.DebugLogService?.Warning("ActivityPanel", "Cannot create task: no broker or empty title");
                 return;
             }
 
@@ -115,18 +115,18 @@ namespace MultiTerminal.ActivityPanel
                 var result = _messageBroker.CreateTask(e.Title, e.Description ?? "", "ActivityFeed");
                 if (result.Success)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Task created from feed: {result.TaskId}");
+                    _messageBroker?.DebugLogService?.Info("ActivityPanel", $"Task created from feed: {result.TaskId}");
                     _renderer?.SendTaskCreatedConfirmation(result.TaskId ?? "");
                 }
                 else
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Task creation failed: {result.Error}");
+                    _messageBroker?.DebugLogService?.Error("ActivityPanel", $"Task creation failed: {result.Error}");
                     _renderer?.SendTaskCreateFailed(result.Error ?? "Unknown error");
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Failed to create task: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("ActivityPanel", $"Failed to create task: {ex.Message}");
                 _renderer?.SendTaskCreateFailed(ex.Message);
             }
         }
@@ -138,14 +138,14 @@ namespace MultiTerminal.ActivityPanel
         /// </summary>
         private void OnDockStateChanged(object sender, EventArgs e)
         {
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] DockStateChanged: DockState={DockState}, _activityService={(_activityService == null ? "NULL" : "OK")}, _hasLoadedInitialData={_hasLoadedInitialData}");
+            _messageBroker?.DebugLogService?.Info("ActivityPanel", $"DockStateChanged: DockState={DockState}, _activityService={(_activityService == null ? "NULL" : "OK")}, _hasLoadedInitialData={_hasLoadedInitialData}");
 
             // When panel becomes visible and we haven't loaded data yet
             if (DockState != DockState.Hidden && DockState != DockState.Unknown && !_hasLoadedInitialData)
             {
                 if (_activityService != null)
                 {
-                    System.Diagnostics.Debug.WriteLine("[ActivityPanel] Panel now visible with service ready - will load data when WebView2 initializes");
+                    _messageBroker?.DebugLogService?.Info("ActivityPanel", "Panel now visible with service ready - will load data when WebView2 initializes");
                     // WebView2 will initialize now that we're visible
                     // OnRendererReady will call RefreshActivity when it's ready
                     _hasLoadedInitialData = true;
@@ -159,17 +159,22 @@ namespace MultiTerminal.ActivityPanel
         /// </summary>
         public void Initialize(ActivityService activityService, PoolCoordinator poolCoordinator = null, MessageBroker messageBroker = null, TaskDatabase taskDatabase = null)
         {
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Initialize called, activityService={(activityService == null ? "NULL" : "OK")}, poolCoordinator={(poolCoordinator == null ? "NULL" : "OK")}, messageBroker={(messageBroker == null ? "NULL" : "OK")}, renderer={((_renderer == null) ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
-
             _activityService = activityService;
             _poolCoordinator = poolCoordinator;
             _messageBroker = messageBroker;
             _taskDatabase = taskDatabase;
 
+            _messageBroker?.DebugLogService?.Info("ActivityPanel", $"Initialize called, activityService={(activityService == null ? "NULL" : "OK")}, poolCoordinator={(poolCoordinator == null ? "NULL" : "OK")}, messageBroker={(messageBroker == null ? "NULL" : "OK")}, renderer={((_renderer == null) ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
+
+            if (_renderer != null)
+            {
+                _renderer.DebugLogService = _messageBroker?.DebugLogService;
+            }
+
             if (_activityService != null)
             {
                 _activityService.ActivityUpdated += OnActivityUpdated;
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Subscribed to ActivityUpdated events");
+                _messageBroker?.DebugLogService?.Info("ActivityPanel", "Subscribed to ActivityUpdated events");
             }
 
             // Subscribe to pool coordinator events for real-time updates
@@ -177,7 +182,7 @@ namespace MultiTerminal.ActivityPanel
             {
                 _poolCoordinator.LearnedMessageRecorded += OnLearnedMessageRecorded;
                 _poolCoordinator.PoolMessageRecorded += OnPoolMessageRecorded;
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Subscribed to LearnedMessageRecorded and PoolMessageRecorded events");
+                _messageBroker?.DebugLogService?.Info("ActivityPanel", "Subscribed to LearnedMessageRecorded and PoolMessageRecorded events");
             }
 
             // Subscribe to message broker events for real-time chat updates
@@ -186,19 +191,19 @@ namespace MultiTerminal.ActivityPanel
                 _messageBroker.MessageSent += OnMessageSent;
                 _messageBroker.TasksUpdated += OnTasksUpdated;
                 _messageBroker.ActivityRecorded += OnActivityRecorded;
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Subscribed to MessageBroker events (including ActivityRecorded)");
+                _messageBroker?.DebugLogService?.Info("ActivityPanel", "Subscribed to MessageBroker events (including ActivityRecorded)");
             }
 
             // If renderer is already initialized, load data now
             // Otherwise, OnRendererReady will load it when WebView2 is ready
             if (_renderer?.IsInitialized == true)
             {
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Renderer already ready, calling RefreshActivity now");
+                _messageBroker?.DebugLogService?.Info("ActivityPanel", "Renderer already ready, calling RefreshActivity now");
                 RefreshActivity();
             }
             else
             {
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] Renderer not ready yet, will refresh when Ready event fires");
+                _messageBroker?.DebugLogService?.Info("ActivityPanel", "Renderer not ready yet, will refresh when Ready event fires");
             }
         }
 
@@ -287,7 +292,7 @@ namespace MultiTerminal.ActivityPanel
                 IsPinned = false
             };
 
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] OnPoolMessageRecorded: {e.Action} from {e.Instance} - {feedItem.Content}");
+            _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"OnPoolMessageRecorded: {e.Action} from {e.Instance} - {feedItem.Content}");
             _renderer?.AddFeedItem(feedItem);
             UpdateMetrics();
         }
@@ -379,13 +384,13 @@ namespace MultiTerminal.ActivityPanel
 
             _lastEventUpdate = DateTime.UtcNow;
 
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] OnActivityRecorded: {activity.Type}/{activity.Action} - {activity.Content}");
+            _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"OnActivityRecorded: {activity.Type}/{activity.Action} - {activity.Content}");
 
             // Create a unique ID for deduplication
             var feedItemId = $"{activity.Type}_{activity.Id}";
             if (_displayedFeedItemIds.Contains(feedItemId))
             {
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Skipping duplicate: {feedItemId}");
+                _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"Skipping duplicate: {feedItemId}");
                 return;
             }
 
@@ -500,7 +505,7 @@ namespace MultiTerminal.ActivityPanel
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Error building sparkline data: {ex.Message}");
+                _messageBroker?.DebugLogService?.Error("ActivityPanel", $"Error building sparkline data: {ex.Message}");
             }
 
             return buckets;
@@ -511,11 +516,11 @@ namespace MultiTerminal.ActivityPanel
         /// </summary>
         public void RefreshActivity()
         {
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] RefreshActivity called, _activityService={((_activityService == null) ? "NULL" : "OK")}, _poolCoordinator={((_poolCoordinator == null) ? "NULL" : "OK")}, _renderer={(_renderer == null ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
+            _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"RefreshActivity called, _activityService={((_activityService == null) ? "NULL" : "OK")}, _poolCoordinator={((_poolCoordinator == null) ? "NULL" : "OK")}, _renderer={(_renderer == null ? "NULL" : (_renderer.IsInitialized ? "READY" : "NOT_READY"))}");
 
             if (_activityService == null)
             {
-                System.Diagnostics.Debug.WriteLine("[ActivityPanel] RefreshActivity: _activityService is null, returning");
+                _messageBroker?.DebugLogService?.Trace("ActivityPanel", "RefreshActivity: _activityService is null, returning");
                 return;
             }
 
@@ -525,36 +530,36 @@ namespace MultiTerminal.ActivityPanel
                 try
                 {
                     var profiles = _taskDatabase.LoadAllProfiles();
-                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] RefreshActivity: Got {profiles?.Count ?? 0} profiles from database");
+                    _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"RefreshActivity: Got {profiles?.Count ?? 0} profiles from database");
                     _renderer?.ShowProfiles(profiles);
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Error loading profiles: {ex.Message}");
+                    _messageBroker?.DebugLogService?.Error("ActivityPanel", $"Error loading profiles: {ex.Message}");
                 }
             }
 
             // Load and display terminal activity (Mission Control avatars)
             var activities = _activityService.GetTeamActivity();
-            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] RefreshActivity: Got {activities?.Count ?? 0} terminal activities from service");
+            _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"RefreshActivity: Got {activities?.Count ?? 0} terminal activities from service");
             _renderer?.ShowTeamActivity(activities);
 
             // Load and display pool messages (Activity Feed - LEARNED items)
             if (_poolCoordinator != null)
             {
                 var poolMessages = _poolCoordinator.GetRecentMessages(50);
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] RefreshActivity: Got {poolMessages?.Count ?? 0} pool messages");
+                _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"RefreshActivity: Got {poolMessages?.Count ?? 0} pool messages");
 
                 // Convert pool messages to feed items (newest first display, but add oldest first to maintain order)
                 // Normalize timestamps to milliseconds for consistent sorting (some are seconds, some milliseconds)
                 var sortedMessages = poolMessages?
                     .OrderBy(m => m.Timestamp > 1_000_000_000_000 ? m.Timestamp : m.Timestamp * 1000)
                     .ToList() ?? new List<PoolMessage>();
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] _displayedFeedItemIds has {_displayedFeedItemIds.Count} entries");
+                _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"_displayedFeedItemIds has {_displayedFeedItemIds.Count} entries");
                 foreach (var msg in sortedMessages)
                 {
                     var alreadyDisplayed = _displayedFeedItemIds.Contains(msg.Id);
-                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Pool msg {msg.Id?.Substring(0, 8) ?? "NULL"}... already displayed: {alreadyDisplayed}");
+                    _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"Pool msg {msg.Id?.Substring(0, 8) ?? "NULL"}... already displayed: {alreadyDisplayed}");
                     if (!alreadyDisplayed)
                     {
                         _displayedFeedItemIds.Add(msg.Id);
@@ -582,7 +587,7 @@ namespace MultiTerminal.ActivityPanel
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Error processing pool message {msg.Id}: {ex.Message}");
+                            _messageBroker?.DebugLogService?.Error("ActivityPanel", $"Error processing pool message {msg.Id}: {ex.Message}");
                         }
                     }
                 }
@@ -592,12 +597,12 @@ namespace MultiTerminal.ActivityPanel
             if (_messageBroker != null)
             {
                 var chatMessages = _messageBroker.GetMessageHistory(50);
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] RefreshActivity: Got {chatMessages?.Count ?? 0} chat messages");
+                _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"RefreshActivity: Got {chatMessages?.Count ?? 0} chat messages");
 
                 foreach (var msg in chatMessages ?? new List<MCPServer.Models.Message>())
                 {
                     var alreadyDisplayed = _displayedFeedItemIds.Contains(msg.Id);
-                    System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Chat msg {msg.Id?.Substring(0, 8) ?? "NULL"}... already displayed: {alreadyDisplayed}");
+                    _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"Chat msg {msg.Id?.Substring(0, 8) ?? "NULL"}... already displayed: {alreadyDisplayed}");
                     if (!alreadyDisplayed)
                     {
                         _displayedFeedItemIds.Add(msg.Id);
@@ -623,13 +628,13 @@ namespace MultiTerminal.ActivityPanel
                 {
                     _knownTaskIds.Add(task.Id);
                 }
-                System.Diagnostics.Debug.WriteLine($"[ActivityPanel] Initialized _knownTaskIds with {_knownTaskIds.Count} existing tasks");
+                _messageBroker?.DebugLogService?.Trace("ActivityPanel", $"Initialized _knownTaskIds with {_knownTaskIds.Count} existing tasks");
             }
 
             // Update metrics
             UpdateMetrics();
 
-            System.Diagnostics.Debug.WriteLine("[ActivityPanel] RefreshActivity: Complete");
+            _messageBroker?.DebugLogService?.Trace("ActivityPanel", "RefreshActivity: Complete");
         }
 
         /// <summary>
