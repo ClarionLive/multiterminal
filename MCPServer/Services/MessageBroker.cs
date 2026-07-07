@@ -420,8 +420,7 @@ namespace MultiTerminal.MCPServer.Services
                             WorktreePruneCoordinator.UnmarkPruning(w.WorktreePath);
                     }
                     WorktreePruneCoordinator.UnmarkPruning(record.WorktreePath);
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Deferred prune for task {taskId} cancelled — task no longer 'done'. Released defer-marks.");
+                    DebugLogService?.Info("MessageBroker", $"Deferred prune for task {taskId} cancelled — task no longer 'done'. Released defer-marks.");
                     return false;
                 }
 
@@ -457,8 +456,7 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (integration.HadConflicts)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Deferred prune for {taskId} aborted: helper integration conflict ({string.Join(", ", integration.ConflictBranches)}). Worktrees + branches preserved for rebase recovery.");
+                        DebugLogService?.Warning("MessageBroker", $"Deferred prune for {taskId} aborted: helper integration conflict ({string.Join(", ", integration.ConflictBranches)}). Worktrees + branches preserved for rebase recovery.");
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
@@ -470,8 +468,7 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     else
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Deferred prune for {taskId} aborted: helper integration failed ({integration.Stderr}). Worktrees preserved.");
+                        DebugLogService?.Error("MessageBroker", $"Deferred prune for {taskId} aborted: helper integration failed ({integration.Stderr}). Worktrees preserved.");
                     }
                     return false; // nothing marked or pruned yet — everything preserved
                 }
@@ -512,7 +509,7 @@ namespace MultiTerminal.MCPServer.Services
                         }
                         catch (Exception ex)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Deferred-retry delete helper branch '{hb}' failed: {ex.Message}");
+                            DebugLogService?.Error("MessageBroker", $"Deferred-retry delete helper branch '{hb}' failed: {ex.Message}");
                         }
                     }
                     PerformPostPruneMergeAndFireReady(taskId, task, projectPath, record.WorktreePath);
@@ -522,7 +519,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] TryDeferredPruneRetryAsync({taskId}) threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"TryDeferredPruneRetryAsync({taskId}) threw: {ex.Message}");
                 return false;
             }
             finally
@@ -571,7 +568,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] TryAutoMergeForTaskAsync({taskId}) threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"TryAutoMergeForTaskAsync({taskId}) threw: {ex.Message}");
                 return new MultiTerminal.Services.MergeResult { Success = false, Stderr = ex.Message };
             }
         }
@@ -597,7 +594,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] WorktreePruning subscribers threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"WorktreePruning subscribers threw: {ex.Message}");
             }
             return args;
         }
@@ -615,7 +612,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] WorktreeReady subscribers threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"WorktreeReady subscribers threw: {ex.Message}");
             }
         }
 
@@ -673,8 +670,7 @@ namespace MultiTerminal.MCPServer.Services
                     // "task branch deleted" in that case (pipeline run 1, Codex adversary
                     // MEDIUM): the next janitor sweep cleans the leftover branch.
                     bool cleanupPending = !string.IsNullOrEmpty(mergeResult.Stderr);
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Auto-merge for {taskId}: merged into {mergeResult.MergedInto}" +
+                    DebugLogService?.Info("MessageBroker", $"Auto-merge for {taskId}: merged into {mergeResult.MergedInto}" +
                         (cleanupPending ? $" (branch cleanup pending: {mergeResult.Stderr})" : ""));
                     RecordActivity(new ActivityEvent
                     {
@@ -694,8 +690,7 @@ namespace MultiTerminal.MCPServer.Services
                     // merge (task 90c2acc6, Suspect A: never claim "merged into trunk"
                     // when nothing landed).
                     string skipReason = mergeResult.SkippedReason ?? "no merge performed";
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Auto-merge for {taskId}: skipped — {skipReason}");
+                    DebugLogService?.Warning("MessageBroker", $"Auto-merge for {taskId}: skipped — {skipReason}");
                     RecordActivity(new ActivityEvent
                     {
                         Terminal = task.Assignee ?? "System",
@@ -707,8 +702,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 else
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Auto-merge for {taskId} FAILED" +
+                    DebugLogService?.Error("MessageBroker", $"Auto-merge for {taskId} FAILED" +
                         (mergeResult.HadConflicts ? " (conflict)" : "") +
                         $": {mergeResult.Stderr}");
                     string conflictTag = mergeResult.HadConflicts ? "Merge conflict" : "Merge failed";
@@ -725,8 +719,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MessageBroker] Auto-merge threw for task {taskId}: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Auto-merge threw for task {taskId}: {ex.Message}");
                 RecordActivity(new ActivityEvent
                 {
                     Terminal = task.Assignee ?? "System",
@@ -764,7 +757,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] ListWorktreesForTask({taskId}) threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"ListWorktreesForTask({taskId}) threw: {ex.Message}");
                 // Can't enumerate per-agent worktrees — fall back to the canonical-only
                 // path (single-agent behavior); the canonical commit already ran.
                 return true;
@@ -789,8 +782,7 @@ namespace MultiTerminal.MCPServer.Services
                         taskId, helper.AgentName, repoRoot, task.Title, task.ImplementationSummary).GetAwaiter().GetResult();
                     if (!hc.Success)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Helper commit failed for {taskId}/{helper.AgentName}: {hc.Stderr}");
+                        DebugLogService?.Error("MessageBroker", $"Helper commit failed for {taskId}/{helper.AgentName}: {hc.Stderr}");
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = task.Assignee ?? "System",
@@ -804,8 +796,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Helper commit threw for {taskId}/{helper.AgentName}: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Helper commit threw for {taskId}/{helper.AgentName}: {ex.Message}");
                     RecordActivity(new ActivityEvent
                     {
                         Terminal = task.Assignee ?? "System",
@@ -833,8 +824,7 @@ namespace MultiTerminal.MCPServer.Services
                     string offending = integ.ConflictBranches != null && integ.ConflictBranches.Count > 0
                         ? string.Join(", ", integ.ConflictBranches)
                         : "(see debug log)";
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] Helper integration halted for {taskId}: {integ.Stderr}");
+                    DebugLogService?.Warning("MessageBroker", $"Helper integration halted for {taskId}: {integ.Stderr}");
                     RecordActivity(new ActivityEvent
                     {
                         Terminal = task.Assignee ?? "System",
@@ -856,8 +846,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MessageBroker] Helper integration threw for {taskId}: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Helper integration threw for {taskId}: {ex.Message}");
                 RecordActivity(new ActivityEvent
                 {
                     Terminal = task.Assignee ?? "System",
@@ -907,7 +896,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Conflict notify to '{to}' failed: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Conflict notify to '{to}' failed: {ex.Message}");
                 }
             }
         }
@@ -1037,12 +1026,12 @@ namespace MultiTerminal.MCPServer.Services
                                    ?? _worktrees?.GetWorktreePathForTask(activeTask.Id);
                 if (string.IsNullOrEmpty(candidate) || !System.IO.Directory.Exists(candidate))
                     return null;
-                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' -> task '{activeTask.Id}' -> '{candidate}'");
+                DebugLogService?.Trace("ResolveTaskWorktreePath", $"'{terminalName}' -> task '{activeTask.Id}' -> '{candidate}'");
                 return candidate;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ResolveTaskWorktreePath] '{terminalName}' threw: {ex.Message} — falling through to main checkout");
+                DebugLogService?.Error("ResolveTaskWorktreePath", $"'{terminalName}' threw: {ex.Message} — falling through to main checkout");
                 return null;
             }
         }
@@ -1070,7 +1059,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine($"[ResolveTaskRepoRoot] '{terminalName}' threw: {ex.Message} — falling through");
+                DebugLogService?.Error("ResolveTaskRepoRoot", $"'{terminalName}' threw: {ex.Message} — falling through");
                 return null;
             }
         }
@@ -1162,8 +1151,7 @@ namespace MultiTerminal.MCPServer.Services
                     var attributableDirty = GetAttributableDirtyFiles(activeTask.Id, projectPath);
                     if (attributableDirty == null)
                     {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Worktree backfill indeterminate for task {activeTask.Id}: could not verify repo-root dirty state — failing closed.");
+                        DebugLogService?.Error("MessageBroker", $"Worktree backfill indeterminate for task {activeTask.Id}: could not verify repo-root dirty state — failing closed.");
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = activeTask.Assignee ?? agentName ?? "System",
@@ -1178,8 +1166,7 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         string sample = string.Join(", ", attributableDirty.Take(5))
                                         + (attributableDirty.Count > 5 ? ", ..." : "");
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[MessageBroker] Worktree backfill blocked for task {activeTask.Id}: {attributableDirty.Count} linked file(s) dirty at repo root ({sample}).");
+                        DebugLogService?.Warning("MessageBroker", $"Worktree backfill blocked for task {activeTask.Id}: {attributableDirty.Count} linked file(s) dirty at repo root ({sample}).");
                         RecordActivity(new ActivityEvent
                         {
                             Terminal = activeTask.Assignee ?? agentName ?? "System",
@@ -1208,7 +1195,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] EnsureWorktreeForActiveTask('{agentName}') failed: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"EnsureWorktreeForActiveTask('{agentName}') failed: {ex.Message}");
                 return null;
             }
         }
@@ -1255,7 +1242,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles dirty-probe for {taskId} threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"GetAttributableDirtyFiles dirty-probe for {taskId} threw: {ex.Message}");
                 return null; // indeterminate — fail closed
             }
             if (dirty == null) return null;          // git couldn't determine state — fail closed
@@ -1268,7 +1255,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles link-read for {taskId} threw: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"GetAttributableDirtyFiles link-read for {taskId} threw: {ex.Message}");
                 return null; // can't attribute → indeterminate → fail closed
             }
             if (links == null || links.Count == 0) return new List<string>(); // nothing to attribute → proceed
@@ -1293,7 +1280,7 @@ namespace MultiTerminal.MCPServer.Services
                     // means we cannot fully classify the repo's dirty set. Fail CLOSED —
                     // return indeterminate rather than silently dropping it and possibly
                     // reporting "clean" when an unclassified file is actually the task's.
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles: undecodable dirty path '{d}' for {taskId}: {ex.Message} — indeterminate (fail closed).");
+                    DebugLogService?.Error("MessageBroker", $"GetAttributableDirtyFiles: undecodable dirty path '{d}' for {taskId}: {ex.Message} — indeterminate (fail closed).");
                     return null;
                 }
             }
@@ -1320,7 +1307,7 @@ namespace MultiTerminal.MCPServer.Services
                     // is among the dirty set, so the attribution result is not fully
                     // verifiable — fail CLOSED (indeterminate) rather than skip it and
                     // risk reporting "clean".
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetAttributableDirtyFiles: undecodable link path '{link.FilePath}' for {taskId}: {ex.Message} — indeterminate (fail closed).");
+                    DebugLogService?.Error("MessageBroker", $"GetAttributableDirtyFiles: undecodable link path '{link.FilePath}' for {taskId}: {ex.Message} — indeterminate (fail closed).");
                     return null;
                 }
                 if (dirtyAbs.Contains(abs)) hits.Add(link.FilePath);
@@ -1386,12 +1373,13 @@ namespace MultiTerminal.MCPServer.Services
 
         public MessageBroker()
         {
-            System.Diagnostics.Trace.WriteLine("[MessageBroker] Constructor START");
+            // NOTE: DebugLogService is a DI-set property wired post-construction (MainForm ~499), so it
+            // is null throughout this ctor. The pre-sweep Trace.WriteLine "Constructor START / creating
+            // TaskDatabase" breadcrumbs here would now be permanent no-ops — dropped rather than left as
+            // dead code that reads like it logs. A hard TaskDatabase failure still surfaces (re-thrown).
             try
             {
-                System.Diagnostics.Trace.WriteLine("[MessageBroker] About to create TaskDatabase");
                 _taskDb = new TaskDatabase();
-                System.Diagnostics.Trace.WriteLine("[MessageBroker] TaskDatabase created");
             }
             catch (Exception ex)
             {
@@ -1482,7 +1470,6 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private void LogTrace(string message)
         {
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] {message}");
             DebugLogService?.Trace("MessageBroker", message);
         }
 
@@ -1491,7 +1478,6 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private void LogInfo(string message)
         {
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] {message}");
             DebugLogService?.Info("MessageBroker", message);
         }
 
@@ -1500,7 +1486,6 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private void LogError(string message)
         {
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] {message}");
             DebugLogService?.Error("MessageBroker", message);
         }
 
@@ -1554,8 +1539,12 @@ namespace MultiTerminal.MCPServer.Services
         void ITaskServiceHost.RaiseTaskClaimed(TaskClaimedEventArgs args) => RaiseSafe(TaskClaimed, args);
         void ITaskServiceHost.RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) => RaiseSafe(TaskActiveChanged, args);
 
-        void ITaskServiceHost.LogError(string message) => LogError(message);
-        void ITaskServiceHost.LogTrace(string message) => LogTrace(message);
+        // Stamped with source "TaskService" so the extracted service's log lines are attributable to
+        // it, not the broker (these back the TaskService logging conversion in c425e3a2).
+        void ITaskServiceHost.LogError(string message) => DebugLogService?.Error("TaskService", message);
+        void ITaskServiceHost.LogWarning(string message) => DebugLogService?.Warning("TaskService", message);
+        void ITaskServiceHost.LogInfo(string message) => DebugLogService?.Info("TaskService", message);
+        void ITaskServiceHost.LogTrace(string message) => DebugLogService?.Trace("TaskService", message);
 
         string ITaskServiceHost.NormalizeProjectId(string raw) => NormalizeProjectId(raw);
         bool ITaskServiceHost.TryResolveWorktreeEligibility(KanbanTask task, out string projectPath, out string canonicalProjectId, out string skipReason)
@@ -1589,11 +1578,11 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     _projects.TryAdd(project.Id, project);
                 }
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Loaded {projects.Count} projects from database");
+                DebugLogService?.Info("MessageBroker", $"Loaded {projects.Count} projects from database");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to load projects: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to load projects: {ex.Message}");
             }
         }
 
@@ -1610,11 +1599,11 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     _profiles.TryAdd(profile.Id, profile);
                 }
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Loaded {profiles.Count} profiles from database");
+                DebugLogService?.Info("MessageBroker", $"Loaded {profiles.Count} profiles from database");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to load profiles: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to load profiles: {ex.Message}");
             }
         }
 
@@ -1727,7 +1716,7 @@ namespace MultiTerminal.MCPServer.Services
             // Validate channel port range to prevent SSRF — only allow ports in the assigned range
             if (channelPort.HasValue && (channelPort.Value < 8800 || channelPort.Value > 8899))
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Rejected channel port {channelPort.Value} for '{name}' — outside allowed range 8800-8899");
+                DebugLogService?.Warning("MessageBroker", $"Rejected channel port {channelPort.Value} for '{name}' — outside allowed range 8800-8899");
                 channelPort = null; // Silently drop invalid port, fall back to inbox delivery
             }
 
@@ -1750,7 +1739,7 @@ namespace MultiTerminal.MCPServer.Services
                 // likely inherited the env var from a parent process (e.g., Clarion IDE addin).
                 if (!existingByDocId.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
+                    DebugLogService?.Warning("MessageBroker", $"DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
                     LogInfo($"SWAPDIAG REGISTER-OUTCOME=hijack-reject incoming name='{name}' docId='{docId}' wasOwnedBy='{existingByDocId.Name}' => docId cleared, fresh registration"); // task ab32897c diag; remove after root cause
                     docId = null; // Clear the stolen docId so it falls through to fresh registration below
                     existingByDocId = null;
@@ -1761,7 +1750,7 @@ namespace MultiTerminal.MCPServer.Services
                 string oldName = existingByDocId.Name;
                 string newName = name;
 
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Terminal renaming: {oldName} → {newName} (DocId: {docId})");
+                DebugLogService?.Info("MessageBroker", $"Terminal renaming: {oldName} → {newName} (DocId: {docId})");
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=rename '{oldName}'→'{newName}' on DocId='{docId}' (placeholder adopted incoming name). This is the prime swap suspect if DocId belongs to the OTHER doc. task ab32897c"); // remove after root cause
 
                 // Update terminal name and channel port
@@ -1784,7 +1773,7 @@ namespace MultiTerminal.MCPServer.Services
                         oldProfile.IsOnline = false;
                         oldProfile.UpdatedAt = DateTime.UtcNow;
                         _taskDb.SaveProfile(oldProfile);
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Marked old profile offline: {oldName}");
+                        DebugLogService?.Info("MessageBroker", $"Marked old profile offline: {oldName}");
                     }
 
                     // Mark NEW profile online (or create if doesn't exist)
@@ -1796,7 +1785,7 @@ namespace MultiTerminal.MCPServer.Services
                             newProfile.IsOnline = true;
                             newProfile.UpdatedAt = DateTime.UtcNow;
                             _taskDb.SaveProfile(newProfile);
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Marked new profile online: {newName}");
+                            DebugLogService?.Info("MessageBroker", $"Marked new profile online: {newName}");
                         }
                         else
                         {
@@ -1812,17 +1801,17 @@ namespace MultiTerminal.MCPServer.Services
                             };
                             _profiles.TryAdd(newName, newProfile);
                             _taskDb.SaveProfile(newProfile);
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Created new profile online: {newName}");
+                            DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
                         }
                     }
                     else
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Skipping profile creation for temporary agent: {newName}");
+                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for temporary agent: {newName}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to handle profile transitions: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to handle profile transitions: {ex.Message}");
                 }
 
                 // Re-raise event so MainForm updates tab title
@@ -1882,7 +1871,7 @@ namespace MultiTerminal.MCPServer.Services
                             };
                             _profiles.TryAdd(name, newProfile);
                             _taskDb.SaveProfile(newProfile);
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-created profile for terminal: {name}");
+                            DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
                         }
                         else if (isTeamLead)
                         {
@@ -1899,12 +1888,12 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     else
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Skipping profile creation for placeholder/agent: {name}");
+                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to create/update profile: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
                 }
 
                 // Ensure message queue exists (may be missing after disconnect/reconnect)
@@ -1951,7 +1940,7 @@ namespace MultiTerminal.MCPServer.Services
                             };
                             _profiles.TryAdd(name, newProfile);
                             _taskDb.SaveProfile(newProfile);
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-created profile for terminal: {name}");
+                            DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
                         }
                         else if (isTeamLead)
                         {
@@ -1968,12 +1957,12 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     else
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Skipping profile creation for placeholder/agent: {name}");
+                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to create/update profile: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
                 }
 
                 return new RegisterResult
@@ -2005,7 +1994,7 @@ namespace MultiTerminal.MCPServer.Services
 
             if (terminal == null)
             {
-                System.Diagnostics.Trace.WriteLine($"[MessageBroker.MarkAgentReady] Agent not found: {agentName}");
+                DebugLogService?.Warning("MessageBroker.MarkAgentReady", $"Agent not found: {agentName}");
                 return false;
             }
 
@@ -2014,14 +2003,14 @@ namespace MultiTerminal.MCPServer.Services
                 !string.IsNullOrEmpty(terminal.DocId) &&
                 !terminal.DocId.Equals(docId, StringComparison.OrdinalIgnoreCase))
             {
-                System.Diagnostics.Trace.WriteLine($"[MessageBroker.MarkAgentReady] DocId mismatch for {agentName}: expected {terminal.DocId}, got {docId}");
+                DebugLogService?.Warning("MessageBroker.MarkAgentReady", $"DocId mismatch for {agentName}: expected {terminal.DocId}, got {docId}");
                 return false;
             }
 
             terminal.IsReady = true;
             terminal.LastActiveAt = DateTime.UtcNow;
 
-            System.Diagnostics.Trace.WriteLine($"[MessageBroker.MarkAgentReady] Agent {agentName} marked as ready");
+            DebugLogService?.Trace("MessageBroker.MarkAgentReady", $"Agent {agentName} marked as ready");
 
             return true;
         }
@@ -2074,7 +2063,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to set profile offline: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to set profile offline: {ex.Message}");
                 }
             }
         }
@@ -2098,7 +2087,7 @@ namespace MultiTerminal.MCPServer.Services
             // Always update profile status (even if terminal not found in memory)
             SetProfileOffline(name);
 
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] DisconnectTerminalByName: {name} (terminal found: {terminal != null})");
+            DebugLogService?.Info("MessageBroker", $"DisconnectTerminalByName: {name} (terminal found: {terminal != null})");
             return true;
         }
 
@@ -2354,11 +2343,11 @@ namespace MultiTerminal.MCPServer.Services
             try
             {
                 queuedMessageId = _messageQueueDb.EnqueueMessage(fromTerminal.Name, toTerminal.Name, content, "message", null, null, null, null, effectivePriority);
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Persisted message {queuedMessageId} to SQLite queue (from={fromTerminal.Name}, to={toTerminal.Name})");
+                DebugLogService?.Trace("MessageBroker", $"Persisted message {queuedMessageId} to SQLite queue (from={fromTerminal.Name}, to={toTerminal.Name})");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Failed to persist message: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to persist message: {ex.Message}");
                 // Continue with in-memory delivery even if persistence fails
             }
 
@@ -2402,11 +2391,11 @@ namespace MultiTerminal.MCPServer.Services
                 try
                 {
                     _messageQueueDb.MarkDelivering(queuedMessageId);
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Message {queuedMessageId} marked as delivering (in-flight)");
+                    DebugLogService?.Trace("MessageBroker", $"Message {queuedMessageId} marked as delivering (in-flight)");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Failed to mark as delivering: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to mark as delivering: {ex.Message}");
                 }
             }
 
@@ -2429,7 +2418,7 @@ namespace MultiTerminal.MCPServer.Services
                         try
                         {
                             _messageQueueDb.MarkDelivered(queuedMessageId);
-                            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Message {queuedMessageId} marked as delivered after webhook delivery");
+                            DebugLogService?.Trace("MessageBroker", $"Message {queuedMessageId} marked as delivered after webhook delivery");
                         }
                         catch (Exception ex)
                         {
@@ -2460,9 +2449,9 @@ namespace MultiTerminal.MCPServer.Services
                 if (OnMessageDelivery != null)
                 {
                     LogInfo($"TIER 2: Attempting callback delivery for message {message.Id}");
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Calling OnMessageDelivery for message {message.Id} from {fromTerminal.Name} to {toTerminal.Id}");
+                    DebugLogService?.Trace("MessageBroker", $"Calling OnMessageDelivery for message {message.Id} from {fromTerminal.Name} to {toTerminal.Id}");
                     deliverySuccess = await OnMessageDelivery(message.Id, toTerminal.Id, fromTerminal.Name, content);
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] OnMessageDelivery returned {deliverySuccess} for message {message.Id}");
+                    DebugLogService?.Trace("MessageBroker", $"OnMessageDelivery returned {deliverySuccess} for message {message.Id}");
                     LogInfo($"TIER 2: Callback returned {deliverySuccess}");
                 }
             }
@@ -2505,11 +2494,11 @@ namespace MultiTerminal.MCPServer.Services
                     try
                     {
                         _messageQueueDb.MarkFailed(queuedMessageId, "Initial delivery failed");
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Message {queuedMessageId} marked as failed - will retry");
+                        DebugLogService?.Error("MessageBroker", $"Message {queuedMessageId} marked as failed - will retry");
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update message status: {ex.Message}");
+                        DebugLogService?.Error("MessageBroker", $"Failed to update message status: {ex.Message}");
                     }
                 }
             }
@@ -2682,11 +2671,11 @@ namespace MultiTerminal.MCPServer.Services
                     null,           // taskTitle
                     replyToMessageId,
                     threadId);
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Persisted threaded reply {queuedMessageId} to SQLite queue (replyTo: {replyToMessageId}, thread: {threadId})");
+                DebugLogService?.Trace("MessageBroker", $"Persisted threaded reply {queuedMessageId} to SQLite queue (replyTo: {replyToMessageId}, thread: {threadId})");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist threaded message: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to persist threaded message: {ex.Message}");
                 // Continue with in-memory delivery even if persistence fails
             }
 
@@ -2724,11 +2713,11 @@ namespace MultiTerminal.MCPServer.Services
                 try
                 {
                     _messageQueueDb.MarkDelivering(queuedMessageId);
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Reply message {queuedMessageId} marked as delivering (in-flight)");
+                    DebugLogService?.Trace("MessageBroker", $"Reply message {queuedMessageId} marked as delivering (in-flight)");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to mark reply as delivering: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to mark reply as delivering: {ex.Message}");
                 }
             }
 
@@ -2744,7 +2733,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Push delivery failed: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Push delivery failed: {ex.Message}");
                 deliverySuccess = false;
             }
 
@@ -2756,17 +2745,17 @@ namespace MultiTerminal.MCPServer.Services
                     if (deliverySuccess)
                     {
                         _messageQueueDb.MarkDelivered(queuedMessageId);
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Reply message {queuedMessageId} marked as delivered");
+                        DebugLogService?.Trace("MessageBroker", $"Reply message {queuedMessageId} marked as delivered");
                     }
                     else
                     {
                         _messageQueueDb.MarkFailed(queuedMessageId, "Initial delivery failed");
-                        System.Diagnostics.Debug.WriteLine($"[MessageBroker] Reply message {queuedMessageId} marked as failed - will retry");
+                        DebugLogService?.Error("MessageBroker", $"Reply message {queuedMessageId} marked as failed - will retry");
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update message status: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to update message status: {ex.Message}");
                 }
             }
 
@@ -2788,17 +2777,17 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] ProcessPendingMessages ENTRY");
+                DebugLogService?.Trace("MessageBroker", $"ProcessPendingMessages ENTRY");
 
                 // Reset any stale "delivering" messages that may be stuck
                 int resetCount = _messageQueueDb.ResetStaleDeliveringMessages(30);
                 if (resetCount > 0)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Reset {resetCount} stale 'delivering' messages back to pending");
+                    DebugLogService?.Warning("MessageBroker", $"Reset {resetCount} stale 'delivering' messages back to pending");
                 }
 
                 var pendingMessages = _messageQueueDb.GetPendingMessages();
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Found {pendingMessages.Count} pending messages to process");
+                DebugLogService?.Trace("MessageBroker", $"Found {pendingMessages.Count} pending messages to process");
 
                 foreach (var queuedMsg in pendingMessages)
                 {
@@ -2813,15 +2802,15 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         // Mark as delivering to prevent concurrent retry attempts
                         _messageQueueDb.MarkDelivering(queuedMsg.Id);
-                        System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] RETRY: Message {queuedMsg.Id} marked as delivering");
+                        DebugLogService?.Trace("MessageBroker", $"RETRY: Message {queuedMsg.Id} marked as delivering");
 
                         // Attempt delivery and await completion
                         bool deliverySuccess = false;
                         if (OnMessageDelivery != null)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] RETRY: Calling OnMessageDelivery for queued message {queuedMsg.Id} from {queuedMsg.FromTerminal} to {toTerminal.Id}");
+                            DebugLogService?.Trace("MessageBroker", $"RETRY: Calling OnMessageDelivery for queued message {queuedMsg.Id} from {queuedMsg.FromTerminal} to {toTerminal.Id}");
                             deliverySuccess = await OnMessageDelivery(queuedMsg.Id.ToString(), toTerminal.Id, queuedMsg.FromTerminal, queuedMsg.Content);
-                            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] RETRY: OnMessageDelivery returned {deliverySuccess} for message {queuedMsg.Id}");
+                            DebugLogService?.Trace("MessageBroker", $"RETRY: OnMessageDelivery returned {deliverySuccess} for message {queuedMsg.Id}");
                         }
 
                         if (deliverySuccess)
@@ -2829,29 +2818,29 @@ namespace MultiTerminal.MCPServer.Services
                             // Mark as delivered
                             _messageQueueDb.MarkDelivered(queuedMsg.Id);
                             deliveredCount++;
-                            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Retry delivered message {queuedMsg.Id} to {queuedMsg.ToTerminal}");
+                            DebugLogService?.Trace("MessageBroker", $"Retry delivered message {queuedMsg.Id} to {queuedMsg.ToTerminal}");
                         }
                         else
                         {
                             // Delivery failed, mark as failed
                             _messageQueueDb.MarkFailed(queuedMsg.Id, "Delivery callback returned false");
-                            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Retry failed for message {queuedMsg.Id}: delivery returned false");
+                            DebugLogService?.Error("MessageBroker", $"Retry failed for message {queuedMsg.Id}: delivery returned false");
                         }
                     }
                     catch (Exception ex)
                     {
                         // Mark as failed (increments retry count)
                         _messageQueueDb.MarkFailed(queuedMsg.Id, ex.Message);
-                        System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] Retry failed for message {queuedMsg.Id}: {ex.Message}");
+                        DebugLogService?.Error("MessageBroker", $"Retry failed for message {queuedMsg.Id}: {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] ProcessPendingMessages error: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"ProcessPendingMessages error: {ex.Message}");
             }
 
-            System.Diagnostics.Debug.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] [MessageBroker] ProcessPendingMessages EXIT: {deliveredCount} messages delivered");
+            DebugLogService?.Trace("MessageBroker", $"ProcessPendingMessages EXIT: {deliveredCount} messages delivered");
             return deliveredCount;
         }
 
@@ -2883,7 +2872,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Cleanup failed: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Cleanup failed: {ex.Message}");
                 return 0;
             }
         }
@@ -3015,7 +3004,7 @@ namespace MultiTerminal.MCPServer.Services
                 // Notify for push delivery to terminal UI
                 if (OnMessageDelivery != null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] SYSTEM_BROADCAST: Calling OnMessageDelivery for message {message.Id} from SYSTEM to {recipient.Id}");
+                    DebugLogService?.Trace("MessageBroker", $"SYSTEM_BROADCAST: Calling OnMessageDelivery for message {message.Id} from SYSTEM to {recipient.Id}");
                     await OnMessageDelivery(message.Id, recipient.Id, "SYSTEM", content);
                 }
             }
@@ -3058,11 +3047,11 @@ namespace MultiTerminal.MCPServer.Services
             {
                 queuedMessageId = _messageQueueDb.EnqueueMessage(
                     "SYSTEM", helper.Name, content, "helper_added", taskId, taskTitle);
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Persisted helper_added notification {queuedMessageId}");
+                DebugLogService?.Trace("MessageBroker", $"Persisted helper_added notification {queuedMessageId}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist helper_added notification: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to persist helper_added notification: {ex.Message}");
             }
 
             var message = new Message
@@ -3096,11 +3085,11 @@ namespace MultiTerminal.MCPServer.Services
                 try
                 {
                     _messageQueueDb.MarkDelivering(queuedMessageId);
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Helper notification {queuedMessageId} marked as delivering");
+                    DebugLogService?.Trace("MessageBroker", $"Helper notification {queuedMessageId} marked as delivering");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to mark helper notification as delivering: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to mark helper notification as delivering: {ex.Message}");
                 }
             }
 
@@ -3110,13 +3099,13 @@ namespace MultiTerminal.MCPServer.Services
             {
                 if (OnMessageDelivery != null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] HELPER_ADDED: Calling OnMessageDelivery for message {message.Id} from SYSTEM to {helper.Id}");
+                    DebugLogService?.Trace("MessageBroker", $"HELPER_ADDED: Calling OnMessageDelivery for message {message.Id} from SYSTEM to {helper.Id}");
                     deliverySuccess = await OnMessageDelivery(message.Id, helper.Id, "SYSTEM", content);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Push delivery failed for helper_added: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Push delivery failed for helper_added: {ex.Message}");
                 deliverySuccess = false;
             }
 
@@ -3186,11 +3175,11 @@ namespace MultiTerminal.MCPServer.Services
             {
                 queuedMessageId = _messageQueueDb.EnqueueMessage(
                     requester, helper.Name, content, "help_requested", taskId, taskTitle);
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Persisted help_requested notification {queuedMessageId}");
+                DebugLogService?.Trace("MessageBroker", $"Persisted help_requested notification {queuedMessageId}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist help_requested notification: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to persist help_requested notification: {ex.Message}");
             }
 
             var message = new Message
@@ -3224,11 +3213,11 @@ namespace MultiTerminal.MCPServer.Services
                 try
                 {
                     _messageQueueDb.MarkDelivering(queuedMessageId);
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Help request {queuedMessageId} marked as delivering");
+                    DebugLogService?.Trace("MessageBroker", $"Help request {queuedMessageId} marked as delivering");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to mark help request as delivering: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to mark help request as delivering: {ex.Message}");
                 }
             }
 
@@ -3238,13 +3227,13 @@ namespace MultiTerminal.MCPServer.Services
             {
                 if (OnMessageDelivery != null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] HELP_REQUESTED: Calling OnMessageDelivery for message {message.Id} from {requester} to {helper.Id}");
+                    DebugLogService?.Trace("MessageBroker", $"HELP_REQUESTED: Calling OnMessageDelivery for message {message.Id} from {requester} to {helper.Id}");
                     deliverySuccess = await OnMessageDelivery(message.Id, helper.Id, requester, content);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Push delivery failed for help_requested: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Push delivery failed for help_requested: {ex.Message}");
                 deliverySuccess = false;
             }
 
@@ -3335,11 +3324,11 @@ namespace MultiTerminal.MCPServer.Services
             {
                 queuedMessageId = _messageQueueDb.EnqueueMessage(
                     "SYSTEM", assignee.Name, content, "stale_task", taskId, taskTitle);
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Persisted stale_task notification {queuedMessageId}");
+                DebugLogService?.Warning("MessageBroker", $"Persisted stale_task notification {queuedMessageId}");
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to persist stale_task notification: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to persist stale_task notification: {ex.Message}");
             }
 
             var message = new Message
@@ -3373,11 +3362,11 @@ namespace MultiTerminal.MCPServer.Services
                 try
                 {
                     _messageQueueDb.MarkDelivering(queuedMessageId);
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Stale task notification {queuedMessageId} marked as delivering");
+                    DebugLogService?.Warning("MessageBroker", $"Stale task notification {queuedMessageId} marked as delivering");
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to mark stale notification as delivering: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"Failed to mark stale notification as delivering: {ex.Message}");
                 }
             }
 
@@ -3387,13 +3376,13 @@ namespace MultiTerminal.MCPServer.Services
             {
                 if (OnMessageDelivery != null)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] STALE_TASK: Calling OnMessageDelivery for message {message.Id} from SYSTEM to {assignee.Id}");
+                    DebugLogService?.Warning("MessageBroker", $"STALE_TASK: Calling OnMessageDelivery for message {message.Id} from SYSTEM to {assignee.Id}");
                     deliverySuccess = await OnMessageDelivery(message.Id, assignee.Id, "SYSTEM", content);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Push delivery failed for stale_task: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Push delivery failed for stale_task: {ex.Message}");
                 deliverySuccess = false;
             }
 
@@ -3591,8 +3580,7 @@ namespace MultiTerminal.MCPServer.Services
                 // Non-null, non-empty, but all whitespace. Behavior is the same
                 // as null/empty (no project bound) but log it so caller bugs
                 // (e.g. trimmed-too-aggressively-on-the-frontend) are visible.
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MessageBroker] NormalizeProjectId: input was non-empty whitespace ({raw.Length} chars); treating as no-project intent.");
+                DebugLogService?.Info("MessageBroker", $"NormalizeProjectId: input was non-empty whitespace ({raw.Length} chars); treating as no-project intent.");
                 return null;
             }
             string trimmed = raw.Trim();
@@ -3624,8 +3612,7 @@ namespace MultiTerminal.MCPServer.Services
                 // (32-char "N" format, 36-char dashed format).
                 if (prefixOnlyHits > 0 && trimmed.Length < 32)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"[MessageBroker] NormalizeProjectId: '{trimmed}' is a short exact key that also prefixes {prefixOnlyHits} longer key(s); ambiguous, returning null. Caller should pass the full id.");
+                    DebugLogService?.Info("MessageBroker", $"NormalizeProjectId: '{trimmed}' is a short exact key that also prefixes {prefixOnlyHits} longer key(s); ambiguous, returning null. Caller should pass the full id.");
                     return null;
                 }
                 return trimmed;
@@ -3642,8 +3629,7 @@ namespace MultiTerminal.MCPServer.Services
                 // null so callers (CreateTask, UpdateTaskProject) fast-fail
                 // instead of storing a raw value that would silently fail
                 // every downstream _projects lookup.
-                System.Diagnostics.Debug.WriteLine(
-                    $"[MessageBroker] NormalizeProjectId: '{trimmed}' prefixes {prefixOnlyHits} registered keys; ambiguous, returning null. Caller should pass the full id.");
+                DebugLogService?.Info("MessageBroker", $"NormalizeProjectId: '{trimmed}' prefixes {prefixOnlyHits} registered keys; ambiguous, returning null. Caller should pass the full id.");
                 return null;
             }
 
@@ -3651,8 +3637,7 @@ namespace MultiTerminal.MCPServer.Services
             // match. Storing it preserves caller intent and lets the value
             // round-trip — downstream lookups fail loudly rather than this
             // call swallowing a typo silently.
-            System.Diagnostics.Debug.WriteLine(
-                $"[MessageBroker] NormalizeProjectId: '{trimmed}' had no prefix match in _projects; storing raw value.");
+            DebugLogService?.Info("MessageBroker", $"NormalizeProjectId: '{trimmed}' had no prefix match in _projects; storing raw value.");
             return trimmed;
         }
 
@@ -4283,7 +4268,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetProject: ProjectService fallback failed: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"GetProject: ProjectService fallback failed: {ex.Message}");
                 }
             }
 
@@ -4332,7 +4317,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] ListProjects: ProjectService failed, falling back to cache: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"ListProjects: ProjectService failed, falling back to cache: {ex.Message}");
                 }
             }
 
@@ -4507,7 +4492,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetProjectsList: ProjectService failed, falling back to cache: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"GetProjectsList: ProjectService failed, falling back to cache: {ex.Message}");
                 }
             }
 
@@ -4541,7 +4526,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] GetProjects: ProjectService failed, falling back to cache: {ex.Message}");
+                    DebugLogService?.Error("MessageBroker", $"GetProjects: ProjectService failed, falling back to cache: {ex.Message}");
                 }
             }
 
@@ -4756,7 +4741,7 @@ namespace MultiTerminal.MCPServer.Services
                         UpdatedAt = DateTime.UtcNow
                     });
                     _taskDb.SetProfileOnline(id);
-                    System.Diagnostics.Debug.WriteLine($"[MessageBroker] Auto-created profile: {id}");
+                    DebugLogService?.Info("MessageBroker", $"Auto-created profile: {id}");
                 }
                 else
                 {
@@ -4769,13 +4754,13 @@ namespace MultiTerminal.MCPServer.Services
                 }
 
                 BroadcastProfileUpdate();
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Set profile online: {id}");
+                DebugLogService?.Info("MessageBroker", $"Set profile online: {id}");
 
                 return new SetProfileStatusResult { Success = true };
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to set profile online: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to set profile online: {ex.Message}");
                 return new SetProfileStatusResult { Success = false, Error = ex.Message };
             }
         }
@@ -4800,13 +4785,13 @@ namespace MultiTerminal.MCPServer.Services
                 }
 
                 BroadcastProfileUpdate();
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Set profile offline: {id}");
+                DebugLogService?.Info("MessageBroker", $"Set profile offline: {id}");
 
                 return new SetProfileStatusResult { Success = true };
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to set profile offline: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to set profile offline: {ex.Message}");
                 return new SetProfileStatusResult { Success = false, Error = ex.Message };
             }
         }
@@ -4889,7 +4874,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save helper session: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to save helper session: {ex.Message}");
                 return new SpawnHelperResult
                 {
                     Success = false,
@@ -4949,7 +4934,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to get helper session: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to get helper session: {ex.Message}");
                 return new UpdateHelperStatusResult
                 {
                     Success = false,
@@ -4972,7 +4957,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to update helper status: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to update helper status: {ex.Message}");
                 return new UpdateHelperStatusResult
                 {
                     Success = false,
@@ -5020,7 +5005,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to save helper message: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to save helper message: {ex.Message}");
                 return new LogHelperMessageResult
                 {
                     Success = false,
@@ -5054,7 +5039,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to get active helpers: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to get active helpers: {ex.Message}");
                 return new GetActiveHelpersResult
                 {
                     Success = false,
@@ -5102,7 +5087,7 @@ namespace MultiTerminal.MCPServer.Services
             };
 
             _officeAgents[uniqueName] = agent;
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Office agent spawned: {uniqueName} (by {spawnedBy})");
+            DebugLogService?.Info("MessageBroker", $"Office agent spawned: {uniqueName} (by {spawnedBy})");
 
             RaiseSafe(OfficeAgentSpawned, agent);
 
@@ -5121,7 +5106,7 @@ namespace MultiTerminal.MCPServer.Services
             if (_officeAgents.TryRemove(name, out var agent))
             {
                 agent.Status = "completed";
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Office agent departed: {name}");
+                DebugLogService?.Info("MessageBroker", $"Office agent departed: {name}");
                 RaiseSafe(OfficeAgentDeparted, agent);
                 return new OfficeAgentResult { Success = true, AgentName = name };
             }
@@ -5135,7 +5120,7 @@ namespace MultiTerminal.MCPServer.Services
             if (match.Key != null && _officeAgents.TryRemove(match.Key, out var matchedAgent))
             {
                 matchedAgent.Status = "completed";
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Office agent departed: {match.Key} (fuzzy match from {name})");
+                DebugLogService?.Info("MessageBroker", $"Office agent departed: {match.Key} (fuzzy match from {name})");
                 RaiseSafe(OfficeAgentDeparted, matchedAgent);
                 return new OfficeAgentResult { Success = true, AgentName = match.Key };
             }
@@ -5169,7 +5154,7 @@ namespace MultiTerminal.MCPServer.Services
 
             if (staleAgents.Count > 0)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Cleaned up {staleAgents.Count} stale office agent(s)");
+                DebugLogService?.Warning("MessageBroker", $"Cleaned up {staleAgents.Count} stale office agent(s)");
             }
 
             return staleAgents;
@@ -5189,7 +5174,7 @@ namespace MultiTerminal.MCPServer.Services
 
             if (allAgents.Count > 0)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Force-cleared {allAgents.Count} office agent(s)");
+                DebugLogService?.Info("MessageBroker", $"Force-cleared {allAgents.Count} office agent(s)");
             }
 
             return allAgents;
@@ -5205,7 +5190,7 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
         {
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] Recording activity: {activity.Type}/{activity.Action} - {activity.Content}");
+            DebugLogService?.Trace("MessageBroker", $"Recording activity: {activity.Type}/{activity.Action} - {activity.Content}");
 
             // Auto-resolve project_id from task cache if not set explicitly
             if (string.IsNullOrEmpty(activity.ProjectId) && !string.IsNullOrEmpty(activity.RelatedId))
@@ -5333,7 +5318,7 @@ namespace MultiTerminal.MCPServer.Services
 
             _taskDb.SaveTerminalActivity(activity);
 
-            System.Diagnostics.Debug.WriteLine($"[MessageBroker] {terminalName} {(enter ? "entered" : "exited")} critical section" +
+            DebugLogService?.Trace("MessageBroker", $"{terminalName} {(enter ? "entered" : "exited")} critical section" +
                 (expiresAt.HasValue ? $" (expires {expiresAt.Value:HH:mm:ss})" : ""));
         }
 
@@ -5415,13 +5400,13 @@ namespace MultiTerminal.MCPServer.Services
                     UnreadCount = _taskDb.GetInboxUnreadCount(userId)
                 });
 
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Inbox notification created: {type} for {userId} on task {taskId}");
+                DebugLogService?.Info("MessageBroker", $"Inbox notification created: {type} for {userId} on task {taskId}");
 
                 return new CreateInboxMessageResult { Success = true, MessageId = message.Id };
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MessageBroker] Failed to create inbox notification: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"Failed to create inbox notification: {ex.Message}");
                 return new CreateInboxMessageResult { Success = false, Error = ex.Message };
             }
         }

@@ -130,6 +130,8 @@ namespace MultiTerminal.Tests
             public void RaiseTaskClaimed(TaskClaimedEventArgs args) { }
             public void RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) { }
             public void LogError(string message) { }
+            public void LogWarning(string message) { }
+            public void LogInfo(string message) { }
             public void LogTrace(string message) { }
             public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false) { }
             public CreateInboxMessageResult CreateInboxNotification(string userId, string taskId, string taskTitle, int? checklistItemIndex, string checklistItemName, string type, string summary, string createdBy) => new CreateInboxMessageResult { Success = true };
