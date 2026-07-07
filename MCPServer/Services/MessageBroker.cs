@@ -1683,6 +1683,13 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Register a terminal with the broker.
+        /// <para>Documented write-path bypass (P5 / 1df2a534): this registration orchestration writes
+        /// profiles in-place (SaveProfile across several branches — docId match, name match, rename,
+        /// team-lead promotion) rather than through the profile write path. Ratified as a bypass because
+        /// it is registration flow, not profile CRUD, and re-registration self-heals; it is enumerated in
+        /// scripts/verify-writepath.mjs (NAMED_BYPASSES). Follow-up ticket <c>e1643ccc</c> converts this
+        /// (and UnregisterTerminal) to the write path and REMOVES it from the allowlist as its close
+        /// condition, so the exception set shrinks rather than accretes.</para>
         /// </summary>
         public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null)
         {
@@ -6271,6 +6278,55 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Debug-only cache-coherency check (P5 / 1df2a534): samples up to <paramref name="sampleSize"/>
+        /// cached tasks and compares their persisted fields against the DB row, reporting any divergence.
+        /// Under the single write path the answer is always "coherent" — this is the observable evidence
+        /// that clone→persist→swap keeps <c>_tasks</c> in lockstep with the tasks table. Not on any hot
+        /// path; exposed via the debug endpoint and exercised as verification in the P5 test suite.
+        /// </summary>
+        public CacheCoherencyReport VerifyCacheCoherency(int sampleSize = 50)
+        {
+            var report = new CacheCoherencyReport();
+            var cached = _tasks.Values.ToList();
+            report.CachedCount = cached.Count;
+
+            // Take up to sampleSize cached tasks (sampleSize <= 0 checks EVERY cached task). Order is
+            // ConcurrentDictionary enumeration order — an arbitrary but sufficient sample for a coherency
+            // spot-check; callers wanting full coverage (e.g. the P5 test) pass sampleSize = 0.
+            IEnumerable<KanbanTask> sample = sampleSize > 0 && cached.Count > sampleSize
+                ? cached.Take(sampleSize)
+                : cached;
+
+            foreach (var cachedTask in sample)
+            {
+                report.Checked++;
+                var dbTask = _taskDb.GetTask(cachedTask.Id);
+                if (dbTask == null)
+                {
+                    report.Divergences.Add($"{cachedTask.Id}: present in cache, missing from DB");
+                    continue;
+                }
+
+                if (cachedTask.Status != dbTask.Status
+                    || cachedTask.SubStatus != dbTask.SubStatus
+                    || cachedTask.Assignee != dbTask.Assignee
+                    || cachedTask.Title != dbTask.Title
+                    || cachedTask.Priority != dbTask.Priority
+                    || cachedTask.ProjectId != dbTask.ProjectId
+                    || cachedTask.Plan != dbTask.Plan
+                    || cachedTask.ChecklistJson != dbTask.ChecklistJson
+                    || cachedTask.ContinuationNotes != dbTask.ContinuationNotes)
+                {
+                    report.Divergences.Add(
+                        $"{cachedTask.Id}: cache/DB field divergence (cache status='{cachedTask.Status}' sub='{cachedTask.SubStatus}' vs db status='{dbTask.Status}' sub='{dbTask.SubStatus}')");
+                }
+            }
+
+            report.Coherent = report.Divergences.Count == 0;
+            return report;
+        }
+
+        /// <summary>
         /// Add a helper to a task and send Tier 1 notification.
         /// </summary>
         /// <param name="taskId">The task ID.</param>
@@ -7173,19 +7229,17 @@ namespace MultiTerminal.MCPServer.Services
                 return new DeleteProfileResult { Success = false, Error = $"Profile not found: {id}" };
             }
 
-            // Delete from the DB FIRST, then remove from the cache (mirror of the insert ordering). A
-            // failed delete keeps the profile in both stores rather than dropping it from the UI only.
+            // Write path: DB-delete before cache-remove (via DeleteProfileInternal). A failed delete keeps
+            // the profile in both stores rather than dropping it from the UI only.
             try
             {
-                _taskDb.DeleteProfile(id);
+                DeleteProfileInternal(id);
             }
             catch (Exception ex)
             {
                 LogError($"DeleteProfile: persist failed for {id}: {ex.Message}");
                 return new DeleteProfileResult { Success = false, Error = $"Failed to delete profile: {ex.Message}" };
             }
-
-            _profiles.TryRemove(id, out _);
 
             BroadcastProfileUpdate();
 
@@ -7306,6 +7360,18 @@ namespace MultiTerminal.MCPServer.Services
             _taskDb.SaveProfile(profile);   // persist FIRST
             _profiles[profile.Id] = profile;   // add to cache only after the DB write succeeded
             return profile;
+        }
+
+        private bool DeleteProfileInternal(string id)
+        {
+            if (!_profiles.ContainsKey(id))
+            {
+                return false;
+            }
+
+            _taskDb.DeleteProfile(id);        // delete from DB FIRST
+            _profiles.TryRemove(id, out _);   // remove from cache only after the DB delete succeeded
+            return true;
         }
 
         #endregion

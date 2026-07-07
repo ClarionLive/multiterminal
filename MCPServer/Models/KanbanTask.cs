@@ -252,6 +252,20 @@ namespace MultiTerminal.MCPServer.Models
     }
 
     /// <summary>
+    /// Result of a debug cache-coherency check (P5 / ticket 1df2a534): whether the in-memory task cache
+    /// agreed with the DB rows for the sampled tasks. Under the single write path this should always be
+    /// coherent — it's the observable evidence that clone→persist→swap keeps <c>_tasks</c> in lockstep
+    /// with the tasks table. Any entry in <see cref="Divergences"/> is a coherency bug.
+    /// </summary>
+    public class CacheCoherencyReport
+    {
+        public bool Coherent { get; set; }
+        public int CachedCount { get; set; }
+        public int Checked { get; set; }
+        public List<string> Divergences { get; set; } = new List<string>();
+    }
+
+    /// <summary>
     /// Result of claiming a task.
     /// </summary>
     public class ClaimTaskResult
