@@ -308,7 +308,12 @@ async function api(path, options = {}) {
             console.error(`API ${res.status}: ${path}`);
             return null;
         }
-        return await res.json();
+        // Tolerate empty 2xx bodies (pure-ack endpoints return an empty 200 under the
+        // standardized contract, 7ce19175). res.json() throws on an empty body; parse the
+        // text instead so an ack doesn't spuriously flip the connection status offline.
+        // Mirrors the MCP apiCall() empty-tolerance in mcp/index.js.
+        const text = await res.text();
+        return text ? JSON.parse(text) : null;
     } catch (err) {
         console.error(`API error: ${path}`, err);
         updateConnectionStatus(false);

@@ -261,7 +261,10 @@ namespace MultiTerminal.API.Controllers
             if (!result.Success)
                 return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok();
+            // Non-empty body: the phone PWA (gateway-mounted TasksController) reaches this via
+            // api(), which calls res.json() on 2xx — an empty ack would throw and be read as a
+            // failed assign. Mirrors the { status } special-case on UpdateStatus (7ce19175).
+            return Ok(new { assignee = request.Assignee });
         }
 
         /// <summary>
