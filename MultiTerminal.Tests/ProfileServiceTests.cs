@@ -151,6 +151,52 @@ namespace MultiTerminal.Tests
             Assert.DoesNotContain(list.Profiles, p => p.Id == "Agent Alice");  // stub IsTemporaryAgent filters it
         }
 
+        // ── e1643ccc: the public write-path entry points the terminal-registration region now uses instead
+        //    of the removed cache-only TryAddProfile bypass. ─────────────────────────────────────────────
+
+        [Fact]
+        public void InsertProfile_PersistsFirst_ThenCaches()
+        {
+            var p = new TeamMemberProfile { Id = "reg", DisplayName = "Reg", IsOnline = true };
+            var returned = _svc.InsertProfile(p);
+            Assert.Same(p, returned);
+
+            // cached
+            Assert.True(_svc.TryGetProfile("reg", out var cached));
+            Assert.True(cached.IsOnline);
+
+            // persisted (fresh service over the same db sees it after reload)
+            using var freshDb = new TaskDatabase();
+            var fresh = new ProfileService(freshDb, new StubHost());
+            fresh.LoadPersistedProfiles();
+            Assert.True(fresh.GetProfile("reg").Success);
+        }
+
+        [Fact]
+        public void MutateProfile_ClonesMutatesPersistsSwaps_ReturnsUpdated()
+        {
+            _svc.CreateProfile("diana", "Diana", null, null, null, null, null);
+
+            var updated = _svc.MutateProfile("diana", p => { p.IsTeamLead = true; p.IsOnline = true; });
+            Assert.NotNull(updated);
+            Assert.True(updated.IsTeamLead);
+            Assert.True(_svc.GetProfile("diana").Profile.IsTeamLead);
+
+            // persisted through the write path
+            using var freshDb = new TaskDatabase();
+            var fresh = new ProfileService(freshDb, new StubHost());
+            fresh.LoadPersistedProfiles();
+            Assert.True(fresh.GetProfile("diana").Profile.IsTeamLead);
+        }
+
+        [Fact]
+        public void MutateProfile_ReturnsNull_WhenProfileNotCached()
+        {
+            // The registration old-offline path relies on this: no-op (returns null) when the id isn't cached.
+            var result = _svc.MutateProfile("ghost", p => p.IsOnline = false);
+            Assert.Null(result);
+        }
+
         /// <summary>
         /// Minimal <see cref="IProfileServiceHost"/> stub. Records the ProfilesUpdated raises (so the write
         /// path's broadcast is assertable), no-ops logging, and mirrors the broker's "Agent " temporary-agent
