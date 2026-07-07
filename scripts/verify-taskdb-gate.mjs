@@ -67,8 +67,11 @@ const MANIFEST = [
     file: 'Services/TaskDatabase.cs',
     gates: [GATE.lockConn],
     // ad08caac allowlist: init/schema/migrate/dispose + two init-only helpers + the ctor.
+    // P5 (1df2a534) adds the schema_migrations runner trio — all called only from InitializeDatabase,
+    // single-threaded before the connection is shared, same class as CreateSchema.
     allow: name => initNames(name) || name === 'TaskDatabase' ||
-      name === 'SeedDefaultProfiles' || name === 'UniqueNoteTabName',
+      name === 'SeedDefaultProfiles' || name === 'UniqueNoteTabName' ||
+      name === 'RunMigration' || name === 'IsMigrationApplied' || name === 'RecordMigration',
   },
   {
     file: 'Services/ProjectDatabase.cs',

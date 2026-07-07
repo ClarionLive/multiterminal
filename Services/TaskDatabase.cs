@@ -157,55 +157,91 @@ namespace MultiTerminal.Services
             // Always run CreateSchema - all statements use IF NOT EXISTS so it's idempotent
             CreateSchema();
 
-            // Run migrations for schema changes
-            MigrateAddProjectIdToTasks();
-            MigrateAddTaskSummaries();
-            MigrateAddTaskStackColumns();
-            MigrateAddStaleColumns();
-            MigrateAddPriorityColumn();
-            MigrateAddCriticalSection();
-            MigrateAddChecklistToTasks();
-            MigrateAddImplementationChecklistToTasks();
-            MigrateAddPendingEnhancement();
-            MigrateAddTeamMemberProfiles();
-            MigrateAddHelperSessions();
-            MigrateAddTaskDocumentation();
-            MigrateCleanupProfileNullStrings();
-            MigrateAddOnlineStatusToProfiles();
-            MigrateAddContinuationNotesToTasks();
-            MigrateAddAutoStatusToTasks();
-            MigrateAddReviewNotesToTasks();
-            MigrateAddIsQuickTaskToTasks();
-            MigrateAddSortOrderToTasks();
-            MigrateAddUserInbox();
-            MigrateAddProjectIdsToProfiles();
-            MigrateAddTaskAttachments();
-            MigrateAddAgentFieldsToProfiles();
-            MigrateAddTeamLeadToProfiles();
-            MigrateAddSessionLineage();
-            MigrateAddKnowledgeBase();
-            MigrateAddTaskRelationships();
-            MigrateAddTaskFileLinks();
-            MigrateAddChecklistItemIndexToFileLinks();
-            MigrateAddOwnerProfile();
-            MigrateAddSourceControlAccounts();
-            MigrateAddAgentInvocations();
-            MigrateAddTaskReports();
-            MigrateAddNotificationEvents();
-            MigrateAddMessageImages();
-            MigrateAddKnowledgeQueryHash();
-            MigrateAddKnowledgeAttentionDecay();
-            MigrateAddSessionLifecycleStatus();
-            MigrateAddTaskWorktrees();
-            MigrateAddBranchMetadata();
-            MigrateAddAgentToTaskWorktrees();
-            MigrateNormalizeNoteTabPaths();
+            // Run migrations for schema changes, each recorded in schema_migrations so already-applied
+            // migrations are skipped on subsequent startups (P5 / 1df2a534). Every MigrateXxx method is
+            // idempotent (PRAGMA / sqlite_master check before ALTER), so the first startup after this
+            // ledger was introduced re-runs and records all of them with no data risk; later startups
+            // skip the recorded ones. The nameof() key is the method name, stable across renames-with-refactor.
+            RunMigration(nameof(MigrateAddProjectIdToTasks), MigrateAddProjectIdToTasks);
+            RunMigration(nameof(MigrateAddTaskSummaries), MigrateAddTaskSummaries);
+            RunMigration(nameof(MigrateAddTaskStackColumns), MigrateAddTaskStackColumns);
+            RunMigration(nameof(MigrateAddStaleColumns), MigrateAddStaleColumns);
+            RunMigration(nameof(MigrateAddPriorityColumn), MigrateAddPriorityColumn);
+            RunMigration(nameof(MigrateAddCriticalSection), MigrateAddCriticalSection);
+            RunMigration(nameof(MigrateAddChecklistToTasks), MigrateAddChecklistToTasks);
+            RunMigration(nameof(MigrateAddImplementationChecklistToTasks), MigrateAddImplementationChecklistToTasks);
+            RunMigration(nameof(MigrateAddPendingEnhancement), MigrateAddPendingEnhancement);
+            RunMigration(nameof(MigrateAddTeamMemberProfiles), MigrateAddTeamMemberProfiles);
+            RunMigration(nameof(MigrateAddHelperSessions), MigrateAddHelperSessions);
+            RunMigration(nameof(MigrateAddTaskDocumentation), MigrateAddTaskDocumentation);
+            RunMigration(nameof(MigrateCleanupProfileNullStrings), MigrateCleanupProfileNullStrings);
+            RunMigration(nameof(MigrateAddOnlineStatusToProfiles), MigrateAddOnlineStatusToProfiles);
+            RunMigration(nameof(MigrateAddContinuationNotesToTasks), MigrateAddContinuationNotesToTasks);
+            RunMigration(nameof(MigrateAddAutoStatusToTasks), MigrateAddAutoStatusToTasks);
+            RunMigration(nameof(MigrateAddReviewNotesToTasks), MigrateAddReviewNotesToTasks);
+            RunMigration(nameof(MigrateAddIsQuickTaskToTasks), MigrateAddIsQuickTaskToTasks);
+            RunMigration(nameof(MigrateAddSortOrderToTasks), MigrateAddSortOrderToTasks);
+            RunMigration(nameof(MigrateAddUserInbox), MigrateAddUserInbox);
+            RunMigration(nameof(MigrateAddProjectIdsToProfiles), MigrateAddProjectIdsToProfiles);
+            RunMigration(nameof(MigrateAddTaskAttachments), MigrateAddTaskAttachments);
+            RunMigration(nameof(MigrateAddAgentFieldsToProfiles), MigrateAddAgentFieldsToProfiles);
+            RunMigration(nameof(MigrateAddTeamLeadToProfiles), MigrateAddTeamLeadToProfiles);
+            RunMigration(nameof(MigrateAddSessionLineage), MigrateAddSessionLineage);
+            RunMigration(nameof(MigrateAddKnowledgeBase), MigrateAddKnowledgeBase);
+            RunMigration(nameof(MigrateAddTaskRelationships), MigrateAddTaskRelationships);
+            RunMigration(nameof(MigrateAddTaskFileLinks), MigrateAddTaskFileLinks);
+            RunMigration(nameof(MigrateAddChecklistItemIndexToFileLinks), MigrateAddChecklistItemIndexToFileLinks);
+            RunMigration(nameof(MigrateAddOwnerProfile), MigrateAddOwnerProfile);
+            RunMigration(nameof(MigrateAddSourceControlAccounts), MigrateAddSourceControlAccounts);
+            RunMigration(nameof(MigrateAddAgentInvocations), MigrateAddAgentInvocations);
+            RunMigration(nameof(MigrateAddTaskReports), MigrateAddTaskReports);
+            RunMigration(nameof(MigrateAddNotificationEvents), MigrateAddNotificationEvents);
+            RunMigration(nameof(MigrateAddMessageImages), MigrateAddMessageImages);
+            RunMigration(nameof(MigrateAddKnowledgeQueryHash), MigrateAddKnowledgeQueryHash);
+            RunMigration(nameof(MigrateAddKnowledgeAttentionDecay), MigrateAddKnowledgeAttentionDecay);
+            RunMigration(nameof(MigrateAddSessionLifecycleStatus), MigrateAddSessionLifecycleStatus);
+            RunMigration(nameof(MigrateAddTaskWorktrees), MigrateAddTaskWorktrees);
+            RunMigration(nameof(MigrateAddBranchMetadata), MigrateAddBranchMetadata);
+            RunMigration(nameof(MigrateAddAgentToTaskWorktrees), MigrateAddAgentToTaskWorktrees);
+            RunMigration(nameof(MigrateNormalizeNoteTabPaths), MigrateNormalizeNoteTabPaths);
 
             // Seed default agent profiles on first run
             SeedDefaultProfiles();
 
             // Check FTS5 support after all tables are created
             _fts5Available = CheckFts5Available();
+        }
+
+        /// <summary>
+        /// Migration runner (P5 / 1df2a534): runs <paramref name="migration"/> only if it has not been
+        /// recorded in schema_migrations, then records it. Every caller is in InitializeDatabase, which
+        /// runs single-threaded before the connection is shared — so, like CreateSchema and the Migrate*
+        /// methods, these three helpers are exempt from LockConn (init-phase, name-pattern allowlisted).
+        /// </summary>
+        private void RunMigration(string name, Action migration)
+        {
+            if (IsMigrationApplied(name))
+            {
+                return;
+            }
+
+            migration();
+            RecordMigration(name);
+        }
+
+        private bool IsMigrationApplied(string name)
+        {
+            using var command = new SQLiteCommand("SELECT 1 FROM schema_migrations WHERE name = @name LIMIT 1", _connection);
+            command.Parameters.AddWithValue("@name", name);
+            return command.ExecuteScalar() != null;
+        }
+
+        private void RecordMigration(string name)
+        {
+            using var command = new SQLiteCommand("INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (@name, @applied_at)", _connection);
+            command.Parameters.AddWithValue("@name", name);
+            command.Parameters.AddWithValue("@applied_at", DateTime.UtcNow.ToString("o"));
+            command.ExecuteNonQuery();
         }
 
         private void CreateSchema()
@@ -224,6 +260,15 @@ namespace MultiTerminal.Services
 
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee);
+
+                -- Schema migration ledger (P5 / 1df2a534): one row per applied MigrateXxx, so the
+                -- migration runner can skip already-applied migrations and there's an audit trail of
+                -- when each landed. Idempotent migrations still run once on the first upgrade that
+                -- introduces this table (schema_migrations starts empty), recording as they go.
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    name TEXT PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
 
                 CREATE TABLE IF NOT EXISTS terminal_activity (
                     terminal TEXT PRIMARY KEY,
