@@ -135,6 +135,28 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Cache-coherency check (P5 / 1df2a534): sample cached tasks and compare their persisted fields
+        /// against the DB rows. Returns coherent=true with an empty divergences list under the single
+        /// write path. Optional ?sampleSize=N. The HTTP surface CLAMPS the sample to [1, 500] (a request
+        /// for 0/negative defaults to 50) so a loopback web page can't force an unbounded per-task DB scan
+        /// (Codex security review). Internal/test callers use the broker method directly with sampleSize=0
+        /// for a full scan.
+        /// </summary>
+        [HttpGet("cache-coherency")]
+        public IActionResult GetCacheCoherency([FromQuery] int sampleSize = 50)
+        {
+            int clampedSampleSize = sampleSize <= 0 ? 50 : System.Math.Min(sampleSize, 500);
+            var report = _broker.VerifyCacheCoherency(clampedSampleSize);
+            return Ok(new
+            {
+                coherent = report.Coherent,
+                cachedCount = report.CachedCount,
+                checkedCount = report.Checked,
+                divergences = report.Divergences
+            });
+        }
+
+        /// <summary>
         /// List all available log files, most recent first.
         /// </summary>
         [HttpGet("files")]

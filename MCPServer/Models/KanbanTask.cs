@@ -173,6 +173,23 @@ namespace MultiTerminal.MCPServer.Models
         public bool AutoStatus { get; set; }
 
         /// <summary>
+        /// Returns a copy of this task with an independent <see cref="Helpers"/> list.
+        /// <para>Used by MessageBroker's single task write path (P5 / ticket 1df2a534): a mutation is
+        /// applied to a clone, persisted, and only THEN swapped into the cache. That ordering means a
+        /// persist failure cannot leave the cache diverged from the DB, and a concurrent reader never
+        /// observes a half-mutated task — it sees either the old or the new copy, each internally whole.</para>
+        /// <para>Every other property is a string or a value type (immutable, or copied by value by
+        /// <see cref="object.MemberwiseClone"/>), so a member-wise copy plus a fresh <see cref="Helpers"/>
+        /// list is a sufficient deep copy. If a future field is a mutable reference type, deep-copy it here.</para>
+        /// </summary>
+        public KanbanTask Clone()
+        {
+            var copy = (KanbanTask)MemberwiseClone();
+            copy.Helpers = Helpers == null ? null : new List<string>(Helpers);
+            return copy;
+        }
+
+        /// <summary>
         /// Get checklist as list of items, normalizing any legacy items to enhanced format.
         /// </summary>
         public List<ChecklistItem> GetChecklist()
@@ -232,6 +249,20 @@ namespace MultiTerminal.MCPServer.Models
         public bool Success { get; set; }
         public string TaskId { get; set; }
         public string Error { get; set; }
+    }
+
+    /// <summary>
+    /// Result of a debug cache-coherency check (P5 / ticket 1df2a534): whether the in-memory task cache
+    /// agreed with the DB rows for the sampled tasks. Under the single write path this should always be
+    /// coherent — it's the observable evidence that clone→persist→swap keeps <c>_tasks</c> in lockstep
+    /// with the tasks table. Any entry in <see cref="Divergences"/> is a coherency bug.
+    /// </summary>
+    public class CacheCoherencyReport
+    {
+        public bool Coherent { get; set; }
+        public int CachedCount { get; set; }
+        public int Checked { get; set; }
+        public List<string> Divergences { get; set; } = new List<string>();
     }
 
     /// <summary>

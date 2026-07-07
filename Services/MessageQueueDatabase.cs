@@ -72,15 +72,17 @@ namespace MultiTerminal.Services
         /// </summary>
         public MessageQueueDatabase()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string folder = Path.Combine(appData, "multiterminal");
-
-            if (!Directory.Exists(folder))
+            // Resolve via GetDatabasePath so the MULTITERMINAL_TEST_MSGDB override is honored — the ctor
+            // previously hardcoded the %APPDATA%\multiterminal\messages.db path, ignoring the override the
+            // static resolver already exposed, which made a full MessageBroker impossible to construct in a
+            // test without touching the live message queue (P5 / 1df2a534, cache-coherency test enabler).
+            _databasePath = GetDatabasePath();
+            string folder = Path.GetDirectoryName(_databasePath);
+            if (!string.IsNullOrEmpty(folder) && !Directory.Exists(folder))
             {
                 Directory.CreateDirectory(folder);
             }
 
-            _databasePath = Path.Combine(folder, "messages.db");
             InitializeDatabase();
         }
 
