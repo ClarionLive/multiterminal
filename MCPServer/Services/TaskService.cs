@@ -824,19 +824,32 @@ namespace MultiTerminal.MCPServer.Services
                 // make-active both under the lock.
                 lock (AssigneeActivationLock(assignee))
                 {
-                    resumedTask = GetMostRecentPausedTask(assignee);
-                    if (resumedTask != null)
+                    // New-1 (7c59c004 F-B completion): the done write ABOVE vacated this assignee's active
+                    // slot OUTSIDE this lock, so a concurrent SetTaskActive could have activated another task
+                    // for the assignee in that window. Under this lock its cache+DB swap is fully committed,
+                    // so this check is authoritative: if the assignee ALREADY has an active task, SKIP the
+                    // auto-resume rather than create a second active task (don't override the user's explicit
+                    // activation). Closes the done→auto-resume two-active window.
+                    bool assigneeAlreadyActive = _tasks.Values.Any(t => t.Id != taskId
+                        && string.Equals(t.Assignee, assignee, StringComparison.OrdinalIgnoreCase)
+                        && t.Status == "in_progress" && t.SubStatus == "active");
+
+                    if (!assigneeAlreadyActive)
                     {
-                        // Write path for the auto-resumed task (no broadcast — one broadcast below covers both).
-                        try
+                        resumedTask = GetMostRecentPausedTask(assignee);
+                        if (resumedTask != null)
                         {
-                            MutateTaskInternal(resumedTask.Id, t =>
+                            // Write path for the auto-resumed task (no broadcast — one broadcast below covers both).
+                            try
                             {
-                                t.SubStatus = "active";
-                                t.PausedAt = null;
-                            });
+                                MutateTaskInternal(resumedTask.Id, t =>
+                                {
+                                    t.SubStatus = "active";
+                                    t.PausedAt = null;
+                                });
+                            }
+                            catch (Exception ex) { _host.LogError($"UpdateTaskStatus: persist failed for resumed task {resumedTask.Id}: {ex.Message}"); }
                         }
-                        catch (Exception ex) { _host.LogError($"UpdateTaskStatus: persist failed for resumed task {resumedTask.Id}: {ex.Message}"); }
                     }
                 }
 
@@ -1306,17 +1319,18 @@ namespace MultiTerminal.MCPServer.Services
                 if (tooCloseBelow || tooCloseAbove)
                 {
                     _taskDb.RebalanceSortOrder(task.Status);
-                    // Sync each affected task's cached rank UNDER its per-task lock (7c59c004 F-C).
-                    // RebalanceSortOrder already persisted the DB ranks, so the persist step is a no-op —
-                    // this is a lock-protected cache refresh FROM the DB, not a re-persist, so a concurrent
-                    // field mutator can't tear the in-place SortOrder write.
-                    foreach (var t in _tasks.Values.Where(t => t.Status == task.Status).ToList())
+                    // Sync each affected task's cached rank UNDER its per-task lock (7c59c004 F-C + New-3).
+                    // RebalanceSortOrder already persisted the DB ranks, so the persist step is a no-op — this
+                    // is a lock-protected cache refresh FROM the DB. The DB read is done INSIDE the mutate
+                    // lambda (i.e. under TaskWriteLock), NOT from a pre-lock snapshot, so a concurrent reorder
+                    // landing between read and swap can't leave a stale rank in the cache.
+                    foreach (var affectedId in _tasks.Values.Where(t => t.Status == task.Status).Select(t => t.Id).ToList())
                     {
-                        var refreshed = _taskDb.GetTask(t.Id);
-                        if (refreshed != null)
+                        MutateTaskInternal(affectedId, x =>
                         {
-                            MutateTaskInternal(t.Id, x => x.SortOrder = refreshed.SortOrder, _ => { });
-                        }
+                            var fresh = _taskDb.GetTask(affectedId);
+                            if (fresh != null) x.SortOrder = fresh.SortOrder;
+                        }, _ => { });
                     }
                 }
             }
@@ -2786,11 +2800,15 @@ namespace MultiTerminal.MCPServer.Services
 
         private object TaskWriteLock(string taskId) => _taskWriteLocks.GetOrAdd(taskId ?? string.Empty, _ => new object());
 
-        // Per-assignee activation lock (7c59c004 F-B). Serializes the "make a task active for this assignee"
-        // operations — SetTaskActive AND UpdateTaskStatus's done→auto-resume — so the single-active-per-assignee
-        // invariant holds and SetTaskActive's cache-derived active-sibling set can't be changed by a concurrent
-        // activation between discovery and the transaction (which would otherwise pause a task whose per-task
-        // lock isn't held). ORDERING INVARIANT (composes with the per-task locks with NO new deadlock class):
+        // Per-assignee activation lock (7c59c004 F-B / New-1). Serializes the "make a task active for this
+        // assignee" operations — SetTaskActive AND UpdateTaskStatus's done→auto-resume — so the
+        // single-active-per-assignee invariant holds and SetTaskActive's cache-derived active-sibling set can't
+        // be changed by a concurrent activation between discovery and the transaction (which would otherwise
+        // pause a task whose per-task lock isn't held). KNOWN RESIDUAL (651105b3, enumerated in
+        // verify-writepath.mjs): ClaimTask (MakeTaskActive) and RecalculateAutoStatus also make-active but are
+        // NOT yet under this lock — a transient, self-healing divergence (SetTaskActive's defensive skip never
+        // writes an unlocked cache entry), not a durable corruption. The structural fix is one serialized
+        // activation primitive every make-active path routes through, deferred to 651105b3. ORDERING INVARIANT (composes with the per-task locks with NO new deadlock class):
         // ALWAYS acquire the assignee lock BEFORE any per-task lock — assignee-lock → per-task lock(s)
         // (WithTaskLocks, sorted) → LockConn. No site inverts this. Unbounded by design (one small object per
         // assignee ever activated), same accepted pattern as the per-task locks.

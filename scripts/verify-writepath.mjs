@@ -86,6 +86,17 @@ const KNOWN_UNLOCKED_EXPOSURES = [
               'concurrent MutateTaskInternal can still race it (field-level lost update / cache-ahead-of-DB).',
     hardening: '1f327236',
   },
+  {
+    site: 'MCPServer/Services/TaskService.cs: ClaimTask (MakeTaskActive) + SetAutoStatus/RecalculateAutoStatus',
+    exposure: 'The single-active-per-assignee invariant is guarded by the per-assignee activation lock only at ' +
+              'SetTaskActive + UpdateTaskStatus auto-resume (7c59c004 F-B/New-1). ClaimTask and RecalculateAutoStatus ' +
+              'also transition a task to sub_status=active WITHOUT that lock, so a concurrent SetTaskActive can pause ' +
+              'a DB-active sibling not in its lock set — SetTaskActive DEFENSIVELY logs + skips the cache swap (never ' +
+              'writes an unlocked entry), so this is a TRANSIENT, self-healing cache-active/DB-paused divergence, not ' +
+              'a durable corruption. The structural fix is one serialized activation primitive every make-active path ' +
+              'routes through (ends the whack-a-mole). Pre-existing; not a 7c59c004 regression.',
+    hardening: '651105b3',
+  },
 ];
 
 // CORE PERSIST + RAW CACHE WRITE patterns (the divergence-creating writes). Targeted column/side-table

@@ -203,6 +203,56 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);  // cache ≡ DB after the storm
         }
 
+        [Fact]
+        public async System.Threading.Tasks.Task UpdateTaskStatusDone_ConcurrentSetTaskActive_NeverTwoActive()
+        {
+            // New-1 (7c59c004 F-B completion): UpdateTaskStatus marks the active task done OUTSIDE the assignee
+            // lock, then auto-resumes the most-recent paused task UNDER the lock. A concurrent SetTaskActive for
+            // the same assignee, interleaving between those two steps, could (pre-fix) leave TWO active tasks.
+            // The under-lock "assignee already has an active task? → skip resume" guard must keep it to ≤1.
+            // Repeated to make the narrow window likely.
+            for (int trial = 0; trial < 25; trial++)
+            {
+                var a = _svc.CreateTask($"A{trial}", "d", "diana").TaskId;
+                var b = _svc.CreateTask($"B{trial}", "d", "diana").TaskId;
+                var c = _svc.CreateTask($"C{trial}", "d", "diana").TaskId;
+                foreach (var id in new[] { a, b, c })
+                {
+                    _svc.ClaimTask(id, "diana", null);
+                    _svc.UpdateTaskStatus(id, "in_progress");
+                }
+                // a active; b most-recent paused; c older paused.
+                _svc.SetTaskActive(c, "diana");
+                _svc.SetTaskActive(b, "diana");
+                _svc.SetTaskActive(a, "diana");
+
+                // Race: mark the active task done (auto-resumes b) vs activate c.
+                var t1 = System.Threading.Tasks.Task.Run(() => _svc.UpdateTaskStatus(a, "done"));
+                var t2 = System.Threading.Tasks.Task.Run(() => _svc.SetTaskActive(c, "diana"));
+                await System.Threading.Tasks.Task.WhenAll(t1, t2);
+
+                int activeForDiana = _tasks_ActiveCount("diana");
+                Assert.True(activeForDiana <= 1, $"trial {trial}: {activeForDiana} active tasks for diana (expected ≤1)");
+            }
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
+        // Count DB rows that are active for an assignee (authoritative — asserts the invariant on the durable store).
+        private int _tasks_ActiveCount(string assignee)
+        {
+            int n = 0;
+            foreach (var t in _svc.GetTasks())
+            {
+                var fresh = _db.GetTask(t.Id);
+                if (fresh != null && fresh.SubStatus == "active"
+                    && string.Equals(fresh.Assignee, assignee, StringComparison.OrdinalIgnoreCase))
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
