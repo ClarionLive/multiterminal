@@ -18,6 +18,7 @@ using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Models;
 using MultiTerminal.Panels;
 using MultiTerminal.Services;
+using MultiTerminal.Services.Startup;
 using MultiTerminal.InboxPanel;
 using MultiTerminal.TaskLifecycleBoard;
 using MultiTerminal.Terminal; // For FontSizeChangedEventArgs
@@ -691,6 +692,15 @@ namespace MultiTerminal
                 System.Diagnostics.Trace.WriteLine("[InitializeMcpServerAndChatPanel] Step 8: Wiring ServerError event");
                 _mcpServer.ServerError += (s, ex) =>
                 {
+                    // A :5050 "address already in use" bind failure is owned by the dedicated
+                    // port-contention path (TryStartRestServerWithContentionHandlingAsync →
+                    // classified Retry/Exit dialog). StartAsync raises ServerError before it
+                    // rethrows, so without this guard the user would see this raw stack-trace
+                    // dialog FIRST and the friendly one second — repeated on every Retry
+                    // (task 4fec40e2). Let the contention handler be the sole voice for that case.
+                    if (StartupPortContentionClassifier.IsAddressInUse(ex))
+                        return;
+
                     var errorMsg = $"MCP Server error: {ex.Message}\n\nStack Trace:\n{ex.StackTrace}";
                     _debugLogService.Error("MainForm", $"MCP Server error: {ex.Message}");
 
@@ -800,7 +810,14 @@ namespace MultiTerminal
                 {
                     try
                     {
-                        await _mcpServer.StartAsync();
+                        // Bind the :5050 REST host. If the port is already taken, show a
+                        // Retry/Exit dialog that classifies the holder (another MultiTerminal
+                        // vs a foreign process) instead of a dead-API error (task 4fec40e2).
+                        // A false return means the user chose to exit — stop the init chain.
+                        if (!await TryStartRestServerWithContentionHandlingAsync().ConfigureAwait(false))
+                        {
+                            return;
+                        }
 
                         // Crash recovery: index any unflushed sessions from previous runs
                         // Must run after StartAsync so ProjectService is wired
@@ -929,6 +946,101 @@ namespace MultiTerminal
                 MessageBox.Show(errorMsg + $"\n\nLog file: {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "multiterminal", "startup-error.log")}\n\nThe Chat feature will not be available.",
                     "MCP Server Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        /// <summary>
+        /// Start the :5050 REST host, converting an "address already in use" bind failure into
+        /// a friendly Retry/Exit dialog (task 4fec40e2). Returns true once the host is bound,
+        /// false if the user chose to exit. Non-contention failures propagate to the caller's
+        /// existing generic startup-error handler unchanged.
+        /// </summary>
+        private async Task<bool> TryStartRestServerWithContentionHandlingAsync()
+        {
+            while (true)
+            {
+                try
+                {
+                    await _mcpServer.StartAsync().ConfigureAwait(false);
+                    return true;
+                }
+                catch (Exception ex) when (StartupPortContentionClassifier.IsAddressInUse(ex))
+                {
+                    System.Diagnostics.Debug.WriteLine($"[MainForm] :5050 bind failed (address already in use): {ex.Message}");
+
+                    if (ResolvePortContentionDialog(_mcpServer.Port) == DialogResult.Retry)
+                    {
+                        continue; // user freed the port (or wants another attempt)
+                    }
+
+                    // User chose to exit — tear down the app rather than run with a dead API.
+                    try
+                    {
+                        Invoke(new Action(Application.Exit));
+                    }
+                    catch (Exception exitEx)
+                    {
+                        // The window handle may not be created yet if the bind failed very early
+                        // (Invoke throws). Fall back to a hard exit so a held port can't leave a
+                        // headless dead-API process running (task 4fec40e2 debugger MEDIUM).
+                        System.Diagnostics.Debug.WriteLine($"[MainForm] Application.Exit during port-contention exit failed, forcing process exit: {exitEx.Message}");
+                        Environment.Exit(0);
+                    }
+
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Probe + classify the current :5050 holder and show the Retry/Cancel dialog. The
+        /// probe/lookup/message decisions belong to the pure StartupPortContentionClassifier;
+        /// this method is only the WinForms glue. Returns the user's choice (Retry or Cancel).
+        /// </summary>
+        private DialogResult ResolvePortContentionDialog(int port)
+        {
+            var probe = StartupHealthProbe.Probe(port);
+            // Always resolve the real OS owner: needed both to name a foreign holder AND to
+            // cross-check a marker-positive probe against the actual socket owner — a hostile
+            // process can echo our public marker but cannot fake which PID owns :5050
+            // (task 4fec40e2 security finding).
+            PortHolderInfo holder = TcpPortOwnerLookup.Lookup(port);
+            // Verify a marker-positive probe against the OS-resolved owner's process identity,
+            // NOT the spoofable HTTP body (task 4fec40e2). A genuine second MultiTerminal owns the
+            // socket under this same executable name; a foreign squatter does not.
+            string expectedProcessName;
+            try
+            {
+                using var self = System.Diagnostics.Process.GetCurrentProcess();
+                expectedProcessName = self.ProcessName;
+            }
+            catch (Exception)
+            {
+                expectedProcessName = "MultiTerminal";
+            }
+
+            var verdict = StartupPortContentionClassifier.ClassifyWithOwner(probe, holder, expectedProcessName);
+
+            string message = StartupPortContentionClassifier.BuildMessage(verdict, port, probe, holder);
+            string caption = verdict == PortContentionVerdict.MultiTerminalAlreadyRunning
+                ? "MultiTerminal already running"
+                : "MultiTerminal — port in use";
+
+            DialogResult result = DialogResult.Cancel;
+            try
+            {
+                Invoke(new Action(() =>
+                {
+                    result = MessageBox.Show(message, caption, MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning);
+                }));
+            }
+            catch (Exception ex)
+            {
+                // If we can't even show the dialog (e.g. no window handle yet), default to exit.
+                System.Diagnostics.Debug.WriteLine($"[MainForm] Port-contention dialog failed to show: {ex.Message}");
+                result = DialogResult.Cancel;
+            }
+
+            return result;
         }
 
         // Serializes Multi-Connect gateway restarts so two rapid Save/Restart clicks can't

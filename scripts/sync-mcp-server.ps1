@@ -83,6 +83,22 @@ if (-not (Test-Path -LiteralPath $sourceIndex)) {
     exit 0
 }
 
+# --- Worktree skip (ticket 4fec40e2) ---------------------------------------
+# The non-fatal dev APPDATA sync must only deploy from the ROOT repo checkout.
+# A git worktree (.claude\worktrees\<id>) can carry an mcp/index.js from a branch
+# that predates a consolidation merge; firing the dev sync from such a build would
+# clobber the reviewed live server (in %APPDATA%) with an OLDER tool set. The
+# mtime "newer-target" guard above does NOT catch this -- a fresh worktree
+# checkout writes brand-new file timestamps, so its stale index.js looks newer
+# than the live copy. Gate on the source PATH instead: only root/official builds
+# deploy to the live install. The fatal installer-staging path (-FailOnError) is
+# intentionally exempt -- it stages into the repo-local installer\mcp-dist, is
+# worktree-irrelevant, and must always run for a correct Release/installer build.
+if (-not $FailOnError -and $SourceDir -match '\.claude[\\/]+worktrees[\\/]') {
+    Write-Host "MCPSYNC SKIP: worktree build -- root/CI builds deploy the live %APPDATA% MCP server (source: $SourceDir)."
+    exit 0
+}
+
 # --- Resolve dest (defaults to current user's APPDATA copy) -----------------
 if ([string]::IsNullOrWhiteSpace($DestDir) -and $env:SMS_DEST_DIR) { $DestDir = $env:SMS_DEST_DIR }
 if ([string]::IsNullOrWhiteSpace($DestDir)) {

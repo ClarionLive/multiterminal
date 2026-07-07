@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
+using MultiTerminal.Services.Startup;
 
 namespace MultiTerminal.API
 {
@@ -35,6 +36,11 @@ namespace MultiTerminal.API
         private readonly MultiTerminal.Services.ProjectService _externalProjectService;
         private MultiTerminal.Services.Presence.PresenceAdapter _presenceAdapter;
         private bool _isDisposed;
+        // Guards the one-time subscription to the SHARED ProjectService.ProjectRegistered
+        // event. StartAsync can be re-invoked by the port-contention Retry loop (task
+        // 4fec40e2); without this, each retry would attach a duplicate handler to the shared
+        // ProjectService and they would all survive the eventual successful start.
+        private readonly OneTimeHook _projectRegisteredHook = new OneTimeHook();
 
         /// <summary>
         /// The message broker for routing messages between terminals.
@@ -229,6 +235,12 @@ namespace MultiTerminal.API
 
                 var app = builder.Build();
 
+                // Assign _host immediately after Build (NOT after the wiring below) so the catch's
+                // dispose unwinds the built app/container even if a failure occurs during the
+                // service-resolution/wiring between here and the bind — otherwise those DB-owning
+                // DI singletons would leak on a pre-bind failure (task 4fec40e2 adversary finding).
+                _host = app;
+
                 // Exception handler must be first so it catches exceptions from all downstream
                 // middleware and controllers (Eval P2 item 1, task c522764d). Produces RFC 7807
                 // ProblemDetails 500s via the registered ProblemDetails service; RestApiExceptionHandler
@@ -295,38 +307,44 @@ namespace MultiTerminal.API
                     }
                 };
 
-                // Sync UI-created projects to MessageBroker/Database
-                projectService.ProjectRegistered += (sender, args) =>
+                // Sync UI-created projects to MessageBroker/Database.
+                // Routed through _projectRegisteredHook so a retried StartAsync (port-contention
+                // Retry loop, task 4fec40e2) cannot attach a duplicate handler to the SHARED
+                // ProjectService — the subscription fires once no matter how many attempts run.
+                _projectRegisteredHook.Run(() =>
                 {
-                    try
+                    projectService.ProjectRegistered += (sender, args) =>
                     {
-                        var fileProject = args.Project;
-                        var dbProject = new MCPServer.Models.Project
+                        try
                         {
-                            Id = fileProject.Id,
-                            Name = fileProject.Name,
-                            Description = fileProject.Description ?? "",
-                            Path = fileProject.Path,
-                            CreatedBy = "UI",
-                            CreatedAt = fileProject.CreatedAt,
-                            UpdatedAt = DateTime.UtcNow
-                        };
+                            var fileProject = args.Project;
+                            var dbProject = new MCPServer.Models.Project
+                            {
+                                Id = fileProject.Id,
+                                Name = fileProject.Name,
+                                Description = fileProject.Description ?? "",
+                                Path = fileProject.Path,
+                                CreatedBy = "UI",
+                                CreatedAt = fileProject.CreatedAt,
+                                UpdatedAt = DateTime.UtcNow
+                            };
 
-                        if (_broker.GetProject(dbProject.Id).Success == false)
-                        {
-                            // This hook fires *after* ProjectService.RegisterProject wrote
-                            // .claude/project.json. The broker must reuse that ID rather
-                            // than reject the create as a duplicate — set allowReuseExisting.
-                            _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path,
-                                allowReuseExisting: true);
-                            System.Diagnostics.Debug.WriteLine($"[ProjectSync] Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
+                            if (_broker.GetProject(dbProject.Id).Success == false)
+                            {
+                                // This hook fires *after* ProjectService.RegisterProject wrote
+                                // .claude/project.json. The broker must reuse that ID rather
+                                // than reject the create as a duplicate — set allowReuseExisting.
+                                _broker.CreateProject(dbProject.Name, dbProject.Description, "UI", dbProject.Path,
+                                    allowReuseExisting: true);
+                                System.Diagnostics.Debug.WriteLine($"[ProjectSync] Synced UI project to database: {dbProject.Name} (ID: {dbProject.Id})");
+                            }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"[ProjectSync] Failed to sync project: {ex.Message}");
-                    }
-                };
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[ProjectSync] Failed to sync project: {ex.Message}");
+                        }
+                    };
+                });
 
                 // LEARNED message persistence now handled by knowledge_entries in multiterminal.db
 
@@ -363,8 +381,6 @@ namespace MultiTerminal.API
                 // Simple health check endpoint
                 app.MapGet("/", () => "MultiTerminal REST API is running");
                 app.MapGet("/health", () => new { status = "ok", port = _port });
-
-                _host = app;
 
                 await _host.StartAsync(cancellationToken);
 
@@ -407,6 +423,35 @@ namespace MultiTerminal.API
                 {
                     _isRunning = false;
                 }
+
+                // Unwind the pre-bind work so a retried StartAsync (port-contention Retry loop,
+                // task 4fec40e2) can't orphan an unstarted host, leave duplicate hourly timers
+                // running, or leak the DB-owning DI singletons the failed host built. The shared
+                // ProjectRegistered subscription is kept idempotent separately via
+                // _projectRegisteredHook, so it is intentionally NOT unwound here.
+                try { _staleTaskTimer?.Dispose(); _staleTaskTimer = null; } catch (Exception) { /* best-effort */ }
+                try { _staleAgentTimer?.Dispose(); _staleAgentTimer = null; } catch (Exception) { /* best-effort */ }
+                try { _host?.Dispose(); _host = null; } catch (Exception) { /* best-effort */ }
+                // The disposed host's DI container owned EVERY service StartAsync published onto the
+                // long-lived broker before the bind (ActivityService wraps this host's TaskDatabase
+                // connection; the others hold DI-owned deps too). Drop ALL of them so nothing calls
+                // into a disposed, DB-backed service during the Retry window; a successful retry
+                // re-publishes them. ProjectService is intentionally NOT cleared — it is MainForm's
+                // shared instance, not host-owned (task 4fec40e2 adversary defense-in-depth: clear
+                // every host-owned broker reference, not just one).
+                try
+                {
+                    if (_broker != null)
+                    {
+                        _broker.ActivityService = null;
+                        _broker.SummaryService = null;
+                        _broker.ComplexityDetector = null;
+                        _broker.ChangelogService = null;
+                        _broker.ActivityFeedService = null;
+                    }
+                }
+                catch (Exception) { /* best-effort */ }
+
                 ServerError?.Invoke(this, ex);
                 throw;
             }
