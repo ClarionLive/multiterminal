@@ -15,12 +15,11 @@ namespace MultiTerminal.MCPServer.Services
     /// <para>Owns the <c>_profiles</c> cache (single-owner-per-cache, per bb2b0104) and the profile write path
     /// (clone→mutate→persist→swap, from 1df2a534). The broker keeps its full public profile surface as
     /// one-line delegations to this service, and reaches back in as the service's <see cref="IProfileServiceHost"/>
-    /// (event raising + the IsTemporaryAgent naming utility). Because the terminal-registration region still
-    /// bootstraps profiles into the cache directly (auto-create on register, mark-offline on disconnect — a
-    /// pre-P5 bypass slated for e1643ccc), this service also exposes the NARROW cache primitives
-    /// (<see cref="TryGetProfile"/>, <see cref="ContainsProfile"/>, <see cref="TryAddProfile"/>) those
-    /// broker-side sites reach through, so <c>_profiles</c> stays single-owned without redesigning the
-    /// registration flow.</para>
+    /// (event raising + the IsTemporaryAgent naming utility). The terminal-registration region reaches the
+    /// cache through the read accessors (<see cref="TryGetProfile"/>, <see cref="ContainsProfile"/>) plus the
+    /// public write path (<see cref="InsertProfile"/> for auto-create, <see cref="MutateProfile"/> for
+    /// online/offline/team-lead field writes) — since e1643ccc converted registration onto the write path,
+    /// there is no cache-only add bypass, so a persist failure can never leave a profile in cache but not the DB.</para>
     /// </summary>
     internal sealed class ProfileService
     {
@@ -95,7 +94,7 @@ namespace MultiTerminal.MCPServer.Services
             // cache, and we return Success=false instead of the pre-P5 swallow-and-succeed.
             try
             {
-                InsertProfileInternal(profile);
+                InsertProfile(profile);
             }
             catch (Exception ex)
             {
@@ -122,7 +121,7 @@ namespace MultiTerminal.MCPServer.Services
             // (coherent) and returns Success=false instead of the pre-P5 swallow-and-succeed.
             try
             {
-                MutateProfileInternal(id, p =>
+                MutateProfile(id, p =>
                 {
                     // Update only provided fields (null means don't change).
                     if (displayName != null) p.DisplayName = displayName;
@@ -212,7 +211,9 @@ namespace MultiTerminal.MCPServer.Services
                 // Auto-create profile if it doesn't exist (persist-before-cache via the write path).
                 if (!_profiles.ContainsKey(id))
                 {
-                    InsertProfileInternal(new TeamMemberProfile
+                    // InsertProfile persists the full row with IsOnline=true, so no separate SetProfileOnline
+                    // column write is needed (folds in 86f3fd21's redundant-write NIT).
+                    InsertProfile(new TeamMemberProfile
                     {
                         Id = id,
                         DisplayName = id,
@@ -220,13 +221,12 @@ namespace MultiTerminal.MCPServer.Services
                         CreatedAt = DateTime.UtcNow,
                         UpdatedAt = DateTime.UtcNow
                     });
-                    _taskDb.SetProfileOnline(id);
                     _host.LogInfo($"Auto-created profile: {id}");
                 }
                 else
                 {
                     // Targeted online-flag write as the persist step + coherent cache swap.
-                    MutateProfileInternal(id, p =>
+                    MutateProfile(id, p =>
                     {
                         p.IsOnline = true;
                         p.UpdatedAt = DateTime.UtcNow;
@@ -255,7 +255,7 @@ namespace MultiTerminal.MCPServer.Services
             {
                 // If cached, swap coherently with the offline-flag write as the persist step; if not
                 // cached, still write the DB flag (matches pre-P5, which always wrote it).
-                if (MutateProfileInternal(id, p =>
+                if (MutateProfile(id, p =>
                 {
                     p.IsOnline = false;
                     p.UpdatedAt = DateTime.UtcNow;
@@ -277,18 +277,20 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Broadcast profile updates to all clients. Public because the terminal-registration region
-        /// (RegisterTerminal/UnregisterTerminal, broker-side) still calls it after its own cache writes.
+        /// Broadcast profile updates to all clients. Private since e1643ccc: the CRUD + online/offline
+        /// write-path methods are its only callers now that registration reaches the cache through the
+        /// persist-first write path (no broker-side broadcast call remains).
         /// </summary>
-        public void BroadcastProfileUpdate()
+        private void BroadcastProfileUpdate()
         {
             var profiles = _profiles.Values.OrderBy(p => p.DisplayName ?? p.Id).ToList();
             _host.RaiseProfilesUpdated(profiles);
         }
 
-        // ── Narrow cache accessors for the broker-side terminal-registration region (cross-region writers).
-        //    These keep _profiles single-owned while RegisterTerminal/UnregisterTerminal bootstrap profiles
-        //    into the cache directly (pre-P5 bypass, folds into the write path under e1643ccc). ────────────
+        // ── Narrow cache READ accessors for the broker-side terminal-registration + terminal-listing
+        //    regions. (The write primitives are the public MutateProfile / InsertProfile below — since
+        //    e1643ccc, registration bootstraps profiles through the write path, so there is no longer a
+        //    cache-only add primitive.) ─────────────────────────────────────────────────────────────────
 
         /// <summary>Read accessor: cache lookup for the registration/terminal-listing regions.</summary>
         public bool TryGetProfile(string id, out TeamMemberProfile profile) => _profiles.TryGetValue(id, out profile);
@@ -296,18 +298,13 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>Read accessor: cache existence check for the registration region.</summary>
         public bool ContainsProfile(string id) => _profiles.ContainsKey(id);
 
-        /// <summary>
-        /// Cache-add primitive for the terminal-registration bootstrap bypass (keyed by profile Id). NOT a
-        /// write-path helper — the broker-side caller pairs it with its own _taskDb.SaveProfile, preserving
-        /// RegisterTerminal's exact pre-P5 semantics. Allowlisted in verify-writepath.mjs; removed when
-        /// e1643ccc converts registration onto the write path.
-        /// </summary>
-        public bool TryAddProfile(TeamMemberProfile profile) => _profiles.TryAdd(profile.Id, profile);
-
         // Profile write path (P5 / 1df2a534) — clone → mutate → persist → swap, the mirror of the task /
         // project paths. `persist` defaults to a full-row SaveProfile; pass a custom action for a targeted
         // column write (e.g. the online-flag writers). Neither helper broadcasts (the caller decides).
-        private TeamMemberProfile MutateProfileInternal(string id, Action<TeamMemberProfile> mutate, Action<TeamMemberProfile> persist = null)
+        // PUBLIC since e1643ccc: the terminal-registration region reaches the write path through these
+        // (MutateProfile for online/offline/team-lead field writes, InsertProfile for auto-create) instead
+        // of a cache-only bypass, so a persist failure can no longer leave a profile in cache but not the DB.
+        public TeamMemberProfile MutateProfile(string id, Action<TeamMemberProfile> mutate, Action<TeamMemberProfile> persist = null)
         {
             if (!_profiles.TryGetValue(id, out var current))
             {
@@ -329,13 +326,14 @@ namespace MultiTerminal.MCPServer.Services
             return updated;
         }
 
-        private TeamMemberProfile InsertProfileInternal(TeamMemberProfile profile)
+        public TeamMemberProfile InsertProfile(TeamMemberProfile profile)
         {
             _taskDb.SaveProfile(profile);   // persist FIRST
             _profiles[profile.Id] = profile;   // add to cache only after the DB write succeeded
             return profile;
         }
 
+        // Stays private + Internal-suffixed (no cross-region caller — DeleteProfile is the only entry point).
         private bool DeleteProfileInternal(string id)
         {
             if (!_profiles.ContainsKey(id))
