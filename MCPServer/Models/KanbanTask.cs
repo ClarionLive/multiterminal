@@ -173,6 +173,23 @@ namespace MultiTerminal.MCPServer.Models
         public bool AutoStatus { get; set; }
 
         /// <summary>
+        /// Returns a copy of this task with an independent <see cref="Helpers"/> list.
+        /// <para>Used by MessageBroker's single task write path (P5 / ticket 1df2a534): a mutation is
+        /// applied to a clone, persisted, and only THEN swapped into the cache. That ordering means a
+        /// persist failure cannot leave the cache diverged from the DB, and a concurrent reader never
+        /// observes a half-mutated task — it sees either the old or the new copy, each internally whole.</para>
+        /// <para>Every other property is a string or a value type (immutable, or copied by value by
+        /// <see cref="object.MemberwiseClone"/>), so a member-wise copy plus a fresh <see cref="Helpers"/>
+        /// list is a sufficient deep copy. If a future field is a mutable reference type, deep-copy it here.</para>
+        /// </summary>
+        public KanbanTask Clone()
+        {
+            var copy = (KanbanTask)MemberwiseClone();
+            copy.Helpers = Helpers == null ? null : new List<string>(Helpers);
+            return copy;
+        }
+
+        /// <summary>
         /// Get checklist as list of items, normalizing any legacy items to enhanced format.
         /// </summary>
         public List<ChecklistItem> GetChecklist()
