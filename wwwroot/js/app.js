@@ -308,7 +308,12 @@ async function api(path, options = {}) {
             console.error(`API ${res.status}: ${path}`);
             return null;
         }
-        return await res.json();
+        // Tolerate empty 2xx bodies (pure-ack endpoints return an empty 200 under the
+        // standardized contract, 7ce19175). res.json() throws on an empty body; parse the
+        // text instead so an ack doesn't spuriously flip the connection status offline.
+        // Mirrors the MCP apiCall() empty-tolerance in mcp/index.js.
+        const text = await res.text();
+        return text ? JSON.parse(text) : null;
     } catch (err) {
         console.error(`API error: ${path}`, err);
         updateConnectionStatus(false);
@@ -389,7 +394,10 @@ async function toggleRemoteMode() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: newState })
         });
-        if (!res || !res.success) {
+        // api() returns null on any non-2xx (incl. 403 origin reject); the success body is
+        // now the raw resource { remote_mode } with no `success` flag (7ce19175). So !res
+        // fully captures failure — on error, revert the optimistic toggle.
+        if (!res) {
             applyRemoteToggle(isOn);
         }
     } finally {

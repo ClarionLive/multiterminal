@@ -46,10 +46,10 @@ namespace MultiTerminal.API.Controllers
             // Absent Origin = server-to-server / curl / hook — allowed.
             var origin = Request.Headers["Origin"].FirstOrDefault();
             if (!string.IsNullOrEmpty(origin) && !IsTrustedOrigin(origin))
-                return StatusCode(403, new { error = "Origin not allowed" });
+                return Problem(detail: "Origin not allowed", statusCode: 403);
 
             _broker.SetRemoteMode(request.Enabled);
-            return Ok(new { success = true, remote_mode = request.Enabled });
+            return Ok(new { remote_mode = request.Enabled });
         }
 
         private bool IsTrustedOrigin(string origin)

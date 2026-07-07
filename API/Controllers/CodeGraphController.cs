@@ -52,11 +52,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult Search([FromQuery] string query, [FromQuery] string type = null)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
-            if (string.IsNullOrWhiteSpace(query)) return BadRequest(new { error = "query is required" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
+            if (string.IsNullOrWhiteSpace(query)) return Problem(detail: "query is required", statusCode: 400);
 
             using var dt = q.FindSymbol(query, type);
-            return Ok(new { success = true, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -67,13 +67,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetCallers([FromQuery] long symbolId, [FromQuery] string symbolName = null)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
 
             long id = ResolveSymbolId(symbolId, symbolName);
-            if (id < 0) return NotFound(new { error = "Symbol not found" });
+            if (id < 0) return Problem(detail: "Symbol not found", statusCode: 404);
 
             using var dt = q.GetCallers(id);
-            return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -84,13 +84,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetCallees([FromQuery] long symbolId, [FromQuery] string symbolName = null)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
 
             long id = ResolveSymbolId(symbolId, symbolName);
-            if (id < 0) return NotFound(new { error = "Symbol not found" });
+            if (id < 0) return Problem(detail: "Symbol not found", statusCode: 404);
 
             using var dt = q.GetCallees(id);
-            return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -101,13 +101,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetImpact([FromQuery] long symbolId, [FromQuery] string symbolName = null, [FromQuery] int maxDepth = 10)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
 
             long id = ResolveSymbolId(symbolId, symbolName);
-            if (id < 0) return NotFound(new { error = "Symbol not found" });
+            if (id < 0) return Problem(detail: "Symbol not found", statusCode: 404);
 
             using var dt = q.GetImpact(id, maxDepth);
-            return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -118,13 +118,13 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetInheritance([FromQuery] long symbolId, [FromQuery] string symbolName = null)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
 
             long id = ResolveSymbolId(symbolId, symbolName);
-            if (id < 0) return NotFound(new { error = "Symbol not found" });
+            if (id < 0) return Problem(detail: "Symbol not found", statusCode: 404);
 
             using var dt = q.GetInheritanceTree(id);
-            return Ok(new { success = true, symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { symbolId = id, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -135,10 +135,10 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetDeadCode([FromQuery] int? projectId = null)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
 
             using var dt = q.GetDeadCode(projectId);
-            return Ok(new { success = true, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -149,11 +149,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetFileSymbols([FromQuery] string filePath)
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
-            if (string.IsNullOrWhiteSpace(filePath)) return BadRequest(new { error = "filePath is required" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
+            if (string.IsNullOrWhiteSpace(filePath)) return Problem(detail: "filePath is required", statusCode: 400);
 
             using var dt = q.GetFileSymbols(filePath);
-            return Ok(new { success = true, filePath, count = dt.Rows.Count, results = DataTableToList(dt) });
+            return Ok(new { filePath, count = dt.Rows.Count, results = DataTableToList(dt) });
         }
 
         /// <summary>
@@ -164,11 +164,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult Index([FromBody] IndexRequest request)
         {
             var coordinator = _broker.CodeGraphIndexCoordinator;
-            if (coordinator == null) return StatusCode(503, new { error = "CodeGraph not available" });
-            if (request == null) return BadRequest(new { error = "request body is required" });
+            if (coordinator == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
+            if (request == null) return Problem(detail: "request body is required", statusCode: 400);
             var directory = SafeProjectRoot(request.Directory);
             if (directory == null)
-                return BadRequest(new { error = "directory is required and must resolve to an existing directory" });
+                return Problem(detail: "directory is required and must resolve to an existing directory", statusCode: 400);
 
             try
             {
@@ -177,7 +177,6 @@ namespace MultiTerminal.API.Controllers
                 var result = coordinator.Index(directory, request.ProjectName);
                 return Ok(new
                 {
-                    success = true,
                     result.ProjectName,
                     result.FileCount,
                     result.SymbolCount,
@@ -187,7 +186,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = $"Indexing failed: {ex.Message}" });
+                return Problem(detail: $"Indexing failed: {ex.Message}", statusCode: 500);
             }
         }
 
@@ -199,15 +198,14 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetStats()
         {
             var q = GetQuery();
-            if (q == null) return StatusCode(503, new { error = "CodeGraph not available" });
+            if (q == null) return Problem(detail: "CodeGraph not available", statusCode: 503);
 
             using var dt = q.GetStats();
-            if (dt.Rows.Count == 0) return Ok(new { success = true, indexed = false });
+            if (dt.Rows.Count == 0) return Ok(new { indexed = false });
 
             var row = dt.Rows[0];
             return Ok(new
             {
-                success = true,
                 indexed = true,
                 projectCount = Convert.ToInt32(row["project_count"]),
                 fileCount = Convert.ToInt32(row["file_count"]),

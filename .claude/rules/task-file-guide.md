@@ -20,7 +20,7 @@ When working on a feature area, read these files in order:
 | **Stale task tracking** | StaleTaskService.cs -> TaskDatabase.GetStaleTasks() |
 | **REST API** | MultiTerminalRestServer.cs -> Controllers/ (21 controllers) |
 | **Terminal spawning** | TerminalSpawner.cs -> SpawnController.cs -> SpawnedTeammate.cs |
-| **Terminal streaming** | TerminalStreamService.cs -> TerminalStreamController.cs (WebSocket) |
+| **Terminal streaming** | TerminalStreamService.cs -> TerminalsController.cs (WebSocket, api/terminals/{id}/stream) |
 | **Browser tabs (HUD)** | BrowserTabsController.cs -> HudTabContainer/ |
 | **Companion processes** | CompanionProcessManager.cs -> CompanionController.cs -> CompanionProcess.cs |
 | **MCP Gateway** | GatewayIntegrationService.cs -> GatewayController.cs |

@@ -26,8 +26,11 @@ namespace MultiTerminal.API.Gateway
             {
                 var result = broker.UpdateTaskStatus(taskId, request.Status);
                 if (!result.Success)
-                    return Results.BadRequest(new { error = result.Error });
-                return Results.Ok(new { success = true });
+                    return Results.Problem(detail: result.Error, statusCode: 400);
+                // Non-empty body matching TasksController.UpdateStatus's { status } shape
+                // (7ce19175): the phone PWA's api() calls res.json() on 2xx, so an empty ack
+                // would throw and be read as failure. Shape stays identical to the native route.
+                return Results.Ok(new { status = request.Status });
             });
         }
     }

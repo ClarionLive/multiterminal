@@ -4,6 +4,13 @@ using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Controllers
 {
+    // DATA-ACCESS EXCEPTION (task 7ce19175, ratified by PM). The convention in
+    // API/CONVENTIONS.md is "controllers call MessageBroker; the broker owns TaskDatabase."
+    // This controller is a deliberate, documented exception: it is a self-contained
+    // analytics/telemetry surface (aggregate agent stats + append-only invocation records)
+    // with NO broker-mediated domain state, cache, or events to keep consistent. Routing it
+    // through the broker would add pure pass-throughs that enforce no invariant, growing the
+    // 5.5K-LOC hub for zero behavioral gain. It therefore reads/writes TaskDatabase directly.
     [ApiController]
     [Route("api/agents")]
     public class AgentStatsController : ControllerBase
@@ -47,9 +54,9 @@ namespace MultiTerminal.API.Controllers
         public IActionResult RecordInvocation([FromBody] RecordInvocationRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "Request body is required" });
+                return Problem(detail: "Request body is required", statusCode: 400);
             if (string.IsNullOrWhiteSpace(request.AgentName))
-                return BadRequest(new { error = "agentName is required" });
+                return Problem(detail: "agentName is required", statusCode: 400);
 
             var id = request.Id ?? Guid.NewGuid().ToString("N").Substring(0, 8);
             var invokedAt = request.InvokedAt ?? DateTime.UtcNow;
@@ -68,7 +75,7 @@ namespace MultiTerminal.API.Controllers
                 request.CompletedAt,
                 request.ReportSummary);
 
-            return Ok(new { success = true, invocationId = id });
+            return Ok(new { invocationId = id });
         }
     }
 

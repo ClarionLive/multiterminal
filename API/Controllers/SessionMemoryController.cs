@@ -36,10 +36,10 @@ namespace MultiTerminal.API.Controllers
         {
             var db = GetDb();
             if (db == null)
-                return StatusCode(503, new { error = "SessionMemoryDatabase is not available" });
+                return Problem(detail: "SessionMemoryDatabase is not available", statusCode: 503);
 
             if (string.IsNullOrWhiteSpace(query))
-                return BadRequest(new { error = "query parameter is required" });
+                return Problem(detail: "query parameter is required", statusCode: 400);
 
             if (topK <= 0 || topK > 100) topK = 10;
 
@@ -47,7 +47,6 @@ namespace MultiTerminal.API.Controllers
 
             return Ok(new
             {
-                success = true,
                 query,
                 count = results.Count,
                 results = results.ConvertAll(r => new
@@ -73,21 +72,21 @@ namespace MultiTerminal.API.Controllers
         {
             var db = GetDb();
             if (db == null)
-                return StatusCode(503, new { error = "SessionMemoryDatabase is not available" });
+                return Problem(detail: "SessionMemoryDatabase is not available", statusCode: 503);
 
             if (string.IsNullOrEmpty(request?.SessionFilePath))
-                return BadRequest(new { error = "sessionFilePath is required" });
+                return Problem(detail: "sessionFilePath is required", statusCode: 400);
 
             // Path traversal protection: only allow indexing files under known Claude project directories
             string fullPath = System.IO.Path.GetFullPath(request.SessionFilePath);
             string claudeDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude")
                 + System.IO.Path.DirectorySeparatorChar;
             if (!fullPath.StartsWith(claudeDir, StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { error = "sessionFilePath must be within the Claude projects directory" });
+                return Problem(detail: "sessionFilePath must be within the Claude projects directory", statusCode: 400);
 
             int chunks = db.IndexSessionFile(fullPath, request.TerminalName, request.ProjectPath);
 
-            return Ok(new { success = true, chunksCreated = chunks });
+            return Ok(new { chunksCreated = chunks });
         }
 
         /// <summary>
@@ -99,10 +98,10 @@ namespace MultiTerminal.API.Controllers
         {
             var db = GetDb();
             if (db == null)
-                return StatusCode(503, new { error = "SessionMemoryDatabase is not available" });
+                return Problem(detail: "SessionMemoryDatabase is not available", statusCode: 503);
 
             if (string.IsNullOrEmpty(request?.ProjectPath))
-                return BadRequest(new { error = "projectPath is required" });
+                return Problem(detail: "projectPath is required", statusCode: 400);
 
             int chunks = 0;
             try
@@ -112,10 +111,10 @@ namespace MultiTerminal.API.Controllers
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[SessionMemory] Index-project failed: {ex.Message}");
-                return StatusCode(500, new { error = "Indexing failed" });
+                return Problem(detail: "Indexing failed", statusCode: 500);
             }
 
-            return Ok(new { success = true, chunksCreated = chunks });
+            return Ok(new { chunksCreated = chunks });
         }
 
         /// <summary>
@@ -127,12 +126,11 @@ namespace MultiTerminal.API.Controllers
         {
             var db = GetDb();
             if (db == null)
-                return StatusCode(503, new { error = "SessionMemoryDatabase is not available" });
+                return Problem(detail: "SessionMemoryDatabase is not available", statusCode: 503);
 
             var stats = db.GetStats(projectPath);
             return Ok(new
             {
-                success = true,
                 stats.TotalChunks,
                 stats.IndexedSessions
             });
@@ -147,13 +145,13 @@ namespace MultiTerminal.API.Controllers
         {
             var db = GetDb();
             if (db == null)
-                return StatusCode(503, new { error = "SessionMemoryDatabase is not available" });
+                return Problem(detail: "SessionMemoryDatabase is not available", statusCode: 503);
 
             if (string.IsNullOrEmpty(projectPath))
-                return BadRequest(new { error = "projectPath is required" });
+                return Problem(detail: "projectPath is required", statusCode: 400);
 
             var files = db.FindUnindexedSessions(projectPath);
-            return Ok(new { success = true, count = files.Count, files });
+            return Ok(new { count = files.Count, files });
         }
     }
 

@@ -112,9 +112,12 @@ namespace MultiTerminal.API.Gateway
         }
 
         // ============================ Spawn (in-process) =================================
-        // MR /api/spawn → MT SpawnController.SpawnTerminal. Calls SpawnService directly
-        // (the instance MainForm wired UI callbacks onto). Mirrors the controller's Oracle
-        // guard + project-source-path resolution + response shape.
+        // MR /api/spawn → the phone PWA's spawn endpoint. Calls SpawnService directly (the
+        // instance MainForm wired UI callbacks onto), mirroring SpawnController's Oracle guard
+        // + project-source-path resolution. Response shape DELIBERATELY keeps { success } even
+        // though the :5050 SpawnController dropped it (7ce19175): the shipped phone client
+        // (wwwroot/js/terminals.js) strictly checks data.success, so this gateway endpoint must
+        // retain the flag. Do NOT "standardize" it away without also updating the phone client.
         public static void MapMultiRemoteSpawnEndpoints(this WebApplication app)
         {
             app.MapPost("/api/spawn", async (SpawnTerminalRequest request, SpawnService spawnService, ProjectDatabase projectDb) =>

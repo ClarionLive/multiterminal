@@ -25,7 +25,7 @@ namespace MultiTerminal.API.Controllers
         private WikiGeneratorService GetService() => _broker.WikiGenerator;
 
         private IActionResult ServiceUnavailable()
-            => StatusCode(503, new { error = "WikiGeneratorService is not available" });
+            => Problem(detail: "WikiGeneratorService is not available", statusCode: 503);
 
         // Resolve a caller-supplied projectRoot to a canonical absolute path that exists on disk.
         // Returns null on any failure; callers should respond 400. This collapses '..' segments and
@@ -64,16 +64,16 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("generate")]
         public IActionResult Generate([FromBody] GenerateRequest request)
         {
-            if (request == null) return BadRequest(new { error = "request body is required" });
+            if (request == null) return Problem(detail: "request body is required", statusCode: 400);
             var projectRoot = SafeProjectRoot(request.ProjectRoot);
             if (projectRoot == null)
-                return BadRequest(new { error = "projectRoot is required and must resolve to an existing directory" });
+                return Problem(detail: "projectRoot is required and must resolve to an existing directory", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             if (!string.IsNullOrWhiteSpace(request.SubsystemId) && !IsSafeSubsystemId(request.SubsystemId))
-                return BadRequest(new { error = "subsystemId must match ^[A-Za-z0-9_-]{1,64}$" });
+                return Problem(detail: "subsystemId must match ^[A-Za-z0-9_-]{1,64}$", statusCode: 400);
 
             try
             {
@@ -82,7 +82,6 @@ namespace MultiTerminal.API.Controllers
                     var article = service.GenerateOne(projectRoot, request.ProjectId, request.SubsystemId);
                     return Ok(new
                     {
-                        success = true,
                         article = new
                         {
                             id = article.Id,
@@ -98,7 +97,6 @@ namespace MultiTerminal.API.Controllers
                 var articles = service.GenerateAll(projectRoot, request.ProjectId);
                 return Ok(new
                 {
-                    success = true,
                     count = articles.Count,
                     articles = articles.ConvertAll(a => new
                     {
@@ -114,7 +112,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = ex.Message });
+                return Problem(detail: ex.Message, statusCode: 500);
             }
         }
 
@@ -127,7 +125,7 @@ namespace MultiTerminal.API.Controllers
         {
             var safeRoot = SafeProjectRoot(projectRoot);
             if (safeRoot == null)
-                return BadRequest(new { error = "projectRoot query parameter is required and must resolve to an existing directory" });
+                return Problem(detail: "projectRoot query parameter is required and must resolve to an existing directory", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
@@ -151,7 +149,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = ex.Message });
+                return Problem(detail: ex.Message, statusCode: 500);
             }
         }
 
@@ -164,16 +162,16 @@ namespace MultiTerminal.API.Controllers
         {
             var safeRoot = SafeProjectRoot(projectRoot);
             if (safeRoot == null)
-                return BadRequest(new { error = "projectRoot query parameter is required and must resolve to an existing directory" });
+                return Problem(detail: "projectRoot query parameter is required and must resolve to an existing directory", statusCode: 400);
             if (!IsSafeSubsystemId(id))
-                return BadRequest(new { error = "id must match ^[A-Za-z0-9_-]{1,64}$" });
+                return Problem(detail: "id must match ^[A-Za-z0-9_-]{1,64}$", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             var markdown = service.GetArticleMarkdown(safeRoot, id);
             if (markdown == null)
-                return NotFound(new { error = $"Article '{id}' not found. Run POST /api/wiki/generate first." });
+                return Problem(detail: $"Article '{id}' not found. Run POST /api/wiki/generate first.", statusCode: 404);
 
             return Ok(new { id, markdown });
         }

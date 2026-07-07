@@ -28,7 +28,7 @@ namespace MultiTerminal.API.Controllers
         private KnowledgeDatabase GetService() => _broker.KnowledgeDb;
 
         private IActionResult ServiceUnavailable()
-            => StatusCode(503, new { error = "KnowledgeDatabase is not available" });
+            => Problem(detail: "KnowledgeDatabase is not available", statusCode: 503);
 
         // ── Knowledge entries ──────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ namespace MultiTerminal.API.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { error = ex.Message });
+                return Problem(detail: ex.Message, statusCode: 500);
             }
         }
 
@@ -124,19 +124,19 @@ namespace MultiTerminal.API.Controllers
         public IActionResult AddKnowledgeEntry([FromBody] KnowledgeEntry entry)
         {
             if (entry == null)
-                return BadRequest(new { error = "Request body is required" });
+                return Problem(detail: "Request body is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(entry.Title))
-                return BadRequest(new { error = "title is required" });
+                return Problem(detail: "title is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(entry.Content))
-                return BadRequest(new { error = "content is required" });
+                return Problem(detail: "content is required", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             var id = service.AddKnowledgeEntry(entry);
-            return Ok(new { success = true, id });
+            return Ok(new { id });
         }
 
         /// <summary>
@@ -149,16 +149,16 @@ namespace MultiTerminal.API.Controllers
         public IActionResult UpdateKnowledgeEntry(int id, [FromBody] Dictionary<string, string> fields)
         {
             if (fields == null || fields.Count == 0)
-                return BadRequest(new { error = "At least one field is required" });
+                return Problem(detail: "At least one field is required", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             int rows = service.UpdateKnowledgeEntry(id, fields);
             if (rows == 0)
-                return NotFound(new { error = $"Knowledge entry {id} not found or no valid fields provided" });
+                return Problem(detail: $"Knowledge entry {id} not found or no valid fields provided", statusCode: 404);
 
-            return Ok(new { success = true });
+            return Ok();
         }
 
         /// <summary>
@@ -171,16 +171,16 @@ namespace MultiTerminal.API.Controllers
         public IActionResult BumpReferences([FromBody] BumpReferencesRequest request)
         {
             if (request?.Ids == null || request.Ids.Count == 0)
-                return BadRequest(new { error = "ids array is required" });
+                return Problem(detail: "ids array is required", statusCode: 400);
 
             if (request.Ids.Count > 100)
-                return BadRequest(new { error = "ids array exceeds maximum of 100 entries" });
+                return Problem(detail: "ids array exceeds maximum of 100 entries", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             service.BumpReferences(request.Ids);
-            return Ok(new { success = true, bumped = request.Ids.Count });
+            return Ok(new { bumped = request.Ids.Count });
         }
 
         // ── Research cache ────────────────────────────────────────────────────
@@ -193,7 +193,7 @@ namespace MultiTerminal.API.Controllers
         public IActionResult LookupResearchCache([FromQuery] string query)
         {
             if (string.IsNullOrWhiteSpace(query))
-                return BadRequest(new { error = "query is required" });
+                return Problem(detail: "query is required", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
@@ -223,11 +223,11 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SaveResearchCache([FromBody] ResearchCacheRequest request)
         {
             if (request == null)
-                return BadRequest(new { error = "Request body is required" });
+                return Problem(detail: "Request body is required", statusCode: 400);
             if (string.IsNullOrWhiteSpace(request.Query))
-                return BadRequest(new { error = "query is required" });
+                return Problem(detail: "query is required", statusCode: 400);
             if (string.IsNullOrWhiteSpace(request.Content))
-                return BadRequest(new { error = "content is required" });
+                return Problem(detail: "content is required", statusCode: 400);
 
             // Server-side content size limit (defense-in-depth — hook truncates to 4000 but direct callers bypass)
             if (request.Content.Length > 10000)
@@ -240,7 +240,7 @@ namespace MultiTerminal.API.Controllers
 
             // Dedup: skip if exact hash already exists
             if (service.ResearchCacheExists(hash))
-                return Ok(new { success = true, deduplicated = true, message = "Research already cached" });
+                return Ok(new { deduplicated = true, message = "Research already cached" });
 
             var entry = new KnowledgeEntry
             {
@@ -256,7 +256,7 @@ namespace MultiTerminal.API.Controllers
             };
 
             var id = service.AddKnowledgeEntry(entry);
-            return Ok(new { success = true, id, queryHash = hash });
+            return Ok(new { id, queryHash = hash });
         }
 
         /// <summary>
@@ -283,14 +283,14 @@ namespace MultiTerminal.API.Controllers
             [FromQuery] string projectId)
         {
             if (string.IsNullOrWhiteSpace(filePath))
-                return BadRequest(new { error = "filePath is required" });
+                return Problem(detail: "filePath is required", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             var digest = service.GetCodeDigest(projectId, filePath);
             if (digest == null)
-                return NotFound(new { error = "No digest found for the given file" });
+                return Problem(detail: "No digest found for the given file", statusCode: 404);
 
             return Ok(digest);
         }
@@ -303,16 +303,16 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SaveCodeDigest([FromBody] CodeDigest digest)
         {
             if (digest == null)
-                return BadRequest(new { error = "Request body is required" });
+                return Problem(detail: "Request body is required", statusCode: 400);
 
             if (string.IsNullOrWhiteSpace(digest.FilePath))
-                return BadRequest(new { error = "filePath is required" });
+                return Problem(detail: "filePath is required", statusCode: 400);
 
             var service = GetService();
             if (service == null) return ServiceUnavailable();
 
             var id = service.SaveCodeDigest(digest);
-            return Ok(new { success = true, id });
+            return Ok(new { id });
         }
 
         /// <summary>

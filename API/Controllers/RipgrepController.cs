@@ -21,12 +21,12 @@ namespace MultiTerminal.API.Controllers
         public IActionResult SearchContent([FromBody] SearchContentRequest request)
         {
             if (string.IsNullOrEmpty(request.Pattern))
-                return BadRequest(new { error = "pattern is required" });
+                return Problem(detail: "pattern is required", statusCode: 400);
             if (string.IsNullOrEmpty(request.Path))
-                return BadRequest(new { error = "path is required" });
+                return Problem(detail: "path is required", statusCode: 400);
 
             if (!_ripgrep.IsAvailable)
-                return StatusCode(503, new { error = "rg.exe not available" });
+                return Problem(detail: "rg.exe not available", statusCode: 503);
 
             var options = new RipgrepOptions
             {
@@ -46,11 +46,10 @@ namespace MultiTerminal.API.Controllers
             var result = _ripgrep.Search(request.Pattern, request.Path, options);
 
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new
             {
-                success = true,
                 matchCount = result.MatchCount,
                 matches = result.Matches,
                 stats = result.Stats
@@ -64,19 +63,18 @@ namespace MultiTerminal.API.Controllers
         public IActionResult FindFiles([FromBody] FindFilesRequest request)
         {
             if (string.IsNullOrEmpty(request.Path))
-                return BadRequest(new { error = "path is required" });
+                return Problem(detail: "path is required", statusCode: 400);
 
             if (!_ripgrep.IsAvailable)
-                return StatusCode(503, new { error = "rg.exe not available" });
+                return Problem(detail: "rg.exe not available", statusCode: 503);
 
             var result = _ripgrep.FindFiles(request.Path, request.Glob, request.FileType);
 
             if (!result.Success)
-                return BadRequest(new { error = result.Error });
+                return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new
             {
-                success = true,
                 fileCount = result.Files.Count,
                 files = result.Files
             });
