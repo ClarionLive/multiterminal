@@ -151,7 +151,10 @@ namespace MultiTerminal.API.Controllers
                     // Fold stderr into the ProblemDetails detail (P3b: house style has no Extensions;
                     // consumers branch on HTTP status, not the error body — see API/CONVENTIONS.md).
                     // stdout is dropped from the response; it stays available in the process logs.
-                    return Problem(detail: $"Regeneration failed: {stderr}", statusCode: 500);
+                    // Guard the fold so an empty stderr doesn't leave a dangling ": " in the detail.
+                    return Problem(
+                        detail: string.IsNullOrWhiteSpace(stderr) ? "Regeneration failed" : $"Regeneration failed: {stderr}",
+                        statusCode: 500);
 
                 // Return the fresh digest
                 return GetLatest();
