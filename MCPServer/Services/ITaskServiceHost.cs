@@ -26,8 +26,10 @@ namespace MultiTerminal.MCPServer.Services
     /// </summary>
     internal interface ITaskServiceHost
     {
-        // ── Logging (broker DebugLogService wrappers) ─────────────────────────────────────────────
+        // ── Logging (broker DebugLogService wrappers; stamped with source "TaskService") ────────────
         void LogError(string message);
+        void LogWarning(string message);
+        void LogInfo(string message);
         void LogTrace(string message);
 
         // ── Event raisers — the Task* events STAY declared on the broker so subscribers (MainForm,

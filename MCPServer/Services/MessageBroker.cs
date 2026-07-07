@@ -1538,8 +1538,12 @@ namespace MultiTerminal.MCPServer.Services
         void ITaskServiceHost.RaiseTaskClaimed(TaskClaimedEventArgs args) => RaiseSafe(TaskClaimed, args);
         void ITaskServiceHost.RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) => RaiseSafe(TaskActiveChanged, args);
 
-        void ITaskServiceHost.LogError(string message) => LogError(message);
-        void ITaskServiceHost.LogTrace(string message) => LogTrace(message);
+        // Stamped with source "TaskService" so the extracted service's log lines are attributable to
+        // it, not the broker (these back the TaskService logging conversion in c425e3a2).
+        void ITaskServiceHost.LogError(string message) => DebugLogService?.Error("TaskService", message);
+        void ITaskServiceHost.LogWarning(string message) => DebugLogService?.Warning("TaskService", message);
+        void ITaskServiceHost.LogInfo(string message) => DebugLogService?.Info("TaskService", message);
+        void ITaskServiceHost.LogTrace(string message) => DebugLogService?.Trace("TaskService", message);
 
         string ITaskServiceHost.NormalizeProjectId(string raw) => NormalizeProjectId(raw);
         bool ITaskServiceHost.TryResolveWorktreeEligibility(KanbanTask task, out string projectPath, out string canonicalProjectId, out string skipReason)
