@@ -700,6 +700,9 @@ function renderTask(task) {
     // --- Build column card lists ---
     // Capture each item's TRUE index in the full checklist array (idx) so the card
     // number matches what the PM/agent refers to, not its position within a column.
+    // Displayed ZERO-BASED (task 5b99b0aa): agents address items by the API's 0-based
+    // itemIndex ("item #5"), so the UI shows the same number — no off-by-one between
+    // what an agent says and what the Owner sees.
     const cols = { pending: [], coding: [], testing: [], done: [] };
     checklist.forEach((item, idx) => {
         const st = (item.status || 'pending').toLowerCase();
@@ -720,11 +723,12 @@ function renderColumn(status, items) {
 
     // Build card HTML to set innerHTML in one shot (avoids repeated reflows).
     // Each entry is { item, idx } where idx is the item's true index in the full
-    // checklist array, so the rendered number is stable across status columns.
+    // checklist array, so the rendered number is stable across status columns and
+    // equals the 0-based API itemIndex agents use (task 5b99b0aa).
     let html = '';
     items.forEach(entry => {
         const item = entry.item;
-        const num  = entry.idx + 1;
+        const num  = entry.idx;
         const text = escapeHtml(item.item || '');
         const cycleCount = parseInt(item.cycleCount, 10) || 0;
         const assignedTo = (item.assignedTo || '').trim();
