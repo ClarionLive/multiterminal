@@ -69,6 +69,16 @@ namespace MultiTerminal.Docking
         private DebugLogService _debugLogService;
         private static int _instanceCount = 0;
         private readonly string _docId = Guid.NewGuid().ToString("N").Substring(0, 8);
+        // Per-launch proof-of-origin nonce (fd3437e6). Full 32-hex GUID (much higher entropy
+        // than the 8-char _docId — it must be unguessable, not just unique). MT injects this
+        // into THIS terminal's child env (MULTITERMINAL_LAUNCH_NONCE) AND seeds it on the broker
+        // placeholder it pre-registers; the child echoes it back through register_terminal, and
+        // the broker/MainForm require the echoed value to match before letting a registration
+        // adopt+promote an "Unassigned" placeholder. A foreign process that leaked only the
+        // docId (env inheritance, task ab50355f residual) never learns this nonce, so it can no
+        // longer claim the identity and lock out the real owner. Fresh per instance (incl.
+        // restore/re-adopt), so it tracks this terminal's own launch — same lifetime as _docId.
+        private readonly string _launchNonce = Guid.NewGuid().ToString("N");
 
         // Wall-clock (Unix ms) this TerminalDocument instance was constructed. Used as
         // the freshness floor for the statusline name-glob fallback (task 1ba59334): a
@@ -104,6 +114,15 @@ namespace MultiTerminal.Docking
         /// Used for MCP push notification mapping.
         /// </summary>
         public string DocId => _docId;
+
+        /// <summary>
+        /// Per-launch proof-of-origin nonce for this terminal (task fd3437e6). MT injects it into
+        /// this document's child env and seeds it on the broker placeholder; a registration must
+        /// echo the matching value before it may adopt+promote this doc's "Unassigned" placeholder.
+        /// Empty is never produced here (always a fresh GUID), but downstream gates fail-open on
+        /// an empty seed so session-restore / legacy / non-lockstep-deploy paths keep working.
+        /// </summary>
+        public string LaunchNonce => _launchNonce;
 
         /// <summary>
         /// The broker-confirmed, stable agent identity for this terminal (set once via
@@ -1160,7 +1179,7 @@ namespace MultiTerminal.Docking
             // the SWAPDIAG REGISTER lines to detect a doc↔docId cross. Remove after root cause.
             _debugLogService?.Info("SWAPDIAG",
                 $"LAUNCH inst={InstanceId} docId={_docId} name='{terminalName}' projectId='{projectId}' dir='{workingDirectory}'");
-            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
+            _terminal.Start(workingDirectory, _docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, _launchNonce);
             _debugLogService?.Trace("TerminalDocument.StartTerminal", $"_terminal.Start returned");
 
             // Update status bar after terminal starts

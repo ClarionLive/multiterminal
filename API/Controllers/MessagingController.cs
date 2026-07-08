@@ -25,7 +25,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("register")]
         public IActionResult RegisterTerminal([FromBody] RegisterTerminalRequest request)
         {
-            var result = _broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort);
+            var result = _broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort, nonce: request.Nonce);
             if (!result.Success)
                 return Problem(detail: result.Error, statusCode: 400);
 
@@ -188,6 +188,12 @@ namespace MultiTerminal.API.Controllers
         /// When provided, messages are delivered via channel instead of inbox files.
         /// </summary>
         public int? ChannelPort { get; set; }
+        /// <summary>
+        /// Per-launch proof-of-origin nonce (task fd3437e6), echoed by the child from its
+        /// MULTITERMINAL_LAUNCH_NONCE env var. Required to adopt an "Unassigned" placeholder;
+        /// null/absent for legacy clients (broker fails open on an unseeded placeholder).
+        /// </summary>
+        public string Nonce { get; set; }
     }
 
     public class SendMessageRequest

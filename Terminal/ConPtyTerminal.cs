@@ -92,7 +92,8 @@ namespace MultiTerminal.Terminal
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
         /// <param name="gatewayProfile">MCP Gateway profile name (sets MCP_GATEWAY_PROFILE env var)</param>
         /// <param name="taskWorktreePath">Per-task worktree path resolved from the active task (sets MULTITERMINAL_TASK_WORKTREE env var). Empty when no task worktree is in play.</param>
-        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
+        /// <param name="launchNonce">Per-launch proof-of-origin nonce (sets MULTITERMINAL_LAUNCH_NONCE env var). The child echoes it back through register_terminal so the broker/MainForm can verify a placeholder adoption comes from the terminal MT actually launched, not a foreign process that leaked the docId (task fd3437e6).</param>
+        public void Start(int cols, int rows, string shellPath = null, string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
         {
             if (_isRunning)
                 throw new InvalidOperationException("Terminal is already running");
@@ -124,7 +125,7 @@ namespace MultiTerminal.Terminal
                 CreatePseudoConsole(cols, rows);
 
                 // Start the shell process
-                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
+                StartProcess(shellPath, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce);
 
                 // Close the pipe ends that belong to the pseudo console.
                 // CreatePseudoConsole() duplicates these handles internally, so our
@@ -284,7 +285,24 @@ namespace MultiTerminal.Terminal
                     ". Make sure you're running Windows 10 version 1809 or later.");
         }
 
-        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
+        /// <summary>
+        /// Redacts the <c>MULTITERMINAL_LAUNCH_NONCE</c> assignment from a launch command line before it
+        /// is written to <see cref="DebugLogService"/> (task fd3437e6). The launch nonce is a live secret;
+        /// debug-log output is readable by agents via the <c>debug_logs</c> MCP tool, so logging the raw
+        /// value would let any agent recover and replay it. Only the single-quoted nonce value is replaced
+        /// with a placeholder — the non-secret <c>MULTITERMINAL_*</c> assignments (docId, name, dirs) are
+        /// left intact, and the <c>= $null</c> clear form (no quoted value) is not matched. Pure + internal
+        /// so it is unit-tested (InternalsVisibleTo → MultiTerminal.Tests) without launching a process.
+        /// </summary>
+        internal static string RedactLaunchNonceForLog(string commandLine) =>
+            string.IsNullOrEmpty(commandLine)
+                ? commandLine
+                : System.Text.RegularExpressions.Regex.Replace(
+                    commandLine,
+                    @"(\$env:MULTITERMINAL_LAUNCH_NONCE = ')[^']*(')",
+                    "$1***REDACTED***$2");
+
+        private void StartProcess(string shellPath, string workingDirectory, string docId, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
         {
             DebugLogService?.Info("ConPtyTerminal", $"StartProcess ===== START =====");
             DebugLogService?.Trace("ConPtyTerminal", $"shellPath: '{shellPath}'");
@@ -349,6 +367,24 @@ namespace MultiTerminal.Terminal
             string safeDocId = docId.Replace("'", "''");
             envSetup += $"$env:MULTITERMINAL_DOC_ID = '{safeDocId}'; ";
             DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_DOC_ID = '{docId}'");
+
+            // Per-launch proof-of-origin nonce (fd3437e6): a fresh secret MT injects into THIS
+            // child only and also seeds on the broker placeholder. The child echoes it back via
+            // register_terminal; the broker/MainForm require it to match before letting the
+            // registration adopt+promote an "Unassigned" placeholder — so a foreign process that
+            // merely leaked MULTITERMINAL_DOC_ID (but not this nonce) can't claim the identity.
+            // Clear-when-absent for the same anti-inheritance reason as the vars below.
+            if (!string.IsNullOrEmpty(launchNonce))
+            {
+                string safeLaunchNonce = launchNonce.Replace("'", "''");
+                envSetup += $"$env:MULTITERMINAL_LAUNCH_NONCE = '{safeLaunchNonce}'; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Setting MULTITERMINAL_LAUNCH_NONCE (proof-of-origin)");
+            }
+            else
+            {
+                envSetup += "$env:MULTITERMINAL_LAUNCH_NONCE = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_LAUNCH_NONCE");
+            }
 
             // When a value is NOT supplied, explicitly CLEAR the variable instead of leaving
             // it to be inherited from this process's environment (ab50355f). If MT.exe itself
@@ -478,8 +514,14 @@ namespace MultiTerminal.Terminal
             // that ProcessExited fires and the terminal returns to the Start Screen.
             string noExit = string.IsNullOrEmpty(autoRunCommand) ? "-NoExit " : "";
             string commandLine = $"\"{shellPath}\" -NoLogo -ExecutionPolicy Bypass {noExit}-Command \"{envSetup}{cdPrefix}{promptFunc}{autoRun}\"";
+            // fd3437e6: the command line embeds $env:MULTITERMINAL_LAUNCH_NONCE = '<secret>', and
+            // DebugLogService output is readable by agents via the debug_logs MCP tool — logging the
+            // raw value would let any agent recover a LIVE nonce and replay the placeholder adoption
+            // this ticket exists to block (codex-security-auditor A01/CWE-200). Redact ONLY the nonce
+            // assignment before logging; the real value still goes to CreateProcess unchanged.
+            string loggedCommandLine = RedactLaunchNonceForLog(commandLine);
             DebugLogService?.Trace("ConPtyTerminal", $"Final command line:");
-            DebugLogService?.Trace("ConPtyTerminal", $"{commandLine}");
+            DebugLogService?.Trace("ConPtyTerminal", $"{loggedCommandLine}");
 
             // Create process
             DebugLogService?.Trace("ConPtyTerminal", $"Calling CreateProcess...");

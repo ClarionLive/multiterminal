@@ -41,6 +41,7 @@ namespace MultiTerminal.Controls
         private bool _pendingIsTeamLead;
         private string _pendingGatewayProfile;
         private string _pendingTaskWorktreePath;
+        private string _pendingLaunchNonce;
         private TerminalTheme _pendingTheme = TerminalTheme.Dark;
         private string _terminalTitle = "PowerShell";
         private DebugLogService _debugLogService;
@@ -199,7 +200,7 @@ namespace MultiTerminal.Controls
             if (_pendingStart)
             {
                 _pendingStart = false;
-                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile, _pendingTaskWorktreePath);
+                DoStart(_pendingWorkingDir, _pendingDocId, _pendingTerminalName, _pendingAutoRunCommand, _pendingSpawnerName, _pendingProjectId, _pendingIsTeamLead, _pendingGatewayProfile, _pendingTaskWorktreePath, _pendingLaunchNonce);
             }
         }
 
@@ -212,7 +213,7 @@ namespace MultiTerminal.Controls
         /// <param name="autoRunCommand">Command to run automatically after shell starts (e.g., "claude -r session_id")</param>
         /// <param name="projectId">Project ID for context injection (sets MULTITERMINAL_PROJECT_ID env var)</param>
         /// <param name="isTeamLead">Whether this terminal is a team lead (sets MULTITERMINAL_TEAM_LEAD env var)</param>
-        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
+        public void Start(string workingDirectory = null, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
         {
             if (_terminal != null && _terminal.IsRunning)
             {
@@ -222,7 +223,7 @@ namespace MultiTerminal.Controls
             // If renderer is initialized, start immediately
             if (_renderer.IsInitialized)
             {
-                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
+                DoStart(workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce);
             }
             else
             {
@@ -237,6 +238,7 @@ namespace MultiTerminal.Controls
                 _pendingIsTeamLead = isTeamLead;
                 _pendingGatewayProfile = gatewayProfile;
                 _pendingTaskWorktreePath = taskWorktreePath;
+                _pendingLaunchNonce = launchNonce;
             }
         }
 
@@ -245,7 +247,7 @@ namespace MultiTerminal.Controls
             FontSizeChanged?.Invoke(this, e);
         }
 
-        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null)
+        private void DoStart(string workingDirectory, string docId = null, string terminalName = null, string autoRunCommand = null, string spawnerName = null, string projectId = null, bool isTeamLead = false, string gatewayProfile = null, string taskWorktreePath = null, string launchNonce = null)
         {
             // Reset Claude Code detection so the event fires again for this new session
             _claudeCodeDetectedThisSession = false;
@@ -274,7 +276,7 @@ namespace MultiTerminal.Controls
 
             try
             {
-                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath);
+                _terminal.Start(_cols, _rows, null, workingDirectory, docId, terminalName, autoRunCommand, spawnerName, projectId, isTeamLead, gatewayProfile, taskWorktreePath, launchNonce);
             }
             catch (Exception ex)
             {

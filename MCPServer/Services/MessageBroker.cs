@@ -1648,12 +1648,13 @@ namespace MultiTerminal.MCPServer.Services
             out string resolvedName,
             string docId = null,
             bool isTeamLead = false,
-            int? channelPort = null)
+            int? channelPort = null,
+            string nonce = null)
         {
             if (string.IsNullOrWhiteSpace(requested))
             {
                 resolvedName = requested;
-                return RegisterTerminal(requested, docId, isTeamLead, channelPort);
+                return RegisterTerminal(requested, docId, isTeamLead, channelPort, nonce);
             }
 
             // "Unassigned" is a deliberate shared sentinel — multiple anonymous
@@ -1661,13 +1662,13 @@ namespace MultiTerminal.MCPServer.Services
             if (requested.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
             {
                 resolvedName = requested;
-                return RegisterTerminal(requested, docId, isTeamLead, channelPort);
+                return RegisterTerminal(requested, docId, isTeamLead, channelPort, nonce);
             }
 
             lock (_uniqueRegistrationLock)
             {
                 resolvedName = FindUniqueCandidate(requested);
-                return RegisterTerminal(resolvedName, docId, isTeamLead, channelPort);
+                return RegisterTerminal(resolvedName, docId, isTeamLead, channelPort, nonce);
             }
         }
 
@@ -1708,9 +1709,9 @@ namespace MultiTerminal.MCPServer.Services
         /// (and UnregisterTerminal) to the write path and REMOVES it from the allowlist as its close
         /// condition, so the exception set shrinks rather than accretes.</para>
         /// </summary>
-        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null)
+        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null, string nonce = null)
         {
-            LogInfo($"RegisterTerminal ENTRY: name='{name}', docId='{docId ?? "null"}', channelPort={channelPort?.ToString() ?? "null"}, stack={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name ?? "?"}");
+            LogInfo($"RegisterTerminal ENTRY: name='{name}', docId='{docId ?? "null"}', channelPort={channelPort?.ToString() ?? "null"}, noncePresented={!string.IsNullOrEmpty(nonce)}, stack={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name ?? "?"}");
 
             // Validate channel port range to prevent SSRF — only allow ports in the assigned range
             if (channelPort.HasValue && (channelPort.Value < 8800 || channelPort.Value > 8899))
@@ -1736,10 +1737,33 @@ namespace MultiTerminal.MCPServer.Services
                 // Only allow rename if the existing terminal is "Unassigned" (placeholder → real name).
                 // If a real terminal already owns this docId, reject the hijack — the new registrant
                 // likely inherited the env var from a parent process (e.g., Clarion IDE addin).
-                if (!existingByDocId.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+                //
+                // Proof-of-origin gate (fd3437e6): even for an "Unassigned" placeholder, adoption is
+                // allowed ONLY when the registrant echoes the launch nonce MT seeded on the placeholder.
+                // A foreign process that inherited MULTITERMINAL_DOC_ID but never learned the nonce is
+                // refused, so it can't claim the identity and lock out the real owner. FAIL-OPEN only when
+                // the placeholder carries NO seeded nonce — a defensive path for a hypothetical unseeded
+                // placeholder; in-version it is never entered because every TerminalDocument launch path
+                // seeds doc.LaunchNonce. NOTE: this is deliberately NOT a "new MT.exe + old mcp/index.js"
+                // compatibility story — that skew would fail CLOSED here (seeded nonce vs empty echo), but
+                // SyncMcpServer (MultiTerminal.csproj, AfterTargets="Build") republishes index.js to
+                // %APPDATA% on every exe build, so a launched child always echoes the nonce and the skew
+                // cannot occur on a built/deployed machine.
+                bool isUnassignedPlaceholder = existingByDocId.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase);
+                bool nonceOk = string.IsNullOrEmpty(existingByDocId.LaunchNonce)
+                               || string.Equals(nonce, existingByDocId.LaunchNonce, StringComparison.Ordinal);
+                if (!isUnassignedPlaceholder || !nonceOk)
                 {
-                    DebugLogService?.Warning("MessageBroker", $"DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
-                    LogInfo($"SWAPDIAG REGISTER-OUTCOME=hijack-reject incoming name='{name}' docId='{docId}' wasOwnedBy='{existingByDocId.Name}' => docId cleared, fresh registration"); // task ab32897c diag; remove after root cause
+                    if (!isUnassignedPlaceholder)
+                    {
+                        DebugLogService?.Warning("MessageBroker", $"DocId collision rejected: '{name}' tried to claim DocId '{docId}' owned by '{existingByDocId.Name}'. Issuing fresh registration.");
+                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=hijack-reject incoming name='{name}' docId='{docId}' wasOwnedBy='{existingByDocId.Name}' => docId cleared, fresh registration"); // task ab32897c diag; remove after root cause
+                    }
+                    else
+                    {
+                        DebugLogService?.Warning("MessageBroker", $"Placeholder adoption rejected: '{name}' presented a non-matching launch nonce for DocId '{docId}'. A foreign registration cannot claim this placeholder. Issuing fresh registration.");
+                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-reject incoming name='{name}' docId='{docId}' placeholder='{existingByDocId.Name}' noncePresented={!string.IsNullOrEmpty(nonce)} => docId cleared, fresh registration"); // task fd3437e6
+                    }
                     docId = null; // Clear the stolen docId so it falls through to fresh registration below
                     existingByDocId = null;
                 }
@@ -1829,6 +1853,65 @@ namespace MultiTerminal.MCPServer.Services
             var existingByName = _terminals.Values.FirstOrDefault(t =>
                 t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.IsConnected);
 
+            // fd3437e6: "Unassigned" is a shared sentinel NAME, but each placeholder is a DISTINCT
+            // terminal with its own docId + launch nonce. The shared name makes the FirstOrDefault
+            // above AMBIGUOUS when several "Unassigned" rows exist, so we must NOT trust it to pick the
+            // right row for this docId. Two corrections, in order:
+            //
+            // (1) ANCHOR TO THE DOCID ROW. If a row already exists for THIS docId under the same name
+            //     (an "Unassigned" placeholder re-registering, or a reconnect), reuse that EXACT row —
+            //     existingByDocId is unambiguous where the name lookup is not. Without this, a same-name
+            //     re-registration could fall through to (2) and MINT A DUPLICATE unseeded row for a docId
+            //     that already has a seeded one; a later registration could then hit the duplicate and be
+            //     wrongly fail-open-adopted (cross-model adversary Run-2 finding). Note: the adoption/
+            //     reject branch at the top only runs when the docId row's name DIFFERS from the incoming
+            //     name, so this same-name case would otherwise be unhandled here.
+            if (existingByDocId != null
+                && !ReferenceEquals(existingByName, existingByDocId)
+                && existingByDocId.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                existingByName = existingByDocId;
+            }
+
+            // (2) SPLIT A NEW PLACEHOLDER OFF THE SHARED SENTINEL. Only reached when NO row exists for
+            //     this docId (else (1) anchored it). If the name lookup matched a DIFFERENT-docId
+            //     "Unassigned" row, don't reuse it — that would leave this placeholder's docId/nonce out
+            //     of broker state (the set-if-empty guards below keep the other row's values), leaving a
+            //     squattable hole. Give each distinct-docId "Unassigned" placeholder its OWN row so its
+            //     seeded nonce is present for the adoption gate above.
+            if (existingByName != null
+                && name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(docId)
+                && !docId.Equals(existingByName.DocId, StringComparison.OrdinalIgnoreCase))
+            {
+                existingByName = null;
+            }
+
+            // (3) PROOF-OF-ORIGIN TO ATTACH TO A SEEDED PLACEHOLDER (cross-model adversary Run-3 finding).
+            //     The top adoption gate only nonce-checks a DIFFERENT-name registration. Reaching here with
+            //     existingByName pointing at a SEEDED "Unassigned" placeholder means a SAME-name (name==
+            //     "Unassigned") registration is about to reuse that row and mutate its routable state
+            //     (IsConnected, ChannelPort) and re-raise TerminalRegistered — all WITHOUT proving origin.
+            //     A foreign caller that leaked the docId could thus hijack the placeholder's channel port.
+            //     Require the presented nonce to match the placeholder's seeded nonce; on mismatch, refuse
+            //     to attach — clear docId and force a fresh isolated row. MT's own re-registration passes
+            //     doc.LaunchNonce so it is unaffected; only foreign no-nonce / wrong-nonce callers are
+            //     rejected. Real-named rows never reach here (a real name hits the top adoption gate, and a
+            //     non-placeholder same-name reuse — e.g. the channel server's own port report — is exempt
+            //     because its row's Name is not "Unassigned"). Checked on existingByName (not just the
+            //     anchor) so the single-placeholder case, where existingByName IS existingByDocId, is
+            //     covered too.
+            if (existingByName != null
+                && existingByName.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(existingByName.LaunchNonce)
+                && !string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal))
+            {
+                DebugLogService?.Warning("MessageBroker", $"Placeholder same-name attach rejected: '{name}' presented a non-matching launch nonce for seeded DocId '{existingByName.DocId}'. Issuing fresh registration.");
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-reject-samename incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} => docId cleared, fresh registration"); // task fd3437e6
+                docId = null;
+                existingByName = null;
+            }
+
             if (existingByName != null)
             {
                 // Update existing terminal
@@ -1847,6 +1930,13 @@ namespace MultiTerminal.MCPServer.Services
                 if (!string.IsNullOrEmpty(docId) && string.IsNullOrEmpty(existingByName.DocId))
                 {
                     existingByName.DocId = docId;
+                }
+                // Seed the launch nonce if not already bound (fd3437e6) — mirrors the DocId
+                // set-if-empty rule so a pre-registration that reuses a shared "Unassigned" row
+                // still records its proof-of-origin, but never overwrites an established nonce.
+                if (!string.IsNullOrEmpty(nonce) && string.IsNullOrEmpty(existingByName.LaunchNonce))
+                {
+                    existingByName.LaunchNonce = nonce;
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // Always re-raise event so MainForm updates its mapping
@@ -1910,7 +2000,11 @@ namespace MultiTerminal.MCPServer.Services
                 Name = name,
                 DocId = docId,
                 Color = _terminalColors[_colorIndex++ % _terminalColors.Length],
-                ChannelPort = channelPort
+                ChannelPort = channelPort,
+                // Bind the launch nonce (fd3437e6): for an MT-seeded "Unassigned" placeholder this is
+                // the authoritative proof-of-origin value; for any other fresh registration it records
+                // what the registrant presented. Either way it's what a later adoption must match.
+                LaunchNonce = nonce
             };
             LogInfo($"NEW TERMINAL: '{name}' id={id} channelPort={channelPort?.ToString() ?? "null"} docId={docId ?? "null"}");
 
