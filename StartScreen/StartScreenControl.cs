@@ -378,7 +378,8 @@ namespace MultiTerminal.StartScreen
                         currentVersion = p.CurrentVersion,
                         gitDefaultBranch = p.GitDefaultBranch,
                         gitRepoUrl = p.GitRepoUrl,
-                        defaultTerminal = TerminalKindHelper.Normalize(p.DefaultTerminal)
+                        defaultTerminal = TerminalKindHelper.Normalize(p.DefaultTerminal),
+                        teamLead = p.TeamLead
                     });
                 }
 
