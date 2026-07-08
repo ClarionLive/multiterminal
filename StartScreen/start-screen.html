@@ -332,6 +332,15 @@
             background-color: var(--success);
         }
 
+        .team-lead-badge {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
         /* Card-top controls cluster: pin + launch-kind caret */
         .card-controls {
             display: flex;
@@ -947,6 +956,7 @@
                         <th class="list-icon-cell"></th>
                         <th id="sort-name"    onclick="setSort('name')"     class="sort-asc">Name</th>
                         <th id="sort-type"    onclick="setSort('type')">Type</th>
+                        <th id="sort-lead"    onclick="setSort('lead')">Team Lead</th>
                         <th id="sort-opened"  onclick="setSort('opened')">Last Opened</th>
                         <th>Terminal</th>
                         <th></th>
@@ -1063,6 +1073,9 @@
             if (currentSort === 'type') {
                 va = (a.projectType || '').toLowerCase();
                 vb = (b.projectType || '').toLowerCase();
+            } else if (currentSort === 'lead') {
+                va = (a.teamLead || '').toLowerCase();
+                vb = (b.teamLead || '').toLowerCase();
             } else if (currentSort === 'opened') {
                 va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
                 vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
@@ -1131,6 +1144,7 @@
         var lastOpened = relativeTime(project.lastOpenedAt);
         var termKind = (project.defaultTerminal === 'codex') ? 'codex' : 'claude-code';
         var termName = (termKind === 'codex') ? 'Codex' : 'Claude Code';
+        var teamLead = project.teamLead || '';
 
         card.innerHTML =
             '<div class="card-top">' +
@@ -1170,6 +1184,9 @@
                 '<div class="card-meta">' +
                     (agents > 0
                         ? '<span class="agent-badge"><span class="agent-dot"></span>' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>'
+                        : '') +
+                    (teamLead
+                        ? '<span class="team-lead-badge" title="Team Leader: ' + esc(teamLead) + '">&#128100; ' + esc(teamLead) + '</span>'
                         : '') +
                     '<span class="card-terminal-label" title="Clicking the card launches this terminal">' +
                         'Terminal: <span class="terminal-name">' + esc(termName) + '</span>' +
@@ -1274,7 +1291,8 @@
             return (
                 (p.name        || '').toLowerCase().indexOf(q) >= 0 ||
                 (p.description || '').toLowerCase().indexOf(q) >= 0 ||
-                (p.projectType || '').toLowerCase().indexOf(q) >= 0
+                (p.projectType || '').toLowerCase().indexOf(q) >= 0 ||
+                (p.teamLead    || '').toLowerCase().indexOf(q) >= 0
             );
         });
 
@@ -1284,6 +1302,9 @@
             if (currentSort === 'type') {
                 va = (a.projectType || '').toLowerCase();
                 vb = (b.projectType || '').toLowerCase();
+            } else if (currentSort === 'lead') {
+                va = (a.teamLead || '').toLowerCase();
+                vb = (b.teamLead || '').toLowerCase();
             } else if (currentSort === 'opened') {
                 va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
                 vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
@@ -1317,7 +1338,9 @@
                     '<div class="list-name">' + esc(project.name) + '</div>' +
                     '<div class="list-path">' + esc(project.sourcePath || '') + '</div>' +
                 '</td>' +
-                '<td><span class="type-badge">' + esc(project.projectType || 'project') + '</span></td>' +
+                '<td>' + (project.teamLead
+                    ? '<span class="team-lead-badge" title="Team Leader: ' + esc(project.teamLead) + '">&#128100; ' + esc(project.teamLead) + '</span>'
+                    : '<span class="last-opened">—</span>') + '</td>' +
                 '<td><span class="last-opened">' + relativeTime(project.lastOpenedAt) + '</span></td>' +
                 '<td class="list-terminal-cell"><span class="list-terminal-chip">' + esc(termName) + '</span></td>' +
                 '<td class="list-launch-cell">' +
@@ -1361,7 +1384,7 @@
     }
 
     function updateSortHeaders() {
-        ['name','type','opened'].forEach(function(col) {
+        ['name','type','lead','opened'].forEach(function(col) {
             var th = document.getElementById('sort-' + col);
             if (!th) return;
             th.className = '';
