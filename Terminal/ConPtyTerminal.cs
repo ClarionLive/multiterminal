@@ -350,6 +350,12 @@ namespace MultiTerminal.Terminal
             envSetup += $"$env:MULTITERMINAL_DOC_ID = '{safeDocId}'; ";
             DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_DOC_ID = '{docId}'");
 
+            // When a value is NOT supplied, explicitly CLEAR the variable instead of leaving
+            // it to be inherited from this process's environment (ab50355f). If MT.exe itself
+            // carries stale MULTITERMINAL_* values (launched from a dev shell, or a shell
+            // inside a prior MT), an un-named child would inherit a FOREIGN identity and
+            // register against another terminal's docId/name — the statusline-migration /
+            // header-cross vector. In PowerShell, assigning $null removes the env var.
             if (!string.IsNullOrEmpty(terminalName))
             {
                 string safeTerminalName = terminalName.Replace("'", "''");
@@ -358,7 +364,8 @@ namespace MultiTerminal.Terminal
             }
             else
             {
-                DebugLogService?.Trace("ConPtyTerminal", $"NO terminalName - MULTITERMINAL_NAME will not be set!");
+                envSetup += "$env:MULTITERMINAL_NAME = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", $"NO terminalName - clearing MULTITERMINAL_NAME (no inheritance)");
             }
 
             if (!string.IsNullOrEmpty(spawnerName))
@@ -367,6 +374,11 @@ namespace MultiTerminal.Terminal
                 envSetup += $"$env:MULTITERMINAL_SPAWNER = '{safeSpawnerName}'; ";
                 DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_SPAWNER = '{spawnerName}'");
             }
+            else
+            {
+                envSetup += "$env:MULTITERMINAL_SPAWNER = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_SPAWNER");
+            }
 
             if (!string.IsNullOrEmpty(projectId))
             {
@@ -374,11 +386,21 @@ namespace MultiTerminal.Terminal
                 envSetup += $"$env:MULTITERMINAL_PROJECT_ID = '{safeProjectId}'; ";
                 DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_PROJECT_ID = '{projectId}'");
             }
+            else
+            {
+                envSetup += "$env:MULTITERMINAL_PROJECT_ID = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_PROJECT_ID");
+            }
 
             if (isTeamLead)
             {
                 envSetup += "$env:MULTITERMINAL_TEAM_LEAD = 'true'; ";
                 DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_TEAM_LEAD = 'true'");
+            }
+            else
+            {
+                envSetup += "$env:MULTITERMINAL_TEAM_LEAD = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_TEAM_LEAD");
             }
 
             if (!string.IsNullOrEmpty(gatewayProfile))
@@ -387,12 +409,22 @@ namespace MultiTerminal.Terminal
                 envSetup += $"$env:MCP_GATEWAY_PROFILE = '{safeGatewayProfile}'; ";
                 DebugLogService?.Trace("ConPtyTerminal", $"Setting MCP_GATEWAY_PROFILE = '{gatewayProfile}'");
             }
+            else
+            {
+                envSetup += "$env:MCP_GATEWAY_PROFILE = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MCP_GATEWAY_PROFILE");
+            }
 
             if (!string.IsNullOrEmpty(taskWorktreePath))
             {
                 string safeWorktreePath = taskWorktreePath.Replace("'", "''");
                 envSetup += $"$env:MULTITERMINAL_TASK_WORKTREE = '{safeWorktreePath}'; ";
                 DebugLogService?.Trace("ConPtyTerminal", $"Setting MULTITERMINAL_TASK_WORKTREE = '{taskWorktreePath}'");
+            }
+            else
+            {
+                envSetup += "$env:MULTITERMINAL_TASK_WORKTREE = $null; ";
+                DebugLogService?.Trace("ConPtyTerminal", "Clearing inherited MULTITERMINAL_TASK_WORKTREE");
             }
 
             // Enable flicker-free alternate-screen renderer for Claude Code

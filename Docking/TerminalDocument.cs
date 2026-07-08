@@ -227,6 +227,13 @@ namespace MultiTerminal.Docking
         private string _lastStatusLineContent;
         private string _lastSharedQuotaContent;
 
+        // Statusline identity generation (ab50355f codex-security HIGH): bumped via Interlocked
+        // whenever StatusLineIdentity changes (promotion, pre-promotion rename). A poll tick
+        // captures it at entry and re-checks it before UI delivery AND before advancing
+        // _lastStatusLineContent, so an in-flight tick that already read the PRIOR identity's
+        // file can never apply or cache that payload after a relabel.
+        private int _statusLineIdentityGen;
+
         // Working-tree dirty poll — GitRepoWatcher only watches .git/, so plain
         // working-tree edits (modify, no stage) never fire RepoStateChanged.
         // This timer ticks on a slow cadence and refreshes the HUD's
@@ -301,6 +308,7 @@ namespace MultiTerminal.Docking
             set
             {
                 _debugLogService?.Trace("TerminalDocument", $"#PROJ# [TerminalDocument.CustomTitle.set] Instance={InstanceId} DocId='{_docId}' old='{_customTitle}' new='{value}' _projectName='{_projectName}'");
+                string oldTitle = _customTitle;
                 _customTitle = value;
                 // NOTE: cycle-7 removed the setter-side promotion of
                 // _originalAgentName — restored sessionInfo.CustomTitle (set
@@ -311,6 +319,24 @@ namespace MultiTerminal.Docking
                 // identity sources: StartTerminal (live launch) and MainForm's
                 // OnMcpTerminalRegistered (broker-confirmed registration).
                 UpdateTabTitle();
+                // Real rename while the statusline poll is live AND the stable identity is
+                // not yet promoted (ab50355f): only then does the rename change
+                // StatusLineIdentity (which falls back to the title pre-promotion). Bump the
+                // identity generation so an in-flight tick drops its stale payload, and clear
+                // the change-detection cache so the next tick redelivers from the new
+                // identity's file. Once promoted, a tab rename is cosmetic and must NOT
+                // disturb the poll (codex-adversary: display title is user-writable).
+                if (_statusLineTimer != null
+                    && string.IsNullOrEmpty(_originalAgentName)
+                    && !string.IsNullOrEmpty(oldTitle)
+                    && !string.IsNullOrEmpty(value)
+                    && !oldTitle.Equals(value, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Cache cleared BEFORE the gen bump — release-publication order (see PromoteOriginalAgentName).
+                    _lastStatusLineContent = null;
+                    System.Threading.Interlocked.Increment(ref _statusLineIdentityGen);
+                    _debugLogService?.Info("TerminalDocument", $"Statusline poll re-pointed by rename '{oldTitle}' → '{value}' (Instance={InstanceId} DocId='{_docId}') — identity gen bumped, cache reset for redelivery (ab50355f)");
+                }
                 // Start polling for status line data once we know the terminal name
                 StartStatusLinePolling();
             }
@@ -332,10 +358,35 @@ namespace MultiTerminal.Docking
         public void PromoteOriginalAgentName(string authoritativeAgentName)
         {
             if (string.IsNullOrEmpty(authoritativeAgentName)) return;
+            // The "Unassigned" placeholder is a launch-time stand-in, not an identity
+            // (ab50355f): promoting it would lock every placeholder-launched terminal to a
+            // meaningless stable name — which made MainForm's 1:1 binding guard refuse the
+            // LEGITIMATE placeholder→real-name relabel (the broker's designed rename flow,
+            // MessageBroker.RegisterTerminal) and pinned the statusline poll to
+            // mt-statusline-Unassigned-*. First REAL name wins instead.
+            if (authoritativeAgentName.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)) return;
             if (!string.IsNullOrEmpty(_originalAgentName)) return;
             _originalAgentName = authoritativeAgentName;
+            // Promotion can change StatusLineIdentity (placeholder/restored tabs were polling
+            // under CustomTitle): clear the change-detection cache so the next tick redelivers
+            // from the now-authoritative identity's file, THEN bump the generation so any
+            // in-flight tick drops its payload (release-publication order: the state a fenced
+            // reader may act on is written before the flag that admits it).
+            _lastStatusLineContent = null;
+            System.Threading.Interlocked.Increment(ref _statusLineIdentityGen);
             _debugLogService?.Trace("TerminalDocument.PromoteOriginalAgentName", $"DocId='{_docId}' set _originalAgentName='{authoritativeAgentName}'.");
         }
+
+        /// <summary>
+        /// The identity used for statusline file lookup: the broker-confirmed stable agent
+        /// name once promoted, else the displayed title (restored tabs pre-promotion). Kept
+        /// separate from <see cref="CustomTitle"/> so a cosmetic tab rename can never
+        /// redirect statusline lookup to another agent's files (ab50355f codex-adversary),
+        /// while unpromoted restored tabs still recover by their displayed identity
+        /// (the d14048ef restore path).
+        /// </summary>
+        private string StatusLineIdentity =>
+            !string.IsNullOrEmpty(_originalAgentName) ? _originalAgentName : _customTitle;
 
         private void UpdateTabTitle()
         {
@@ -2808,13 +2859,24 @@ namespace MultiTerminal.Docking
         {
             if (_statusLineTimer != null) return;
 
-            string terminalName = CustomTitle;
-            if (string.IsNullOrEmpty(terminalName)) return;
+            if (string.IsNullOrEmpty(CustomTitle)) return;
 
             _statusLineTimer = new System.Threading.Timer(_ =>
             {
                 try
                 {
+                    // Read the identity LIVE each tick, not a launch-time capture (ab50355f):
+                    // a captured local froze the name forever, so a tab relabeled by a later
+                    // registration (identity cross, rename) kept polling — and displaying —
+                    // the PRIOR identity's file, which is exactly the "statusline migrated to
+                    // another terminal" symptom. StatusLineIdentity (promoted stable name,
+                    // else displayed title) keeps a cosmetic tab rename from redirecting the
+                    // lookup. The captured generation fences this tick: if the identity
+                    // changes mid-tick, the payload is dropped instead of delivered/cached.
+                    int identityGen = System.Threading.Volatile.Read(ref _statusLineIdentityGen);
+                    string terminalName = StatusLineIdentity;
+                    if (string.IsNullOrEmpty(terminalName)) return;
+
                     // File path is scoped by both terminal name AND docId so sibling
                     // terminals with the same name can't read each other's statusline.
                     // When the docId-scoped file is absent — a terminal restored/re-adopted
@@ -3013,10 +3075,20 @@ namespace MultiTerminal.Docking
                         }
                     }
 
+                    // Identity fence (ab50355f): if a relabel/promotion landed after this tick
+                    // read its identity + file, both the UI delivery and the cache advance
+                    // below would apply the PRIOR identity's payload — drop the tick instead;
+                    // the next tick (~2s) reads the current identity's file.
+                    if (System.Threading.Volatile.Read(ref _statusLineIdentityGen) != identityGen) return;
+
                     // Marshal to UI thread
                     string folderForUi = folder;
                     BeginInvoke(new Action(() =>
                     {
+                        // Re-check on the UI thread: the rename can also land between the
+                        // timer-thread fence above and this queued action running.
+                        if (System.Threading.Volatile.Read(ref _statusLineIdentityGen) != identityGen) return;
+
                         _statusBar?.UpdateStatusLine(model, folderForUi, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h);
                         _statusBar?.UpdateTokenMeter(tmTotal, tmCost, tmEstimate, tmLowerBound, tmBurn, tmSub, tmCache);
 
@@ -3087,8 +3159,14 @@ namespace MultiTerminal.Docking
                     // side effect of an awaitingRender-only re-delivery. Caching unconfirmed content here
                     // (set on the timer thread right after the queue-only BeginInvoke) is what let a
                     // raced/stale ack leave change-detection satisfied while the rows were still hidden,
-                    // suppressing recovery (pipeline Run-1 debugger HIGH-2).
-                    if (perTerminalChanged) _lastStatusLineContent = content;
+                    // suppressing recovery (pipeline Run-1 debugger HIGH-2). The identity-generation
+                    // re-check keeps a stale tick from writing the PRIOR identity's content back over
+                    // the cache a rename/promotion just cleared (ab50355f codex-security HIGH).
+                    if (perTerminalChanged
+                        && System.Threading.Volatile.Read(ref _statusLineIdentityGen) == identityGen)
+                    {
+                        _lastStatusLineContent = content;
+                    }
                 }
                 catch
                 {
@@ -3258,15 +3336,24 @@ namespace MultiTerminal.Docking
             }
             catch { /* best-effort */ }
 
-            // Delete this terminal's scoped statusline file so %TEMP% doesn't
-            // accumulate orphans. Best-effort — missing/locked file is fine.
+            // Delete this terminal's scoped statusline files so %TEMP% doesn't accumulate
+            // orphans. Clean up under BOTH identities when they differ (ab50355f Run-2
+            // codex-security MEDIUM): polling follows StatusLineIdentity (the promoted name),
+            // so a promoted tab cosmetically renamed would otherwise leave its ACTIVE file
+            // behind under the promoted name — briefly adoptable by a later same-name
+            // terminal via the newest-glob fallback. Safe-segment gated so a hostile title
+            // can't traverse the delete path. Best-effort — missing/locked file is fine.
             try
             {
-                string terminalName = CustomTitle;
-                if (!string.IsNullOrEmpty(terminalName) && !string.IsNullOrEmpty(_docId))
+                if (!string.IsNullOrEmpty(_docId))
                 {
-                    string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
-                    if (File.Exists(filePath)) File.Delete(filePath);
+                    var cleanupNames = new[] { StatusLineIdentity, CustomTitle };
+                    foreach (string name in cleanupNames.Where(n => !string.IsNullOrEmpty(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        if (!IsSafeStatusLineSegment(name)) continue;
+                        string filePath = Path.Combine(Path.GetTempPath(), $"mt-statusline-{name}-{_docId}.json");
+                        if (File.Exists(filePath)) File.Delete(filePath);
+                    }
                 }
             }
             catch { /* best-effort cleanup */ }
