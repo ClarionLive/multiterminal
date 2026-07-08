@@ -5,7 +5,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
@@ -13,13 +12,15 @@ using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
+using MultiTerminal.TaskLifecycleBoard;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Controls
 {
     /// <summary>
-    /// WebView2-based dashboard panel showing project info, task stats,
-    /// git status, last session summary, and recent activity feed.
+    /// WebView2-based dashboard panel showing the active task (hero card that
+    /// opens the Lifecycle board on click), project info, task stats, git
+    /// status, last session summary, and recent activity feed.
     /// Lives as a permanent tab in HudTabContainer.
     /// </summary>
     public class HudDashboardRenderer : UserControl
@@ -41,22 +42,6 @@ namespace MultiTerminal.Controls
         // Debounce timer for activity refresh — batches rapid events and
         // gives the DB write time to complete before we read back.
         private System.Windows.Forms.Timer _activityDebounce;
-
-        // Analytics aggregation — Project Analytics (KPI strip + Health
-        // Timeline + Progress Over Time). Separate debounce from activity
-        // because the trigger event is TasksUpdated/ProjectsUpdated, not
-        // ActivityRecorded, and the compute is heavier (30-day window).
-        private ProjectAnalyticsService _analyticsService;
-        private System.Windows.Forms.Timer _analyticsDebounce;
-        private CancellationTokenSource _analyticsCts;
-
-        // CamelCase JSON for the analytics payload — record property names
-        // (Kpis.Open, KpiCard.Value, HealthDay.Date, ProgressPoint.Total)
-        // need to land in the WebView as open/value/date/total.
-        private static readonly JsonSerializerOptions s_camelCaseJsonOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        };
 
         /// <summary>
         /// Raised when the WebView2 zoom factor changes (e.g. Ctrl+wheel).
@@ -200,6 +185,18 @@ namespace MultiTerminal.Controls
                 {
                     OpenGitTabRequested?.Invoke(this, EventArgs.Empty);
                 }
+                else if (msgType == "openLifecycle")
+                {
+                    // Active-task hero card click → open the task's Lifecycle board.
+                    // OpenForTask dedups already-open windows; fires on the UI thread
+                    // (same pattern as TaskHudRenderer / HudGitRenderer).
+                    if (root.TryGetProperty("taskId", out var taskIdEl))
+                    {
+                        var taskId = taskIdEl.GetString();
+                        if (!string.IsNullOrEmpty(taskId) && _broker != null)
+                            TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme);
+                    }
+                }
             }
             catch { }
         }
@@ -238,25 +235,14 @@ namespace MultiTerminal.Controls
                 {
                     _activityDebounce.Stop();
                     RefreshActivity();
+                    // Continuation-note updates mutate the task and record activity
+                    // WITHOUT broadcasting TasksUpdated (TaskService.UpdateTaskContinuation),
+                    // so the hero card must also refresh on the activity path or its
+                    // note snippet goes stale until the next task mutation.
+                    RefreshActiveTask();
                 };
             }
 
-            // Analytics service is constructed once per broker; subsequent
-            // Initialize() calls (theme reload, etc.) reuse the same instance.
-            if (_analyticsService == null && _broker.TaskDb != null)
-            {
-                _analyticsService = new ProjectAnalyticsService(_broker.TaskDb);
-            }
-
-            if (_analyticsDebounce == null)
-            {
-                _analyticsDebounce = new System.Windows.Forms.Timer { Interval = 250 };
-                _analyticsDebounce.Tick += async (s, e) =>
-                {
-                    _analyticsDebounce.Stop();
-                    await RefreshAnalyticsAsync();
-                };
-            }
         }
 
         /// <summary>
@@ -264,17 +250,8 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void SetProject(string projectId, string projectPath, string projectName)
         {
-            bool changed = !string.Equals(_projectId, projectId, StringComparison.Ordinal);
             _projectId = projectId;
             _projectPath = projectPath;
-
-            // Project switch — cancel any in-flight analytics compute immediately
-            // so the previous project's snapshot can't post into the new view.
-            // (RefreshAll() below kicks off a fresh compute with a new CTS.)
-            if (changed)
-            {
-                _analyticsCts?.Cancel();
-            }
 
             if (_isInitialized)
             {
@@ -309,16 +286,16 @@ namespace MultiTerminal.Controls
         // -------------------------------------------------------------------------
 
         /// <summary>
-        /// Refreshes all dashboard data: project info, task stats, git, activity, analytics.
+        /// Refreshes all dashboard data: project info, active task, task stats, git, activity.
         /// </summary>
         public void RefreshAll()
         {
             if (_broker == null) return;
 
             RefreshProjectInfo();
+            RefreshActiveTask();
             RefreshTaskStats();
             RefreshActivity();
-            RequestAnalyticsRefresh();
         }
 
         private async void RefreshProjectInfo()
@@ -443,99 +420,86 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Schedules an analytics recompute via the 250 ms debounce. Called from
-        /// TasksUpdated / ProjectsUpdated / project switch — bursts of related
-        /// events coalesce into one ComputeAsync invocation.
+        /// Sends the project's current active task to the hero card (task cec2efd0).
+        /// Selection: the in-progress task whose SubStatus is "active"; falls back
+        /// to the first non-paused in-progress task, then any in-progress task.
+        /// Sends a none-state when the project has no in-progress work so the
+        /// card shows its empty variant instead of a stale task.
         /// </summary>
-        private void RequestAnalyticsRefresh()
+        private void RefreshActiveTask()
         {
-            if (_analyticsDebounce == null) return;
-            _analyticsDebounce.Stop();
-            _analyticsDebounce.Start();
-        }
+            if (_broker == null) return;
 
-        /// <summary>
-        /// Computes the analytics snapshot off the UI thread (ComputeAsync wraps
-        /// in Task.Run internally) and posts it to the WebView. Cancels any
-        /// in-flight compute when a newer request arrives. Drops the result if
-        /// the user switched projects between dispatch and completion.
-        /// </summary>
-        private async Task RefreshAnalyticsAsync()
-        {
-            if (_broker == null || _analyticsService == null) return;
-
-            // Replace any in-flight compute with the latest one.
-            var oldCts = _analyticsCts;
-            _analyticsCts = new CancellationTokenSource();
-            var ct = _analyticsCts.Token;
-            oldCts?.Cancel();
-            oldCts?.Dispose();
-
-            // Capture projectId at dispatch — used both to scope the broker query
-            // and to verify the snapshot still matches the active view before
-            // posting (project switch during the 250 ms debounce window can
-            // otherwise leak the old project's data into the new view).
-            string capturedProjectId = _projectId;
-            if (string.IsNullOrEmpty(capturedProjectId))
-            {
-                // No project context — blank the analytics section so the
-                // previous project's KPI strip / charts don't linger.
-                SendAnalyticsClearMessage();
-                return;
-            }
-
+            KanbanTask active = null;
             try
             {
-                var tasks = _broker.GetTasks(capturedProjectId);
-                if (tasks == null) return;
-
-                var snapshot = await _analyticsService.ComputeAsync(capturedProjectId, tasks, ct);
-                if (ct.IsCancellationRequested) return;
-                if (!string.Equals(_projectId, capturedProjectId, StringComparison.Ordinal))
+                var tasks = _broker.GetTasks(_projectId);
+                if (tasks != null)
                 {
-                    // The user switched projects between dispatch and result —
-                    // drop this snapshot rather than render stale data.
-                    return;
+                    var inProgress = tasks.Where(t => t.Status == "in_progress" && !t.IsQuickTask).ToList();
+
+                    // Multi-agent projects can hold several simultaneously-active
+                    // tasks (one per agent). This dashboard belongs to ONE terminal,
+                    // so prefer that agent's task at every tier — the card answers
+                    // "what is THIS terminal working on", not "what is the oldest
+                    // active task anyone has".
+                    bool Mine(KanbanTask t) => !string.IsNullOrEmpty(_terminalName) &&
+                        string.Equals(t.Assignee, _terminalName, StringComparison.OrdinalIgnoreCase);
+
+                    active = inProgress.FirstOrDefault(t => Mine(t) && t.SubStatus == "active")
+                          ?? inProgress.FirstOrDefault(t => t.SubStatus == "active")
+                          ?? inProgress.FirstOrDefault(t => Mine(t) && t.SubStatus != "paused")
+                          ?? inProgress.FirstOrDefault(t => t.SubStatus != "paused")
+                          ?? inProgress.FirstOrDefault(Mine)
+                          ?? inProgress.FirstOrDefault();
                 }
-
-                // CamelCase the record property names so the WebView handler
-                // (data.kpis.open.value, data.health[].date, etc.) reads cleanly.
-                var payload = new
-                {
-                    type = "analytics",
-                    kpis = snapshot.Kpis,
-                    health = snapshot.Health,
-                    progress = snapshot.Progress,
-                    degraded = snapshot.Degraded
-                };
-                string json = JsonSerializer.Serialize(payload, s_camelCaseJsonOptions);
-                if (_isInitialized)
-                    PostRawJson(json);
-                else
-                    _pendingMessages.Enqueue(json);
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected when a newer request supersedes this one.
             }
             catch
             {
-                // Analytics is non-critical — never let it blank the dashboard.
+                // Non-critical — fall through to the none-state below.
             }
-        }
 
-        /// <summary>
-        /// Posts a "clear analytics" message so the WebView can blank the KPI
-        /// strip and both Canvas charts when the dashboard loses project
-        /// context (terminal detached, project deleted).
-        /// </summary>
-        private void SendAnalyticsClearMessage()
-        {
-            string json = JsonSerializer.Serialize(new { type = "analytics", clear = true });
-            if (_isInitialized)
-                PostRawJson(json);
-            else
-                _pendingMessages.Enqueue(json);
+            if (active == null)
+            {
+                SendMessage(new { type = "active_task", none = true });
+                return;
+            }
+
+            int checklistDone = 0, checklistTotal = 0;
+            try
+            {
+                var checklist = active.GetChecklist();
+                if (checklist != null)
+                {
+                    checklistTotal = checklist.Count;
+                    // GetChecklist() normalizes legacy items (null Status → done/pending),
+                    // so Status alone is authoritative here — same as DashboardHeaderControl.
+                    checklistDone = checklist.Count(c => c.Status == "done");
+                }
+            }
+            catch
+            {
+                // Corrupt checklist JSON — show the card without progress numbers.
+            }
+
+            // Trim the continuation note to a snippet — the card clamps to 3
+            // lines anyway; no point shipping multi-KB notes over the bridge.
+            string continuation = active.ContinuationNotes ?? "";
+            if (continuation.Length > 280)
+                continuation = continuation.Substring(0, 280).TrimEnd() + "…";
+
+            SendMessage(new
+            {
+                type = "active_task",
+                taskId = active.Id,
+                title = active.Title,
+                assignee = active.Assignee,
+                subStatus = active.SubStatus,
+                priority = active.Priority,
+                checklistDone,
+                checklistTotal,
+                continuation
+            });
         }
 
         private void RefreshActivity()
@@ -606,8 +570,8 @@ namespace MultiTerminal.Controls
                 BeginInvoke(new Action(() => OnTasksUpdated(sender, tasks)));
                 return;
             }
+            RefreshActiveTask();
             RefreshTaskStats();
-            RequestAnalyticsRefresh();
         }
 
         private void OnProjectsUpdated(object sender, List<Project> projects)
@@ -618,7 +582,6 @@ namespace MultiTerminal.Controls
                 return;
             }
             RefreshProjectInfo();
-            RequestAnalyticsRefresh();
         }
 
         private void OnBrokerActivityRecorded(object sender, MCPServer.Models.ActivityEvent activity)
@@ -683,14 +646,6 @@ namespace MultiTerminal.Controls
                 _activityDebounce?.Stop();
                 _activityDebounce?.Dispose();
                 _activityDebounce = null;
-
-                _analyticsDebounce?.Stop();
-                _analyticsDebounce?.Dispose();
-                _analyticsDebounce = null;
-
-                _analyticsCts?.Cancel();
-                _analyticsCts?.Dispose();
-                _analyticsCts = null;
 
                 if (_broker != null)
                 {
