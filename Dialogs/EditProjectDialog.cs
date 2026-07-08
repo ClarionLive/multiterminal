@@ -37,6 +37,7 @@ namespace MultiTerminal.Dialogs
         private TextBox nameTextBox;
         private TextBox descriptionTextBox;
         private ComboBox projectTypeComboBox;
+        private ComboBox statusComboBox;
         private TextBox currentVersionTextBox;
         private TextBox changeLogTextBox;
         private TextBox iconTextBox;
@@ -239,6 +240,9 @@ namespace MultiTerminal.Dialogs
             SelectSourceControlAccount(project.SourceControlAccountId);
             int typeIdx = projectTypeComboBox.FindStringExact(project.ProjectType ?? string.Empty);
             projectTypeComboBox.SelectedIndex = typeIdx >= 0 ? typeIdx : 0;
+            // Normalize null/legacy values to a canonical item so FindStringExact always hits.
+            int statusIdx = statusComboBox.FindStringExact(Project.NormalizeStatus(project.Status));
+            statusComboBox.SelectedIndex = statusIdx >= 0 ? statusIdx : 0;
         }
 
         /// <summary>
@@ -477,6 +481,7 @@ namespace MultiTerminal.Dialogs
             _workingProject.IsPinned = isPinnedCheckBox.Checked;
             string selType = projectTypeComboBox.SelectedItem as string;
             _workingProject.ProjectType = string.IsNullOrWhiteSpace(selType) ? null : selType;
+            _workingProject.Status = Project.NormalizeStatus(statusComboBox.SelectedItem as string);
 
             // Tab 1 - Paths & Commands (only read if user visited this tab)
             if (_visitedTabs.Contains(1))
@@ -833,6 +838,20 @@ namespace MultiTerminal.Dialogs
             this.projectTypeComboBox.SelectedIndex = 0;
             y += rh;
 
+            var lStatus = MkLbl("Status:", lx, y);
+            this.statusComboBox = new ComboBox
+            {
+                Location = new Point(fx, y),
+                Size = new Size(200, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Name = "statusComboBox"
+            };
+            // Source the items from the model's canonical list so the dialog and persistence
+            // never drift (string[] is a valid object[] via array covariance).
+            this.statusComboBox.Items.AddRange(MultiTerminal.Models.Project.StatusValues);
+            this.statusComboBox.SelectedIndex = 0; // Active
+            y += rh;
+
             var l4 = MkLbl("Version:", lx, y);
             this.currentVersionTextBox = MkTxt(fx, y, 120);
             y += rh;
@@ -863,6 +882,7 @@ namespace MultiTerminal.Dialogs
                 l1, this.nameTextBox,
                 l2, this.descriptionTextBox,
                 l3, this.projectTypeComboBox,
+                lStatus, this.statusComboBox,
                 l4, this.currentVersionTextBox,
                 l5, this.iconTextBox,
                 l6, this.iconColorTextBox,

@@ -369,9 +369,13 @@ namespace MultiTerminal.StartScreen
                         description = p.Description,
                         path = p.SourcePath ?? p.Path,
                         isPinned = p.IsPinned,
+                        status = MultiTerminal.Models.Project.NormalizeStatus(p.Status),
                         icon = p.Icon,
                         iconColor = p.IconColor,
                         projectType = p.ProjectType,
+                        createdAt = p.CreatedAt == default
+                            ? null
+                            : p.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss"),
                         lastOpenedAt = p.LastOpenedAt == default
                             ? null
                             : p.LastOpenedAt.ToString("yyyy-MM-dd HH:mm:ss"),
