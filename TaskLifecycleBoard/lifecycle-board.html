@@ -2685,11 +2685,12 @@ body.light .helper-chip {
         }
         content.appendChild(handle);
 
-        // Item number — true position in the full checklist array (1-based), so it
-        // matches the number the PM/agent refers to regardless of which status column
-        // the card sits in.
+        // Item number — true position in the full checklist array, displayed ZERO-BASED
+        // (task 5b99b0aa): agents address items by the API's 0-based itemIndex, so the
+        // board shows the same number the PM/agent refers to regardless of which status
+        // column the card sits in — no off-by-one between agent chat and the UI.
         var num = createEl("div", "card-num");
-        num.textContent = (originalIndex + 1) + ".";
+        num.textContent = originalIndex + ".";
         content.appendChild(num);
 
         // Card Text
@@ -3342,7 +3343,7 @@ body.light .helper-chip {
         for (var i = 0; i < checklist.length; i++) {
             var item = checklist[i];
             if (item.Notes && item.Notes.length > 0) {
-                var itemLabel = item.Item || "Item " + (i + 1);
+                var itemLabel = item.Item || "Item " + i; // 0-based to match the API itemIndex (5b99b0aa)
                 if (itemLabel.length > 50) itemLabel = itemLabel.substring(0, 50) + "...";
                 var combined = [];
                 for (var n = item.Notes.length - 1; n >= 0; n--) {
