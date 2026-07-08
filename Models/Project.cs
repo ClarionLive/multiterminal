@@ -85,6 +85,19 @@ namespace MultiTerminal.Models
         public bool IsPinned { get; set; }
 
         /// <summary>
+        /// Lifecycle status of the project. One of <see cref="StatusValues"/>:
+        /// "Active", "Parked", or "Archived". Drives the Home-page status filter
+        /// (Archived hidden by default) and the card status badge.
+        /// <para>Deliberately NULL-by-default (NOT "Active"): the SaveRichProject UPSERT
+        /// COALESCEs this column, so callers that re-save from a project.json (which lacks
+        /// this SQLite-only field) leave it null and MUST NOT clobber an existing
+        /// Parked/Archived value — exactly the team_lead precedent. Readers and the DTO
+        /// coerce null → "Active" via <see cref="NormalizeStatus"/>, so a null never
+        /// surfaces to the UI.</para>
+        /// </summary>
+        public string Status { get; set; }
+
+        /// <summary>
         /// Icon identifier for the project (e.g. a Material icon name or emoji).
         /// </summary>
         public string Icon { get; set; }
@@ -166,6 +179,27 @@ namespace MultiTerminal.Models
         /// Not persisted directly in projects table — use project_agents table via ProjectDatabase.
         /// </summary>
         public List<string> TeamAgents { get; set; } = new List<string>();
+
+        /// <summary>
+        /// The canonical lifecycle status values, in display order.
+        /// </summary>
+        public static readonly string[] StatusValues = { "Active", "Parked", "Archived" };
+
+        /// <summary>
+        /// Coerces any stored/incoming status string to a canonical value
+        /// (case-insensitive). Null/blank/unrecognized values map to "Active" so a
+        /// bad DB value or a legacy row can never break the filter or badge.
+        /// </summary>
+        public static string NormalizeStatus(string status)
+        {
+            if (string.IsNullOrWhiteSpace(status)) return "Active";
+            switch (status.Trim().ToLowerInvariant())
+            {
+                case "parked": return "Parked";
+                case "archived": return "Archived";
+                default: return "Active";
+            }
+        }
 
         /// <summary>
         /// Creates a new Project with a generated GUID and current timestamp.

@@ -186,7 +186,8 @@ namespace MultiTerminal.Services
                 ("git_auto_commit",    "INTEGER DEFAULT 0"),
                 ("team_lead",          "TEXT"),
                 ("default_terminal",   "TEXT NOT NULL DEFAULT 'claude-code'"),
-                ("source_control_account_id", "TEXT")
+                ("source_control_account_id", "TEXT"),
+                ("status",             "TEXT DEFAULT 'active'")
             };
 
             foreach (var (colName, colDef) in newColumns)
@@ -573,7 +574,7 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id
+                           team_lead, default_terminal, source_control_account_id, status
                     FROM projects
                     WHERE id = @id
                 ";
@@ -605,7 +606,7 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id
+                           team_lead, default_terminal, source_control_account_id, status
                     FROM projects
                     ORDER BY is_pinned DESC, created_at DESC
                 ";
@@ -691,12 +692,12 @@ namespace MultiTerminal.Services
                            source_path, deploy_path, build_output_path, build_command, deploy_command,
                            launch_command, project_type, current_version, change_log, is_pinned,
                            icon, icon_color, last_opened_at, git_repo_url, git_default_branch, git_auto_commit,
-                           team_lead, default_terminal, source_control_account_id)
+                           team_lead, default_terminal, source_control_account_id, status)
                     VALUES (@id, @name, @description, @path, @createdBy, @createdAt, @updatedAt,
                            @sourcePath, @deployPath, @buildOutputPath, @buildCommand, @deployCommand,
                            @launchCommand, @projectType, @currentVersion, @changeLog, @isPinned,
                            @icon, @iconColor, @lastOpenedAt, @gitRepoUrl, @gitDefaultBranch, @gitAutoCommit,
-                           @teamLead, @defaultTerminal, @sourceControlAccountId)
+                           @teamLead, @defaultTerminal, @sourceControlAccountId, @status)
                     ON CONFLICT(id) DO UPDATE SET
                         name = COALESCE(@name, projects.name),
                         description = COALESCE(@description, projects.description),
@@ -720,7 +721,8 @@ namespace MultiTerminal.Services
                         git_auto_commit = @gitAutoCommit,
                         team_lead = COALESCE(@teamLead, projects.team_lead),
                         default_terminal = COALESCE(@defaultTerminal, projects.default_terminal),
-                        source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id)
+                        source_control_account_id = COALESCE(@sourceControlAccountId, projects.source_control_account_id),
+                        status = COALESCE(@status, projects.status)
                 ";
 
                 using var command = new SQLiteCommand(sql, _connection);
@@ -754,6 +756,14 @@ namespace MultiTerminal.Services
                 command.Parameters.AddWithValue("@defaultTerminal",
                     (object)MultiTerminal.Models.TerminalKindHelper.Normalize(project.DefaultTerminal) ?? DBNull.Value);
                 command.Parameters.AddWithValue("@sourceControlAccountId", (object)project.SourceControlAccountId ?? DBNull.Value);
+                // NULL when the caller didn't set a status (e.g. a project.json re-save) so the
+                // COALESCE preserves an existing Parked/Archived — mirrors team_lead. When set,
+                // normalize to the lowercased canonical form so an unrecognized string can never
+                // persist; readers re-normalize to the capitalized display form.
+                command.Parameters.AddWithValue("@status",
+                    string.IsNullOrWhiteSpace(project.Status)
+                        ? (object)DBNull.Value
+                        : MultiTerminal.Models.Project.NormalizeStatus(project.Status).ToLowerInvariant());
 
                 command.ExecuteNonQuery();
             }
@@ -839,7 +849,9 @@ namespace MultiTerminal.Services
                 TeamLead = reader.IsDBNull(23) ? null : reader.GetString(23),
                 DefaultTerminal = MultiTerminal.Models.TerminalKindHelper.Normalize(
                     reader.IsDBNull(24) ? null : reader.GetString(24)),
-                SourceControlAccountId = reader.IsDBNull(25) ? null : reader.GetString(25)
+                SourceControlAccountId = reader.IsDBNull(25) ? null : reader.GetString(25),
+                Status = MultiTerminal.Models.Project.NormalizeStatus(
+                    reader.IsDBNull(26) ? null : reader.GetString(26))
             };
         }
 

@@ -341,6 +341,65 @@
             font-weight: 600;
         }
 
+        .card-created {
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        /* Lifecycle status pill — one class per canonical status (item 75a612dd). */
+        .status-badge {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border: 1px solid transparent;
+            white-space: nowrap;
+        }
+        .status-active {
+            color: var(--success, #4caf50);
+            background-color: rgba(76, 175, 80, 0.14);
+            border-color: rgba(76, 175, 80, 0.35);
+        }
+        .status-parked {
+            color: #d99a2b;
+            background-color: rgba(217, 154, 43, 0.14);
+            border-color: rgba(217, 154, 43, 0.35);
+        }
+        .status-archived {
+            color: var(--text-muted);
+            background-color: var(--badge-bg);
+            border-color: var(--border);
+        }
+        /* Archived cards read as dimmed/inactive in the grid. */
+        .project-card.is-archived { opacity: 0.62; }
+        /* Status column cell in the Browse All table. */
+        .list-status-cell { white-space: nowrap; }
+
+        /* Home grid controls row: "Recent Projects" label + status filter. */
+        .home-controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .status-filter-wrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .status-filter-wrap select {
+            font-size: 11px;
+            padding: 3px 6px;
+            border-radius: 6px;
+            background-color: var(--badge-bg);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
         /* Card-top controls cluster: pin + launch-kind caret */
         .card-controls {
             display: flex;
@@ -798,7 +857,8 @@
             max-width: 240px;
         }
 
-        .list-no-results {
+        .list-no-results,
+        .grid-no-results {
             text-align: center;
             padding: 40px;
             color: var(--text-muted);
@@ -893,7 +953,18 @@
         </div>
 
         <!-- Populated grid (hidden until data arrives) -->
-        <div class="section-label" id="recent-label" style="display:none;">Recent Projects</div>
+        <div class="home-controls" id="recent-label" style="display:none;">
+            <span class="section-label">Recent Projects <span style="font-weight:400;color:var(--text-muted);">· pinned first, then most recent</span></span>
+            <label class="status-filter-wrap">Show
+                <select id="status-filter" onchange="onStatusFilterChange(this.value)">
+                    <option value="default">Active &amp; Parked</option>
+                    <option value="active">Active</option>
+                    <option value="parked">Parked</option>
+                    <option value="archived">Archived</option>
+                    <option value="all">All</option>
+                </select>
+            </label>
+        </div>
         <div id="project-grid" class="grid-section" style="display:none;">
             <div class="project-grid" id="card-container"></div>
         </div>
@@ -947,6 +1018,15 @@
                 autocomplete="off"
                 spellcheck="false"
             />
+            <label class="status-filter-wrap">Show
+                <select id="status-filter-browse" onchange="onStatusFilterChange(this.value)">
+                    <option value="default">Active &amp; Parked</option>
+                    <option value="active">Active</option>
+                    <option value="parked">Parked</option>
+                    <option value="archived">Archived</option>
+                    <option value="all">All</option>
+                </select>
+            </label>
         </div>
 
         <div class="project-list-wrap">
@@ -956,7 +1036,9 @@
                         <th class="list-icon-cell"></th>
                         <th id="sort-name"    onclick="setSort('name')"     class="sort-asc">Name</th>
                         <th id="sort-type"    onclick="setSort('type')">Type</th>
+                        <th id="sort-status"  onclick="setSort('status')">Status</th>
                         <th id="sort-lead"    onclick="setSort('lead')">Team Lead</th>
+                        <th id="sort-created" onclick="setSort('created')">Created</th>
                         <th id="sort-opened"  onclick="setSort('opened')">Last Opened</th>
                         <th>Terminal</th>
                         <th></th>
@@ -978,9 +1060,10 @@
        State
        --------------------------------------------------------------- */
     var allProjects = [];          // full project list received from C#
-    var currentSort = 'name';      // 'name' | 'type' | 'opened'
+    var currentSort = 'name';      // 'name' | 'type' | 'status' | 'lead' | 'created' | 'opened'
     var currentSortDir = 'asc';    // 'asc' | 'desc'
     var searchQuery = '';
+    var statusFilter = 'default';  // 'default'(Active+Parked) | 'active' | 'parked' | 'archived' | 'all'
     var dataLoaded = false;
 
     /* ---------------------------------------------------------------
@@ -1016,6 +1099,18 @@
         // Older: show month + day
         var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
         return months[date.getMonth()] + ' ' + date.getDate();
+    }
+
+    /* ---------------------------------------------------------------
+       Status helper — mirrors C# Project.NormalizeStatus so a null/legacy/
+       unrecognized value always resolves to a canonical display value.
+       --------------------------------------------------------------- */
+    function normalizeStatus(status) {
+        switch (String(status || '').trim().toLowerCase()) {
+            case 'parked':   return 'Parked';
+            case 'archived': return 'Archived';
+            default:         return 'Active';
+        }
     }
 
     /* ---------------------------------------------------------------
@@ -1062,40 +1157,48 @@
     }
 
     /* ---------------------------------------------------------------
-       Sort helper
+       Status filter — 'default' shows Active + Parked (Archived hidden);
+       the other values scope to a single status; 'all' shows everything.
+       --------------------------------------------------------------- */
+    function passesStatusFilter(p) {
+        var s = normalizeStatus(p.status).toLowerCase();
+        switch (statusFilter) {
+            case 'all':      return true;
+            case 'active':   return s === 'active';
+            case 'parked':   return s === 'parked';
+            case 'archived': return s === 'archived';
+            default:         return s !== 'archived'; // 'default' = Active + Parked
+        }
+    }
+
+    // Fired by both the home and Browse All status <select>s. Keeps them in sync
+    // and re-renders whichever views are mounted.
+    function onStatusFilterChange(val) {
+        statusFilter = val || 'default';
+        var sel1 = document.getElementById('status-filter');
+        var sel2 = document.getElementById('status-filter-browse');
+        if (sel1) sel1.value = statusFilter;
+        if (sel2) sel2.value = statusFilter;
+        renderGrid();
+        renderList();
+    }
+
+    /* ---------------------------------------------------------------
+       Sort helper — the home grid's explicit default is pinned-first,
+       then most-recently-opened (independent of the Browse All column sort).
        --------------------------------------------------------------- */
     function sortedProjects(list) {
         var pinned   = list.filter(function(p) { return p.isPinned; });
         var unpinned = list.filter(function(p) { return !p.isPinned; });
 
-        function cmp(a, b) {
-            var va, vb;
-            if (currentSort === 'type') {
-                va = (a.projectType || '').toLowerCase();
-                vb = (b.projectType || '').toLowerCase();
-            } else if (currentSort === 'lead') {
-                va = (a.teamLead || '').toLowerCase();
-                vb = (b.teamLead || '').toLowerCase();
-            } else if (currentSort === 'opened') {
-                va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
-                vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
-                // default opened = desc (newest first) when no explicit asc forced
-            } else {
-                va = (a.name || '').toLowerCase();
-                vb = (b.name || '').toLowerCase();
-            }
-            if (va < vb) return currentSortDir === 'asc' ? -1 : 1;
-            if (va > vb) return currentSortDir === 'asc' ? 1 : -1;
-            return 0;
-        }
-
-        pinned.sort(cmp);
-        unpinned.sort(function(a, b) {
-            // always sort unpinned by lastOpenedAt desc in home grid
+        function byRecencyDesc(a, b) {
             var ta = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
             var tb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
             return tb - ta;
-        });
+        }
+
+        pinned.sort(byRecencyDesc);
+        unpinned.sort(byRecencyDesc);
 
         return pinned.concat(unpinned);
     }
@@ -1107,7 +1210,12 @@
         var container = document.getElementById('card-container');
         container.innerHTML = '';
 
-        var sorted = sortedProjects(allProjects);
+        var sorted = sortedProjects(allProjects.filter(passesStatusFilter));
+
+        if (sorted.length === 0) {
+            container.innerHTML = '<div class="grid-no-results">No projects match this filter.</div>';
+            return;
+        }
 
         sorted.forEach(function(project, idx) {
             var card = buildCard(project, idx);
@@ -1132,8 +1240,9 @@
     }
 
     function buildCard(project, idx) {
+        var status = normalizeStatus(project.status);
         var card = document.createElement('div');
-        card.className = 'project-card';
+        card.className = 'project-card' + (status === 'Archived' ? ' is-archived' : '');
         card.style.animationDelay = (idx * 0.04) + 's';
 
         var label  = iconLabel(project);
@@ -1142,6 +1251,7 @@
         var agents = project.activeAgentCount || 0;
         var badgeText = project.projectType || 'project';
         var lastOpened = relativeTime(project.lastOpenedAt);
+        var created = relativeTime(project.createdAt);
         var termKind = (project.defaultTerminal === 'codex') ? 'codex' : 'claude-code';
         var termName = (termKind === 'codex') ? 'Codex' : 'Claude Code';
         var teamLead = project.teamLead || '';
@@ -1182,6 +1292,7 @@
             '<div class="card-bottom">' +
                 '<span class="type-badge">' + esc(badgeText) + '</span>' +
                 '<div class="card-meta">' +
+                    '<span class="status-badge status-' + status.toLowerCase() + '" title="Status: ' + esc(status) + '">' + esc(status) + '</span>' +
                     (agents > 0
                         ? '<span class="agent-badge"><span class="agent-dot"></span>' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>'
                         : '') +
@@ -1191,7 +1302,8 @@
                     '<span class="card-terminal-label" title="Clicking the card launches this terminal">' +
                         'Terminal: <span class="terminal-name">' + esc(termName) + '</span>' +
                     '</span>' +
-                    '<span class="last-opened">' + lastOpened + '</span>' +
+                    '<span class="card-created" title="Created ' + esc(project.createdAt || 'unknown') + '">Created ' + created + '</span>' +
+                    '<span class="last-opened" title="Last opened ' + esc(project.lastOpenedAt || 'never') + '">Opened ' + lastOpened + '</span>' +
                 '</div>' +
             '</div>';
 
@@ -1285,14 +1397,15 @@
         var noResults = document.getElementById('list-no-results');
         body.innerHTML = '';
 
-        var filtered = allProjects.filter(function(p) {
+        var filtered = allProjects.filter(passesStatusFilter).filter(function(p) {
             if (!searchQuery) return true;
             var q = searchQuery.toLowerCase();
             return (
                 (p.name        || '').toLowerCase().indexOf(q) >= 0 ||
                 (p.description || '').toLowerCase().indexOf(q) >= 0 ||
                 (p.projectType || '').toLowerCase().indexOf(q) >= 0 ||
-                (p.teamLead    || '').toLowerCase().indexOf(q) >= 0
+                (p.teamLead    || '').toLowerCase().indexOf(q) >= 0 ||
+                normalizeStatus(p.status).toLowerCase().indexOf(q) >= 0
             );
         });
 
@@ -1302,9 +1415,15 @@
             if (currentSort === 'type') {
                 va = (a.projectType || '').toLowerCase();
                 vb = (b.projectType || '').toLowerCase();
+            } else if (currentSort === 'status') {
+                va = normalizeStatus(a.status).toLowerCase();
+                vb = normalizeStatus(b.status).toLowerCase();
             } else if (currentSort === 'lead') {
                 va = (a.teamLead || '').toLowerCase();
                 vb = (b.teamLead || '').toLowerCase();
+            } else if (currentSort === 'created') {
+                va = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                vb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
             } else if (currentSort === 'opened') {
                 va = a.lastOpenedAt ? new Date(a.lastOpenedAt).getTime() : 0;
                 vb = b.lastOpenedAt ? new Date(b.lastOpenedAt).getTime() : 0;
@@ -1328,6 +1447,7 @@
             tr.className = 'list-row';
             var label = iconLabel(project);
             var color = iconColor(project);
+            var rowStatus = normalizeStatus(project.status);
             var termKind = (project.defaultTerminal === 'codex') ? 'codex' : 'claude-code';
             var termName = (termKind === 'codex') ? 'Codex' : 'Claude Code';
             tr.innerHTML =
@@ -1338,10 +1458,15 @@
                     '<div class="list-name">' + esc(project.name) + '</div>' +
                     '<div class="list-path">' + esc(project.sourcePath || '') + '</div>' +
                 '</td>' +
+                '<td>' + (project.projectType
+                    ? '<span class="type-badge">' + esc(project.projectType) + '</span>'
+                    : '<span class="last-opened">—</span>') + '</td>' +
+                '<td class="list-status-cell"><span class="status-badge status-' + rowStatus.toLowerCase() + '">' + esc(rowStatus) + '</span></td>' +
                 '<td>' + (project.teamLead
                     ? '<span class="team-lead-badge" title="Team Leader: ' + esc(project.teamLead) + '">&#128100; ' + esc(project.teamLead) + '</span>'
                     : '<span class="last-opened">—</span>') + '</td>' +
-                '<td><span class="last-opened">' + relativeTime(project.lastOpenedAt) + '</span></td>' +
+                '<td><span class="last-opened" title="' + esc(project.createdAt || 'unknown') + '">' + relativeTime(project.createdAt) + '</span></td>' +
+                '<td><span class="last-opened" title="' + esc(project.lastOpenedAt || 'never') + '">' + relativeTime(project.lastOpenedAt) + '</span></td>' +
                 '<td class="list-terminal-cell"><span class="list-terminal-chip">' + esc(termName) + '</span></td>' +
                 '<td class="list-launch-cell">' +
                     '<button class="list-launch-caret" title="Choose a terminal for this launch" aria-label="Choose terminal">&#9660;</button>' +
@@ -1384,7 +1509,7 @@
     }
 
     function updateSortHeaders() {
-        ['name','type','lead','opened'].forEach(function(col) {
+        ['name','type','status','lead','created','opened'].forEach(function(col) {
             var th = document.getElementById('sort-' + col);
             if (!th) return;
             th.className = '';
