@@ -2855,6 +2855,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // set by ConPtyTerminal and always matches the TerminalDocument.
         // The caller-provided docId is unreliable (often a made-up value).
         const effectiveDocId = process.env.MULTITERMINAL_DOC_ID || args.docId;
+        // Proof-of-origin nonce (task fd3437e6): echo back the per-launch secret MT injected into
+        // THIS child's env. It is read ONLY from the env — never from a caller-supplied arg — so an
+        // agent can't forge it, and it's absent for legacy/foreign launches (broker fails open on an
+        // unseeded placeholder). The broker requires it to match before letting this registration
+        // adopt+promote an "Unassigned" placeholder, blocking docId-inheritance identity hijacks.
+        const launchNonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
         // Do NOT set channelPort here — the channel MCP server (multiterminal-channel.mjs)
         // reports its own port via reportPortToBroker() after it starts listening.
         // If we set it here, we'd overwrite the actual port with the env var default (8800),
@@ -2863,6 +2869,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           name: args.name,
           docId: effectiveDocId,
         };
+        if (launchNonce) regPayload.nonce = launchNonce;
         const result = await apiCall("/api/messaging/register", "POST", regPayload);
         const channelInfo = `\nChannel Port: (managed by channel server)`;
         return {

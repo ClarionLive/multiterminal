@@ -1564,6 +1564,34 @@ namespace MultiTerminal
                 }
             }
 
+            // Proof-of-origin gate (fd3437e6): before promoting e.Name onto an UNCLAIMED placeholder
+            // document, require the registration to echo the launch nonce MT injected into THAT
+            // document's child. This is the UI-side half of the placeholder-adoption defense: even if
+            // a foreign registration (inherited/leaked docId) reaches here, it cannot become the
+            // document's first stable identity — which would permanently lock out the real owner —
+            // unless it proves it is the terminal MT actually launched. Only unclaimed placeholders are
+            // gated; an already-promoted/named doc took the boundIdentity path above. Fail-open only
+            // when the doc carries no nonce (defensive — a real TerminalDocument always has one).
+            if (targetDoc != null && !string.IsNullOrEmpty(targetDoc.LaunchNonce))
+            {
+                bool docUnclaimed = string.IsNullOrEmpty(targetDoc.OriginalAgentName)
+                    && (string.IsNullOrEmpty(targetDoc.CustomTitle)
+                        || targetDoc.CustomTitle.Equals("Unassigned", StringComparison.OrdinalIgnoreCase));
+                if (docUnclaimed && !string.Equals(e.LaunchNonce, targetDoc.LaunchNonce, StringComparison.Ordinal))
+                {
+                    // Log only WHETHER a nonce was presented — never the value (it's a live secret).
+                    _debugLogService?.Warning("MainForm", $"Placeholder adoption DENIED (nonce mismatch): registration '{e.Name}' (id={e.Id}, docId={e.DocId}, noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)}) does not prove origin for unclaimed doc inst={targetDoc.InstanceId} docId={targetDoc.DocId}. Refusing to promote it onto this placeholder.");
+                    _debugLogService?.Warning("SWAPDIAG", $"NONCE-DENY name='{e.Name}' e.DocId='{e.DocId}' targetInst={targetDoc.InstanceId} targetDocId={targetDoc.DocId} noncePresented={!string.IsNullOrEmpty(e.LaunchNonce)} => promote refused (task fd3437e6)");
+
+                    // Re-resolve ONLY to a document this registrant legitimately owns (already promoted
+                    // under e.Name). Deliberately NO unclaimed-by-name fallback here: that fallback is
+                    // the very adoption vector we're closing, so a foreign registration with no promoted
+                    // doc of its own binds nowhere (channel/inbox delivery by e.Id/e.Name still works).
+                    targetDoc = _dockPanel.Documents.OfType<TerminalDocument>()
+                        .FirstOrDefault(t => t.OriginalAgentName?.Equals(e.Name, StringComparison.OrdinalIgnoreCase) ?? false);
+                }
+            }
+
             if (targetDoc != null)
             {
                 lock (_terminalDocMapLock)
@@ -3026,14 +3054,14 @@ namespace MultiTerminal
                         _debugLogService?.Trace("AddNewTerminal", $"Team lead naming applied: '{identityName}'");
                     }
 
-                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead, atomicIdentityUniqueness);
+                    terminalName = PreRegisterTerminalWithName(doc.DocId, identityName, isTeamLead, atomicIdentityUniqueness, doc.LaunchNonce);
                     _debugLogService?.Trace("AddNewTerminal", $"PreRegisterTerminalWithName returned: '{terminalName}'");
                 }
                 else if (hasLaunchParams)
                 {
                     _debugLogService?.Trace("AddNewTerminal", "No identity name, using 'Unassigned'");
                     terminalName = "Unassigned";
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, nonce: doc.LaunchNonce);
                 }
                 // else: start screen tab — no MCP registration yet; happens when user launches a project
             }
@@ -3237,12 +3265,12 @@ namespace MultiTerminal
                     // IdentityPickerDialog flow (dialog is authoritative).
                     if (!isTeamLead && kind == TerminalKind.Codex)
                     {
-                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, doc.DocId, isTeamLead);
+                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
                         terminalName = resolved;
                     }
                     else
                     {
-                        _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
+                        _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
                     }
                 }
 
@@ -3329,7 +3357,7 @@ namespace MultiTerminal
                 if (_mcpServer?.Broker != null)
                 {
                     terminalName = "Unassigned";
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, nonce: doc.LaunchNonce);
                 }
 
                 string dir = _settings?.GetLastDirectory();
@@ -3387,7 +3415,7 @@ namespace MultiTerminal
 
                 if (_mcpServer?.Broker != null)
                 {
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead);
+                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
                 }
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
@@ -3491,12 +3519,12 @@ namespace MultiTerminal
                 {
                     if (!isTeamLead && terminalKind == Models.TerminalKind.Codex)
                     {
-                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, sourceDoc.DocId, isTeamLead);
+                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, sourceDoc.DocId, isTeamLead, nonce: sourceDoc.LaunchNonce);
                         terminalName = resolved;
                     }
                     else
                     {
-                        _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead);
+                        _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead, nonce: sourceDoc.LaunchNonce);
                     }
                 }
 
@@ -3633,7 +3661,7 @@ namespace MultiTerminal
         /// Pre-registers a terminal with the MCP server before the shell starts.
         /// Returns a unique name for the terminal.
         /// </summary>
-        private string PreRegisterTerminal(string docId)
+        private string PreRegisterTerminal(string docId, string launchNonce = null)
         {
             try
             {
@@ -3658,8 +3686,9 @@ namespace MultiTerminal
                     terminalName = $"Agent-{docId.Substring(0, 4)}";
                 }
 
-                // Register with MCP server
-                var result = _mcpServer.Broker.RegisterTerminal(terminalName, docId);
+                // Register with MCP server. Seed the launch nonce (fd3437e6) so the broker
+                // placeholder holds the same proof-of-origin value MT injects into this doc's child.
+                var result = _mcpServer.Broker.RegisterTerminal(terminalName, docId, nonce: launchNonce);
                 if (result.Success)
                 {
                     return terminalName;
@@ -3728,7 +3757,7 @@ namespace MultiTerminal
                 : codexDefault;
         }
 
-        private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false, bool atomicUniqueness = false)
+        private string PreRegisterTerminalWithName(string docId, string identityName, bool isTeamLead = false, bool atomicUniqueness = false, string launchNonce = null)
         {
             try
             {
@@ -3739,13 +3768,13 @@ namespace MultiTerminal
                 // exempt inside the broker.
                 if (atomicUniqueness && !isTeamLead)
                 {
-                    var uniqueResult = _mcpServer.Broker.RegisterTerminalUnique(identityName, out string resolved, docId, isTeamLead);
+                    var uniqueResult = _mcpServer.Broker.RegisterTerminalUnique(identityName, out string resolved, docId, isTeamLead, nonce: launchNonce);
                     if (uniqueResult.Success)
                         return resolved;
                 }
                 else
                 {
-                    var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead);
+                    var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead, nonce: launchNonce);
                     if (result.Success)
                         return identityName;
                 }
@@ -3756,7 +3785,7 @@ namespace MultiTerminal
             }
 
             // Fallback to regular pre-registration if specific name fails
-            return PreRegisterTerminal(docId);
+            return PreRegisterTerminal(docId, launchNonce);
         }
 
         /// <summary>
@@ -3808,7 +3837,7 @@ namespace MultiTerminal
             if (_mcpServer?.Broker != null)
             {
                 terminalName = "Unassigned";
-                _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId);
+                _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, nonce: doc.LaunchNonce);
             }
 
             // Start the terminal
@@ -4277,7 +4306,7 @@ namespace MultiTerminal
                 doc.Show(_dockPanel, DockState.Document);
 
                 // Pre-register with MessageBroker so the terminal is routable immediately
-                var terminalName = PreRegisterTerminal(doc.DocId);
+                var terminalName = PreRegisterTerminal(doc.DocId, doc.LaunchNonce);
                 doc.StartTerminal(_settings?.GetLastDirectory(), terminalName);
                 doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
                 docs.Add(doc);
@@ -6271,7 +6300,7 @@ namespace MultiTerminal
             doc.Show(_dockPanel, DockState.Document);
 
             // Pre-register with MessageBroker so the terminal is routable immediately
-            var terminalName = PreRegisterTerminal(doc.DocId);
+            var terminalName = PreRegisterTerminal(doc.DocId, doc.LaunchNonce);
 
             // Start the terminal
             doc.StartTerminal(_settings?.GetLastDirectory(), terminalName);

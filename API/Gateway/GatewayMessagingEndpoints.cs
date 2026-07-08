@@ -30,7 +30,7 @@ namespace MultiTerminal.API.Gateway
 
             app.MapPost("/api/terminals/register", (RegisterTerminalRequest request, MessageBroker broker) =>
             {
-                var result = broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort);
+                var result = broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort, nonce: request.Nonce);
                 if (!result.Success)
                     return Results.BadRequest(new { error = result.Error });
                 return Results.Ok(new { terminalId = result.TerminalId });

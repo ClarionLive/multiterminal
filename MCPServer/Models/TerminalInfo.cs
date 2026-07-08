@@ -43,6 +43,25 @@ namespace MultiTerminal.MCPServer.Models
         public string DocId { get; set; }
 
         /// <summary>
+        /// Per-launch proof-of-origin nonce (task fd3437e6). For an MT-seeded "Unassigned"
+        /// placeholder this is the authoritative value MT injected into the real child's env;
+        /// for any other registration it is the value the registrant echoed back. A registration
+        /// may only adopt+promote an "Unassigned" placeholder when its echoed nonce matches the
+        /// placeholder's seeded nonce — closing the docId-inheritance identity-hijack vector.
+        /// Empty when unseeded; the adoption gate fails open in that (in-version unreachable) case.
+        /// <para>SECURITY: this is a SECRET and MUST NEVER be serialized to any client. It is
+        /// <see cref="System.Text.Json.Serialization.JsonIgnore"/>d so <c>GetTerminals()</c> /
+        /// <c>GET /api/messaging/terminals</c> / the gateway <c>/api/terminals</c> / the MCP
+        /// <c>list_terminals</c> tool cannot disclose it — otherwise any agent that can list
+        /// terminals could read the nonce and replay it, collapsing proof-of-origin into a bearer
+        /// token (codex-security-auditor A01/CWE-200). In-process gate reads (broker adoption
+        /// branch, MainForm promote guard, the TerminalRegistered event) are unaffected — the
+        /// attribute only suppresses JSON serialization, not property access.</para>
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public string LaunchNonce { get; set; }
+
+        /// <summary>
         /// Whether the agent has sent the ready confirmation (via webhook or message).
         /// Used for spawn handshake to ensure agent is initialized before sending work.
         /// </summary>
