@@ -68,6 +68,14 @@ namespace MultiTerminal.Docking
 
         public event EventHandler<ProjectSelectedEventArgs> ProjectSelected;
         public event EventHandler<ProjectSelectedEventArgs> ProjectLaunchRequested;
+
+        /// <summary>
+        /// Raised when the user clicks "Manage Projects" on the panel's welcome card.
+        /// The panel has no header toolbar anymore (selector lives in the WebView), so
+        /// the welcome card must reach MainForm's ProjectManagerDialog through this
+        /// event or it is a dead end for new users (task d2dd75a3).
+        /// </summary>
+        public event EventHandler ManageProjectsRequested;
         public event EventHandler<PromptEventArgs> PromptPasteRequested;
         public event EventHandler<PromptEventArgs> PromptEditRequested;
         public event EventHandler<PromptEventArgs> PromptDeleteRequested;
@@ -139,6 +147,7 @@ namespace MultiTerminal.Docking
             _renderer.ProjectDeleteRequested += OnRendererProjectDeleteRequested;
             _renderer.NewProjectRequested += OnNewProjectRequested;
             _renderer.ProjectListRequested += OnProjectListRequested;
+            _renderer.OpenManagerRequested += OnOpenManagerRequested;
             _renderer.ListDirectoryRequested += OnListDirectoryRequested;
             _renderer.ReadFileRequested += OnReadFileRequested;
 
@@ -1323,6 +1332,15 @@ namespace MultiTerminal.Docking
         private void OnProjectListRequested(object sender, EventArgs e)
         {
             SendProjectListToRenderer();
+        }
+
+        /// <summary>
+        /// Handles the welcome card's "Manage Projects" click — re-raised for MainForm,
+        /// which owns the ProjectManagerDialog (theme + services).
+        /// </summary>
+        private void OnOpenManagerRequested(object sender, EventArgs e)
+        {
+            ManageProjectsRequested?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>

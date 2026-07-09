@@ -127,6 +127,13 @@ namespace MultiTerminal.ProjectPanel
         public event EventHandler ProjectListRequested;
 
         /// <summary>
+        /// Raised when the user clicks "Manage Projects" on the welcome card — the
+        /// welcome state must never be a dead end even when the host toolbar failed
+        /// to render (task d2dd75a3). Routed up to MainForm's ProjectManagerDialog.
+        /// </summary>
+        public event EventHandler OpenManagerRequested;
+
+        /// <summary>
         /// Raised when JS requests the contents of a directory for the file explorer.
         /// Carries the directory path.
         /// </summary>
@@ -333,6 +340,10 @@ namespace MultiTerminal.ProjectPanel
 
                     case "getProjectList":
                         ProjectListRequested?.Invoke(this, EventArgs.Empty);
+                        break;
+
+                    case "openManager":
+                        OpenManagerRequested?.Invoke(this, EventArgs.Empty);
                         break;
 
                     case "listDirectory":

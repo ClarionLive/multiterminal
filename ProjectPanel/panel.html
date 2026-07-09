@@ -1875,7 +1875,11 @@
             return html;
         }
 
-        // Render welcome state
+        // Render welcome state. Must NEVER be a dead end (task d2dd75a3): the host
+        // toolbar this card used to reference can be absent (intermittent render bug),
+        // so the card itself carries working controls — the existing in-panel project
+        // selector and a Manage hook — instead of tips pointing at chrome that may
+        // not exist.
         function renderWelcome() {
             const container = document.getElementById('container');
             container.innerHTML = `
@@ -1883,14 +1887,18 @@
                     <div class="welcome-icon">🚀</div>
                     <div class="welcome-title">Welcome to MultiTerminal</div>
                     <div class="welcome-subtitle">Select a project to get started</div>
+                    <div style="display:flex; gap:10px; justify-content:center; margin: 18px 0 6px;">
+                        <button class="project-selector-btn" onclick="openProjectSelector()" style="padding: 8px 16px; font-size: 13px;">&#9660; Browse Projects</button>
+                        <button class="project-selector-btn" onclick="sendToHost({ type: 'openManager' })" style="padding: 8px 16px; font-size: 13px;">&#9881; Manage Projects</button>
+                    </div>
                     <div class="tips-list">
                         <div class="tip-item">
                             <span class="icon">📂</span>
-                            <span>Click <strong>Projects</strong> above to select a registered project</span>
+                            <span><strong>Browse Projects</strong> lists every registered project — click one to open it</span>
                         </div>
                         <div class="tip-item">
                             <span class="icon">⚙️</span>
-                            <span>Click <strong>Manage</strong> to view and organize all projects</span>
+                            <span><strong>Manage Projects</strong> opens the manager to view and organize all projects</span>
                         </div>
                         <div class="tip-item">
                             <span class="icon">✨</span>
@@ -3317,13 +3325,20 @@
         let cachedProjectList = [];
         let cachedCurrentProjectId = '';
         let _projectSelectorPendingOpen = false;
+        let _projectListLoading = false; // true while a getProjectList request is outstanding
 
         function openProjectSelector() {
             if (cachedProjectList.length > 0) {
                 showProjectSelectorPopup();
             } else {
-                // Request data — popup will open when 'projectList' message arrives
+                // Open the popup IMMEDIATELY in a loading state and request data — the
+                // 'projectList' reply refreshes the already-open popup (existing path).
+                // Never leave the click a silent no-op: if the host reply races or is
+                // lost (task d2dd75a3 defect 1), the user still sees the popup with its
+                // loading row and a working Close, instead of nothing happening.
                 _projectSelectorPendingOpen = true;
+                _projectListLoading = true;
+                showProjectSelectorPopup();
                 sendToHost({ type: 'getProjectList' });
             }
         }
@@ -3338,7 +3353,13 @@
 
             let itemsHtml = '';
             if (filtered.length === 0) {
-                itemsHtml = '<div class="picker-empty">No matching projects</div>';
+                // Distinguish the three empty cases: still waiting on the host,
+                // genuinely no registered projects (first run), or filter miss.
+                itemsHtml = _projectListLoading
+                    ? '<div class="picker-empty">Loading projects…</div>'
+                    : (cachedProjectList.length === 0 && !filterText
+                        ? '<div class="picker-empty">No projects registered yet — use <strong>Manage Projects</strong> to add one, or run <code>/multiterminal-addproject</code> in a Claude Code terminal</div>'
+                        : '<div class="picker-empty">No matching projects</div>');
             } else {
                 filtered.forEach(p => {
                     const isCurrent = p.id === cachedCurrentProjectId;
@@ -3546,6 +3567,7 @@
                             const plData = JSON.parse(data);
                             cachedProjectList = plData.projects || [];
                             cachedCurrentProjectId = plData.currentProjectId || '';
+                            _projectListLoading = false; // reply arrived — loading row becomes real content (or true empty-state)
                             // If the selector was waiting for data, open it now
                             if (_projectSelectorPendingOpen) {
                                 _projectSelectorPendingOpen = false;
