@@ -603,9 +603,11 @@ namespace MultiTerminal.Docking
                 Dock = DockStyle.Fill
             };
 
-            // Add permanent HUD tabs: Dashboard, then Notes (Tasks is already tab 0)
+            // Add permanent HUD tabs (Tasks is already tab 0). The dashboard pane is
+            // titled "Activities" (Owner request d788da4b) - its tab ID stays
+            // "__dashboard__" so SwitchToTabById deep-links keep working.
             _hudDashboard = new HudDashboardRenderer();
-            _hudTabContainer.AddPermanentTab("__dashboard__", "\ud83d\udcca Dashboard", _hudDashboard);
+            _hudTabContainer.AddPermanentTab("__dashboard__", "\u26a1 Activities", _hudDashboard);
 
             _hudNotes = new HudNotesRenderer();
             _hudTabContainer.AddPermanentTab("__notes__", "\ud83d\udcdd Notes", _hudNotes);
@@ -625,8 +627,10 @@ namespace MultiTerminal.Docking
             _hudGit = new HudGitRenderer();
             _hudTabContainer.AddPermanentTab("__git__", "\ud83d\udd00 Git", _hudGit);
 
-            // Set desired tab order: Dashboard, Tasks, Git, Notes, Knowledge, Sessions
-            _hudTabContainer.ReorderPermanentTabs("__dashboard__", "__tasks__", "__git__", "__notes__", "__knowledge__", "__sessions__");
+            // Set desired tab order: Tasks, Git, Activities, Notes, Knowledge, Sessions
+            // (Owner request d788da4b). ReorderPermanentTabs also makes the FIRST tab
+            // the startup-active tab, so Tasks is the default view.
+            _hudTabContainer.ReorderPermanentTabs("__tasks__", "__git__", "__dashboard__", "__notes__", "__knowledge__", "__sessions__");
 
             // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
             taskHudRenderer.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
@@ -1210,8 +1214,10 @@ namespace MultiTerminal.Docking
             _hudGit?.SetProject(projectId, workingDirectory);
             // (_hudSessions is keyed above to the canonical project path, not the
             // launch/worktree dir — see _hudNotesProjectKey resolution.)
-            // Switch HUD to dashboard tab by default when starting a terminal
-            _hudTabContainer?.SwitchToTabById("__dashboard__");
+            // Switch HUD to the Tasks tab by default when starting a terminal
+            // (Owner request d788da4b — Tasks is the default view; this deep-link
+            // previously forced the dashboard and silently defeated the reorder).
+            _hudTabContainer?.SwitchToTabById("__tasks__");
 
             // Kick off working-tree dirty polling now that we have a project
             // context. This surfaces uncommitted edits (which don't touch .git/)
@@ -2366,8 +2372,6 @@ namespace MultiTerminal.Docking
                 _hudGit.OpenDiffPopupRequested += OnHudGitOpenDiffPopupRequested;
             }
             _hudSessions?.Initialize(broker);
-            if (!string.IsNullOrEmpty(CustomTitle))
-                _hudDashboard?.SetTerminalName(CustomTitle);
 
             // Update status bar if terminal name is already set
             // Otherwise, StartTerminal() will call UpdateStatusBar() later

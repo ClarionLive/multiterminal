@@ -12,7 +12,6 @@ using Microsoft.Web.WebView2.WinForms;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
-using MultiTerminal.TaskLifecycleBoard;
 using MultiTerminal.Terminal;
 
 namespace MultiTerminal.Controls
@@ -32,7 +31,6 @@ namespace MultiTerminal.Controls
         private double _pendingZoom = 1.0;
 
         private MessageBroker _broker;
-        private string _terminalName;
         private string _projectPath;
         private string _projectId;
 
@@ -185,18 +183,6 @@ namespace MultiTerminal.Controls
                 {
                     OpenGitTabRequested?.Invoke(this, EventArgs.Empty);
                 }
-                else if (msgType == "openLifecycle")
-                {
-                    // Active-task hero card click → open the task's Lifecycle board.
-                    // OpenForTask dedups already-open windows; fires on the UI thread
-                    // (same pattern as TaskHudRenderer / HudGitRenderer).
-                    if (root.TryGetProperty("taskId", out var taskIdEl))
-                    {
-                        var taskId = taskIdEl.GetString();
-                        if (!string.IsNullOrEmpty(taskId) && _broker != null)
-                            TaskLifecycleBoardForm.OpenForTask(taskId, _broker, _isDarkTheme);
-                    }
-                }
             }
             catch { }
         }
@@ -235,11 +221,6 @@ namespace MultiTerminal.Controls
                 {
                     _activityDebounce.Stop();
                     RefreshActivity();
-                    // Continuation-note updates mutate the task and record activity
-                    // WITHOUT broadcasting TasksUpdated (TaskService.UpdateTaskContinuation),
-                    // so the hero card must also refresh on the activity path or its
-                    // note snippet goes stale until the next task mutation.
-                    RefreshActiveTask();
                 };
             }
 
@@ -257,14 +238,6 @@ namespace MultiTerminal.Controls
             {
                 RefreshAll();
             }
-        }
-
-        /// <summary>
-        /// Sets the terminal name for this dashboard.
-        /// </summary>
-        public void SetTerminalName(string name)
-        {
-            _terminalName = name;
         }
 
         public void ApplyTheme(bool isDark)
@@ -286,14 +259,13 @@ namespace MultiTerminal.Controls
         // -------------------------------------------------------------------------
 
         /// <summary>
-        /// Refreshes all dashboard data: project info, active task, task stats, git, activity.
+        /// Refreshes all dashboard data: project info, task stats, activity.
         /// </summary>
         public void RefreshAll()
         {
             if (_broker == null) return;
 
             RefreshProjectInfo();
-            RefreshActiveTask();
             RefreshTaskStats();
             RefreshActivity();
         }
@@ -419,89 +391,6 @@ namespace MultiTerminal.Controls
             });
         }
 
-        /// <summary>
-        /// Sends the project's current active task to the hero card (task cec2efd0).
-        /// Selection: the in-progress task whose SubStatus is "active"; falls back
-        /// to the first non-paused in-progress task, then any in-progress task.
-        /// Sends a none-state when the project has no in-progress work so the
-        /// card shows its empty variant instead of a stale task.
-        /// </summary>
-        private void RefreshActiveTask()
-        {
-            if (_broker == null) return;
-
-            KanbanTask active = null;
-            try
-            {
-                var tasks = _broker.GetTasks(_projectId);
-                if (tasks != null)
-                {
-                    var inProgress = tasks.Where(t => t.Status == "in_progress" && !t.IsQuickTask).ToList();
-
-                    // Multi-agent projects can hold several simultaneously-active
-                    // tasks (one per agent). This dashboard belongs to ONE terminal,
-                    // so prefer that agent's task at every tier — the card answers
-                    // "what is THIS terminal working on", not "what is the oldest
-                    // active task anyone has".
-                    bool Mine(KanbanTask t) => !string.IsNullOrEmpty(_terminalName) &&
-                        string.Equals(t.Assignee, _terminalName, StringComparison.OrdinalIgnoreCase);
-
-                    active = inProgress.FirstOrDefault(t => Mine(t) && t.SubStatus == "active")
-                          ?? inProgress.FirstOrDefault(t => t.SubStatus == "active")
-                          ?? inProgress.FirstOrDefault(t => Mine(t) && t.SubStatus != "paused")
-                          ?? inProgress.FirstOrDefault(t => t.SubStatus != "paused")
-                          ?? inProgress.FirstOrDefault(Mine)
-                          ?? inProgress.FirstOrDefault();
-                }
-            }
-            catch
-            {
-                // Non-critical — fall through to the none-state below.
-            }
-
-            if (active == null)
-            {
-                SendMessage(new { type = "active_task", none = true });
-                return;
-            }
-
-            int checklistDone = 0, checklistTotal = 0;
-            try
-            {
-                var checklist = active.GetChecklist();
-                if (checklist != null)
-                {
-                    checklistTotal = checklist.Count;
-                    // GetChecklist() normalizes legacy items (null Status → done/pending),
-                    // so Status alone is authoritative here — same as DashboardHeaderControl.
-                    checklistDone = checklist.Count(c => c.Status == "done");
-                }
-            }
-            catch
-            {
-                // Corrupt checklist JSON — show the card without progress numbers.
-            }
-
-            // Trim the continuation note to a snippet — the card clamps to 3
-            // lines anyway; no point shipping multi-KB notes over the bridge.
-            string continuation = active.ContinuationNotes ?? "";
-            if (continuation.Length > 280)
-                continuation = continuation.Substring(0, 280).TrimEnd() + "…";
-
-            SendMessage(new
-            {
-                type = "active_task",
-                taskId = active.Id,
-                title = active.Title,
-                assignee = active.Assignee,
-                subStatus = active.SubStatus,
-                priority = active.Priority,
-                checklistDone,
-                checklistTotal,
-                continuation
-            });
-        }
-
         private void RefreshActivity()
         {
             var feedService = _broker.ActivityFeedService;
@@ -584,7 +473,6 @@ namespace MultiTerminal.Controls
                 BeginInvoke(new Action(() => OnTasksUpdated(sender, tasks)));
                 return;
             }
-            RefreshActiveTask();
             RefreshTaskStats();
         }
 
