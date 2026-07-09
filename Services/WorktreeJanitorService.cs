@@ -38,7 +38,10 @@ namespace MultiTerminal.Services
     /// git no longer knows about. Non-empty dirs are skipped — Pass 3 never
     /// deletes content.</para>
     ///
-    /// <para>Stateless. Decoupled from <see cref="MessageBroker"/> via two
+    /// <para>Nearly stateless — the only cross-sweep state is
+    /// <see cref="_lastSweepActivityKeys"/>, a dedup memory that suppresses activity
+    /// lines identical to the previous sweep's so a persistent wedge logs once, not
+    /// every 5 min (task 7d140c8b). Decoupled from <see cref="MessageBroker"/> via two
     /// callbacks: <see cref="JanitorActivityCallback"/> for activity logging
     /// and a <see cref="Func{T,TResult}"/> for resolving project paths from
     /// task ids. The wire-up site (typically <c>MainForm</c>) provides both.</para>
@@ -46,6 +49,24 @@ namespace MultiTerminal.Services
     public class WorktreeJanitorService
     {
         private readonly TaskDatabase _db;
+
+        // Cross-sweep dedup memory (task 7d140c8b): the (action|relatedId|content)
+        // keys recorded on the PREVIOUS sweep. A persistently-notable condition — e.g.
+        // a done-task branch that keeps failing to auto-merge (task d14048ef) — yields
+        // the SAME activity line every 5-min sweep; without this the janitor spammed the
+        // HUD activity feed once per sweep forever. We log such a condition ONCE and stay
+        // quiet until its content changes or it clears. Accessed only inside SweepCoreAsync,
+        // which the re-entrancy gate below serializes — so no lock is needed on this field.
+        private HashSet<string> _lastSweepActivityKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        // Re-entrancy gate (codex adversary, task 7d140c8b): System.Threading.Timer does NOT
+        // serialize its callbacks, so a slow sweep (e.g. a long git merge) can be overlapped
+        // by the next 5-min tick. Running two sweeps concurrently would break the dedup
+        // compare→record→swap transaction (duplicate emission + stale-state overwrite). The
+        // public SweepAsync skips a tick whenever a sweep is already running, so SweepCoreAsync
+        // runs single-threaded and the whole transaction is atomic by construction.
+        private readonly object _sweepGate = new object();
+        private bool _sweepRunning;
 
         public WorktreeJanitorService(TaskDatabase db)
         {
@@ -56,14 +77,45 @@ namespace MultiTerminal.Services
         /// Activity-log callback signature. Caller wires this to
         /// <c>ActivityService.RecordActivity</c> (or equivalent) without the
         /// janitor needing to depend on the broker / MCPServer namespace.
+        /// Returns <c>true</c> when the activity was durably recorded and <c>false</c> when
+        /// the write failed — the janitor's dedup only remembers delivered lines so a
+        /// silently-failed write is retried next sweep rather than suppressed forever.
         /// </summary>
-        public delegate void JanitorActivityCallback(string action, string content, string relatedId);
+        public delegate bool JanitorActivityCallback(string action, string content, string relatedId);
+
+        /// <summary>
+        /// Public entry point. Serializes sweeps: if a sweep is already running (the 5-min
+        /// timer can overlap a slow one — System.Threading.Timer callbacks aren't serialized),
+        /// this tick is skipped and returns an empty result rather than running concurrently.
+        /// That keeps the cross-sweep dedup transaction in <see cref="SweepCoreAsync"/> atomic.
+        /// </summary>
+        public async Task<JanitorResult> SweepAsync(
+            Func<string, string> getProjectPathForTask,
+            JanitorActivityCallback recordActivity,
+            Func<string, Task<bool>> tryDeferredPruneRetry = null,
+            Func<string, string, Task<MergeResult>> tryMergeForTask = null)
+        {
+            lock (_sweepGate)
+            {
+                if (_sweepRunning) return new JanitorResult(); // a sweep is in progress — skip this overlapping tick
+                _sweepRunning = true;
+            }
+            try
+            {
+                return await SweepCoreAsync(getProjectPathForTask, recordActivity, tryDeferredPruneRetry, tryMergeForTask).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_sweepGate) { _sweepRunning = false; }
+            }
+        }
 
         /// <summary>
         /// Run a single sweep. Safe to call from any thread; performs only
         /// small read+update DB operations. Logs notable events via
         /// <paramref name="recordActivity"/>; logs nothing when the sweep is a
-        /// pure no-op (no missing dirs, no pending merges).
+        /// pure no-op (no missing dirs, no pending merges). Invoked only through
+        /// <see cref="SweepAsync"/>, which guarantees one sweep runs at a time.
         /// </summary>
         /// <param name="getProjectPathForTask">Resolver: taskId → repo root, or
         /// null when the task's project can't be located. Janitor skips Pass 2
@@ -83,13 +135,44 @@ namespace MultiTerminal.Services
         /// dirty-trunk blocker auto-resolves, most pending merges succeed on
         /// retry; a genuine conflict clean-aborts inside the merge service and
         /// the branch stays flagged — bounded per sweep, never a retry loop.</param>
-        public async Task<JanitorResult> SweepAsync(
+        private async Task<JanitorResult> SweepCoreAsync(
             Func<string, string> getProjectPathForTask,
             JanitorActivityCallback recordActivity,
             Func<string, Task<bool>> tryDeferredPruneRetry = null,
             Func<string, string, Task<MergeResult>> tryMergeForTask = null)
         {
             var result = new JanitorResult();
+
+            // Source-side dedup (task 7d140c8b): route every activity record through a
+            // filter that suppresses lines identical to one recorded on the PREVIOUS sweep,
+            // so a persistent wedge (e.g. an unmergeable orphaned branch) logs once, not
+            // every 5 min. Reassigning the parameter here routes ALL existing
+            // recordActivity?.Invoke(...) sites below — per-pass lines AND the aggregate
+            // summary — through the filter with no other edits. currentSweepKeys captures
+            // everything seen THIS sweep (recorded or suppressed) so a still-present
+            // condition stays suppressed next sweep too; a cleared condition drops out and
+            // re-logs if it ever recurs.
+            var rawRecord = recordActivity;
+            var currentSweepKeys = new HashSet<string>(StringComparer.Ordinal);
+            recordActivity = (action, content, relatedId) =>
+            {
+                // Join with a control char (U+0001) that cannot occur in activity text,
+                // so distinct (action, relatedId, content) triples can never collide.
+                var key = string.Join((char)1, action ?? string.Empty, relatedId ?? string.Empty, content ?? string.Empty);
+                if (_lastSweepActivityKeys.Contains(key))
+                {
+                    currentSweepKeys.Add(key); // still present — keep it remembered so it stays suppressed
+                    return true;
+                }
+                // New/changed this sweep: emit, and only REMEMBER the key once delivery is
+                // confirmed. If the write silently failed (rawRecord returns false), we do NOT
+                // dedup it — the identical actionable condition is retried next sweep instead of
+                // being suppressed forever (codex adversary HIGH, task 7d140c8b). A null sink
+                // (headless/tests) counts as delivered so those runs don't loop.
+                bool delivered = rawRecord?.Invoke(action, content, relatedId) ?? true;
+                if (delivered) currentSweepKeys.Add(key);
+                return delivered;
+            };
 
             // Deferred-prune retry pass (cycle-3): tasks whose worktree prune
             // was deferred at task-done time because the broker's pre-prune
@@ -352,11 +435,44 @@ namespace MultiTerminal.Services
             if (recordActivity != null
                 && (result.ReconciledMissing > 0 || result.PendingMerges.Count > 0 || result.OrphansRemoved > 0 || result.DeferredPrunesCompleted > 0 || result.MergesRecovered > 0 || result.StrandedDirsRemaining > 0 || result.Errors.Count > 0))
             {
+                // Actionable summaries (caught errors, or rmdir-blocked strands that need a
+                // human to release the holding process) use a distinct action so the HUD tiers
+                // them as IMPORTANT and they survive the Important filter — a plain
+                // "janitor_sweep" is housekeeping and would be hidden otherwise (codex adversary,
+                // task 7d140c8b). Routing importance via the action name (not display-text
+                // parsing) keeps the dashboard classifier simple and robust.
+                bool actionable = result.Errors.Count > 0 || result.StrandedDirsRemaining > 0;
+                var summary = $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.StrandedDirsRemaining} rmdir-blocked this sweep (held — not a live total; query api/worktrees/stranded for that), {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.";
+
+                // Append the actual error text to the actionable summary. The base summary carries
+                // only COUNTS, so two sweeps with the same error COUNT but DIFFERENT errors would
+                // otherwise produce identical dedup keys and the second (new) error would be
+                // suppressed (codex, task 7d140c8b). The summary content doubles as the cross-sweep
+                // dedup key, so we must NOT let display truncation also truncate the dedup identity:
+                // a bounded 300-char PREVIEW is shown, but a stable FNV-1a digest of the FULL ordered
+                // error set is appended so the key reflects the complete identity — two error sets that
+                // merely share the first 300 chars (e.g. long worktree paths with a common prefix) still
+                // get distinct keys. Identical persistent error sets still dedup. (StrandedDirsRemaining
+                // always pairs with an entry in Errors, so this also distinguishes stranded paths.)
+                if (actionable && result.Errors.Count > 0)
+                {
+                    var joinedFull = string.Join(" | ", result.Errors);
+                    var preview = joinedFull.Length > 300 ? joinedFull.Substring(0, 300) + "…" : joinedFull;
+                    uint sig = 2166136261u; // FNV-1a over the FULL text — deterministic, not display-truncated
+                    foreach (char c in joinedFull) { sig = (sig ^ c) * 16777619u; }
+                    summary += $" Errors: {preview} [sig {sig:x8}]";
+                }
+
                 recordActivity(
-                    "janitor_sweep",
-                    $"Worktree janitor: reconciled {result.ReconciledMissing} missing, {result.MergesRecovered} merges recovered, {result.PendingMerges.Count} pending merge, {result.OrphansRemoved} orphans removed, {result.StrandedDirsRemaining} rmdir-blocked this sweep (held — not a live total; query api/worktrees/stranded for that), {result.DeferredPrunesCompleted} deferred prunes completed, {result.Errors.Count} errors.",
+                    actionable ? "janitor_sweep_attention" : "janitor_sweep",
+                    summary,
                     null);
             }
+
+            // Remember every activity key seen this sweep (recorded OR suppressed) so an
+            // unchanged condition stays quiet next sweep, while a cleared one drops out and
+            // re-logs if it recurs. Single-threaded (serialized by the SweepAsync gate).
+            _lastSweepActivityKeys = currentSweepKeys;
 
             return result;
         }

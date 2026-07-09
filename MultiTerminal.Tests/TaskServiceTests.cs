@@ -391,9 +391,10 @@ namespace MultiTerminal.Tests
             public void LogWarning(string message) { }
             public void LogInfo(string message) { }
             public void LogTrace(string message) { }
-            public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
+            public bool RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
             {
                 if (ThrowFromRecordActivity) throw new InvalidOperationException("test: activity sink down");
+                return true;
             }
             public CreateInboxMessageResult CreateInboxNotification(string userId, string taskId, string taskTitle, int? checklistItemIndex, string checklistItemName, string type, string summary, string createdBy) => new CreateInboxMessageResult { Success = true };
             public void NotifyReportSaved(string taskId, string reportId, string agentName, string verdict) { }

@@ -214,7 +214,18 @@ namespace MultiTerminal.MCPServer.Services
                 DetailsJson = detailsJson,
                 ProjectId = projectId
             };
-            ActivityRecorded?.Invoke(this, entry);
+            // Best-effort notification: the row is already committed above, so a throwing
+            // subscriber must NOT propagate out of this method — otherwise a delivery-aware
+            // caller (the worktree janitor) would misread a post-insert notification failure
+            // as a persistence failure and re-insert an identical row every sweep (task 7d140c8b).
+            try
+            {
+                ActivityRecorded?.Invoke(this, entry);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ActivityFeed] subscriber threw (row {id} already persisted): {ex.Message}");
+            }
 
             System.Diagnostics.Debug.WriteLine($"[ActivityFeed] {activityType}: {summary}");
 

@@ -525,7 +525,13 @@ namespace MultiTerminal.Controls
                     agent = a.Actor,
                     text = a.Summary,
                     timestamp = a.Timestamp.ToString("o"),
-                    icon = GetActivityIcon(a.ActivityType)
+                    icon = GetActivityIcon(a.ActivityType),
+                    // type + severity let the dashboard JS group consecutive same-kind
+                    // entries and tier them by importance (surface lifecycle/build/errors,
+                    // demote housekeeping like the 5-min worktree_janitor_sweep). The raw
+                    // feed is untouched — the Activity panel still shows every row.
+                    type = a.ActivityType,
+                    severity = a.Severity
                 }).ToArray();
 
             SendMessage(new { type = "activity", items });
@@ -533,6 +539,14 @@ namespace MultiTerminal.Controls
 
         private string GetActivityIcon(string activityType)
         {
+            if (string.IsNullOrEmpty(activityType)) return "\u26a1";
+
+            // Activity types persist as the composite "{Type}_{Action}" (MessageBroker.RecordActivity),
+            // so the worktree janitor arrives as "worktree_janitor_sweep" \u2014 not the bare "janitor_sweep"
+            // the old switch expected, which meant every janitor row fell through to the default icon.
+            // Match on the substring so any janitor/worktree-maintenance variant gets the broom.
+            if (activityType.Contains("janitor", StringComparison.OrdinalIgnoreCase)) return "\ud83e\uddf9"; // broom
+
             return activityType switch
             {
                 "task_claimed" => "\ud83d\udccb",
