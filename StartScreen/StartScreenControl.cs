@@ -299,6 +299,30 @@ namespace MultiTerminal.StartScreen
                         }
                         break;
 
+                    case "set_project_status":
+                        if (root.TryGetProperty("projectId", out var stIdEl) &&
+                            root.TryGetProperty("status", out var stValEl))
+                        {
+                            var stId = stIdEl.GetString();
+                            var stVal = stValEl.GetString();
+                            // Validate: non-empty, GUID-length (36 chars max) — mirrors launch/pin.
+                            if (!string.IsNullOrEmpty(stId) && stId.Length <= 36)
+                                SetProjectStatus(stId, stVal);
+                        }
+                        break;
+
+                    case "set_project_terminal":
+                        if (root.TryGetProperty("projectId", out var tmIdEl) &&
+                            root.TryGetProperty("terminal", out var tmValEl))
+                        {
+                            var tmId = tmIdEl.GetString();
+                            var tmVal = tmValEl.GetString();
+                            // Validate: non-empty, GUID-length (36 chars max) — mirrors launch/pin.
+                            if (!string.IsNullOrEmpty(tmId) && tmId.Length <= 36)
+                                SetProjectTerminal(tmId, tmVal);
+                        }
+                        break;
+
                     case "delete_project":
                         if (root.TryGetProperty("projectId", out var delIdEl))
                         {
@@ -369,7 +393,7 @@ namespace MultiTerminal.StartScreen
                         description = p.Description,
                         path = p.SourcePath ?? p.Path,
                         isPinned = p.IsPinned,
-                        status = MultiTerminal.Models.Project.NormalizeStatus(p.Status),
+                        status = Project.NormalizeStatus(p.Status),
                         icon = p.Icon,
                         iconColor = p.IconColor,
                         projectType = p.ProjectType,
@@ -429,6 +453,76 @@ namespace MultiTerminal.StartScreen
             catch (Exception ex)
             {
                 DebugLogService?.Error("StartScreen", $"ToggleProjectPin error: {ex.Message}");
+            }
+        }
+
+        // Persists a new lifecycle status for a project from the card's live status
+        // dropdown. Mirrors ToggleProjectPin's else-branch: normalize → load → set →
+        // SaveRichProject (COALESCE-guarded so a stale project.json re-save can't wipe
+        // it) → re-push the list. Status is DB-only (not in project.json), so unlike pin
+        // there's no ProjectService/file-write path to keep in sync.
+        private void SetProjectStatus(string projectId, string status)
+        {
+            if (string.IsNullOrEmpty(projectId) || _projectDatabase == null)
+                return;
+
+            try
+            {
+                var normalized = Project.NormalizeStatus(status);
+                var project = _projectDatabase.GetRichProject(projectId);
+                if (project == null) return;
+                project.Status = normalized;
+                _projectDatabase.SaveRichProject(project);
+
+                // Push refreshed list back to JS
+                SendProjectsToWebView();
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("StartScreen", $"SetProjectStatus error: {ex.Message}");
+                // The JS updated optimistically before we persisted; re-push DB truth so
+                // the card doesn't keep showing a status that never saved.
+                SendProjectsToWebView();
+            }
+        }
+
+        // Persists a new default terminal for a project from the card's live terminal
+        // dropdown. UNLIKE SetProjectStatus, DefaultTerminal IS serialized to project.json,
+        // so this must dual-write (DB + file) via ProjectService.SetDefaultTerminal —
+        // otherwise ChangelogService/VersioningService's LoadProject→SaveProject would
+        // re-assert the stale on-disk value through SaveRichProject's COALESCE (which can't
+        // guard a non-null field) and silently revert the user's choice. Mirrors ToggleProjectPin.
+        private void SetProjectTerminal(string projectId, string terminal)
+        {
+            if (string.IsNullOrEmpty(projectId) || _projectDatabase == null)
+                return;
+
+            try
+            {
+                if (_projectService != null)
+                {
+                    // Dual-writes SQLite AND project.json (durable — see method doc).
+                    _projectService.SetDefaultTerminal(projectId, terminal);
+                }
+                else
+                {
+                    // No ProjectService wired: DB-only fallback (matches ToggleProjectPin's else-branch).
+                    var normalized = TerminalKindHelper.Normalize(terminal);
+                    var project = _projectDatabase.GetRichProject(projectId);
+                    if (project == null) return;
+                    project.DefaultTerminal = normalized;
+                    _projectDatabase.SaveRichProject(project);
+                }
+
+                // Push refreshed list back to JS
+                SendProjectsToWebView();
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("StartScreen", $"SetProjectTerminal error: {ex.Message}");
+                // The JS updated optimistically before we persisted; re-push DB truth so
+                // the card doesn't keep showing a terminal that never saved.
+                SendProjectsToWebView();
             }
         }
 

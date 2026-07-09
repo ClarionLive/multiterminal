@@ -284,12 +284,28 @@
             transform: scale(1.2);
         }
 
-        /* Card bottom row: badge + time + agents */
+        /* Card bottom: info stack on the left, pin+delete controls at bottom-right. */
         .card-bottom {
             display: flex;
-            align-items: center;
+            align-items: flex-end;
             justify-content: space-between;
             gap: 8px;
+        }
+
+        /* Stacked info lines: meta (type/agent/terminal), Created, Last opened. */
+        .card-bottom-main {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 0;
+        }
+
+        /* Pin + delete, relocated here from the top row (bottom-right corner). */
+        .card-controls-bottom {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            flex-shrink: 0;
         }
 
         .type-badge {
@@ -302,18 +318,20 @@
             border: 1px solid var(--border);
             text-transform: uppercase;
             letter-spacing: 0.05em;
+            white-space: nowrap;   /* keep long types like CLARION-IDE-ADDIN on one line */
         }
 
+        /* Meta line (type + agent + terminal). Wraps instead of overflowing off-card. */
         .card-meta {
             display: flex;
             align-items: center;
-            gap: 8px;
-            flex-shrink: 0;
+            flex-wrap: wrap;
+            gap: 6px 8px;
         }
 
         .last-opened {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-secondary);   /* match description brightness for readability */
         }
 
         .agent-badge {
@@ -343,7 +361,7 @@
 
         .card-created {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-secondary);   /* match description brightness for readability */
         }
 
         /* Lifecycle status pill — one class per canonical status (item 75a612dd). */
@@ -377,6 +395,29 @@
         /* Status column cell in the Browse All table. */
         .list-status-cell { white-space: nowrap; }
 
+        /* Clickable Status control on the card (top-right, near the pin). Reuses the
+           .status-active/parked/archived color classes for its fill/border; the caret
+           signals it opens a dropdown to change status live (item 75a612dd). */
+        .card-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-family: inherit;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border: 1px solid transparent;
+            white-space: nowrap;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: filter 0.15s;
+        }
+        .card-status:hover { filter: brightness(1.12); }
+        .card-status .status-caret { font-size: 8px; opacity: 0.75; }
+
         /* Home grid controls row: "Recent Projects" label + status filter. */
         .home-controls {
             display: flex;
@@ -400,31 +441,12 @@
             border: 1px solid var(--border);
         }
 
-        /* Card-top controls cluster: pin + launch-kind caret */
+        /* Card-top controls cluster: Status button only, far right (pin+delete moved to bottom). */
         .card-controls {
             display: flex;
             align-items: center;
             gap: 2px;
             flex-shrink: 0;
-        }
-
-        .card-launch-caret {
-            background: none;
-            border: none;
-            cursor: pointer;
-            padding: 2px 4px;
-            font-size: 11px;
-            line-height: 1;
-            color: var(--text-muted);
-            transition: color 0.15s, transform 0.15s;
-            display: flex;
-            align-items: center;
-            border-radius: 4px;
-        }
-
-        .card-launch-caret:hover {
-            color: var(--text-primary);
-            background-color: var(--badge-bg);
         }
 
         /* Per-card delete (trash) — hidden until the card is hovered to avoid
@@ -457,9 +479,10 @@
             transform: scale(1.15);
         }
 
-        /* Popup menu for per-launch terminal override */
-        .card-launch-popup,
-        .list-launch-popup {
+        /* Dropdown menus: Browse-All per-launch override, live status, live terminal. */
+        .list-launch-popup,
+        .card-status-popup,
+        .card-terminal-popup {
             position: absolute;
             display: none;
             background-color: var(--bg-card);
@@ -471,14 +494,31 @@
             z-index: 100;
         }
 
-        .card-launch-popup.open,
-        .list-launch-popup.open {
+        .list-launch-popup.open,
+        .card-status-popup.open,
+        .card-terminal-popup.open {
             display: block;
         }
 
-        .card-launch-popup {
+        .card-status-popup {
             top: 38px;
             right: 10px;
+            min-width: 140px;
+        }
+
+        /* Terminal dropdown is anchored to the terminal label (bottom meta), opens upward. */
+        .card-terminal-popup {
+            bottom: 100%;
+            left: 0;
+            margin-bottom: 4px;
+            min-width: 150px;
+        }
+
+        /* Check-mark marking the project's current status in the dropdown. */
+        .launch-popup-item .status-current {
+            font-size: 11px;
+            color: var(--accent);
+            font-weight: 700;
         }
 
         .list-launch-popup {
@@ -519,18 +559,33 @@
         }
 
         /* "Terminal: <name>" indicator on card bottom + list row */
+        /* Wrap anchors the terminal dropdown to the label. */
+        .card-terminal-wrap { position: relative; display: inline-flex; }
+
         .card-terminal-label {
             font-size: 10px;
             color: var(--text-muted);
             display: inline-flex;
             align-items: center;
             gap: 4px;
+            cursor: pointer;
+            padding: 1px 4px;
+            margin: -1px -4px;   /* preserve visual position while adding a hit area */
+            border-radius: 4px;
+            transition: background-color 0.15s, color 0.15s;
+        }
+
+        .card-terminal-label:hover {
+            background-color: var(--badge-bg);
+            color: var(--text-secondary);
         }
 
         .card-terminal-label .terminal-name {
             color: var(--text-secondary);
             font-weight: 600;
         }
+
+        .card-terminal-label .term-caret { font-size: 8px; opacity: 0.7; }
 
         .list-terminal-cell {
             white-space: nowrap;
@@ -1256,6 +1311,33 @@
         var termName = (termKind === 'codex') ? 'Codex' : 'Claude Code';
         var teamLead = project.teamLead || '';
 
+        // Live-status dropdown options (mirrors Project.StatusValues; check marks current).
+        var statusItems = '';
+        var STATUS_OPTIONS = ['Active', 'Parked', 'Archived'];
+        for (var si = 0; si < STATUS_OPTIONS.length; si++) {
+            var sv = STATUS_OPTIONS[si];
+            statusItems +=
+                '<div class="launch-popup-item" data-status="' + sv + '">' +
+                    '<span>' + sv + '</span>' +
+                    (status === sv ? '<span class="status-current">&#10003;</span>' : '') +
+                '</div>';
+        }
+
+        // Live-terminal dropdown options (persist the project's default terminal).
+        var TERMINAL_OPTIONS = [
+            { kind: 'claude-code', name: 'Claude Code' },
+            { kind: 'codex',       name: 'Codex' }
+        ];
+        var terminalItems = '';
+        for (var ti = 0; ti < TERMINAL_OPTIONS.length; ti++) {
+            var to = TERMINAL_OPTIONS[ti];
+            terminalItems +=
+                '<div class="launch-popup-item" data-terminal="' + to.kind + '">' +
+                    '<span>' + to.name + '</span>' +
+                    (termKind === to.kind ? '<span class="status-current">&#10003;</span>' : '') +
+                '</div>';
+        }
+
         card.innerHTML =
             '<div class="card-top">' +
                 '<div class="card-icon" style="background-color:' + esc(color) + '">' + esc(label) + '</div>' +
@@ -1263,7 +1345,45 @@
                     '<div class="card-name" title="' + esc(project.name) + '">' + esc(project.name) + '</div>' +
                     '<div class="card-description" title="' + esc(project.description) + '">' + esc(project.description || '') + '</div>' +
                 '</div>' +
+                // Status control alone at the far right of the top row (frees the name).
                 '<div class="card-controls">' +
+                    '<button class="card-status status-' + status.toLowerCase() + '" ' +
+                        'data-id="' + esc(project.id) + '" ' +
+                        'title="Change project status" aria-label="Change status">' +
+                        esc(status) + '<span class="status-caret">&#9660;</span>' +
+                    '</button>' +
+                '</div>' +
+                '<div class="card-status-popup">' +
+                    '<div class="launch-popup-heading">Set status</div>' +
+                    statusItems +
+                '</div>' +
+            '</div>' +
+            '<div class="card-bottom">' +
+                '<div class="card-bottom-main">' +
+                    '<div class="card-meta">' +
+                        '<span class="type-badge">' + esc(badgeText) + '</span>' +
+                        (agents > 0
+                            ? '<span class="agent-badge"><span class="agent-dot"></span>' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>'
+                            : '') +
+                        (teamLead
+                            ? '<span class="team-lead-badge" title="Team Leader: ' + esc(teamLead) + '">&#128100; ' + esc(teamLead) + '</span>'
+                            : '') +
+                        '<span class="card-terminal-wrap">' +
+                            '<span class="card-terminal-label" data-id="' + esc(project.id) + '" title="Change default terminal">' +
+                                'Terminal: <span class="terminal-name">' + esc(termName) + '</span>' +
+                                '<span class="term-caret">&#9660;</span>' +
+                            '</span>' +
+                            '<div class="card-terminal-popup">' +
+                                '<div class="launch-popup-heading">Set terminal</div>' +
+                                terminalItems +
+                            '</div>' +
+                        '</span>' +
+                    '</div>' +
+                    '<span class="card-created" title="Created ' + esc(project.createdAt || 'unknown') + '">Created ' + created + '</span>' +
+                    '<span class="last-opened" title="Last opened ' + esc(project.lastOpenedAt || 'never') + '">Last opened ' + lastOpened + '</span>' +
+                '</div>' +
+                // Pin + delete relocated to the bottom-right corner.
+                '<div class="card-controls-bottom">' +
                     '<button class="card-delete" ' +
                         'data-id="' + esc(project.id) + '" ' +
                         'title="Delete project from MultiTerminal" ' +
@@ -1273,43 +1393,12 @@
                         'aria-label="' + (pinned ? 'Unpin' : 'Pin') + '">' +
                         (pinned ? '★' : '☆') +
                     '</button>' +
-                    '<button class="card-launch-caret" ' +
-                        'title="Choose a terminal for this launch" ' +
-                        'aria-label="Choose terminal">&#9660;</button>' +
-                '</div>' +
-                '<div class="card-launch-popup">' +
-                    '<div class="launch-popup-heading">Launch with</div>' +
-                    '<div class="launch-popup-item" data-kind="claude-code">' +
-                        '<span>Claude Code</span>' +
-                        (termKind === 'claude-code' ? '<span class="default-tag">default</span>' : '') +
-                    '</div>' +
-                    '<div class="launch-popup-item" data-kind="codex">' +
-                        '<span>Codex</span>' +
-                        (termKind === 'codex' ? '<span class="default-tag">default</span>' : '') +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
-            '<div class="card-bottom">' +
-                '<span class="type-badge">' + esc(badgeText) + '</span>' +
-                '<div class="card-meta">' +
-                    '<span class="status-badge status-' + status.toLowerCase() + '" title="Status: ' + esc(status) + '">' + esc(status) + '</span>' +
-                    (agents > 0
-                        ? '<span class="agent-badge"><span class="agent-dot"></span>' + agents + ' agent' + (agents > 1 ? 's' : '') + '</span>'
-                        : '') +
-                    (teamLead
-                        ? '<span class="team-lead-badge" title="Team Leader: ' + esc(teamLead) + '">&#128100; ' + esc(teamLead) + '</span>'
-                        : '') +
-                    '<span class="card-terminal-label" title="Clicking the card launches this terminal">' +
-                        'Terminal: <span class="terminal-name">' + esc(termName) + '</span>' +
-                    '</span>' +
-                    '<span class="card-created" title="Created ' + esc(project.createdAt || 'unknown') + '">Created ' + created + '</span>' +
-                    '<span class="last-opened" title="Last opened ' + esc(project.lastOpenedAt || 'never') + '">Opened ' + lastOpened + '</span>' +
                 '</div>' +
             '</div>';
 
-        // Launch project on card click (not pin, not caret, not popup).
-        // The card click always uses the project's stored default terminal;
-        // per-launch override comes from the caret popup below.
+        // Launch project on card click (not status, not terminal, not pin/delete, not a popup).
+        // The card click always uses the project's stored default terminal, which is now
+        // changed live via the terminal-name dropdown in the bottom meta line.
         card.addEventListener('click', function() {
             try { console.log('#PROJ# [start-screen.js] card click: id=' + project.id + ' name=' + project.name + ' path=' + (project.path || '')); } catch(e) {}
             postMsg({ type: 'launch_project', projectId: project.id, projectName: project.name });
@@ -1338,14 +1427,82 @@
             });
         }
 
-        wireLaunchPopup(card, '.card-launch-caret', '.card-launch-popup', project);
+        wireStatusPopup(card, project);
+        wireTerminalPopup(card, project);
         return card;
+    }
+
+    // Wires the live status dropdown on a card: the .card-status button toggles the
+    // .card-status-popup (closing other popups first); picking an option optimistically
+    // updates the project + posts set_project_status to the host, which persists and
+    // re-pushes the list. stopPropagation keeps the card's launch handler from firing.
+    function wireStatusPopup(root, project) {
+        var btn = root.querySelector('.card-status');
+        var popup = root.querySelector('.card-status-popup');
+        if (!btn || !popup) return;
+
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            closeAllLaunchPopups(popup);
+            var nowOpen = popup.classList.toggle('open');
+            root.classList.toggle('popup-open', nowOpen);
+        });
+
+        var items = popup.querySelectorAll('.launch-popup-item');
+        for (var i = 0; i < items.length; i++) {
+            items[i].addEventListener('click', function(e) {
+                e.stopPropagation();
+                var newStatus = this.getAttribute('data-status');
+                popup.classList.remove('open');
+                root.classList.remove('popup-open');
+                if (normalizeStatus(project.status) === newStatus) return; // no-op if unchanged
+                project.status = newStatus;                 // optimistic
+                postMsg({ type: 'set_project_status', projectId: project.id, status: newStatus });
+                renderGrid();                               // reflect new badge + status filter
+            });
+        }
+
+        popup.addEventListener('click', function(e) { e.stopPropagation(); });
+    }
+
+    // Wires the live terminal dropdown on a card: clicking the terminal name toggles the
+    // .card-terminal-popup; picking an option optimistically updates the project's default
+    // terminal + posts set_project_terminal to the host (persisted via SaveRichProject).
+    // stopPropagation keeps the card's launch handler from firing.
+    function wireTerminalPopup(root, project) {
+        var label = root.querySelector('.card-terminal-label');
+        var popup = root.querySelector('.card-terminal-popup');
+        if (!label || !popup) return;
+
+        label.addEventListener('click', function(e) {
+            e.stopPropagation();
+            closeAllLaunchPopups(popup);
+            var nowOpen = popup.classList.toggle('open');
+            root.classList.toggle('popup-open', nowOpen);
+        });
+
+        var items = popup.querySelectorAll('.launch-popup-item');
+        for (var i = 0; i < items.length; i++) {
+            items[i].addEventListener('click', function(e) {
+                e.stopPropagation();
+                var newTerm = this.getAttribute('data-terminal');
+                popup.classList.remove('open');
+                root.classList.remove('popup-open');
+                var cur = (project.defaultTerminal === 'codex') ? 'codex' : 'claude-code';
+                if (cur === newTerm) return;                  // no-op if unchanged
+                project.defaultTerminal = newTerm;            // optimistic
+                postMsg({ type: 'set_project_terminal', projectId: project.id, terminal: newTerm });
+                renderGrid();                                 // reflect new terminal label
+            });
+        }
+
+        popup.addEventListener('click', function(e) { e.stopPropagation(); });
     }
 
     // Close every open launch-popup except the one passed in (if any).
     // Call before opening a new popup, and from the document-level outside-click listener.
     function closeAllLaunchPopups(except) {
-        var open = document.querySelectorAll('.card-launch-popup.open, .list-launch-popup.open');
+        var open = document.querySelectorAll('.list-launch-popup.open, .card-status-popup.open, .card-terminal-popup.open');
         for (var i = 0; i < open.length; i++) {
             if (open[i] !== except) {
                 open[i].classList.remove('open');
@@ -1633,7 +1790,7 @@
        renderGrid/renderList so individual listeners aren't enough.
        --------------------------------------------------------------- */
     document.addEventListener('click', function(e) {
-        if (!e.target.closest || (!e.target.closest('.card-launch-popup') && !e.target.closest('.list-launch-popup'))) {
+        if (!e.target.closest || (!e.target.closest('.list-launch-popup') && !e.target.closest('.card-status-popup') && !e.target.closest('.card-terminal-popup'))) {
             closeAllLaunchPopups(null);
         }
     });
