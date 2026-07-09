@@ -20,6 +20,17 @@
             width: 100%;
             height: 100%;
         }
+        /* Reserve the scrollbar gutter permanently so the viewport's usable width
+           NEVER changes when the vertical scrollbar shows/hides. fitAddon.proposeDimensions()
+           subtracts the LIVE scrollbar width; without a stable gutter that width flips 0<->10px
+           as content overflow toggles, which at some window widths lands on a 1-column boundary
+           and makes proposeDimensions oscillate (e.g. 97<->98 cols). The 2s drift heartbeat then
+           refits on every tick, reflowing the whole grid — the "terminal blanks/repaints every
+           ~2s" flash (task 5e36e90b, rescoped from the Project-panel guard). Stable gutter keeps
+           the width constant → proposeDimensions stable → no per-tick refit. */
+        .xterm-viewport {
+            scrollbar-gutter: stable;
+        }
         /* Hide scrollbar in xterm viewport for cleaner look - scrolling still works */
         .xterm-viewport::-webkit-scrollbar {
             width: 10px;
@@ -270,15 +281,36 @@
             // xterm's currently-believed cols/rows against what fitAddon would
             // propose right now; if they disagree, refit so ConPTY gets
             // re-synced via term.onResize. Cheap (~one font-metric calc per tick).
+            //
+            // Anti-oscillation damper (task 5e36e90b): proposeDimensions() can be
+            // unstable on a 1-column boundary (its live scrollbar-width term flips as
+            // overflow toggles), making it bounce e.g. 97<->98 forever. Each refit
+            // reflowed the whole grid every 2s — a visible full-terminal blank/repaint.
+            // The scrollbar-gutter:stable CSS above removes the usual cause; this guard
+            // is defense-in-depth: refuse a refit that would send us straight BACK to the
+            // size we just left (that's oscillation, not drift). Genuine drift proposes a
+            // NEW stable target and still corrects; real container resizes go through the
+            // ResizeObserver's direct fit(), not this heartbeat, so they're unaffected.
+            let prevBeforeHeartbeatFit = null;
             setInterval(() => {
                 if (!term || !fitAddon) return;
                 try {
                     const proposed = fitAddon.proposeDimensions();
                     if (!proposed || !proposed.cols || !proposed.rows) return;
-                    if (proposed.cols !== term.cols || proposed.rows !== term.rows) {
-                        console.warn(`[Terminal] Drift detected: term=${term.cols}x${term.rows}, proposed=${proposed.cols}x${proposed.rows}. Refitting.`);
-                        fitAddon.fit();
+                    if (proposed.cols === term.cols && proposed.rows === term.rows) {
+                        prevBeforeHeartbeatFit = null; // stable — clear the oscillation guard
+                        return;
                     }
+                    // Would this refit just bounce us back to the size the previous heartbeat
+                    // fit left? Then it's a ±1 oscillation — suppress it and stay put.
+                    if (prevBeforeHeartbeatFit &&
+                        proposed.cols === prevBeforeHeartbeatFit.cols &&
+                        proposed.rows === prevBeforeHeartbeatFit.rows) {
+                        return;
+                    }
+                    console.warn(`[Terminal] Drift detected: term=${term.cols}x${term.rows}, proposed=${proposed.cols}x${proposed.rows}. Refitting.`);
+                    prevBeforeHeartbeatFit = { cols: term.cols, rows: term.rows };
+                    fitAddon.fit();
                 } catch (e) {
                     // proposeDimensions can throw if container is detached — ignore.
                 }
