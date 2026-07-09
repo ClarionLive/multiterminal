@@ -363,6 +363,10 @@ namespace MultiTerminal
             // Project events
             _projectPanel.ProjectSelected += OnProjectSelected;
             _projectPanel.ProjectLaunchRequested += OnProjectLaunchRequested;
+            // Welcome-card "Manage Projects" → same dialog as the main toolbar button.
+            // The panel has no header toolbar, so without this the welcome state is a
+            // dead end for a user with no project open (task d2dd75a3).
+            _projectPanel.ManageProjectsRequested += (s, e) => ShowProjectManagerDialog();
 
             // Prompt events
             _projectPanel.PromptPasteRequested += OnPromptPasteRequested;
