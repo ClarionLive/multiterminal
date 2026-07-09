@@ -491,6 +491,9 @@ namespace MultiTerminal.Docking
 
             // Create status bar (shows above terminal)
             _statusBar = new TerminalStatusBarRenderer();
+            // DIAGNOSTIC (task d14048ef): tag this renderer with its owning doc identity so statusline
+            // traces can be matched to the visible instance vs a duplicate/ghost one.
+            _statusBar.SetOwnerTag($"Inst{InstanceId}/Doc{_docId}");
             _statusBar.Ready += (s, e) =>
             {
                 // Only update status bar if we have a name and broker set
@@ -2667,8 +2670,18 @@ namespace MultiTerminal.Docking
         /// </summary>
         private string ResolveStatusLineFilePath(string terminalName)
         {
+            // Strict per-instance binding (task d14048ef, item C): the docId-scoped file is
+            // unique to THIS TerminalDocument (each instance mints its own random _docId), so a
+            // live terminal always reads its own banner data and never a same-named sibling's.
+            // The glob fallback below is reached ONLY when this instance has no own file yet —
+            // the re-adopt-after-restart path — and is bounded by the freshness floor so it can't
+            // latch a prior run's / a removed duplicate's frozen file.
             string exact = Path.Combine(Path.GetTempPath(), $"mt-statusline-{terminalName}-{_docId}.json");
-            if (File.Exists(exact)) return exact;
+            if (File.Exists(exact))
+            {
+                NoteResolvedStatusLinePath(exact, viaFallback: false);
+                return exact;
+            }
 
             // Only the fallback glob needs a safe segment; reject names that could widen
             // the search beyond the intended mt-statusline-{name}-*.json shape.
@@ -2712,7 +2725,59 @@ namespace MultiTerminal.Docking
                     // Torn/corrupt/locked sibling — skip it, keep scanning.
                 }
             }
+            NoteResolvedStatusLinePath(newest, viaFallback: true);
             return newest;
+        }
+
+        // Last statusline file this instance resolved to — used purely to log the re-adopt
+        // transition ONCE (not every 2s poll), keeping the cross-latch path observable without
+        // reintroducing per-tick spam (task d14048ef, items C + D).
+        private string _lastResolvedStatusLinePath;
+
+        /// <summary>
+        /// Records the statusline file this poll resolved to and, on a TRANSITION into the
+        /// glob fallback, emits a single tagged trace. Strict per-instance binding means a live
+        /// terminal resolves to its own <c>mt-statusline-{name}-{_docId}.json</c>; falling back to
+        /// a foreign same-named file is the re-adopt path and is worth a one-line breadcrumb so any
+        /// same-name cross-latch is visible. Logs only when the resolved path changes, so a steadily
+        /// re-adopted terminal does not spam the log every 2s.
+        /// </summary>
+        private void NoteResolvedStatusLinePath(string resolved, bool viaFallback)
+        {
+            if (string.Equals(resolved, _lastResolvedStatusLinePath, StringComparison.OrdinalIgnoreCase))
+                return;
+            _lastResolvedStatusLinePath = resolved;
+            if (viaFallback && resolved != null)
+            {
+                _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline re-adopt: bound to foreign file '{System.IO.Path.GetFileName(resolved)}' (own docId file absent)");
+            }
+        }
+
+        // Last EARLY-RETURN reason this poll logged — lets the silent-doc diagnostics fire once on
+        // transition into a skip state (and once on recovery) rather than every 2s tick. Keeps the
+        // dup-hunt signal that confirmed this bug while removing the per-tick spam (task d14048ef, item D).
+        private string _lastPollSkipReason;
+
+        /// <summary>
+        /// Logs a statusline-poll EARLY-RETURN reason, but only when it differs from the last one —
+        /// so a doc stuck unable to resolve/read its file logs a single line, not one every 2s.
+        /// </summary>
+        private void TracePollSkip(string reason)
+        {
+            if (string.Equals(reason, _lastPollSkipReason, StringComparison.Ordinal)) return;
+            _lastPollSkipReason = reason;
+            _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll EARLY-RETURN: {reason}");
+        }
+
+        /// <summary>
+        /// Clears the skip state once the poll can read content again, emitting a one-time
+        /// "recovered" breadcrumb if this doc had previously been logging a skip reason.
+        /// </summary>
+        private void NotePollProgress()
+        {
+            if (_lastPollSkipReason == null) return;
+            _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll RECOVERED (was: {_lastPollSkipReason})");
+            _lastPollSkipReason = null;
         }
 
         /// <summary>
@@ -2904,10 +2969,26 @@ namespace MultiTerminal.Docking
                     // new random _docId — fall back to the newest mt-statusline-{name}-*.json
                     // so the banner recovers live instead of staying blank until relaunch.
                     string filePath = ResolveStatusLineFilePath(terminalName);
-                    if (filePath == null) return;
+                    if (filePath == null)
+                    {
+                        // DIAGNOSTIC (task d14048ef): a doc whose poll can't resolve a file delivers
+                        // nothing → rows 2-3 stay hidden. Logging Inst/Doc reveals if the VISIBLE doc
+                        // is the silent one. Throttled to log once per transition (item D) so a
+                        // permanently-silent orphan doesn't spam the log every 2s.
+                        TracePollSkip($"ResolveStatusLineFilePath(name='{terminalName}') returned null");
+                        return;
+                    }
 
                     string content = ReadAllTextShared(filePath);
-                    if (string.IsNullOrEmpty(content)) return;
+                    if (string.IsNullOrEmpty(content))
+                    {
+                        TracePollSkip($"file '{System.IO.Path.GetFileName(filePath)}' empty");
+                        return;
+                    }
+
+                    // Got readable content — clear any prior skip state and log a one-time recovery
+                    // breadcrumb if this doc had been silent (item D).
+                    NotePollProgress();
 
                     // Check if either the per-terminal file or shared quota file changed
                     string sharedQuotaPath = Path.Combine(Path.GetTempPath(), "mt-statusline-quota.json");
@@ -2925,7 +3006,7 @@ namespace MultiTerminal.Docking
                     bool awaitingRender = _statusBar != null && _statusBar.IsInitialized && !_statusBar.IsStatusLineRendered;
                     if (!perTerminalChanged && !sharedQuotaChanged && !awaitingRender) return;
 
-                    _debugLogService?.Trace("TerminalDocument", $"statusline poll delivering (changed={perTerminalChanged}, quotaChanged={sharedQuotaChanged}, awaitingRender={awaitingRender})");
+                    _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] statusline poll delivering (file='{System.IO.Path.GetFileName(filePath)}', changed={perTerminalChanged}, quotaChanged={sharedQuotaChanged}, awaitingRender={awaitingRender})");
 
                     // Only cache content AFTER successfully delivering to UI thread.
                     // Otherwise, if IsHandleCreated is false on first read, the content
@@ -3106,7 +3187,20 @@ namespace MultiTerminal.Docking
                     {
                         // Re-check on the UI thread: the rename can also land between the
                         // timer-thread fence above and this queued action running.
+                        // (Merge d14048ef×ab50355f: the identity re-check MUST stay first — it
+                        // early-returns before the branch's diagnostics or any delivery.)
                         if (System.Threading.Volatile.Read(ref _statusLineIdentityGen) != identityGen) return;
+
+                        // DIAGNOSTIC (task d14048ef): on the UI thread, record whether THIS doc is the
+                        // active/visible document and the live size of its status bar at delivery time.
+                        // If the ACTIVE doc delivers + acks but shows blank, it's a WebView2 paint bug;
+                        // if a NON-active (ghost) doc is the only one delivering, it's orphaned-instance.
+                        try
+                        {
+                            bool isActive = DockPanel != null && ReferenceEquals(DockPanel.ActiveDocument, this);
+                            _debugLogService?.Trace("TerminalDocument", $"[Inst{InstanceId}/Doc{_docId}] deliver→UI active={isActive} sbVisible={_statusBar?.Visible} sbHeight={_statusBar?.Height} folder='{folderForUi}'");
+                        }
+                        catch { /* diagnostic only */ }
 
                         _statusBar?.UpdateStatusLine(model, folderForUi, contextPct, quota5h, quota7d, pace5h, pace7d, resetIn5h);
                         _statusBar?.UpdateTokenMeter(tmTotal, tmCost, tmEstimate, tmLowerBound, tmBurn, tmSub, tmCache);
