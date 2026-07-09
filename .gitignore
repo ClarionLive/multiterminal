@@ -98,3 +98,6 @@ scripts/_*.html
 
 # ESPHome presence-sensor secrets (wifi/broker creds) — never commit (task 9f9c3141)
 docs/presence/secrets.yaml
+
+# Scratch CLI changelog research notes (underscore prefix convention; tracked cc-changelog-*.md are kept)
+CLI Research/_changelog_*.md
