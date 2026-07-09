@@ -21,7 +21,11 @@ $InstallerDir   = Join-Path $MultiTermDir 'installer'
 $IssFile        = Join-Path $InstallerDir 'MultiTerminal.iss'
 
 $MTPublishDir   = Join-Path $MultiTermDir 'bin\Release\net8.0-windows\win-x64\publish'
-$GWPublishDir   = Join-Path $GatewayDir   'bin\publish\win-x64'
+# Publish the Gateway to a dedicated installer-staging dir, NOT bin\publish\win-x64 —
+# live McpGateway.exe processes (one per running MT terminal) are launched from that
+# dir and hold locks on its DLLs, so publishing there fails with MSB3027 whenever MT
+# is running. The .iss McpGatewayPublishDir points here too (task df1f521f).
+$GWPublishDir   = Join-Path $GatewayDir   'bin\publish-installer\win-x64'
 
 # --- Find Inno Setup ---
 $InnoCompiler = @(

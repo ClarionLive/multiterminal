@@ -3,7 +3,7 @@
 ; https://jrsoftware.org/isinfo.php
 
 #define AppName "MultiTerminal"
-#define AppVersion "1.4.1"
+#define AppVersion "2.0.0"
 #define AppPublisher "MultiTerminal"
 #define AppExeName "MultiTerminal.exe"
 #define AppURL "https://github.com/peterparker57"
@@ -18,7 +18,9 @@
 ; deps instead of accumulated profile cruft. Run a Release build before compiling
 ; this installer so installer\mcp-dist exists and is current.
 #define McpServerDir "mcp-dist"
-#define McpGatewayPublishDir "..\..\McpGateway\bin\publish\win-x64"
+; publish-installer (not bin\publish) — live gateways run from bin\publish and lock
+; its DLLs, so the release publish targets this dedicated staging dir (task df1f521f).
+#define McpGatewayPublishDir "..\..\McpGateway\bin\publish-installer\win-x64"
 ; Claude Code plugin marketplace (hooks, agents, skills, CLAUDE.md, channel MCP)
 #define PluginMarketplaceDir GetEnv("USERPROFILE") + "\.claude\plugins\marketplaces\multiterminal-marketplace"
 #define ToolsDir "..\tools"
