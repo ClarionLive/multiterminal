@@ -5012,8 +5012,14 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Record an activity event for the Activity Panel feed.
         /// Also persists to the activity_feed table for the dashboard.
+        /// Returns <c>true</c> when the event was durably handled (already-persisted, or the
+        /// feed write succeeded) and <c>false</c> when it was NOT durably stored — either the
+        /// write threw, or the feed service isn't wired yet (e.g. the janitor's first sweep can
+        /// fire before the REST host finishes DI). Callers that dedup on delivery (e.g. the
+        /// worktree janitor) use this so a not-yet-stored line isn't remembered as delivered —
+        /// most callers ignore the return, preserving the previous fire-and-forget behavior.
         /// </summary>
-        public void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
+        public bool RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
         {
             DebugLogService?.Trace("MessageBroker", $"Recording activity: {activity.Type}/{activity.Action} - {activity.Content}");
 
@@ -5028,16 +5034,35 @@ namespace MultiTerminal.MCPServer.Services
             RaiseSafe(ActivityRecorded, activity);
 
             // Persist to activity_feed table for dashboard (skip if caller already persisted, e.g. RecordBuildActivity)
+            bool persisted = true;
             if (!alreadyPersisted)
             {
-                try
+                var feed = ActivityFeedService;
+                if (feed == null)
                 {
-                    var activityType = $"{activity.Type}_{activity.Action}";
-                    ActivityFeedService?.RecordGeneralActivity(activityType, activity.Terminal, activity.Content,
-                        projectId: activity.ProjectId);
+                    // Feed service not wired yet (the janitor's first sweep can fire before the
+                    // REST host finishes DI). Report NOT delivered so delivery-aware callers retry
+                    // once it's available, instead of remembering a key that was never stored.
+                    persisted = false;
                 }
-                catch { /* Don't let feed persistence failures break the main flow */ }
+                else
+                {
+                    try
+                    {
+                        var activityType = $"{activity.Type}_{activity.Action}";
+                        feed.RecordGeneralActivity(activityType, activity.Terminal, activity.Content,
+                            projectId: activity.ProjectId);
+                    }
+                    catch
+                    {
+                        // Don't let feed persistence failures break the main flow — but report the
+                        // failure so delivery-aware callers can retry rather than dedup a lost write.
+                        persisted = false;
+                    }
+                }
             }
+
+            return persisted;
         }
 
         /// <summary>

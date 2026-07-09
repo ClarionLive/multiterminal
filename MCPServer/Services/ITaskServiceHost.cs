@@ -40,7 +40,8 @@ namespace MultiTerminal.MCPServer.Services
         void RaiseTaskActiveChanged(TaskActiveChangedEventArgs args);
 
         // ── Activity feed / user inbox / two-tier notifications (owning regions stay on broker) ─────
-        void RecordActivity(ActivityEvent activity, bool alreadyPersisted = false);
+        // Returns whether the activity persisted (delivery-aware callers dedup on it; most ignore it).
+        bool RecordActivity(ActivityEvent activity, bool alreadyPersisted = false);
         CreateInboxMessageResult CreateInboxNotification(
             string userId, string taskId, string taskTitle, int? checklistItemIndex,
             string checklistItemName, string type, string summary, string createdBy);

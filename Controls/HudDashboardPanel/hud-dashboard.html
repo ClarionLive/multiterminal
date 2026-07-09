@@ -378,6 +378,10 @@ body.light .git-branch { color: #7C3AED; }
     padding: 8px 12px;
     background: var(--bg-header);
     border-bottom: 1px solid var(--border-column);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
 }
 
 .activity-title {
@@ -455,6 +459,61 @@ body.light .git-branch { color: #7C3AED; }
 
 .activity-date-header:first-child {
     padding-top: 2px;
+}
+
+/* Activity importance toggle (All / Important) — task 7d140c8b */
+.activity-filter {
+    display: inline-flex;
+    border: 1px solid var(--border-column);
+    border-radius: 4px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.activity-filter button {
+    font: inherit;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.activity-filter button + button { border-left: 1px solid var(--border-column); }
+.activity-filter button.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* Grouped-run count badge + collapsed housekeeping rows */
+.activity-count {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--text-muted);
+    background: var(--bg-header);
+    border: 1px solid var(--border-column);
+    border-radius: 8px;
+    padding: 0 5px;
+    margin-left: 4px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.activity-item.housekeeping { opacity: 0.6; }
+.activity-item.housekeeping .activity-text { color: var(--text-muted); }
+.activity-range {
+    font-size: 9px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.activity-hidden-note {
+    text-align: center;
+    padding: 8px 0 4px;
+    color: var(--text-muted);
+    font-size: 9px;
+    font-style: italic;
 }
 
 /* No project state */
@@ -560,6 +619,10 @@ body.no-project-state .no-project { display: flex; }
     <div class="panel-activity">
         <div class="activity-header">
             <span class="activity-title">Recent Activity</span>
+            <span class="activity-filter" id="activity-filter">
+                <button type="button" data-mode="all" class="active">All</button>
+                <button type="button" data-mode="important">Important</button>
+            </span>
         </div>
         <div class="activity-list" id="activity-list">
             <div style="text-align:center;padding:20px;color:var(--text-muted);font-size:11px">
@@ -728,19 +791,81 @@ function formatActivityText(text) {
     return escaped;
 }
 
+// ----- Recent Activity feed: grouping + importance tiers (task 7d140c8b) -----
+// The feed used to render every raw row flat, so the 5-min worktree_janitor_sweep
+// buried real work. We now (a) collapse consecutive same-(agent+type) runs into one
+// ×N row and (b) tier rows by importance so housekeeping can be demoted/hidden.
+let _activityItems = [];
+let _activityMode = 'all'; // 'all' (grouped, nothing hidden) | 'important' (housekeeping hidden)
+
+// Importance tier for a row. 'important' always renders individually; 'housekeeping'
+// is visually demoted and hidden in Important-only view; 'normal' is everything else.
+function activityTier(item) {
+    const type = (item && item.type ? item.type : '').toString();
+    const sev = (item && item.severity ? item.severity : 'info').toString().toLowerCase();
+
+    // Anything the backend flagged as a problem is always important.
+    if (sev === 'warning' || sev === 'error') return 'important';
+    if (type === 'TOOL_FAILED') return 'important';
+
+    if (/janitor/i.test(type)) {
+        // Actionable janitor lines stay visible in the Important filter: a branch that
+        // won't auto-merge (pending_merge), a HALF-MERGED checkout (indeterminate), a
+        // merge that timed out, or a sweep that caught errors / rmdir-blocked strands
+        // (the source stamps those "janitor_sweep_attention"). Routine maintenance is
+        // housekeeping. The janitor emits all of these at severity "info", so the
+        // severity branch above never catches them — classify by type.
+        if (/pending_merge|indeterminate|timeout|attention/i.test(type)) return 'important';
+        return 'housekeeping';
+    }
+    if (type === 'TOOL_COMPLETE') return 'housekeeping';
+    if (type === 'session_start' || type === 'session_end') return 'housekeeping';
+
+    // Lifecycle / build / plan events — the signal the user is scanning for.
+    if (/^task_/.test(type) || /^BUILD_/.test(type) || /^PLAN_/.test(type)) return 'important';
+
+    return 'normal';
+}
+
 function updateActivity(items) {
+    _activityItems = Array.isArray(items) ? items : [];
+    renderActivity();
+}
+
+// Note shown (both empty and populated views) when the Important filter is hiding
+// housekeeping rows, so nothing is silently swallowed. One home for the wording.
+function hiddenNoteHtml(n) {
+    return `<div class="activity-hidden-note">${n} housekeeping event${n === 1 ? '' : 's'} hidden — switch to All to show</div>`;
+}
+
+function renderActivity() {
     const list = document.getElementById('activity-list');
-    if (!Array.isArray(items) || items.length === 0) {
-        list.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:11px">No recent activity</div>';
+    let items = _activityItems;
+
+    // Importance filter — Important-only view drops housekeeping rows (counted so
+    // we can tell the user what's hidden rather than silently swallowing it).
+    let hiddenHousekeeping = 0;
+    if (_activityMode === 'important') {
+        const kept = [];
+        items.forEach(it => {
+            if (activityTier(it) === 'housekeeping') hiddenHousekeeping++;
+            else kept.push(it);
+        });
+        items = kept;
+    }
+
+    if (items.length === 0) {
+        const hidden = hiddenHousekeeping > 0 ? hiddenNoteHtml(hiddenHousekeeping) : '';
+        const label = _activityMode === 'important' && hiddenHousekeeping > 0 ? 'No important activity' : 'No recent activity';
+        list.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:11px">${label}</div>${hidden}`;
         return;
     }
 
-    // Group items by date (items arrive newest-first from the API)
+    // Group by date (items arrive newest-first from the renderer).
     const groups = [];
     const groupMap = {};
     items.forEach(item => {
-        const d = new Date(item.timestamp);
-        const dateKey = d.toDateString();
+        const dateKey = new Date(item.timestamp).toDateString();
         if (!groupMap[dateKey]) {
             groupMap[dateKey] = { dateKey, timestamp: item.timestamp, items: [] };
             groups.push(groupMap[dateKey]);
@@ -750,23 +875,38 @@ function updateActivity(items) {
 
     let html = '';
     groups.forEach(group => {
-        const dateLabel = formatDateHeader(group.timestamp);
-        html += `<div class="activity-date-header">${dateLabel}</div>`;
-        group.items.forEach(item => {
-            const icon = item.icon || '⚡';
-            const time = shortTime(item.timestamp);
-            const agent = item.agent ? `<span class="activity-agent">${escapeHtml(item.agent)}</span> ` : '';
-            const text = formatActivityText(item.text);
-            html += `<div class="activity-item">
-                <span class="activity-time">${time}</span>
-                <span class="activity-icon">${icon}</span>
-                <span class="activity-text">${agent}${text}</span>
-            </div>`;
-        });
+        html += `<div class="activity-date-header">${formatDateHeader(group.timestamp)}</div>`;
+
+        // Collapse consecutive runs sharing the same (agent + type) into one row —
+        // BUT only for non-important rows. Important events (lifecycle, builds, and
+        // actionable janitor alerts) always render individually so their distinct text
+        // is never hidden behind a ×N badge, and a run breaks the moment an important
+        // row appears (so an important event can't be swallowed into a housekeeping run).
+        const gi = group.items;
+        let i = 0;
+        while (i < gi.length) {
+            if (activityTier(gi[i]) === 'important') {
+                html += renderActivityRow([gi[i]]);
+                i++;
+                continue;
+            }
+            const key = (gi[i].agent || '') + '|' + (gi[i].type || '');
+            let j = i + 1;
+            while (j < gi.length
+                   && activityTier(gi[j]) !== 'important'
+                   && ((gi[j].agent || '') + '|' + (gi[j].type || '')) === key) j++;
+            html += renderActivityRow(gi.slice(i, j));
+            i = j;
+        }
     });
+
+    if (hiddenHousekeeping > 0) {
+        html += hiddenNoteHtml(hiddenHousekeeping);
+    }
+
     list.innerHTML = html;
 
-    // Attach click handlers for file links
+    // Re-attach click handlers for file links.
     list.querySelectorAll('.activity-file-link').forEach(el => {
         el.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -777,6 +917,41 @@ function updateActivity(items) {
         });
     });
 }
+
+// Render one row from a run of 1+ consecutive same-(agent+type) items. Newest is
+// run[0]; a run of N shows a ×N badge and an oldest–newest time range.
+function renderActivityRow(run) {
+    const newest = run[0];
+    const oldest = run[run.length - 1];
+    const count = run.length;
+    const cls = activityTier(newest) === 'housekeeping' ? 'activity-item housekeeping' : 'activity-item';
+    const icon = newest.icon || '⚡';
+    const agent = newest.agent ? `<span class="activity-agent">${escapeHtml(newest.agent)}</span> ` : '';
+    const text = formatActivityText(newest.text);
+    const countBadge = count > 1 ? `<span class="activity-count">×${count}</span>` : '';
+    const timeCol = count > 1
+        ? `<span class="activity-time">${shortTime(oldest.timestamp)}–${shortTime(newest.timestamp)}</span>`
+        : `<span class="activity-time">${shortTime(newest.timestamp)}</span>`;
+
+    return `<div class="${cls}">
+        ${timeCol}
+        <span class="activity-icon">${icon}</span>
+        <span class="activity-text">${agent}${text}${countBadge}</span>
+    </div>`;
+}
+
+// All / Important toggle — re-renders from the cached items without new data.
+document.getElementById('activity-filter').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-mode]');
+    if (!btn) return;
+    const mode = btn.getAttribute('data-mode');
+    if (mode === _activityMode) return;
+    _activityMode = mode;
+    document.querySelectorAll('#activity-filter button').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-mode') === mode);
+    });
+    renderActivity();
+});
 
 // WebView2 message protocol
 if (window.chrome && window.chrome.webview) {

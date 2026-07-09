@@ -209,7 +209,9 @@ namespace MultiTerminal
                                 {
                                     try
                                     {
-                                        broker.RecordActivity(new MCPServer.Models.ActivityEvent
+                                        // Return whether the feed write persisted so the janitor's dedup
+                                        // only remembers delivered lines (a silently-failed write is retried).
+                                        return broker.RecordActivity(new MCPServer.Models.ActivityEvent
                                         {
                                             Terminal = "Janitor",
                                             Type = "worktree",
@@ -218,7 +220,7 @@ namespace MultiTerminal
                                             RelatedId = relatedId,
                                         });
                                     }
-                                    catch (Exception ex) { _debugLogService?.Error("Janitor", $"activity log failed: {ex.Message}"); }
+                                    catch (Exception ex) { _debugLogService?.Error("Janitor", $"activity log failed: {ex.Message}"); return false; }
                                 },
                                 tryDeferredPruneRetry: id => broker.TryDeferredPruneRetryAsync(id),
                                 tryMergeForTask: (id, root) => broker.TryAutoMergeForTaskAsync(id, root)).GetAwaiter().GetResult();
