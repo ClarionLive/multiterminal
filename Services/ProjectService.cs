@@ -352,6 +352,40 @@ namespace MultiTerminal.Services
             }
         }
 
+        /// <summary>
+        /// Sets a project's default terminal CLI. Writes SQLite AND the portable
+        /// project.json, mirroring <see cref="ToggleProjectPinned"/>. DefaultTerminal is
+        /// serialized to project.json (unlike Status), so a DB-only write would be silently
+        /// reverted the next time ChangelogService / VersioningService does
+        /// LoadProject → SaveProject and the stale on-disk value re-asserts through the
+        /// SaveRichProject COALESCE (which can't guard a non-null field). Keeping both stores
+        /// in sync is what makes a live terminal change durable.
+        /// </summary>
+        public void SetDefaultTerminal(string projectId, string terminalKind)
+        {
+            var richProject = _projectDb.GetRichProject(projectId);
+            if (richProject != null)
+            {
+                var normalized = MultiTerminal.Models.TerminalKindHelper.Normalize(terminalKind);
+                richProject.DefaultTerminal = normalized;
+                _projectDb.SaveRichProject(richProject);
+
+                // Also update the portable project.json if it exists (keeps it from reverting the DB).
+                if (!string.IsNullOrEmpty(richProject.Path))
+                {
+                    var fileProject = LoadProject(richProject.Path);
+                    if (fileProject != null)
+                    {
+                        fileProject.DefaultTerminal = normalized;
+                        string configPath = GetProjectConfigPath(richProject.Path);
+                        string json = SerializeProjectJson(fileProject);
+                        try { File.WriteAllText(configPath, json); }
+                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ProjectService] Failed to update project.json defaultTerminal: {ex.Message}"); }
+                    }
+                }
+            }
+        }
+
         #endregion
 
         #region Discovery & Auto-Detection
