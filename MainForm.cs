@@ -135,6 +135,12 @@ namespace MultiTerminal
         private int _terminalRestoreIndex = 0;
         private List<TerminalSessionInfo> _pendingTerminalSessions;
 
+        // Tracks agent names (CustomTitle) already materialized during the current restore so a
+        // drifted layout.xml can't spawn a second same-named TerminalDocument — the durable half
+        // of the duplicate-identity-restore status-bar fix (task d14048ef). Reset per RestoreSession.
+        private readonly HashSet<string> _restoredTerminalTitles =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // Timer for polling pending message queue (retry delivery)
         private System.Windows.Forms.Timer _messageQueueTimer;
         private int _messageQueueCleanupCounter = 0;
@@ -4872,6 +4878,7 @@ namespace MultiTerminal
         {
             _debugLogService?.Trace("RestoreSession", "Starting...");
 
+            _restoredTerminalTitles.Clear();
             _pendingTerminalSessions = _settings.GetSessionTerminals();
             int terminalCount = _pendingTerminalSessions?.Count ?? 0;
             _debugLogService?.Trace("RestoreSession", $"Session terminals: {terminalCount}");
@@ -5122,11 +5129,38 @@ namespace MultiTerminal
 
             if (persistString == typeof(TerminalDocument).FullName)
             {
-                // Get session info for this terminal (by index)
-                TerminalSessionInfo sessionInfo = null;
-                if (_pendingTerminalSessions != null && _terminalRestoreIndex < _pendingTerminalSessions.Count)
+                // Pair each restored TerminalDocument pane with its saved session by index.
+                // Reconciliation (task d14048ef): returning null skips the saved entry —
+                // DockPanelSuite's documented contract, the same one the Oracle re-bind above
+                // relies on — so a drifted layout.xml can't spawn an extra TerminalDocument.
+                //
+                // (1) Index past the (deduped) session list ⇒ a phantom blank pane. The pre-fix
+                //     code created CreateTerminalForRestore(null) here, which is exactly the
+                //     orphan/blank renderer that defeated the statusline. Skip it.
+                if (_pendingTerminalSessions == null || _terminalRestoreIndex >= _pendingTerminalSessions.Count)
                 {
-                    sessionInfo = _pendingTerminalSessions[_terminalRestoreIndex++];
+                    // Surface the drop in the in-app debug log (not just Trace.WriteLine, which is
+                    // invisible in a release run) so a skipped pane is observable if reconciliation
+                    // ever drops one the user expected (adversary finding, task d14048ef).
+                    string skipMsg = $"[RestoreSession] Skipping extra TerminalDocument pane (index {_terminalRestoreIndex} >= session count {_pendingTerminalSessions?.Count ?? 0}) — drifted layout would spawn a phantom blank terminal";
+                    System.Diagnostics.Trace.WriteLine(skipMsg);
+                    _debugLogService?.Trace("RestoreSession", skipMsg);
+                    return null;
+                }
+
+                TerminalSessionInfo sessionInfo = _pendingTerminalSessions[_terminalRestoreIndex++];
+
+                // (2) Agent name already materialized this restore ⇒ duplicate identity. Belt to
+                //     the SettingsService read-dedup suspenders: if a dup somehow survived into the
+                //     session list, skip the second same-named pane (and let the next pane consume
+                //     the next session, preserving pairing for the remaining terminals).
+                string title = sessionInfo?.CustomTitle;
+                if (!string.IsNullOrEmpty(title) && !_restoredTerminalTitles.Add(title))
+                {
+                    string dupMsg = $"[RestoreSession] Skipping duplicate TerminalDocument for agent '{title}' (one-name-one-terminal invariant)";
+                    System.Diagnostics.Trace.WriteLine(dupMsg);
+                    _debugLogService?.Trace("RestoreSession", dupMsg);
+                    return null;
                 }
 
                 return CreateTerminalForRestore(sessionInfo);
