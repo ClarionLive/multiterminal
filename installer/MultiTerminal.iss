@@ -102,6 +102,18 @@ Source: "{#PublishDir}\Microsoft.Web.WebView2.Wpf.dll"; DestDir: "{app}"; Compon
 Source: "{#PublishDir}\SQLite.Interop.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 Source: "{#PublishDir}\System.Data.SQLite.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 Source: "{#PublishDir}\WebView2Loader.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+; LibGit2Sharp — git operations (GitRepoManager's static ctor loads it). Managed assembly
+; PLUS its hash-named native git2-*.dll. Both were absent from this explicit file list, so a
+; clean-machine install threw TypeInitializationException at MCP/chat init (task df1f521f).
+Source: "{#PublishDir}\LibGit2Sharp.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\git2-*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+; More app NuGet deps that were absent from this list (found by publish-vs-iss audit, task
+; df1f521f): MQTT presence messaging, web-push + its BouncyCastle VAPID crypto, and JSON.NET.
+; Same failure class as LibGit2Sharp — they just load later, once their code path runs.
+Source: "{#PublishDir}\MQTTnet.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\WebPush.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\BouncyCastle.Crypto.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+Source: "{#PublishDir}\Newtonsoft.Json.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 ; Roslyn code graph indexer (v1.4.0+)
 Source: "{#PublishDir}\Microsoft.CodeAnalysis.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
 Source: "{#PublishDir}\Microsoft.CodeAnalysis.CSharp.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
