@@ -121,11 +121,34 @@ namespace MultiTerminal.StartScreen
             _projectService = projectService;
             _initializePending = true;
 
+            // Live-refresh the card grid whenever a project is opened anywhere (launched from
+            // another Home tab, or via ProjectService.MarkProjectOpened). Without this, an
+            // already-rendered Home screen keeps showing a stale "Last opened" date because
+            // RefreshProjects otherwise only runs on init / ShowStartScreen (task 17bf9fae).
+            // Unsubscribe-then-subscribe so a repeat Initialize on the same singleton can't
+            // double-fire. OnProjectServiceProjectOpened → RefreshProjects marshals to the UI thread.
+            if (_projectService != null)
+            {
+                _projectService.ProjectOpened -= OnProjectServiceProjectOpened;
+                _projectService.ProjectOpened += OnProjectServiceProjectOpened;
+            }
+
             if (IsHandleCreated && !_isInitializing && !_isInitialized)
             {
                 await InitializeWebView2Async();
             }
             // else: OnHandleCreated will call InitializeWebView2Async when handle is ready
+        }
+
+        /// <summary>
+        /// ProjectService.ProjectOpened handler — a project's LastOpenedAt was just stamped,
+        /// so re-render this Home screen's cards to show the fresh date (task 17bf9fae).
+        /// RefreshProjects marshals to the UI thread itself.
+        /// </summary>
+        private void OnProjectServiceProjectOpened(object sender, ProjectEventArgs e)
+        {
+            if (IsDisposed || Disposing) return;
+            RefreshProjects();
         }
 
         /// <summary>
@@ -546,6 +569,10 @@ namespace MultiTerminal.StartScreen
         {
             if (disposing)
             {
+                // Detach the live-refresh subscription so a disposed Home tab doesn't leak
+                // on the long-lived ProjectService singleton (task 17bf9fae).
+                if (_projectService != null)
+                    _projectService.ProjectOpened -= OnProjectServiceProjectOpened;
                 _webView?.Dispose();
             }
             base.Dispose(disposing);

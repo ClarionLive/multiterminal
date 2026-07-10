@@ -3348,6 +3348,11 @@ namespace MultiTerminal
                 try
                 {
                     db.UpdateLastOpened(project.Id, stampedAt);
+
+                    // Notify open Home screens so their "Last opened" card date refreshes live
+                    // (task 17bf9fae). Notify-only — the stamp above already persisted; this just
+                    // raises ProjectService.ProjectOpened, which StartScreenControl subscribes to.
+                    _projectService?.NotifyProjectOpened(project);
                 }
                 catch (Exception ex)
                 {
@@ -4369,6 +4374,13 @@ namespace MultiTerminal
 
                     // Update dashboard header active session chip
                     _dashboardHeader?.SetActiveSession(activeDoc.TabText);
+
+                    // If we just switched TO a Home screen, re-read its project list so the
+                    // "Last opened" card data reflects any stamp that landed while the tab sat
+                    // inactive — a safety net beyond the ProjectOpened live-refresh, and it also
+                    // covers stamps from paths we don't hook (e.g. startup restore) (task 17bf9fae).
+                    if (activeDoc.IsStartScreenVisible)
+                        activeDoc.RefreshStartScreenProjects();
                 }
 
                 // Force all panes to refresh their tab strips to show correct active state

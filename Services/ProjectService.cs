@@ -326,6 +326,19 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Raises <see cref="ProjectOpened"/> for a project whose LastOpenedAt was already stamped
+        /// by a caller that bypasses <see cref="MarkProjectOpened"/> (e.g. MainForm's best-effort
+        /// launch stamp, which writes the single column directly). Notify-only — does NOT touch the
+        /// DB — so it can't double-stamp. Lets already-rendered Home screens live-refresh their
+        /// "Last opened" date instead of going stale (task 17bf9fae).
+        /// </summary>
+        public void NotifyProjectOpened(Project project)
+        {
+            if (project == null) return;
+            ProjectOpened?.Invoke(this, new ProjectEventArgs(project));
+        }
+
+        /// <summary>
         /// Toggles the pinned state of a project.
         /// </summary>
         public void ToggleProjectPinned(string projectId)
