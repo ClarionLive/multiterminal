@@ -132,8 +132,6 @@ const ALLOWLIST_SITES = new Map([
     'app entry/composition shim — the 4 Trace lines are splash/loading lifecycle events that fire before/around DebugLogService construction (created inside MainForm); no sink in scope'],
   ['Terminal/WebView2EnvironmentCache.cs',
     'static utility leaf — no instance seam for a sink; single cold Debug diagnostic (data-folder create failure)'],
-  ['TestSpawnForm.cs',
-    'dead/dev-only spawn harness Form — never instantiated in production (no `new TestSpawnForm`); no broker seam; Trace user-action diagnostics'],
 ]);
 
 // ── OWNED BY cd8ca48c (Bob's GitExec refactor) this cycle — swept in 4c86f18d, not this ticket. ─────
@@ -158,7 +156,7 @@ const DEFERRED_LEAVES = new Set([]);
 //    these dirs is now EXPLICITLY CONVERTED (strict-zero) or ALLOWLISTED above, so a new/residual site in
 //    any of them FAILS as UNACCOUNTED (the tightened falsifiable close). Both sets intentionally empty.
 const DEFERRED_DIRS = [];
-const DEFERRED_FILES = new Set([]); // Program.cs + TestSpawnForm.cs are now ALLOWLISTED, not dir-deferred
+const DEFERRED_FILES = new Set([]); // Program.cs is now ALLOWLISTED, not dir-deferred (TestSpawnForm.cs removed, task df1f521f)
 
 // ── walk production .cs, counting code-level calls (skip comment lines) ──────────────────────────────
 function* walk(dir) {
