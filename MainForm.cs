@@ -5130,9 +5130,11 @@ namespace MultiTerminal
 
         private IDockContent GetContentFromPersistString(string persistString)
         {
-            // Handle both old PromptTreeDocument and new ProjectPanelDocument for backward compatibility
+            // Handle both old PromptTreeDocument and new ProjectPanelDocument for backward compatibility.
+            // PromptTreeDocument (the old panel) was removed as dead code (task df1f521f); its persist
+            // string is matched here as a literal so pre-existing saved layouts still re-bind to the panel.
             if (persistString == typeof(ProjectPanelDocument).FullName ||
-                persistString == typeof(PromptTreeDocument).FullName)
+                persistString == "MultiTerminal.Docking.PromptTreeDocument")
             {
                 return _projectPanel;
             }
