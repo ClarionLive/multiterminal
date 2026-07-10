@@ -87,8 +87,11 @@ namespace MultiTerminal
                 Environment.SetEnvironmentVariable(WorktreeConfig.ModeEnvVar, SettingsService.Default.GetWorktreeMode());
             }
 
-            // Ensure plan database is seeded with initial data
-            PlanSeeder.EnsureSeeded();
+            // NOTE: PlanSeeder.EnsureSeeded() removed (task df1f521f). It injected a hardcoded
+            // DEMO plan ("Task-Centric Memory System", leader Bob, with Alice/Charlie/Diana
+            // assignments) into any EMPTY plan DB, so every clean install started up with a
+            // phantom "active plan" that the startup hook then surfaced as real context. Demo
+            // scaffolding must not ship — a fresh install has no active plan, which is correct.
 
             // One-shot migration: relocate any pre-2026-05-14 worktrees from
             // the old sibling layout to the new child-of-repo layout. Idempotent
