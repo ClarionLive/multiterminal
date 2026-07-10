@@ -5892,6 +5892,21 @@ namespace MultiTerminal
 
         private void InitializeOracle()
         {
+            // Oracle is OPT-IN for now — the advisory-agent feature isn't complete enough to
+            // distribute, so it does NOT auto-start with MultiTerminal. Re-enable by setting the
+            // MULTITERMINAL_ORACLE env var to 1/true/on/yes/enabled (MULTITERMINAL_* convention).
+            // Absent/empty/anything-else = off. When off we skip creation entirely; the rest of the
+            // app is already null-safe on _oracleService (EnsureVisible, the "Oracle" dock-restore
+            // factory, SavePanelState, and the digest-timer teardown all use ?. guards).
+            var oracleFlag = Environment.GetEnvironmentVariable("MULTITERMINAL_ORACLE")?.Trim();
+            var oracleEnabled = oracleFlag != null && new[] { "1", "true", "on", "yes", "enabled" }
+                .Contains(oracleFlag, StringComparer.OrdinalIgnoreCase);
+            if (!oracleEnabled)
+            {
+                _debugLogService?.Info("MainForm", "Oracle disabled (opt-in): set MULTITERMINAL_ORACLE=1 to enable. Not starting.");
+                return;
+            }
+
             try
             {
                 _oracleService = new OracleService(
