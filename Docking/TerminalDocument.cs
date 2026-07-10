@@ -1933,14 +1933,23 @@ namespace MultiTerminal.Docking
                 return;
             }
 
-            // Extract directory from PowerShell title and fire event
+            // Extract directory from PowerShell title and fire event.
+            // Claude Code rewrites the terminal title ~1×/sec (spinner/status), but the
+            // extracted directory is almost always unchanged. Only fire DirectoryChanged
+            // (and re-arm the file watcher) when the directory ACTUALLY changed — otherwise
+            // MainForm.OnTerminalDirectoryChanged re-renders the whole Project panel every
+            // title tick, which the user sees as a per-second flash (task 5e36e90b).
             string directory = ExtractDirectoryFromTitle(e.Title);
             if (!string.IsNullOrEmpty(directory))
             {
+                bool directoryChanged = !string.Equals(directory, _lastKnownDirectory, StringComparison.OrdinalIgnoreCase);
                 _lastKnownDirectory = directory;
                 ToolTipText = directory;
-                DirectoryChanged?.Invoke(this, new DirectoryChangedEventArgs(directory));
-                UpdateProjectFileWatcher(directory);
+                if (directoryChanged)
+                {
+                    DirectoryChanged?.Invoke(this, new DirectoryChangedEventArgs(directory));
+                    UpdateProjectFileWatcher(directory);
+                }
             }
 
             // Only update tab text if no custom title is set
