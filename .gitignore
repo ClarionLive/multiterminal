@@ -42,6 +42,9 @@ appsettings.Local.json
 
 # Databases & sessions
 *.db
+# SQLite WAL/SHM sidecars: extension is .db-wal/.db-shm, so *.db does NOT catch them (task d558ffdb)
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 .claude/sessions.db
