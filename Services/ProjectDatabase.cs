@@ -168,6 +168,15 @@ namespace MultiTerminal.Services
 
             var newColumns = new List<(string name, string definition)>
             {
+                // 'path' is created by ProjectDatabase's own CREATE TABLE, but TaskDatabase
+                // (constructed FIRST — MessageBroker builds _taskDb before _projectDb) also does
+                // CREATE TABLE IF NOT EXISTS projects with a 6-column subset that OMITS 'path'.
+                // On a clean install TaskDatabase wins the IF-NOT-EXISTS race, so ProjectDatabase's
+                // CREATE no-ops and 'path' is never created — then GetAllRichProjects' SELECT of
+                // 'path' throws "no such column", the Home screen's project push is swallowed, and
+                // the skeleton cards hang forever. Adding it to this idempotent list heals every
+                // fresh/already-broken DB on next launch (no-op where 'path' already exists). task df1f521f
+                ("path",               "TEXT"),
                 ("source_path",        "TEXT"),
                 ("deploy_path",        "TEXT"),
                 ("build_output_path",  "TEXT"),

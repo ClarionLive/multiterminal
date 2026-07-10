@@ -300,11 +300,18 @@ namespace MultiTerminal.Services
                 CREATE INDEX IF NOT EXISTS idx_activity_type_time ON activity_feed(activity_type, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_feed(timestamp DESC);
 
-                -- Projects table for grouping tasks
+                -- Projects table for grouping tasks.
+                -- NOTE: ProjectDatabase is the real owner of this table (full rich schema); this
+                -- minimal CREATE only exists so TaskDatabase's FKs resolve. Because TaskDatabase is
+                -- constructed BEFORE ProjectDatabase, this statement wins the IF-NOT-EXISTS race on a
+                -- clean install, so its column set must stay a strict subset that includes every
+                -- column any pre-ProjectDatabase-migration read needs. 'path' is included here so the
+                -- two CREATEs agree; ProjectDatabase's migration also ALTER-adds it defensively. (df1f521f)
                 CREATE TABLE IF NOT EXISTS projects (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     description TEXT,
+                    path TEXT,
                     created_by TEXT,
                     created_at DATETIME NOT NULL,
                     updated_at DATETIME NOT NULL
