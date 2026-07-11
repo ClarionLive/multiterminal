@@ -61,14 +61,26 @@ namespace MultiTerminal.API.Controllers
         /// Returns full task detail with checklist summary, same format as /detail.
         /// </summary>
         [HttpGet("active/{agentName}")]
-        public IActionResult GetMyActiveTask(string agentName)
+        public IActionResult GetMyActiveTask(string agentName, [FromQuery] string projectId = null)
         {
             if (string.IsNullOrEmpty(agentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
 
-            var task = _broker.GetMyActiveTask(agentName);
+            var task = _broker.GetMyActiveTask(agentName, projectId);
             if (task == null)
+            {
+                // When a project scope filtered out an active task that DOES exist for this agent
+                // in another project, say so — the caller (a terminal launched for this project)
+                // is otherwise left thinking the agent has no active work at all.
+                if (!string.IsNullOrEmpty(projectId))
+                {
+                    var unscoped = _broker.GetMyActiveTask(agentName);
+                    if (unscoped != null)
+                        return Ok(new { task = (object)null, message = $"No active task for {agentName} in this project. (Active task {unscoped.Id} '{unscoped.Title}' belongs to a different project.)" });
+                }
+
                 return Ok(new { task = (object)null, message = $"No active task for {agentName}" });
+            }
 
             // Load helpers
             var helpers = _broker.LoadTaskHelpers(task.Id);

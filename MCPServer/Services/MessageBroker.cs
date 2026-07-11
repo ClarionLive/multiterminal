@@ -1044,6 +1044,34 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Task-id-pinned variant of <see cref="ResolveTaskWorktreePath(string)"/>: return
+        /// <paramref name="agentName"/>'s materialized worktree for the SPECIFIC
+        /// <paramref name="taskId"/> (canonical for the assignee, helper row for a helper),
+        /// or null when it doesn't exist on disk. Same per-agent resolution and
+        /// <c>Directory.Exists</c> guard as the agent-keyed method, but WITHOUT re-resolving
+        /// the agent's active task — the caller supplies the task it already gated on
+        /// (task 0cd2c868: keeps get_active_worktree's reads pinned to the scoped task so a
+        /// cross-project active task can't be substituted underneath the gate).
+        /// </summary>
+        public string ResolveWorktreePathForTask(string taskId, string agentName)
+        {
+            if (string.IsNullOrEmpty(taskId)) return null;
+            try
+            {
+                string candidate = _worktrees?.GetWorktreePathForTask(taskId, agentName)
+                                   ?? _worktrees?.GetWorktreePathForTask(taskId);
+                if (string.IsNullOrEmpty(candidate) || !System.IO.Directory.Exists(candidate))
+                    return null;
+                return candidate;
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("ResolveWorktreePathForTask", $"task '{taskId}' / '{agentName}' threw: {ex.Message} — falling through to main checkout");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Companion to <see cref="ResolveTaskWorktreePath"/> used by the AC7
         /// launch-root strategy. Returns the project root (main checkout) for
         /// the agent's active task, or <c>null</c> when the agent has no active
@@ -1103,9 +1131,36 @@ namespace MultiTerminal.MCPServer.Services
         public string EnsureWorktreeForActiveTask(string agentName)
         {
             if (string.IsNullOrEmpty(agentName)) return null;
+            var activeTask = ResolveActiveTaskForAgent(agentName);
+            if (activeTask == null) return null;
+            return EnsureWorktreeForTask(activeTask.Id, agentName);
+        }
+
+        /// <summary>
+        /// Task-id-pinned core of <see cref="EnsureWorktreeForActiveTask(string)"/>: materialize
+        /// <paramref name="agentName"/>'s worktree for the SPECIFIC <paramref name="taskId"/> (backfill
+        /// when eligible-but-missing), rather than re-resolving the agent's active task internally.
+        ///
+        /// <para>Pinning to a caller-supplied task id is the fix for the get_active_worktree cross-project
+        /// divergence (task 0cd2c868): the REST endpoint resolves the agent's active task under a project
+        /// scope, then hands THAT task's id here — so this no longer re-runs the unscoped
+        /// <see cref="ResolveActiveTaskForAgent(string, string)"/> (whose strict-then-helper ordering could
+        /// otherwise return a DIFFERENT task — the assignee's active task in another project — than the one
+        /// the caller gated on). <see cref="EnsureWorktreeForActiveTask(string)"/> keeps its exact prior
+        /// behavior by resolving unscoped and delegating here.</para>
+        /// </summary>
+        /// <param name="taskId">The task whose worktree to ensure (the caller-gated task).</param>
+        /// <param name="agentName">The agent the worktree is for (per-agent isolation: canonical for the
+        /// assignee, helper row for a helper).</param>
+        /// <returns>The worktree path after ensuring it, or null when nothing was (or could be) materialized.</returns>
+        public string EnsureWorktreeForTask(string taskId, string agentName)
+        {
+            if (string.IsNullOrEmpty(taskId) || string.IsNullOrEmpty(agentName)) return null;
             try
             {
-                var activeTask = ResolveActiveTaskForAgent(agentName);
+                // Load the pinned task from cache (falling back to the DB for a task not yet loaded),
+                // instead of re-resolving the agent's active task — the caller already chose the task.
+                var activeTask = _taskService.GetTask(taskId) ?? _taskDb?.GetTask(taskId);
                 if (activeTask == null) return null;
 
                 // Fast-path: THIS agent already has a worktree on disk (canonical for
@@ -1202,7 +1257,7 @@ namespace MultiTerminal.MCPServer.Services
             }
             catch (Exception ex)
             {
-                DebugLogService?.Error("MessageBroker", $"EnsureWorktreeForActiveTask('{agentName}') failed: {ex.Message}");
+                DebugLogService?.Error("MessageBroker", $"EnsureWorktreeForTask('{taskId}','{agentName}') failed: {ex.Message}");
                 return null;
             }
         }
@@ -4079,8 +4134,8 @@ namespace MultiTerminal.MCPServer.Services
         /// Get the active in-progress task for a specific agent.
         /// Checks in-memory cache first, falls back to database.
         /// </summary>
-        public KanbanTask GetMyActiveTask(string agentName)
-            => _taskService.GetMyActiveTask(agentName);
+        public KanbanTask GetMyActiveTask(string agentName, string projectId = null)
+            => _taskService.GetMyActiveTask(agentName, projectId);
 
         /// <summary>
         /// Resolve the agent's active task for WORKTREE/CWD purposes. Distinct
@@ -4098,8 +4153,8 @@ namespace MultiTerminal.MCPServer.Services
         /// byte-identical. Most-recent active worktree row wins when an agent
         /// helps on several tasks (task bab81a92, fixes acceptance scenario 2b).</para>
         /// </summary>
-        public KanbanTask ResolveActiveTaskForAgent(string agentName)
-            => _taskService.ResolveActiveTaskForAgent(agentName);
+        public KanbanTask ResolveActiveTaskForAgent(string agentName, string projectId = null)
+            => _taskService.ResolveActiveTaskForAgent(agentName, projectId);
 
         /// <summary>
         /// Debug-only cache-coherency check (P5 / 1df2a534): samples up to <paramref name="sampleSize"/>

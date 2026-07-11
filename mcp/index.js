@@ -835,6 +835,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Your terminal/agent name (from MULTITERMINAL_NAME env var)",
             },
+            projectId: {
+              type: "string",
+              description: "Project scope. Omit to use the terminal's resolved project. Pass \"all\" for any project (legacy unscoped behavior).",
+            },
           },
           required: ["agentName"],
         },
@@ -848,6 +852,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             agentName: {
               type: "string",
               description: "Your terminal/agent name (from MULTITERMINAL_NAME env var)",
+            },
+            projectId: {
+              type: "string",
+              description: "Project scope. Omit to use the terminal's resolved project. Pass \"all\" for any project (legacy unscoped behavior).",
             },
           },
           required: ["agentName"],
@@ -3267,10 +3275,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_my_active_task": {
-        const result = await apiCall(`/api/tasks/active/${seg(args.agentName)}`);
+        // Project-first surfacing: scope the active-task lookup to the terminal's resolved project so a
+        // project-X terminal doesn't surface the agent's active task from project Y. "all" forces the
+        // legacy unscoped lookup. Fails CLOSED (loud) when project context is indicated but unresolvable.
+        const { projectId, degradedText } = await resolveScopedProjectId(args);
+        if (degradedText) {
+          return { content: [{ type: "text", text: degradedText }], isError: true };
+        }
+        let activeUrl = `/api/tasks/active/${seg(args.agentName)}`;
+        if (projectId) activeUrl += `?projectId=${encodeURIComponent(projectId)}`;
+        const result = await apiCall(activeUrl);
         const task = result.task;
         if (!task) {
-          return { content: [{ type: "text", text: `No active task for ${args.agentName}. Use list_tasks or get_my_pickable_tasks to find work.` }] };
+          // Prefer the server's message — it distinguishes "no active task at all" from
+          // "your active task belongs to a different project" (cross-project note).
+          const noTaskMsg = result.message || `No active task for ${args.agentName}.`;
+          return { content: [{ type: "text", text: `${noTaskMsg} Use list_tasks or get_my_pickable_tasks to find work.` }] };
         }
         const summary = result.checklistSummary;
         const checklist = result.checklist;
@@ -3323,14 +3343,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_active_worktree": {
-        const result = await apiCall(`/api/worktrees/active/${seg(args.agentName)}`);
+        // Project-first surfacing: scope the active-worktree lookup to the terminal's resolved project so a
+        // project-X terminal doesn't surface the agent's active worktree from project Y. "all" forces the
+        // legacy unscoped lookup. Fails CLOSED (loud) when project context is indicated but unresolvable.
+        const { projectId, degradedText } = await resolveScopedProjectId(args);
+        if (degradedText) {
+          return { content: [{ type: "text", text: degradedText }], isError: true };
+        }
+        let worktreeUrl = `/api/worktrees/active/${seg(args.agentName)}`;
+        if (projectId) worktreeUrl += `?projectId=${encodeURIComponent(projectId)}`;
+        const result = await apiCall(worktreeUrl);
         if (!result.worktreePath) {
           // No active task, or active task has no materialized worktree
           // (worktree mode off / project unregistered / git failure). Mirrors
-          // the auto-cd no-op signal: caller should NOT cd anywhere.
-          const reason = result.taskId
-            ? `Task '${result.taskTitle}' [${result.taskId}] is active but has no worktree (worktree mode off, project unregistered, or git failed).`
-            : `No active task for ${args.agentName}.`;
+          // the auto-cd no-op signal: caller should NOT cd anywhere. Prefer the
+          // server's message — it carries the cross-project note when the agent's
+          // active task belongs to a different project.
+          const reason = result.message
+            ? result.message
+            : result.taskId
+              ? `Task '${result.taskTitle}' [${result.taskId}] is active but has no worktree (worktree mode off, project unregistered, or git failed).`
+              : `No active task for ${args.agentName}.`;
           return {
             content: [{ type: "text", text: `No active worktree. ${reason}` }],
           };
