@@ -204,6 +204,41 @@ namespace MultiTerminal.Services
             return true;
         }
 
+        /// <summary>
+        /// Returns true when <paramref name="targetDir"/> is <paramref name="repoRoot"/>
+        /// itself or a descendant of it (case-insensitive, separator-normalized).
+        /// Used by MainForm's AC7 spawn-dir guard: a launch with an EXPLICIT target
+        /// folder (New Project dialog, project card, Just Claude folder picker) may
+        /// only be redirected to the agent's active-task worktree when that target
+        /// lives inside the task's repo — otherwise the user's explicit choice wins
+        /// (task f1f74a8f: Diana's MT task hijacked a POSitiveMobile launch).
+        /// Pure and non-throwing: malformed paths return false.
+        /// </summary>
+        public static bool IsWithinRepo(string targetDir, string repoRoot)
+        {
+            if (string.IsNullOrWhiteSpace(targetDir) || string.IsNullOrWhiteSpace(repoRoot))
+                return false;
+
+            try
+            {
+                string target = Path.GetFullPath(targetDir).TrimEnd('\\', '/');
+                string root = Path.GetFullPath(repoRoot).TrimEnd('\\', '/');
+
+                if (string.Equals(target, root, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                // Descendant check with a separator appended so "C:\repo2" is not
+                // treated as inside "C:\repo".
+                return target.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    || target.StartsWith(root + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception)
+            {
+                // GetFullPath throws on invalid characters/segments — treat as "not inside".
+                return false;
+            }
+        }
+
         private static string CombineErrors(params string[] errors)
         {
             string joined = string.Join("; ", errors.Where(e => !string.IsNullOrEmpty(e)));

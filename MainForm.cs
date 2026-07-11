@@ -2932,12 +2932,37 @@ namespace MultiTerminal
         //   - (repoRoot, worktreePath) when both resolve cleanly
         //   - (worktreePath, worktreePath) when worktree exists but repoRoot
         //     can't be resolved — preserves pre-AC7 behavior on that edge.
-        private string ResolveSpawnDir(string terminalName, string fallbackDir, out string taskWorktreePath)
+        //
+        // explicitTargetDir (task f1f74a8f): launch sites where the USER explicitly
+        // named a destination (New Project dialog, project card, Just Claude folder
+        // picker) pass it; the override then only applies when that target lives
+        // inside the active task's repo. Otherwise the user's choice wins and the
+        // active-task worktree cd is suppressed — Diana's active MT task must not
+        // hijack a launch aimed at a different project. Sites with only a default
+        // destination (AddNewTerminal, "Launch as...") pass null and keep the
+        // unconditional AC7 behavior.
+        private string ResolveSpawnDir(string terminalName, string fallbackDir, out string taskWorktreePath, string explicitTargetDir = null)
         {
             taskWorktreePath = ResolveTaskWorktreePath(terminalName);
             if (taskWorktreePath == null) return fallbackDir;
             string repoRoot = _mcpServer?.Broker?.ResolveTaskRepoRoot(terminalName);
-            if (!string.IsNullOrEmpty(repoRoot) && System.IO.Directory.Exists(repoRoot))
+            bool repoRootUsable = !string.IsNullOrEmpty(repoRoot) && System.IO.Directory.Exists(repoRoot);
+
+            if (explicitTargetDir != null)
+            {
+                // Compare against the repo root when it resolved; otherwise the
+                // worktree path is the best available anchor for the task's repo.
+                string taskRepoAnchor = repoRootUsable ? repoRoot : taskWorktreePath;
+                if (!Services.LaunchCommandBuilder.IsWithinRepo(explicitTargetDir, taskRepoAnchor))
+                {
+                    _debugLogService?.Info("ResolveSpawnDir",
+                        $"'{terminalName}' has active-task worktree '{taskWorktreePath}' but explicit target '{explicitTargetDir}' is outside its repo — honoring explicit target (task f1f74a8f)");
+                    taskWorktreePath = null;
+                    return fallbackDir;
+                }
+            }
+
+            if (repoRootUsable)
                 return repoRoot;
             return taskWorktreePath;
         }
@@ -3306,7 +3331,9 @@ namespace MultiTerminal
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
                 // cd narrows to the worktree. Falls through to launchDir on no worktree.
-                launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath);
+                // The project card names an explicit destination, so the override only
+                // applies when the agent's active task lives in THIS project (f1f74a8f).
+                launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath, explicitTargetDir: launchDir);
 
                 _debugLogService?.Trace("StartScreen", $"Launching project '{project.Name}' in {launchDir}");
                 _debugLogService?.Trace("MainForm", $"#PROJ# [MainForm.OnStartScreenProjectLaunched] Calling doc.StartTerminal: doc.DocId='{doc.DocId}' launchDir='{launchDir}' terminalName='{terminalName}' projectId='{project.Id}' projectName='{project.Name}' isTeamLead={isTeamLead} taskWorktreePath='{taskWorktreePath ?? "null"}'");
@@ -3437,7 +3464,9 @@ namespace MultiTerminal
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
                 // cd narrows to the worktree. Falls through to workingDir on no worktree.
-                workingDir = ResolveSpawnDir(terminalName, workingDir, out string taskWorktreePath);
+                // The picker's folder is an explicit user choice, so the override only
+                // applies when the agent's active task lives in that repo (f1f74a8f).
+                workingDir = ResolveSpawnDir(terminalName, workingDir, out string taskWorktreePath, explicitTargetDir: workingDir);
 
                 doc.StartTerminal(workingDir, terminalName, launch.AutoRunCommand, isTeamLead: isTeamLead, taskWorktreePath: taskWorktreePath);
 
@@ -3589,7 +3618,10 @@ namespace MultiTerminal
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
                 // cd narrows to the worktree. Falls through to launchDir on no worktree.
-                launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath2);
+                // A NEW project folder is never inside the lead's active-task repo, so
+                // the explicit-target guard suppresses the override here — this is the
+                // exact hijack from the f1f74a8f repro (Diana's MT task vs POSitiveMobile).
+                launchDir = ResolveSpawnDir(terminalName, launchDir, out string taskWorktreePath2, explicitTargetDir: launchDir);
 
                 // Start terminal in project folder
                 _debugLogService?.Trace("StartScreen", $"Launching new project '{project.Name}' in {launchDir} (taskWorktreePath='{taskWorktreePath2 ?? "null"}')");
