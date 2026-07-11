@@ -3859,8 +3859,10 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="taskId">The task ID to claim</param>
         /// <param name="assignee">The terminal name claiming the task</param>
         /// <param name="priorityOverride">Optional priority override. If specified, uses this instead of task's priority.</param>
-        public ClaimTaskResult ClaimTask(string taskId, string assignee, string priorityOverride = null)
-            => _taskService.ClaimTask(taskId, assignee, priorityOverride);
+        /// <param name="allowReassign">When true, a task already claimed by another agent is reassigned to <paramref name="assignee"/> (task cf32b08f).</param>
+        /// <param name="expectedProjectId">When set, ANY claim (unassigned claim or takeover) is refused unless the task belongs to this project (cf32b08f HIGH-2/HIGH-3 — write bound to the project-scoped read contract).</param>
+        public ClaimTaskResult ClaimTask(string taskId, string assignee, string priorityOverride = null, bool allowReassign = false, string expectedProjectId = null)
+            => _taskService.ClaimTask(taskId, assignee, priorityOverride, allowReassign, expectedProjectId);
 
         /// <summary>
         /// Check if a terminal is currently in a critical section.

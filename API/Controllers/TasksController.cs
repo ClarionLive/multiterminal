@@ -21,12 +21,14 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
-        /// List all tasks, optionally filtered by status
+        /// List all tasks, optionally filtered by status and/or project.
+        /// projectId filtering is STRICT: tasks with no ProjectId stamp are excluded
+        /// (they remain visible in the unfiltered view).
         /// </summary>
         [HttpGet]
-        public IActionResult ListTasks([FromQuery] string status = "all", [FromQuery] bool includeQuickTasks = false)
+        public IActionResult ListTasks([FromQuery] string status = "all", [FromQuery] bool includeQuickTasks = false, [FromQuery] string projectId = null)
         {
-            var allTasks = _broker.GetTasks(projectId: null);
+            var allTasks = _broker.GetTasks(projectId);
 
             if (!includeQuickTasks)
             {
@@ -256,7 +258,7 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("{taskId}/assign")]
         public IActionResult AssignTask(string taskId, [FromBody] AssignTaskRequest request)
         {
-            var result = _broker.ClaimTask(taskId, request.Assignee);
+            var result = _broker.ClaimTask(taskId, request.Assignee, allowReassign: request.Reassign, expectedProjectId: request.ExpectedProjectId);
             if (!result.Success)
                 return Problem(detail: result.Error, statusCode: 400);
 
@@ -486,14 +488,19 @@ namespace MultiTerminal.API.Controllers
         /// <summary>
         /// Get tasks relevant to a specific agent: their assigned tasks + unassigned todo tasks.
         /// Returns a compact summary (no full descriptions, plans, or checklist JSON).
+        /// With projectId (task cf32b08f): surfacing becomes project-first — STRICTLY scoped to
+        /// that project (unstamped tasks excluded), and tasks assigned to OTHER agents are
+        /// included with relation "assigned-other" so the Owner can reassign them to whichever
+        /// agent is picking up work. Without projectId: legacy agent-centric behavior unchanged.
         /// </summary>
         [HttpGet("pickable/{agentName}")]
-        public IActionResult GetPickableTasks(string agentName)
+        public IActionResult GetPickableTasks(string agentName, [FromQuery] string projectId = null)
         {
             if (string.IsNullOrEmpty(agentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
 
-            var allTasks = _broker.GetTasks(projectId: null);
+            bool projectScoped = !string.IsNullOrEmpty(projectId);
+            var allTasks = _broker.GetTasks(projectId);
 
             var results = new List<object>();
             foreach (var task in allTasks)
@@ -508,8 +515,10 @@ namespace MultiTerminal.API.Controllers
                     string.IsNullOrEmpty(task.Assignee);
                 bool isHelper = task.Helpers != null &&
                     task.Helpers.Any(h => h.Equals(agentName, StringComparison.OrdinalIgnoreCase));
+                bool isAssignedToOther = projectScoped &&
+                    !string.IsNullOrEmpty(task.Assignee) && !isAssignedToMe;
 
-                if (!isAssignedToMe && !isUnassignedTodo && !isHelper)
+                if (!isAssignedToMe && !isUnassignedTodo && !isHelper && !isAssignedToOther)
                     continue;
 
                 // Build compact checklist summary
@@ -523,7 +532,10 @@ namespace MultiTerminal.API.Controllers
                     pending = checklist.Count(i => i.Status == "pending")
                 } : null;
 
-                string relation = isAssignedToMe ? "assigned" : isHelper ? "helper" : "available";
+                string relation = isAssignedToMe ? "assigned"
+                    : isHelper ? "helper"
+                    : isAssignedToOther ? "assigned-other"
+                    : "available";
 
                 results.Add(new
                 {
@@ -860,6 +872,15 @@ namespace MultiTerminal.API.Controllers
     public class AssignTaskRequest
     {
         public string Assignee { get; set; }
+
+        /// <summary>When true, a task already claimed by another agent is reassigned (task cf32b08f).</summary>
+        public bool Reassign { get; set; }
+
+        /// <summary>
+        /// When set together with <see cref="Reassign"/>, the takeover is refused unless the task's
+        /// ProjectId matches — binds the write to the project-scoped read contract (cf32b08f HIGH-2).
+        /// </summary>
+        public string ExpectedProjectId { get; set; }
     }
 
     public class AddHelperRequest

@@ -357,17 +357,41 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="taskId">The task ID to claim</param>
         /// <param name="assignee">The terminal name claiming the task</param>
         /// <param name="priorityOverride">Optional priority override. If specified, uses this instead of task's priority.</param>
-        public ClaimTaskResult ClaimTask(string taskId, string assignee, string priorityOverride = null)
+        public ClaimTaskResult ClaimTask(string taskId, string assignee, string priorityOverride = null, bool allowReassign = false, string expectedProjectId = null)
         {
             if (!_tasks.TryGetValue(taskId, out var task))
             {
                 return new ClaimTaskResult { Success = false, Error = $"Task not found: {taskId}" };
             }
 
-            // Allow re-claiming by the same person, but block if claimed by someone else
+            // Claim-scope binding (cf32b08f adversary HIGH-2 + security HIGH-3): when the caller
+            // declares its project scope, EVERY claim — first claim of an unassigned task, reclaim,
+            // or takeover — must target a task of that project. The project-scoped pickable list is
+            // the read contract and the write must not exceed it. Checked BEFORE assignee-state
+            // branching so the unassigned path can't bypass it. Callers that genuinely want a
+            // cross-project claim omit the expected project (MCP: projectId "all").
+            if (!string.IsNullOrEmpty(expectedProjectId) &&
+                !string.Equals(task.ProjectId, expectedProjectId, StringComparison.OrdinalIgnoreCase))
+            {
+                return new ClaimTaskResult
+                {
+                    Success = false,
+                    Error = $"Claim refused: task belongs to project '{task.ProjectId ?? "(none)"}', not the caller's project '{expectedProjectId}'. Pass projectId \"all\" to deliberately claim cross-project."
+                };
+            }
+
+            // Allow re-claiming by the same person, but block if claimed by someone else —
+            // unless the caller explicitly opted into reassignment (task cf32b08f: the Owner
+            // decides which agent works a project ticket; the agent is interchangeable).
+            string reassignedFrom = null;
             if (!string.IsNullOrEmpty(task.Assignee) && !task.Assignee.Equals(assignee, StringComparison.OrdinalIgnoreCase))
             {
-                return new ClaimTaskResult { Success = false, Error = $"Task already claimed by {task.Assignee}" };
+                if (!allowReassign)
+                {
+                    return new ClaimTaskResult { Success = false, Error = $"Task already claimed by {task.Assignee}. Pass reassign to take it over." };
+                }
+
+                reassignedFrom = task.Assignee;
             }
 
             // Use priority override if specified, otherwise use task's priority
@@ -488,6 +512,25 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     return new ClaimTaskResult { Success = false, Error = claimPersistFailed };
                 }
+            }
+
+            // Reassignment audit trail. Best-effort, exception-contained: the claim is already
+            // committed by this point, so a throwing activity sink must never fail the claim
+            // (same principle as EmitPauseSummaries).
+            if (reassignedFrom != null)
+            {
+                try
+                {
+                    _host.RecordActivity(new ActivityEvent
+                    {
+                        Terminal = assignee,
+                        Type = "task",
+                        Action = "reassigned",
+                        Content = $"Task reassigned from {reassignedFrom} to {assignee}: {task.Title}",
+                        RelatedId = taskId
+                    });
+                }
+                catch (Exception ex) { _host.LogError($"ClaimTask: reassign RecordActivity failed for {taskId}: {ex.Message}"); }
             }
 
             BroadcastTaskUpdate();

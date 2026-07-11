@@ -361,6 +361,110 @@ namespace MultiTerminal.Tests
             Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
         }
 
+        // ── cf32b08f reassign-on-claim ────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void ClaimTask_ClaimedByOther_BlocksWithoutReassign()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.ClaimTask(id, "diana", null).Success);
+
+            var result = _svc.ClaimTask(id, "bob", null);
+
+            Assert.False(result.Success);
+            Assert.Contains("diana", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("diana", _db.GetTask(id).Assignee);   // assignee untouched
+        }
+
+        [Fact]
+        public void ClaimTask_AllowReassign_TakesOverAndRecordsAudit()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.ClaimTask(id, "diana", null).Success);
+
+            var result = _svc.ClaimTask(id, "bob", null, allowReassign: true);
+
+            Assert.True(result.Success);
+            Assert.Equal("bob", _db.GetTask(id).Assignee);     // durably reassigned
+            Assert.Contains(_host.Activities, a => a.Action == "reassigned"
+                && a.Content.Contains("diana") && a.Content.Contains("bob"));
+        }
+
+        [Fact]
+        public void ClaimTask_AllowReassign_SamePerson_NoReassignAudit()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.ClaimTask(id, "diana", null).Success);
+
+            // Re-claim by the same person (case-variant) with the flag set: succeeds, but it is
+            // NOT a reassignment, so no "reassigned" audit event may be emitted.
+            var result = _svc.ClaimTask(id, "Diana", null, allowReassign: true);
+
+            Assert.True(result.Success);
+            Assert.DoesNotContain(_host.Activities, a => a.Action == "reassigned");
+        }
+
+        [Fact]
+        public void ClaimTask_UnassignedCrossProject_Refused()
+        {
+            // HIGH-3 (cf32b08f security, Run 2): the claim-scope binding must cover the UNASSIGNED
+            // path too, not just takeovers — a scoped caller must not claim another project's
+            // unassigned task by id. Unbound (null expected) and explicit-global claims still work.
+            var id = _svc.CreateTask("t", "d", "diana", projectId: "projB123").TaskId;
+
+            var refused = _svc.ClaimTask(id, "bob", null, allowReassign: false, expectedProjectId: "projA456");
+
+            Assert.False(refused.Success);
+            Assert.Contains("projB123", refused.Error);
+            Assert.Null(_db.GetTask(id).Assignee);   // still unassigned
+
+            var allowed = _svc.ClaimTask(id, "bob", null);   // no binding = legacy/global mode
+            Assert.True(allowed.Success);
+            Assert.Equal("bob", _db.GetTask(id).Assignee);
+        }
+
+        [Fact]
+        public void ClaimTask_Reassign_CrossProject_Refused()
+        {
+            // HIGH-2 (cf32b08f adversary): the takeover write is bound to the caller's project scope.
+            // A reassign carrying expectedProjectId for project A must be refused for a project-B task,
+            // leaving the assignment untouched; the same call without the binding (global mode) succeeds.
+            var id = _svc.CreateTask("t", "d", "diana", projectId: "projB123").TaskId;
+            Assert.True(_svc.ClaimTask(id, "diana", null).Success);
+
+            var refused = _svc.ClaimTask(id, "bob", null, allowReassign: true, expectedProjectId: "projA456");
+
+            Assert.False(refused.Success);
+            Assert.Contains("projB123", refused.Error);
+            Assert.Equal("diana", _db.GetTask(id).Assignee);   // untouched
+            Assert.DoesNotContain(_host.Activities, a => a.Action == "reassigned");
+
+            // Matching project binding succeeds (case-insensitive), as does explicit global mode (null).
+            var allowed = _svc.ClaimTask(id, "bob", null, allowReassign: true, expectedProjectId: "PROJB123");
+            Assert.True(allowed.Success);
+            Assert.Equal("bob", _db.GetTask(id).Assignee);
+        }
+
+        [Fact]
+        public void ClaimTask_Reassign_OtherAgentsActiveTask_MovesToNewAssignee()
+        {
+            // Steal diana's ACTIVE task: after the reassign, diana must have zero active tasks and
+            // bob (no prior active work) must hold the task as HIS active task.
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _svc.ClaimTask(id, "diana", null);
+            _svc.UpdateTaskStatus(id, "in_progress");
+            _svc.SetTaskActive(id, "diana");
+            Assert.Equal(1, DbActiveCount("diana"));
+
+            var result = _svc.ClaimTask(id, "bob", null, allowReassign: true);
+
+            Assert.True(result.Success);
+            Assert.Equal(0, DbActiveCount("diana"));
+            Assert.Equal(1, DbActiveCount("bob"));
+            Assert.Equal("bob", _db.GetTask(id).Assignee);
+            Assert.True(_svc.VerifyCacheCoherency(0).Coherent);
+        }
+
         [Fact]
         public void GetActiveTaskForAgent_MatchesCaseVariantAssignee()
         {
@@ -380,6 +484,9 @@ namespace MultiTerminal.Tests
         {
             public int TasksUpdatedCount { get; private set; }
 
+            // Captured RecordActivity events, so audit-trail emissions (e.g. cf32b08f "reassigned") are assertable.
+            public List<ActivityEvent> Activities { get; } = new List<ActivityEvent>();
+
             // When set, RecordActivity throws — models a post-commit best-effort activity sink going down, to
             // prove a throwing sink can't poison a committed claim (7c59c004 Codex security [medium]).
             public bool ThrowFromRecordActivity { get; set; }
@@ -394,6 +501,7 @@ namespace MultiTerminal.Tests
             public bool RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
             {
                 if (ThrowFromRecordActivity) throw new InvalidOperationException("test: activity sink down");
+                Activities.Add(activity);
                 return true;
             }
             public CreateInboxMessageResult CreateInboxNotification(string userId, string taskId, string taskTitle, int? checklistItemIndex, string checklistItemName, string type, string summary, string createdBy) => new CreateInboxMessageResult { Success = true };

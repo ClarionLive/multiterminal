@@ -131,41 +131,90 @@ async function apiCall(endpoint, method = "GET", body = null) {
   throw lastErr;
 }
 
-// Resolve and cache the active project id for this MCP server process.
-// Priority: explicit MULTITERMINAL_PROJECT_ID > CLAUDE_PROJECT_DIR matched against /api/projects > null.
-// Cached as a Promise so concurrent callers share the same lookup, and a failed lookup
-// is not retried on every tool call.
-let projectIdPromise = null;
-function resolveProjectId() {
-  if (projectIdPromise) return projectIdPromise;
-  projectIdPromise = (async () => {
+// Resolve the active project scope for this MCP server process.
+// Priority: explicit MULTITERMINAL_PROJECT_ID > CLAUDE_PROJECT_DIR matched against /api/projects.
+// Returns { id: string|null, degraded: boolean, reason: string|null }:
+//   - id set, degraded=false      -> resolved project context.
+//   - id null, degraded=false     -> NO project context indicated (no CLAUDE_PROJECT_DIR) — global is correct.
+//   - id null, degraded=true      -> project context WAS indicated but could not be resolved (API down,
+//                                    unregistered path). Task-surfacing callers must fail LOUD, never
+//                                    silently fall back to the cross-project board (task cf32b08f,
+//                                    adversary HIGH-1: project resolution is a safety boundary).
+// Only successful resolutions are cached; a degraded outcome clears the cache so the next call retries
+// (a cold REST server at MCP start must not poison the whole process lifetime).
+let projectScopePromise = null;
+function resolveProjectScope() {
+  if (projectScopePromise) return projectScopePromise;
+  const attempt = (async () => {
     const explicitId = process.env.MULTITERMINAL_PROJECT_ID;
-    if (explicitId) return explicitId;
+    if (explicitId) return { id: explicitId, degraded: false, reason: null };
 
     const claudeDir = process.env.CLAUDE_PROJECT_DIR;
-    if (!claudeDir) return null;
+    if (!claudeDir) return { id: null, degraded: false, reason: null };
 
     const normalize = (p) => (p || "").replace(/[\\/]+$/, "").toLowerCase();
     const target = normalize(claudeDir);
+    // A terminal sitting inside a task worktree (<repo>/.claude/worktrees/<id>) belongs to the
+    // repo-root project — strip the worktree suffix and match on the root as well.
+    const rootTarget = target.replace(/[\\/]\.claude[\\/]worktrees[\\/].*$/, "");
 
     try {
       const result = await apiCall("/api/projects");
       const projects = (result && result.projects) || [];
-      const match = projects.find(
-        (p) => normalize(p.path) === target || normalize(p.sourcePath) === target
+      const match = projects.find((p) =>
+        [normalize(p.path), normalize(p.sourcePath)].some((pp) => pp && (pp === target || pp === rootTarget))
       );
       if (match) {
         console.error(`Resolved CLAUDE_PROJECT_DIR (${claudeDir}) -> project id ${match.id}`);
-        return String(match.id);
+        return { id: String(match.id), degraded: false, reason: null };
       }
-      console.error(`CLAUDE_PROJECT_DIR (${claudeDir}) did not match any registered project; projectId will be null`);
-      return null;
+      const reason = `CLAUDE_PROJECT_DIR (${claudeDir}) did not match any registered project`;
+      console.error(reason);
+      return { id: null, degraded: true, reason };
     } catch (err) {
-      console.error(`resolveProjectId() lookup failed: ${err.message}`);
-      return null;
+      const reason = `project lookup failed: ${err.message}`;
+      console.error(`resolveProjectScope() ${reason}`);
+      return { id: null, degraded: true, reason };
     }
   })();
-  return projectIdPromise;
+  projectScopePromise = attempt.then(
+    (res) => {
+      if (res.degraded) projectScopePromise = null;
+      return res;
+    },
+    (err) => {
+      projectScopePromise = null;
+      throw err;
+    }
+  );
+  return projectScopePromise;
+}
+
+// Back-compat id-or-null wrapper for stamping callers (create_task / create_quick_task), which
+// deliberately stay fail-open: an untagged task creation is hinted in their tool output, while
+// SURFACING tools (list_tasks / get_my_pickable_tasks) must use resolveScopedProjectId below.
+async function resolveProjectId() {
+  return (await resolveProjectScope()).id;
+}
+
+// Shared scope resolution for the project-first task-surfacing tools.
+// args.projectId: "all" -> explicit global view; any other value -> explicit project; omitted ->
+// the terminal's resolved scope. Returns { projectId, degradedText } — when degradedText is set the
+// caller must return it as an error instead of listing tasks (fail closed, loud).
+async function resolveScopedProjectId(args) {
+  if (args.projectId === "all") return { projectId: null, degradedText: null };
+  if (args.projectId) return { projectId: args.projectId, degradedText: null };
+  const scope = await resolveProjectScope();
+  if (scope.degraded) {
+    return {
+      projectId: null,
+      degradedText:
+        `⚠ Project scope could not be resolved (${scope.reason}). ` +
+        `Refusing to show the cross-project board silently — retry shortly, pass an explicit projectId, ` +
+        `or pass projectId:"all" to deliberately use the global view.`,
+    };
+  }
+  return { projectId: scope.id, degradedText: null };
 }
 
 // Format terminal list for display
@@ -336,7 +385,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "list_tasks",
-        description: "List all kanban tasks from the MultiTerminal board. Quick-tasks (lightweight attribution anchors for trivial changes) are hidden by default; pass includeQuickTasks=true to include them (e.g., for the Quick-Tasks audit view).",
+        description: "List kanban tasks from the MultiTerminal board. In a project terminal this defaults to the CURRENT PROJECT's tasks (resolved from CLAUDE_PROJECT_DIR); pass projectId:\"all\" for the full cross-project board. Quick-tasks (lightweight attribution anchors for trivial changes) are hidden by default; pass includeQuickTasks=true to include them (e.g., for the Quick-Tasks audit view).",
         inputSchema: {
           type: "object",
           properties: {
@@ -349,6 +398,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "boolean",
               description: "If true, include quick-tasks (is_quick_task=1 immutable attribution anchors). Default false keeps the kanban board view clean.",
               default: false,
+            },
+            projectId: {
+              type: "string",
+              description: "Project scope. Omit to use the terminal's resolved project (strict — tasks with no project stamp are excluded). Pass \"all\" for every project (legacy board view).",
             },
           },
         },
@@ -480,7 +533,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "claim_task",
-        description: "Claim/assign a kanban task to yourself or another team member",
+        description: "Claim/assign a kanban task to yourself or another team member. A task already claimed by someone else is refused unless reassign:true (Owner-directed takeover — records a 'reassigned from X to Y' activity event).",
         inputSchema: {
           type: "object",
           properties: {
@@ -491,6 +544,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             assignee: {
               type: "string",
               description: "Name of the person claiming the task",
+            },
+            reassign: {
+              type: "boolean",
+              description: "If true, take over a task currently assigned to another agent. Default false refuses with 'already claimed'.",
+              default: false,
+            },
+            projectId: {
+              type: "string",
+              description: "Project binding for the claim. Omit to bind to the terminal's resolved project (the claim is refused if the task belongs to a different project — applies to unassigned claims and reassign takeovers alike). Pass \"all\" to deliberately claim cross-project.",
             },
           },
           required: ["taskId", "assignee"],
@@ -844,13 +906,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "get_my_pickable_tasks",
-        description: "Get tasks you can work on: your assigned in-progress tasks + unassigned todo tasks available to claim. Returns a compact formatted list. Use this instead of list_tasks when browsing for work.",
+        description: "Get tasks you can work on. In a project terminal this is PROJECT-FIRST: the current project's tasks — yours, unassigned, and those assigned to other agents (claimable via claim_task reassign:true). Outside a registered project it falls back to the agent-centric view (your tasks + unassigned todos, all projects). Returns a compact formatted list. Use this instead of list_tasks when browsing for work.",
         inputSchema: {
           type: "object",
           properties: {
             agentName: {
               type: "string",
               description: "Your terminal/agent name (from MULTITERMINAL_NAME env var)",
+            },
+            projectId: {
+              type: "string",
+              description: "Project scope override. Omit to use the terminal's resolved project. Pass \"all\" to force the legacy cross-project agent-centric view.",
             },
           },
           required: ["agentName"],
@@ -2630,12 +2696,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_tasks": {
         const status = args.status || "all";
         const includeQuickTasks = args.includeQuickTasks === true;
-        const tasks = await apiCall(`/api/tasks?status=${encodeURIComponent(status)}&includeQuickTasks=${encodeURIComponent(includeQuickTasks)}`);
+        // Project-first surfacing (task cf32b08f): default to the terminal's resolved project;
+        // "all" forces the legacy cross-project board view. Fails CLOSED (loud) when project
+        // context is indicated but unresolvable — never silently global.
+        const { projectId, degradedText } = await resolveScopedProjectId(args);
+        if (degradedText) {
+          return { content: [{ type: "text", text: degradedText }], isError: true };
+        }
+        let url = `/api/tasks?status=${encodeURIComponent(status)}&includeQuickTasks=${encodeURIComponent(includeQuickTasks)}`;
+        if (projectId) url += `&projectId=${encodeURIComponent(projectId)}`;
+        const tasks = await apiCall(url);
+        let text = formatTasks(tasks);
+        if (projectId) {
+          text = `(scoped to project ${projectId} — pass projectId:"all" for every project)\n${text}`;
+        }
         return {
           content: [
             {
               type: "text",
-              text: formatTasks(tasks),
+              text,
             },
           ],
         };
@@ -2721,14 +2800,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "claim_task": {
-        await apiCall(`/api/tasks/${seg(args.taskId)}/assign`, "POST", {
+        if (!args.assignee) {
+          return {
+            content: [{ type: "text", text: `❌ claim_task requires 'assignee' (the claiming agent's name).` }],
+            isError: true,
+          };
+        }
+        const body = {
           assignee: args.assignee,
-        });
+          reassign: args.reassign === true,
+        };
+        // Bind EVERY claim to the surfacing scope (cf32b08f adversary HIGH-2 + security HIGH-3):
+        // the project-scoped pickable list is the read contract, so the claim sends the project we
+        // believe the task belongs to and the server refuses a mismatch — for unassigned claims
+        // and takeovers alike. projectId:"all" deliberately opts out.
+        if (args.projectId !== "all") {
+          if (args.projectId) {
+            body.expectedProjectId = args.projectId;
+          } else {
+            const scope = await resolveProjectScope();
+            if (scope.id) {
+              body.expectedProjectId = scope.id;
+            } else if (scope.degraded) {
+              return {
+                content: [{ type: "text", text: `⚠ Claim refused: project scope could not be resolved (${scope.reason}), so the claim cannot be bound to your project. Retry shortly, or pass projectId:"all" to deliberately claim cross-project.` }],
+                isError: true,
+              };
+            }
+            // scope.id null + not degraded = no project context indicated — unscoped terminal,
+            // legacy behavior (no binding).
+          }
+        }
+        await apiCall(`/api/tasks/${seg(args.taskId)}/assign`, "POST", body);
         return {
           content: [
             {
               type: "text",
-              text: `✅ Task ${args.taskId} claimed by ${args.assignee}`,
+              text: `✅ Task ${args.taskId} claimed by ${args.assignee}${args.reassign === true ? " (reassigned)" : ""}`,
             },
           ],
         };
@@ -3242,12 +3350,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_my_pickable_tasks": {
-        const result = await apiCall(`/api/tasks/pickable/${seg(args.agentName)}`);
+        // Project-first surfacing (task cf32b08f): scope to the terminal's resolved project so the
+        // "next ticket" is always a ticket of THIS project, whoever it's assigned to. "all" gives the
+        // legacy cross-project agent-centric view. Fails CLOSED (loud) when project context is
+        // indicated but unresolvable — never silently global.
+        const { projectId, degradedText } = await resolveScopedProjectId(args);
+        if (degradedText) {
+          return { content: [{ type: "text", text: degradedText }], isError: true };
+        }
+        let url = `/api/tasks/pickable/${seg(args.agentName)}`;
+        if (projectId) url += `?projectId=${encodeURIComponent(projectId)}`;
+        const result = await apiCall(url);
         const tasks = result.tasks;
 
+        const scopeNote = projectId
+          ? ` in project ${projectId} (pass projectId:"all" for every project)`
+          : "";
         if (!tasks || tasks.length === 0) {
           return {
-            content: [{ type: "text", text: `No tasks available for ${args.agentName}. The board is clear!` }],
+            content: [{ type: "text", text: `No tasks available for ${args.agentName}${scopeNote}. The board is clear!` }],
           };
         }
 
@@ -3255,6 +3376,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const assigned = tasks.filter(t => t.relation === "assigned");
         const helper = tasks.filter(t => t.relation === "helper");
         const available = tasks.filter(t => t.relation === "available");
+        const assignedOther = tasks.filter(t => t.relation === "assigned-other");
 
         let text = "";
 
@@ -3287,6 +3409,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (text) text += "\n";
           text += `AVAILABLE TO CLAIM (${available.length}):\n`;
           available.forEach(t => { text += formatTask(t) + "\n"; });
+        }
+
+        if (assignedOther.length > 0) {
+          if (text) text += "\n";
+          text += `ASSIGNED TO OTHERS (${assignedOther.length}) — claimable via claim_task with reassign:true:\n`;
+          assignedOther.forEach(t => { text += formatTask(t) + ` [assigned: ${t.assignee}]\n`; });
+        }
+
+        if (projectId) {
+          text = `Project ${projectId} tasks for ${args.agentName}:\n\n${text}`;
         }
 
         return {
