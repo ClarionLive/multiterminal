@@ -4079,8 +4079,8 @@ namespace MultiTerminal.MCPServer.Services
         /// Get the active in-progress task for a specific agent.
         /// Checks in-memory cache first, falls back to database.
         /// </summary>
-        public KanbanTask GetMyActiveTask(string agentName)
-            => _taskService.GetMyActiveTask(agentName);
+        public KanbanTask GetMyActiveTask(string agentName, string projectId = null)
+            => _taskService.GetMyActiveTask(agentName, projectId);
 
         /// <summary>
         /// Resolve the agent's active task for WORKTREE/CWD purposes. Distinct
@@ -4098,8 +4098,8 @@ namespace MultiTerminal.MCPServer.Services
         /// byte-identical. Most-recent active worktree row wins when an agent
         /// helps on several tasks (task bab81a92, fixes acceptance scenario 2b).</para>
         /// </summary>
-        public KanbanTask ResolveActiveTaskForAgent(string agentName)
-            => _taskService.ResolveActiveTaskForAgent(agentName);
+        public KanbanTask ResolveActiveTaskForAgent(string agentName, string projectId = null)
+            => _taskService.ResolveActiveTaskForAgent(agentName, projectId);
 
         /// <summary>
         /// Debug-only cache-coherency check (P5 / 1df2a534): samples up to <paramref name="sampleSize"/>

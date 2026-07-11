@@ -475,6 +475,72 @@ namespace MultiTerminal.Tests
             Assert.Equal("A", active.Id);
         }
 
+        // ── project-scoped active-task resolution (0cd2c868) ─────────────────────────────────────────
+
+        // Drive a task to be the agent's single active task and return its id.
+        private string MakeActive(string title, string assignee, string projectId)
+        {
+            var id = _svc.CreateTask(title, "d", assignee, projectId: projectId).TaskId;
+            _svc.ClaimTask(id, assignee, null);
+            _svc.UpdateTaskStatus(id, "in_progress");
+            _svc.SetTaskActive(id, assignee);
+            return id;
+        }
+
+        [Fact]
+        public void GetMyActiveTask_MatchingProjectId_ReturnsTask()
+        {
+            var id = MakeActive("A", "diana", "projA");
+
+            var task = _svc.GetMyActiveTask("diana", "projA");
+
+            Assert.NotNull(task);
+            Assert.Equal(id, task.Id);
+        }
+
+        [Fact]
+        public void GetMyActiveTask_DifferentProjectId_ReturnsNull()
+        {
+            MakeActive("A", "diana", "projA");
+
+            var task = _svc.GetMyActiveTask("diana", "projB");
+
+            Assert.Null(task);
+        }
+
+        [Fact]
+        public void GetMyActiveTask_NullProjectId_ReturnsTask_BackCompat()
+        {
+            var id = MakeActive("A", "diana", "projA");
+
+            // The existing unscoped call site (optional param defaulted) must be byte-identical.
+            var task = _svc.GetMyActiveTask("diana");
+
+            Assert.NotNull(task);
+            Assert.Equal(id, task.Id);
+        }
+
+        [Fact]
+        public void GetMyActiveTask_TaskWithNullProjectId_ExcludedUnderNonEmptyScope()
+        {
+            // A task with no project is excluded by strict equality under a non-empty projectId,
+            // but still resolves under the unscoped call.
+            var id = MakeActive("A", "diana", null);
+
+            Assert.Null(_svc.GetMyActiveTask("diana", "projA"));
+            Assert.Equal(id, _svc.GetMyActiveTask("diana").Id);
+        }
+
+        [Fact]
+        public void ResolveActiveTaskForAgent_HonorsProjectScope()
+        {
+            var id = MakeActive("A", "diana", "projA");
+
+            Assert.Equal(id, _svc.ResolveActiveTaskForAgent("diana", "projA").Id);   // in scope
+            Assert.Null(_svc.ResolveActiveTaskForAgent("diana", "projB"));           // out of scope
+            Assert.Equal(id, _svc.ResolveActiveTaskForAgent("diana").Id);            // unscoped back-compat
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators

@@ -2707,7 +2707,13 @@ namespace MultiTerminal.MCPServer.Services
         /// Get the active in-progress task for a specific agent.
         /// Checks in-memory cache first, falls back to database.
         /// </summary>
-        public KanbanTask GetMyActiveTask(string agentName)
+        /// <param name="agentName">The agent whose active task to resolve.</param>
+        /// <param name="projectId">Optional project scope. Null/empty = unfiltered (all projects,
+        /// current behavior). Non-empty = strict equality on <c>ProjectId</c> — a task whose
+        /// <c>ProjectId</c> is null or differs is excluded (matches the <see cref="GetTasks(string)"/>
+        /// precedent). The single-active-per-agent invariant check runs on the UNFILTERED per-agent
+        /// set (the invariant is per-agent-global); the project filter is applied only to the returned task.</param>
+        public KanbanTask GetMyActiveTask(string agentName, string projectId = null)
         {
             if (string.IsNullOrEmpty(agentName))
                 return null;
@@ -2728,12 +2734,26 @@ namespace MultiTerminal.MCPServer.Services
                 .ThenBy(t => t.Id, StringComparer.Ordinal)
                 .ToList();
 
+            // Invariant check runs on the UNFILTERED per-agent set — the single-active-per-agent
+            // invariant is global, not per-project, so a project filter must not mask a violation.
             if (actives.Count > 1)
             {
                 _host.LogError($"GetMyActiveTask: {actives.Count} active tasks for '{agentName}' — single-active invariant violated (a sibling-pause likely failed; see follow-up 7c59c004). Resolving deterministically to '{actives[0].Id}'.");
             }
 
-            return actives.FirstOrDefault() ?? _taskDb.GetActiveTaskForAgent(agentName);
+            // Apply the optional project filter AFTER the invariant check. Strict equality:
+            // a task with a null/mismatched ProjectId is excluded under a non-empty projectId.
+            var cached = string.IsNullOrEmpty(projectId)
+                ? actives.FirstOrDefault()
+                : actives.FirstOrDefault(t => t.ProjectId == projectId);
+            if (cached != null)
+                return cached;
+
+            // DB fallback — apply the same project scope to the fallback task.
+            var dbTask = _taskDb.GetActiveTaskForAgent(agentName);
+            if (dbTask != null && !string.IsNullOrEmpty(projectId) && dbTask.ProjectId != projectId)
+                return null;
+            return dbTask;
         }
 
 
@@ -2753,12 +2773,17 @@ namespace MultiTerminal.MCPServer.Services
         /// byte-identical. Most-recent active worktree row wins when an agent
         /// helps on several tasks (task bab81a92, fixes acceptance scenario 2b).</para>
         /// </summary>
-        public KanbanTask ResolveActiveTaskForAgent(string agentName)
+        /// <param name="agentName">The agent whose active task to resolve.</param>
+        /// <param name="projectId">Optional project scope. Null/empty = unfiltered (current behavior).
+        /// Non-empty = strict equality on <c>ProjectId</c>, applied to BOTH the strict assignee path
+        /// (via the scoped <see cref="GetMyActiveTask(string, string)"/>) and the helper-worktree
+        /// fallback — a resolved task whose <c>ProjectId</c> is null or differs yields null.</param>
+        public KanbanTask ResolveActiveTaskForAgent(string agentName, string projectId = null)
         {
             if (string.IsNullOrEmpty(agentName)) return null;
 
-            // Assignee path — strict, unchanged.
-            var strict = GetMyActiveTask(agentName);
+            // Assignee path — strict, now project-scoped.
+            var strict = GetMyActiveTask(agentName, projectId);
             if (strict != null) return strict;
 
             // Helper path — resolve via the agent's own active worktree row.
@@ -2767,9 +2792,15 @@ namespace MultiTerminal.MCPServer.Services
                 var wt = _taskDb?.GetActiveWorktreeForAgent(agentName);
                 if (wt != null && !string.IsNullOrEmpty(wt.TaskId))
                 {
-                    return _tasks.TryGetValue(wt.TaskId, out var helperTask)
-                        ? helperTask
+                    var helperTask = _tasks.TryGetValue(wt.TaskId, out var cached)
+                        ? cached
                         : _taskDb.GetTask(wt.TaskId);
+
+                    // Apply the project scope to the helper-resolved task too — strict equality,
+                    // so a null/mismatched ProjectId excludes it under a non-empty projectId.
+                    if (helperTask != null && !string.IsNullOrEmpty(projectId) && helperTask.ProjectId != projectId)
+                        return null;
+                    return helperTask;
                 }
             }
             catch (Exception ex)

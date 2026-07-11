@@ -32,10 +32,47 @@ namespace MultiTerminal.API.Controllers
         /// path as the "no-op" signal in the auto-cd protocol.
         /// </summary>
         [HttpGet("active/{agentName}")]
-        public IActionResult GetActiveWorktree(string agentName)
+        public IActionResult GetActiveWorktree(string agentName, [FromQuery] string projectId = null)
         {
             if (string.IsNullOrWhiteSpace(agentName))
                 return Problem(detail: "agentName is required", statusCode: 400);
+
+            // Resolve the active task WITH the project scope FIRST, before any worktree
+            // materialization. A terminal launched for project X must never surface — or,
+            // worse, MATERIALIZE the worktree for — the agent's active task in project Y.
+            // EnsureWorktreeForActiveTask (below) has a write side-effect (it creates the
+            // worktree), so the scoped check has to GATE it, not follow it.
+            //
+            // Worktree-purpose resolution (helper-aware): a helper is never the task
+            // assignee, so the strict GetMyActiveTask would miss and the tool would wrongly
+            // report "no active worktree" for a helper that owns one (task bab81a92,
+            // acceptance scenario 2b).
+            var activeTask = _broker.ResolveActiveTaskForAgent(agentName, projectId);
+            if (activeTask == null)
+            {
+                // Out of scope (or genuinely no active task). Return the "no active worktree"
+                // no-op response — a null worktreePath is the auto-cd protocol's no-op signal.
+                // When an UNSCOPED resolve WOULD have found a task, note the cross-project
+                // reason so the caller isn't left thinking the agent is idle.
+                string crossProjectNote = null;
+                if (!string.IsNullOrEmpty(projectId))
+                {
+                    var unscoped = _broker.ResolveActiveTaskForAgent(agentName);
+                    if (unscoped != null)
+                        crossProjectNote = $"No active worktree for {agentName} in this project. (Active task {unscoped.Id} '{unscoped.Title}' belongs to a different project.)";
+                }
+
+                return Ok(new
+                {
+                    agentName,
+                    taskId = (string)null,
+                    taskTitle = (string)null,
+                    worktreePath = (string)null,
+                    repoRoot = (string)null,
+                    branchName = (string)null,
+                    message = crossProjectNote,
+                });
+            }
 
             // Read-or-create (task 4bcd1e24): backfill the worktree for an
             // already-active eligible task whose worktree was never materialized
@@ -53,39 +90,35 @@ namespace MultiTerminal.API.Controllers
             // write is bounded + idempotent to the NAMED agent's own active eligible
             // task (you cannot create arbitrary worktrees by varying agentName — only
             // that agent's one legitimate worktree, once). Not split into a POST.
+            // Safe to call after the scoped check: EnsureWorktreeForActiveTask
+            // internally resolves the agent's single active task, which we've just
+            // verified is in scope.
             _broker.EnsureWorktreeForActiveTask(agentName);
 
-            // Worktree-purpose resolution (helper-aware): a helper is never the
-            // task assignee, so the strict GetMyActiveTask would miss and the tool
-            // would wrongly report "no active worktree" for a helper that owns one
-            // (task bab81a92, acceptance scenario 2b).
-            var activeTask = _broker.ResolveActiveTaskForAgent(agentName);
             string worktreePath = _broker.ResolveTaskWorktreePath(agentName);
             string repoRoot = _broker.ResolveTaskRepoRoot(agentName);
             string branchName = null;
 
-            if (activeTask != null)
+            // activeTask is guaranteed non-null here — the scoped resolve above returns early when null.
+            try
             {
-                try
-                {
-                    // Per-agent isolation: resolve THIS agent's worktree row so the
-                    // branch reflects their own (canonical or helper) branch. Falls
-                    // back to the canonical row if the agent has no per-agent row.
-                    var record = _broker.TaskDb?.GetWorktreeForTask(activeTask.Id, agentName)
-                                 ?? _broker.TaskDb?.GetWorktreeForTask(activeTask.Id);
-                    branchName = record?.BranchName;
-                }
-                catch
-                {
-                    // Branch lookup is informational; fall through with null on any failure.
-                }
+                // Per-agent isolation: resolve THIS agent's worktree row so the
+                // branch reflects their own (canonical or helper) branch. Falls
+                // back to the canonical row if the agent has no per-agent row.
+                var record = _broker.TaskDb?.GetWorktreeForTask(activeTask.Id, agentName)
+                             ?? _broker.TaskDb?.GetWorktreeForTask(activeTask.Id);
+                branchName = record?.BranchName;
+            }
+            catch
+            {
+                // Branch lookup is informational; fall through with null on any failure.
             }
 
             return Ok(new
             {
                 agentName,
-                taskId = activeTask?.Id,
-                taskTitle = activeTask?.Title,
+                taskId = activeTask.Id,
+                taskTitle = activeTask.Title,
                 worktreePath,
                 repoRoot,
                 branchName,
