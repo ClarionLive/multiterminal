@@ -79,6 +79,7 @@
             <li><a href="#paths">Key paths &amp; ports at a glance</a></li>
             <li><a href="#port">REST API / port 5050 conflicts</a></li>
             <li><a href="#mcp">MCP tools not connecting</a></li>
+            <li><a href="#plugin">Running from source: is the plugin required?</a></li>
             <li><a href="#db">Database location &amp; backup</a></li>
             <li><a href="#layout">Resetting the docking layout</a></li>
             <li><a href="#terminal">Frozen terminal / respawn</a></li>
@@ -127,6 +128,32 @@ Get-Process -Id (Get-NetTCPConnection -LocalPort 5050 -State Listen).OwningProce
           <li><strong>Is Node.js available?</strong> The MCP server runs under Node; <code>node --version</code> should succeed on your PATH.</li>
           <li><strong>Restart the client.</strong> After fixing the above, restart your Claude Code session so it re-handshakes with the MCP server.</li>
         </ul>
+
+        <h2 id="plugin">Running from source: is the plugin required?</h2>
+        <p>If you build MultiTerminal from source (no installer), the app runs fine on its own — but the <strong>multiterminal-marketplace Claude Code plugin</strong> is what wires terminals into the coordination features. A common question is how load-bearing it actually is, and whether installing it pollutes your other Claude Code sessions. Short answers: <em>very</em>, and <em>no</em>.</p>
+
+        <p><strong>The plugin does not leak into non-MultiTerminal sessions.</strong> MT launches every hosted terminal with an explicit <code>--plugin-dir</code> flag pointing into the marketplace folder, so the plugin's hooks, skills, agents, and CLAUDE.md load <em>only in MT-spawned terminals</em>. The directory under <code>~/.claude/plugins/marketplaces/</code> is just the file source that flag points at — its presence alone does not activate the plugin anywhere else (that would require <code>enabledPlugins</code> or <code>--plugin-dir</code>, neither of which MT sets globally). Registering the MCP servers globally in <code>~/.claude.json</code> is a separate, opt-in installer component that defaults to off.</p>
+
+        <p><strong>To install the plugin from source</strong> (no installer needed):</p>
+        <pre><code>git clone https://github.com/ClarionLive/multiterminal-marketplace ^
+  "%USERPROFILE%\.claude\plugins\marketplaces\multiterminal-marketplace"</code></pre>
+        <p>MultiTerminal resolves that exact path at launch and passes it to each terminal via <code>--plugin-dir</code>.</p>
+
+        <p><strong>What works without the plugin:</strong></p>
+        <ul>
+          <li>The REST API on 5050, the task board and all UI panels, the project registry, and the code graph</li>
+          <li>All <code>multiterminal</code> MCP tools (task CRUD, <code>list_projects</code>, code search, …) once the MCP server is wired up</li>
+        </ul>
+
+        <p><strong>What stays dark without the plugin:</strong></p>
+        <ul>
+          <li><strong>Terminal identity</strong> — the SessionStart hook registers each session as a named agent; without it <code>list_terminals</code> stays empty and agents can't claim tasks or message as themselves</li>
+          <li><strong>Session continuity</strong> — session-to-DB sync feeds <code>get_latest_session</code>, session memory search, and cross-session handoff notes</li>
+          <li><strong>The workflow layer</strong> — the kanban lifecycle skills, reviewer/verifier agents, and agent behavioral rules (CLAUDE.md)</li>
+          <li><strong>Activity feed</strong> and <strong>inter-agent messaging notifications</strong> (the channel MCP server ships inside the plugin)</li>
+        </ul>
+
+        <p><strong>Verdict:</strong> if you only want a dashboard plus an MCP toolset for a single terminal, you can skip the plugin and add it later in minutes. If you want the actual multi-terminal coordination — named agents, task handoffs, session memory — the plugin is the nervous system, and it costs nothing in your non-MT sessions.</p>
 
         <h2 id="db">Database location &amp; backup</h2>
         <p>MultiTerminal stores its data in SQLite under <code>%APPDATA%\multiterminal\</code>:</p>
