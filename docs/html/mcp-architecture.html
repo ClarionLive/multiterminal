@@ -454,19 +454,21 @@
       <h3>Post-install configuration</h3>
       <p>The <code>post-install.js</code> script runs after file installation and:</p>
       <ol>
-        <li>Generates <code>%APPDATA%\multiterminal\.mcp.json</code> with correct paths to both servers</li>
-        <li>Removes any legacy MCP entries from <code>~/.claude.json</code> (from older versions)</li>
-        <li>Merges hooks into Claude Code's global <code>settings.json</code></li>
-        <li>Generates project-level <code>.claude/project.json</code> and <code>settings.local.json</code></li>
+        <li>Sets <code>CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1</code> in Claude Code's global <code>settings.json</code> (required for Team Agents)</li>
+        <li><em>Opt-in only</em> ("Register MCP servers globally" component, unchecked by default): registers <code>multiterminal</code> + <code>mcp-gateway</code> in <code>~/.claude.json</code> for Claude Code sessions started outside MultiTerminal. MT-spawned terminals don't need this — the app regenerates <code>%APPDATA%\multiterminal\.mcp.json</code> at startup and passes it per-launch via <code>--mcp-config</code></li>
+        <li>Writes <code>gateway-defaults.json</code> for the optional MCP servers selected in the wizard (the gateway auto-seeds on startup)</li>
+        <li>Patches <code>runtimeconfig.json</code> for framework-dependent mode when .NET 8 is already installed</li>
       </ol>
 
       <h3>Uninstall cleanup</h3>
       <p>The <code>post-uninstall.js</code> script:</p>
       <ol>
-        <li>Deletes <code>%APPDATA%\multiterminal\.mcp.json</code></li>
-        <li>Removes legacy entries from <code>~/.claude.json</code></li>
-        <li>Removes MCP server files from AppData</li>
-        <li>Optionally deletes user data (databases) if the user confirms</li>
+        <li>Removes the agent-teams env var from <code>settings.json</code></li>
+        <li>Removes MCP server files from AppData (including <code>%APPDATA%\multiterminal\.mcp.json</code>)</li>
+        <li>Removes <code>multiterminal</code> + <code>mcp-gateway</code> entries from <code>~/.claude.json</code> if present (no-op when the global-registration opt-in was off)</li>
+        <li>Removes optional MCP servers from the gateway database and deletes <code>gateway-defaults.json</code></li>
+        <li>Removes the plugin marketplace directory</li>
+        <li>Restores the <code>runtimeconfig.json</code> backup if one exists</li>
       </ol>
 
       <h3>Build process</h3>

@@ -75,6 +75,12 @@ Name: "docs"; Description: "HTML Documentation"; Types: full
 Name: "claude"; Description: "Claude Code Integration"; Types: full
 Name: "claude\mcp"; Description: "MCP Servers (agent tools + gateway)"; Types: full
 Name: "claude\plugin"; Description: "MultiTerminal Claude Code plugin (hooks, skills, agents, CLAUDE.md)"; Types: full
+; GH#2: global registration is OPT-IN (no Types: = unchecked by default in every install type).
+; MT-spawned terminals never need it — they get MCP servers via --mcp-config and the plugin via
+; --plugin-dir at launch (LaunchCommandBuilder). Check this only if you want Claude Code sessions
+; started OUTSIDE MultiTerminal (plain `claude` in a shell) to see the multiterminal + mcp-gateway
+; tools via ~/.claude.json.
+Name: "claude\globalreg"; Description: "Register MCP servers globally (~/.claude.json) for Claude Code sessions outside MultiTerminal"
 
 ; ============================================================
 ; FILES
@@ -295,7 +301,7 @@ Name: "{group}\{#AppName} Documentation"; Filename: "{app}\docs\html\index.html"
 ; ============================================================
 [Run]
 ; Run post-install script to merge hooks into settings.json and generate configs
-Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps}"; \
+Filename: "node"; Parameters: """{tmp}\post-install.js"" ""{app}"" ""{userappdata}"" ""{%USERPROFILE}"" {code:GetDotNetFlag} {code:GetSelectedMcps} {code:GetGlobalRegFlag}"; \
   StatusMsg: "Configuring Claude Code integration..."; \
   Components: claude; Flags: runhidden waituntilterminated
 
@@ -311,7 +317,8 @@ Filename: "node"; Parameters: """{app}\post-uninstall.js"" ""{app}"" ""{userappd
   RunOnceId: "MultiTerminalCleanup"; Flags: runhidden waituntilterminated
 
 [UninstallDelete]
-; Note: MCP servers are registered in ~/.claude.json — cleaned up by post-uninstall.js
+; Note: MCP servers MAY be registered in ~/.claude.json (opt-in claude\globalreg component) —
+;       post-uninstall.js removes the entries if present (no-op when the opt-in was off)
 ; Note: Plugin marketplace at %USERPROFILE%\.claude\plugins\... — cleaned up by post-uninstall.js
 Type: filesandordirs; Name: "{app}\mcp-gateway"
 Type: filesandordirs; Name: "{app}\mcps"
@@ -382,6 +389,18 @@ begin
     Result := '--framework-dependent'
   else
     Result := '--self-contained';
+end;
+
+// GH#2: tells post-install.js whether to register the multiterminal + mcp-gateway
+// MCP servers globally in ~/.claude.json. Driven by the opt-in claude\globalreg
+// component (unchecked by default) — MT-spawned terminals don't need global
+// registration (they load MCP servers via --mcp-config at launch).
+function GetGlobalRegFlag(Param: String): String;
+begin
+  if WizardIsComponentSelected('claude\globalreg') then
+    Result := '--global-reg=yes'
+  else
+    Result := '--global-reg=no';
 end;
 
 // ============================================================

@@ -4,7 +4,9 @@
  * Runs during uninstall to clean up Claude Code integration:
  * 1. Removes CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var from settings.json
  * 2. Removes MultiTerminal MCP server files from AppData
- * 3. Removes MCP server entries from ~/.claude.json
+ * 3. Removes MCP server entries from ~/.claude.json — present only when the
+ *    opt-in claude\globalreg component was selected at install time (GH#2);
+ *    a no-op otherwise, so this script is safe in both modes
  * 4. Removes optional MCP servers from gateway database
  * 5. Removes the plugin marketplace directory
  * 6. Restores runtimeconfig.json if framework-dependent backup exists

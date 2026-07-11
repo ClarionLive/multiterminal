@@ -43,7 +43,9 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Generates a .mcp.json string. Core MCP servers (multiterminal, mcp-gateway,
-        /// multiterminal-channel) are all registered at user scope (~/.claude/.mcp.json).
+        /// multiterminal-channel) reach MT-spawned terminals per-launch via --mcp-config
+        /// pointing at %APPDATA%\multiterminal\.mcp.json (see LaunchCommandBuilder);
+        /// user-global ~/.claude.json registration is an optional installer opt-in (GH#2).
         /// Project .mcp.json is empty — kept for future per-project overrides.
         /// </summary>
         public string GenerateSimpleMcpJson(string gatewayProfile = null, string sourcePath = null)
@@ -95,9 +97,11 @@ namespace MultiTerminal.Services
                 }
             }
 
-            // All MCP servers are now registered globally in ~/.claude/.mcp.json.
+            // Core MCP servers reach MT terminals via the launch-time --mcp-config flag
+            // (%APPDATA%\multiterminal\.mcp.json); global ~/.claude.json registration is an
+            // optional installer opt-in (GH#2), not the mechanism MT relies on.
             // Do NOT write project-level .mcp.json — an empty one creates a scope boundary
-            // that can shadow global servers (like multiterminal-channel).
+            // that can shadow launch-config/global servers (like multiterminal-channel).
             // Remove any stale project .mcp.json if it exists.
             string outputPath = Path.Combine(sourcePath, ".mcp.json");
             if (File.Exists(outputPath))
@@ -108,7 +112,7 @@ namespace MultiTerminal.Services
                 _log("McpConfig", $"Removed stale project .mcp.json (backed up to {backupPath})");
             }
 
-            _log("McpConfig", $"MCP servers registered globally — no project .mcp.json needed for {sourcePath}");
+            _log("McpConfig", $"MCP servers load via launch-time --mcp-config — no project .mcp.json needed for {sourcePath}");
             return outputPath;
         }
 
