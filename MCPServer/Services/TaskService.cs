@@ -2709,10 +2709,11 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         /// <param name="agentName">The agent whose active task to resolve.</param>
         /// <param name="projectId">Optional project scope. Null/empty = unfiltered (all projects,
-        /// current behavior). Non-empty = strict equality on <c>ProjectId</c> — a task whose
-        /// <c>ProjectId</c> is null or differs is excluded (matches the <see cref="GetTasks(string)"/>
-        /// precedent). The single-active-per-agent invariant check runs on the UNFILTERED per-agent
-        /// set (the invariant is per-agent-global); the project filter is applied only to the returned task.</param>
+        /// current behavior). Non-empty = case-insensitive equality on <c>ProjectId</c> (matching the
+        /// ClaimTask <c>expectedProjectId</c> gate) — a task whose <c>ProjectId</c> is null or differs
+        /// is excluded (the exclude-null behavior mirrors the <see cref="GetTasks(string)"/> precedent).
+        /// The single-active-per-agent invariant check runs on the UNFILTERED per-agent set (the
+        /// invariant is per-agent-global); the project filter is applied only to the returned task.</param>
         public KanbanTask GetMyActiveTask(string agentName, string projectId = null)
         {
             if (string.IsNullOrEmpty(agentName))
@@ -2741,17 +2742,20 @@ namespace MultiTerminal.MCPServer.Services
                 _host.LogError($"GetMyActiveTask: {actives.Count} active tasks for '{agentName}' — single-active invariant violated (a sibling-pause likely failed; see follow-up 7c59c004). Resolving deterministically to '{actives[0].Id}'.");
             }
 
-            // Apply the optional project filter AFTER the invariant check. Strict equality:
-            // a task with a null/mismatched ProjectId is excluded under a non-empty projectId.
+            // Apply the optional project filter AFTER the invariant check. Case-INSENSITIVE
+            // equality, matching the ClaimTask expectedProjectId gate (TaskService.cs:~374,
+            // task cf32b08f) — the project-id domain is case-insensitive there, so a
+            // casing-divergent id must resolve here too or a claimable task wouldn't surface.
+            // A task with a null/mismatched ProjectId is excluded under a non-empty projectId.
             var cached = string.IsNullOrEmpty(projectId)
                 ? actives.FirstOrDefault()
-                : actives.FirstOrDefault(t => t.ProjectId == projectId);
+                : actives.FirstOrDefault(t => string.Equals(t.ProjectId, projectId, StringComparison.OrdinalIgnoreCase));
             if (cached != null)
                 return cached;
 
             // DB fallback — apply the same project scope to the fallback task.
             var dbTask = _taskDb.GetActiveTaskForAgent(agentName);
-            if (dbTask != null && !string.IsNullOrEmpty(projectId) && dbTask.ProjectId != projectId)
+            if (dbTask != null && !string.IsNullOrEmpty(projectId) && !string.Equals(dbTask.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
                 return null;
             return dbTask;
         }
@@ -2775,8 +2779,8 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         /// <param name="agentName">The agent whose active task to resolve.</param>
         /// <param name="projectId">Optional project scope. Null/empty = unfiltered (current behavior).
-        /// Non-empty = strict equality on <c>ProjectId</c>, applied to BOTH the strict assignee path
-        /// (via the scoped <see cref="GetMyActiveTask(string, string)"/>) and the helper-worktree
+        /// Non-empty = case-insensitive equality on <c>ProjectId</c>, applied to BOTH the strict assignee
+        /// path (via the scoped <see cref="GetMyActiveTask(string, string)"/>) and the helper-worktree
         /// fallback — a resolved task whose <c>ProjectId</c> is null or differs yields null.</param>
         public KanbanTask ResolveActiveTaskForAgent(string agentName, string projectId = null)
         {
@@ -2796,9 +2800,10 @@ namespace MultiTerminal.MCPServer.Services
                         ? cached
                         : _taskDb.GetTask(wt.TaskId);
 
-                    // Apply the project scope to the helper-resolved task too — strict equality,
-                    // so a null/mismatched ProjectId excludes it under a non-empty projectId.
-                    if (helperTask != null && !string.IsNullOrEmpty(projectId) && helperTask.ProjectId != projectId)
+                    // Apply the project scope to the helper-resolved task too — case-insensitive
+                    // equality, matching the ClaimTask expectedProjectId gate (TaskService.cs:~374,
+                    // task cf32b08f). A null/mismatched ProjectId excludes it under a non-empty projectId.
+                    if (helperTask != null && !string.IsNullOrEmpty(projectId) && !string.Equals(helperTask.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
                         return null;
                     return helperTask;
                 }

@@ -40,8 +40,9 @@ namespace MultiTerminal.API.Controllers
             // Resolve the active task WITH the project scope FIRST, before any worktree
             // materialization. A terminal launched for project X must never surface — or,
             // worse, MATERIALIZE the worktree for — the agent's active task in project Y.
-            // EnsureWorktreeForActiveTask (below) has a write side-effect (it creates the
-            // worktree), so the scoped check has to GATE it, not follow it.
+            // The worktree backfill (below) has a write side-effect (it creates the
+            // worktree), so the scoped check has to GATE it, not follow it — and every
+            // downstream read is then PINNED to this gated task's id (task 0cd2c868).
             //
             // Worktree-purpose resolution (helper-aware): a helper is never the task
             // assignee, so the strict GetMyActiveTask would miss and the tool would wrongly
@@ -90,13 +91,21 @@ namespace MultiTerminal.API.Controllers
             // write is bounded + idempotent to the NAMED agent's own active eligible
             // task (you cannot create arbitrary worktrees by varying agentName — only
             // that agent's one legitimate worktree, once). Not split into a POST.
-            // Safe to call after the scoped check: EnsureWorktreeForActiveTask
-            // internally resolves the agent's single active task, which we've just
-            // verified is in scope.
-            _broker.EnsureWorktreeForActiveTask(agentName);
+            //
+            // PIN-TO-GATED-TASK (task 0cd2c868, Run-1 blocking fix): every downstream
+            // call is keyed to `activeTask.Id` — the task the SCOPED resolve above
+            // gated on — NOT to `agentName`. The agent-keyed EnsureWorktreeForActiveTask
+            // / ResolveTaskWorktreePath / ResolveTaskRepoRoot each RE-RESOLVE the agent's
+            // active task internally and UNSCOPED, whose strict-then-helper ordering can
+            // return a DIFFERENT task than the scoped gate did (agent assignee-active on
+            // T_Y in project Y while helper-active on T_X in project X: the gate returns
+            // T_X, the unscoped re-resolve returns T_Y). Re-resolving here would
+            // materialize/report project Y's worktree paired with taskId=T_X. Pinning to
+            // the id closes that divergence — no read below re-resolves the active task.
+            _broker.EnsureWorktreeForTask(activeTask.Id, agentName);
 
-            string worktreePath = _broker.ResolveTaskWorktreePath(agentName);
-            string repoRoot = _broker.ResolveTaskRepoRoot(agentName);
+            string worktreePath = _broker.ResolveWorktreePathForTask(activeTask.Id, agentName);
+            string repoRoot = _broker.TryGetProjectPathForTask(activeTask.Id);
             string branchName = null;
 
             // activeTask is guaranteed non-null here — the scoped resolve above returns early when null.

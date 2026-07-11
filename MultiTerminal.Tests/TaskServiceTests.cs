@@ -541,6 +541,32 @@ namespace MultiTerminal.Tests
             Assert.Equal(id, _svc.ResolveActiveTaskForAgent("diana").Id);            // unscoped back-compat
         }
 
+        [Fact]
+        public void ResolveActiveTaskForAgent_HelperInOtherProject_ResolvesPerScope()
+        {
+            // diana is ASSIGNEE-active on T_Y (project Y) AND a HELPER (active task_worktrees row)
+            // on T_X (project X). The scoped resolve must pick the RIGHT task per project — this is
+            // the exact cross-project divergence the get_active_worktree pin (task 0cd2c868) guards:
+            //   scope X -> the helper task, scope Y -> the assignee task, scope Z -> nothing.
+            var tY = MakeActive("Y", "diana", "projY");                             // diana assignee-active in project Y
+            var tX = _svc.CreateTask("X", "d", "bob", projectId: "projX").TaskId;   // a project-X task that is NOT diana's
+            _db.SaveWorktreeRecord(tX, "diana", @"C:\wt\x", "task/x", isCanonical: false);  // diana helps on T_X
+
+            Assert.Equal(tX, _svc.ResolveActiveTaskForAgent("diana", "projX").Id);  // helper task surfaces under scope X
+            Assert.Equal(tY, _svc.ResolveActiveTaskForAgent("diana", "projY").Id);  // assignee task surfaces under scope Y
+            Assert.Null(_svc.ResolveActiveTaskForAgent("diana", "projZ"));          // neither task is in scope Z
+        }
+
+        [Fact]
+        public void GetMyActiveTask_ProjectIdMatch_IsCaseInsensitive()
+        {
+            // Mirrors the ClaimTask expectedProjectId gate (cf32b08f): the project-id domain is
+            // case-insensitive, so a casing-divergent scope still resolves the same task.
+            var id = MakeActive("A", "diana", "projA");
+
+            Assert.Equal(id, _svc.GetMyActiveTask("diana", "PROJA").Id);
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
