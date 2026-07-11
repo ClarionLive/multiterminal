@@ -17,20 +17,20 @@ A Windows desktop app (.NET 8 / WinForms / WebView2) for running and coordinatin
 
 ## Documentation
 
-Full documentation ships with the app as a local HTML site under [`docs/html/`](docs/html/index.html). Open it any time from the **Help** button (❓) in the toolbar, immediately right of History.
+Full documentation is available online at [clarionlive.github.io/multiterminal](https://clarionlive.github.io/multiterminal/html/index.html). The same HTML site ships with the app under `docs/html/` — open it any time from the **Help** button (❓) in the toolbar, immediately right of History.
 
 Highlights:
-[Getting Started](docs/html/getting-started.html) ·
-[Kanban Workflow](docs/html/kanban-workflow.html) ·
-[Git Worktrees](docs/html/worktrees.html) ·
-[Multi-Connect (Phone)](docs/html/multi-connect.html) ·
-[Presence Sensors](docs/html/presence.html) ·
-[Code Graph](docs/html/code-graph.html) ·
-[Troubleshooting / FAQ](docs/html/troubleshooting.html)
+[Getting Started](https://clarionlive.github.io/multiterminal/html/getting-started.html) ·
+[Kanban Workflow](https://clarionlive.github.io/multiterminal/html/kanban-workflow.html) ·
+[Git Worktrees](https://clarionlive.github.io/multiterminal/html/worktrees.html) ·
+[Multi-Connect (Phone)](https://clarionlive.github.io/multiterminal/html/multi-connect.html) ·
+[Presence Sensors](https://clarionlive.github.io/multiterminal/html/presence.html) ·
+[Code Graph](https://clarionlive.github.io/multiterminal/html/code-graph.html) ·
+[Troubleshooting / FAQ](https://clarionlive.github.io/multiterminal/html/troubleshooting.html)
 
 ## Plan System Overview
 
-> **Note:** The sections below (Plan System and the MCP Tools Reference) describe the original plan-centric workflow and an early tool set. Day-to-day work now centers on the **Kanban Task Workflow** — see [`docs/html/kanban-workflow.html`](docs/html/kanban-workflow.html) and the [MCP Tools](docs/html/mcp-tools.html) reference for the current surface.
+> **Note:** The sections below (Plan System and the MCP Tools Reference) describe the original plan-centric workflow and an early tool set. Day-to-day work now centers on the **Kanban Task Workflow** — see the [Kanban Workflow](https://clarionlive.github.io/multiterminal/html/kanban-workflow.html) guide and the [MCP Tools](https://clarionlive.github.io/multiterminal/html/mcp-tools.html) reference for the current surface.
 
 The Plan System enables coordinated multi-agent workflows where multiple Claude terminals collaborate on a shared goal. Plans progress through defined phases with team assignments and decision tracking.
 
