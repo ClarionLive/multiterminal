@@ -235,7 +235,7 @@ function maskCommentsOnly(src) {
 // ActivateExclusively) is NOT indexed, and the census misattributes its cache writes to the preceding
 // decl (7c59c004 — this exact blind spot hid ActivateExclusively's swaps; the tuple negative fixture
 // in the self-test guards it). \s+ between the two spans the newline C# style splits tuple-sig + name onto.
-const METHOD_DECL = /(?:^|\n)\s*(?:public|private|internal|protected)(?:\s+(?:static|async|override|virtual|sealed|new|unsafe))*\s+(?:\([^)]*\)|[\w<>,.\[\]?]+)\s+(\w+)\s*\(/g;
+const METHOD_DECL = /(?:^|\n)\s*(?:public|private|internal|protected)(?:\s+(?:static|async|override|virtual|sealed|new|unsafe))*\s+(?:\([^)]*\)|[\w<>,.[\]?]+)\s+(\w+)\s*\(/g;
 
 function indexMethods(code) {
   const methods = [];
