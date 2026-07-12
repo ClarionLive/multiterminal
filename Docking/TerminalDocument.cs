@@ -3618,6 +3618,11 @@ namespace MultiTerminal.Docking
                 _isDisposing = true;
                 _suppressSplitterEvents = true;
 
+                // Diagnostic: confirms whether the normal tab-close path reaches Dispose. If a tab
+                // is closed but this never logs, DockPanelSuite skipped Dispose and the ContentRemoved
+                // hook in MainForm is what tore the terminal down instead (task a9435da9).
+                _debugLogService?.Info("TerminalDocument", $"Dispose docId={_docId} name='{CustomTitle}' terminalStarted={_isTerminalStarted}");
+
                 _tabContextMenu?.Dispose();
                 _tabContextMenu = null;
 

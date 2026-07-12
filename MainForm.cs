@@ -325,6 +325,12 @@ namespace MultiTerminal
             // Handle active document changes
             _dockPanel.ActiveDocumentChanged += OnActiveDocumentChanged;
 
+            // Robustly tear a terminal down when its tab is closed. ContentRemoved is
+            // DockPanelSuite's authoritative "this content left the panel" signal — unlike
+            // relying on TerminalDocument.Dispose, which WebView2-hosted docs can skip on a
+            // tab-close, leaving an orphaned claude process + a still-registered agent (task a9435da9).
+            _dockPanel.ContentRemoved += OnDockContentRemoved;
+
             Controls.Add(_dockPanel);
 
             _gridManager = new GridLayoutManager(_dockPanel);
@@ -4451,6 +4457,61 @@ namespace MultiTerminal
                     foreach (var key in keysToRemove)
                         _terminalDocMap.Remove(key);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Robust teardown when a terminal tab is CLOSED (removed from the dock). The tab-✕ is
+        /// supposed to Dispose the <see cref="TerminalDocument"/> — which kills the whole process
+        /// tree via the ConPTY Job Object AND unregisters the agent — but with WebView2-hosted docs
+        /// DockPanelSuite's close routing can skip Dispose, leaving the claude process alive and the
+        /// agent still registered (task a9435da9; the "James stayed on the roster after I closed his
+        /// tab" repro). ContentRemoved is the docking library's authoritative "content left the panel"
+        /// signal (it does NOT fire when a doc is merely floated or re-docked within the panel), so we
+        /// force the teardown here. Every step is idempotent with the normal Dispose/OnTerminalExited
+        /// paths, so this is safe even when the ordinary close DID run.
+        /// </summary>
+        private void OnDockContentRemoved(object sender, DockContentEventArgs e)
+        {
+            if (!(e.Content is TerminalDocument doc))
+                return;
+
+            _debugLogService?.Info("MainForm",
+                $"Terminal tab removed from dock: docId={doc.DocId} name='{doc.CustomTitle}' alreadyDisposed={doc.IsDisposed} — forcing teardown (task a9435da9)");
+
+            // Release the agent: idempotent (sets IsConnected=false + profile offline).
+            if (_mcpServer?.Broker != null && !string.IsNullOrEmpty(doc.DocId))
+            {
+                _mcpServer.Broker.UnregisterTerminal(doc.DocId);
+            }
+
+            // Drop it from the terminal -> doc map.
+            lock (_terminalDocMapLock)
+            {
+                var keysToRemove = _terminalDocMap.Where(kvp => kvp.Value == doc).Select(kvp => kvp.Key).ToList();
+                foreach (var key in keysToRemove)
+                    _terminalDocMap.Remove(key);
+            }
+
+            // Guarantee the process tree dies. Deferred via BeginInvoke to avoid reentrancy inside
+            // the ContentRemoved event, and re-checked at run time: only dispose if the form is still
+            // alive, the doc is genuinely still removed (DockPanel == null — guards the theoretical
+            // remove-then-readd), and it hasn't already been disposed. Dispose() runs _terminal.Stop()
+            // -> TerminateJobObject kills shell + claude + MCP children.
+            if (!doc.IsDisposed && IsHandleCreated && !IsDisposed)
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        if (!doc.IsDisposed && doc.DockPanel == null)
+                            doc.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        _debugLogService?.Error("MainForm", $"Deferred terminal dispose failed (docId={doc.DocId}): {ex.Message}");
+                    }
+                }));
             }
         }
 
