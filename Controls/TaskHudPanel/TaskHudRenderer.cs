@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -15,9 +16,13 @@ using MultiTerminal.Terminal;
 namespace MultiTerminal.Controls
 {
     /// <summary>
-    /// WebView2-based HUD panel that shows the active task checklist for a terminal.
-    /// Always visible as a tab in HudTabContainer. Shows an empty state with
-    /// available tasks when no active task is assigned.
+    /// WebView2-based HUD panel with two tabs (task f17777d2): "Active" shows the
+    /// terminal's active task checklist (or a slim no-task state), and "Not Active"
+    /// lists the project's other open tasks (in_progress then todo, done excluded)
+    /// with per-status checklist meters and an Activate action (claim/re-assign +
+    /// set-active via the broker). Task lookups are project-scoped via SetProject;
+    /// a null/empty project id preserves legacy unscoped behavior. Always visible
+    /// as a tab in HudTabContainer.
     /// </summary>
     public class TaskHudRenderer : UserControl
     {
@@ -32,6 +37,7 @@ namespace MultiTerminal.Controls
 
         private MessageBroker _broker;
         private string _terminalName;
+        private string _projectId;
         private DebugLogService _debugLogService;
 
         // Stores the terminal name if SetTerminalName is called before Initialize
@@ -237,6 +243,10 @@ namespace MultiTerminal.Controls
                 {
                     HandleOpenLifecycle(root);
                 }
+                else if (messageType == "set_task_active")
+                {
+                    HandleSetTaskActive(root);
+                }
             }
             catch
             {
@@ -269,6 +279,131 @@ namespace MultiTerminal.Controls
             {
                 _debugLogService?.Trace("TaskHud", $"OpenLifecycle failed for taskId='{taskId}': {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Activates a task from the HUD's Not Active tab ({type:"set_task_active", taskId}).
+        /// Flow (task f17777d2, Owner-specified):
+        ///  - assigned to this terminal's agent → SetTaskActive (auto-parks the current active task)
+        ///  - unassigned → ClaimTask then SetTaskActive
+        ///  - assigned to ANOTHER agent → native TaskDialog confirm ("assigned to Bob — re-assign
+        ///    to Alice?" [Re-assign]/[Cancel]), then ClaimTask(allowReassign:true) + SetTaskActive.
+        /// Native dialog by design: WebView2 script dialogs (confirm/alert) are blocking and
+        /// unreliable, and C# is the layer that knows both agent names anyway. Runs on the UI
+        /// thread (OnWebMessageReceived marshals via InvokeRequired). On success the broker
+        /// fires TasksUpdated → OnTasksUpdated → RefreshTask, so the HUD re-renders itself.
+        /// </summary>
+        private void HandleSetTaskActive(JsonElement root)
+        {
+            if (!root.TryGetProperty("taskId", out var idEl)) return;
+            string taskId = idEl.GetString();
+            if (string.IsNullOrWhiteSpace(taskId)) return;
+            if (_broker == null || string.IsNullOrEmpty(_terminalName)) return;
+
+            try
+            {
+                var task = _broker.GetTask(taskId);
+                if (task == null)
+                {
+                    _debugLogService?.Trace("TaskHud", $"SetTaskActive: taskId='{taskId}' not found");
+                    NotifyActivateCancelled(taskId);
+                    return;
+                }
+
+                // Scope guard: never activate a task outside this terminal's project.
+                // The Not Active list is already scoped, so this only triggers on a
+                // stale/forged message — refuse quietly. (OrdinalIgnoreCase per the
+                // ClaimTask cf32b08f family precedent.)
+                if (!string.IsNullOrEmpty(_projectId) &&
+                    !string.Equals(task.ProjectId, _projectId, StringComparison.OrdinalIgnoreCase))
+                {
+                    _debugLogService?.Warning("TaskHud", $"SetTaskActive REFUSED: task '{task.Title}' belongs to project '{task.ProjectId}', terminal scoped to '{_projectId}'");
+                    NotifyActivateCancelled(taskId);
+                    return;
+                }
+
+                if (task.Status == "done")
+                {
+                    NotifyActivateCancelled(taskId);
+                    return;
+                }
+
+                string assignee = task.Assignee?.Trim();
+                bool isMine = string.Equals(assignee, _terminalName, StringComparison.OrdinalIgnoreCase);
+                bool isUnassigned = string.IsNullOrEmpty(assignee);
+
+                if (!isMine && !isUnassigned)
+                {
+                    // Assigned to another agent — confirm the re-assign with the Owner.
+                    var reassignButton = new TaskDialogButton("Re-assign");
+                    var cancelButton = TaskDialogButton.Cancel;
+                    var page = new TaskDialogPage
+                    {
+                        Caption = "Re-assign task",
+                        Heading = $"This task is assigned to {assignee}.",
+                        Text = $"Do you want to re-assign it to the currently open terminal {_terminalName}?",
+                        Icon = TaskDialogIcon.Warning,
+                        DefaultButton = cancelButton
+                    };
+                    page.Buttons.Add(reassignButton);
+                    page.Buttons.Add(cancelButton);
+
+                    if (TaskDialog.ShowDialog(this, page) != reassignButton)
+                    {
+                        NotifyActivateCancelled(taskId);
+                        return; // Owner cancelled — no-op
+                    }
+                }
+
+                // Claim when the task isn't ours OR isn't in_progress yet. ClaimTask is
+                // the only todo→in_progress promoter (TaskService.QueueTaskForTerminal/
+                // MakeTaskActive), and SetTaskActive hard-rejects non-in_progress tasks —
+                // so a SELF-ASSIGNED todo task must still route through ClaimTask (a
+                // same-assignee re-claim is explicitly permitted). Pipeline Run-1
+                // debugger HIGH: the previous !isMine-only guard broke exactly the
+                // "activate my pre-assigned ticket" case the Not Active tab exists for.
+                if (!isMine || !string.Equals(task.Status, "in_progress", StringComparison.Ordinal))
+                {
+                    var claim = _broker.ClaimTask(taskId, _terminalName, allowReassign: !isUnassigned, expectedProjectId: _projectId);
+                    if (claim == null || !claim.Success)
+                    {
+                        _debugLogService?.Warning("TaskHud", $"SetTaskActive: claim failed for '{task.Title}': {claim?.Error ?? "null result"}");
+                        MessageBox.Show(this, $"Could not claim task:\n{claim?.Error ?? "unknown error"}", "Activate task", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        NotifyActivateCancelled(taskId);
+                        return;
+                    }
+                }
+
+                var result = _broker.SetTaskActive(taskId, _terminalName);
+                if (result == null || !result.Success)
+                {
+                    _debugLogService?.Warning("TaskHud", $"SetTaskActive failed for '{task.Title}': {result?.Error ?? "null result"}");
+                    MessageBox.Show(this, $"Could not activate task:\n{result?.Error ?? "unknown error"}", "Activate task", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    NotifyActivateCancelled(taskId);
+                    return;
+                }
+
+                _debugLogService?.Info("TaskHud", $"SetTaskActive: '{task.Title}' activated by '{_terminalName}' (parked: {string.Join(", ", result.PausedTaskTitles ?? new List<string>())})");
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("TaskHud", $"SetTaskActive failed for taskId='{taskId}': {ex.GetType().Name}: {ex.Message}");
+                NotifyActivateCancelled(taskId);
+            }
+        }
+
+        /// <summary>
+        /// Tells the HUD JS that an activate request ended WITHOUT the task becoming
+        /// active (refused, failed, or Owner-cancelled), so it can drop its
+        /// pendingActivateId. An explicit ack is used instead of having the JS clear
+        /// the id on the next non-matching hud_data: ClaimTask broadcasts TasksUpdated
+        /// BEFORE SetTaskActive completes, so an intermediate refresh with the OLD
+        /// active task would race a passive clear and suppress the Active-tab flip
+        /// (pipeline Run-1 debugger LOW / reviewer NIT, hardened).
+        /// </summary>
+        private void NotifyActivateCancelled(string taskId)
+        {
+            PostJsonMessage(new { type = "activate_cancelled", taskId });
         }
 
         // -------------------------------------------------------------------------
@@ -334,6 +469,28 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
+        /// Sets the project scope for task lookup. When non-empty, the HUD only shows
+        /// tasks whose ProjectId matches (strict filter, same semantics as
+        /// MessageBroker.GetTasks(projectId)); null/empty preserves the legacy
+        /// unscoped behavior for terminals without a project. Safe to call before
+        /// Initialize — RefreshTask reads the field at lookup time.
+        /// Called by TerminalDocument alongside the sibling HUD panels' SetProject
+        /// wiring (StartTerminal + StatusLinePoll re-resolve).
+        /// </summary>
+        public void SetProject(string projectId)
+        {
+            if (string.Equals(_projectId, projectId, StringComparison.Ordinal)) return;
+
+            _projectId = projectId;
+            _debugLogService?.Trace("TaskHud", $"SetProject: projectId='{projectId ?? "null"}', refreshing");
+
+            if (_broker != null && !string.IsNullOrEmpty(_terminalName))
+            {
+                RefreshTask();
+            }
+        }
+
+        /// <summary>
         /// Applies the current theme to the WebView2 HUD.
         /// </summary>
         public void ApplyTheme(bool isDark)
@@ -378,8 +535,10 @@ namespace MultiTerminal.Controls
         // -------------------------------------------------------------------------
 
         /// <summary>
-        /// Finds the active task for this terminal and sends it to the WebView2 HUD.
-        /// Always-on: shows task checklist when active, or empty state with available tasks.
+        /// Refreshes the HUD from broker state: resolves the active task for this
+        /// terminal AND the project's other open tasks, then sends both in one
+        /// hud_data payload so the JS can render the Active / Not Active tabs
+        /// from a single message (task f17777d2).
         /// </summary>
         private void RefreshTask()
         {
@@ -389,73 +548,34 @@ namespace MultiTerminal.Controls
                 return;
             }
 
-            KanbanTask task = FindActiveTask();
+            // Project-scoped: null/empty _projectId falls through to all tasks (legacy unscoped).
+            var allTasks = _broker.GetTasks(_projectId) ?? new List<KanbanTask>();
 
-            if (task == null || IsTaskTerminal(task))
+            KanbanTask task = FindActiveTask(allTasks);
+            if (task != null && IsTaskTerminal(task))
             {
-                // No active task — show empty state with available tasks
-                _debugLogService?.Trace("TaskHud", $"RefreshTask: NO active task → showing empty state with available tasks");
-                SendEmptyState();
-                return;
+                task = null;
             }
 
-            var checklist = task.GetChecklist();
-            if (checklist == null || checklist.Count == 0)
-            {
-                // Task has no checklist — show task info but with empty checklist
-                _debugLogService?.Trace("TaskHud", $"RefreshTask: Task '{task.Title}' has NO checklist → showing task without items");
-                SendTaskData(task);
-                return;
-            }
-
-            // Task found with checklist — show full data
-            _debugLogService?.Info("TaskHud", $"RefreshTask: SHOW '{task.Title}' with {checklist.Count} items for terminal '{_terminalName}'");
-            SendTaskData(task);
+            _debugLogService?.Info("TaskHud", $"RefreshTask: active='{task?.Title ?? "(none)"}' projectId='{_projectId ?? "null"}' totalScopedTasks={allTasks.Count} for terminal '{_terminalName}'");
+            SendHudData(task, allTasks);
         }
 
         /// <summary>
-        /// Sends an empty state message to the HUD with a list of available todo tasks.
-        /// </summary>
-        private void SendEmptyState()
-        {
-            var allTasks = _broker.GetTasks();
-            var todoTasks = allTasks?
-                .Where(t => t.Status == "todo" && string.IsNullOrEmpty(t.Assignee))
-                .Take(5)
-                .Select(t => new { id = t.Id, title = t.Title, priority = t.Priority })
-                .ToArray() ?? Array.Empty<object>();
-
-            var payload = new
-            {
-                type = "empty_state",
-                terminalName = _terminalName,
-                availableTasks = todoTasks
-            };
-
-            string json = JsonSerializer.Serialize(payload);
-
-            if (_isInitialized)
-            {
-                PostRawJson(json);
-            }
-            else
-            {
-                _pendingMessageJson = json;
-            }
-        }
-
-        /// <summary>
-        /// Finds the active task for this terminal.
+        /// Finds the active task for this terminal within the given (already
+        /// project-scoped) task list.
         /// 1. ActivityService lookup (terminal-to-task mapping)
         /// 2. Direct SubStatus match (active task assigned to this terminal)
         /// 3. Any in_progress task assigned to this terminal
+        /// All tiers operate on the project-scoped task list, so an agent's active
+        /// task in ANOTHER project never surfaces in this terminal's HUD (task f17777d2,
+        /// follow-up to 0cd2c868). Null/empty _projectId = legacy unscoped.
         /// </summary>
-        private KanbanTask FindActiveTask()
+        private KanbanTask FindActiveTask(List<KanbanTask> allTasks)
         {
-            var allTasks = _broker.GetTasks();
             int totalTasks = allTasks?.Count ?? 0;
 
-            _debugLogService?.Trace("TaskHud", $"FindActiveTask: terminal='{_terminalName}' totalTasks={totalTasks}");
+            _debugLogService?.Trace("TaskHud", $"FindActiveTask: terminal='{_terminalName}' projectId='{_projectId ?? "null"}' totalTasks={totalTasks}");
 
             if (allTasks == null || allTasks.Count == 0)
             {
@@ -518,32 +638,65 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Sends the full task data payload to the WebView2 HUD.
+        /// Sends the unified HUD payload: the active task (or null) plus the
+        /// project's other OPEN tasks for the Not Active tab. Done tasks are
+        /// excluded (Owner decision, task f17777d2 — done work lives on the
+        /// kanban/lifecycle boards; the HUD is an open-work view). Groups are
+        /// ordered in_progress (paused, most actionable) before todo, then by
+        /// priority within each group.
         /// </summary>
-        private void SendTaskData(KanbanTask task)
+        private void SendHudData(KanbanTask activeTask, List<KanbanTask> allTasks)
         {
-            var checklist = task.GetChecklist();
-            var checklistData = checklist.Select(item => new
+            object activePayload = null;
+            if (activeTask != null)
             {
-                item = item.Item,
-                status = item.Status ?? (item.Done ? "done" : "pending"),
-                assignedTo = item.AssignedTo,
-                cycleCount = item.CycleCount
-            }).ToArray();
+                var checklist = activeTask.GetChecklist() ?? new List<ChecklistItem>();
+                var checklistData = checklist.Select(item => new
+                {
+                    item = item.Item,
+                    status = item.Status ?? (item.Done ? "done" : "pending"),
+                    assignedTo = item.AssignedTo,
+                    cycleCount = item.CycleCount
+                }).ToArray();
+
+                activePayload = new
+                {
+                    id = activeTask.Id,
+                    title = activeTask.Title,
+                    description = activeTask.Description,
+                    priority = activeTask.Priority,
+                    status = activeTask.Status,
+                    assignee = activeTask.Assignee,
+                    checklist = checklistData
+                };
+            }
+
+            var notActiveTasks = allTasks
+                .Where(t => (t.Status == "in_progress" || t.Status == "todo") &&
+                            (activeTask == null || !string.Equals(t.Id, activeTask.Id, StringComparison.Ordinal)))
+                // JS re-groups by status (renderNotActive filters per group), so only
+                // the ThenBy priority order is load-bearing; the status OrderBy just
+                // keeps the wire format readable.
+                .OrderBy(t => t.Status == "in_progress" ? 0 : 1)
+                .ThenBy(t => PriorityRank(t.Priority))
+                .Select(t => new
+                {
+                    id = t.Id,
+                    title = t.Title,
+                    description = t.Description,
+                    priority = t.Priority,
+                    status = t.Status,
+                    assignee = t.Assignee,
+                    counts = CountChecklist(t)
+                })
+                .ToArray();
 
             var payload = new
             {
-                type = "task_data",
-                task = new
-                {
-                    id = task.Id,
-                    title = task.Title,
-                    description = task.Description,
-                    priority = task.Priority,
-                    status = task.Status,
-                    assignee = task.Assignee,
-                    checklist = checklistData
-                }
+                type = "hud_data",
+                terminalName = _terminalName,
+                activeTask = activePayload,
+                notActiveTasks
             };
 
             string json = JsonSerializer.Serialize(payload);
@@ -557,6 +710,41 @@ namespace MultiTerminal.Controls
                 // Queue for when WebView2 reports ready
                 _pendingMessageJson = json;
             }
+        }
+
+        private static int PriorityRank(string priority)
+        {
+            switch ((priority ?? "normal").ToLowerInvariant())
+            {
+                case "urgent": return 0;
+                case "high": return 1;
+                case "normal": return 2;
+                default: return 3; // low / unknown
+            }
+        }
+
+        /// <summary>
+        /// Per-status checklist item counts for a task's Not Active row mini-meter.
+        /// </summary>
+        private static object CountChecklist(KanbanTask task)
+        {
+            int pending = 0, coding = 0, testing = 0, done = 0;
+            var checklist = task.GetChecklist();
+            if (checklist != null)
+            {
+                foreach (var item in checklist)
+                {
+                    switch ((item.Status ?? (item.Done ? "done" : "pending")).ToLowerInvariant())
+                    {
+                        case "coding": coding++; break;
+                        case "testing": testing++; break;
+                        case "done": done++; break;
+                        default: pending++; break;
+                    }
+                }
+            }
+
+            return new { pending, coding, testing, done, total = pending + coding + testing + done };
         }
 
         // -------------------------------------------------------------------------

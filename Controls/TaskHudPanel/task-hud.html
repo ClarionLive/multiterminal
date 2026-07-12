@@ -45,6 +45,9 @@ body {
 
     background: var(--bg-primary);
     color: var(--text-primary);
+
+    display: flex;
+    flex-direction: column;
 }
 
 /* ============================================================
@@ -77,14 +80,63 @@ body.light {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 /* ============================================================
-   Root Layout
+   Tab bar (Active / Not Active) — task f17777d2
    ============================================================ */
-.hud-container {
+.tab-bar {
     display: flex;
+    align-items: stretch;
+    height: 26px;
+    flex-shrink: 0;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border-column);
+}
+
+.tab-btn {
+    appearance: none;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    outline: none;
+}
+
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn:focus-visible { outline: 1px dotted #3B82F6; outline-offset: -2px; }
+.tab-btn.active {
+    color: var(--text-primary);
+    border-bottom-color: #3B82F6;
+}
+
+.tab-count {
+    background: var(--badge-bg);
+    color: var(--text-muted);
+    border-radius: 8px;
+    padding: 0 5px;
+    font-size: 9px;
+    font-weight: 600;
+    min-width: 16px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+.tab-btn.active .tab-count { color: var(--text-secondary); }
+
+/* Tab pages */
+.tab-page {
+    flex: 1;
+    min-height: 0;
+    display: none;
     flex-direction: column;
-    height: 100vh;
     overflow: hidden;
 }
+.tab-page.visible { display: flex; }
 
 /* ============================================================
    Header Bar (~30px title row + 18px description row)
@@ -124,21 +176,21 @@ body.light {
 
 /* Clickable title affordances (only when data-task-id is set) — Path C */
 .task-title[data-task-id],
-.available-task-title[data-task-id] {
+.na-title[data-task-id] {
     cursor: pointer;
     outline: none;
 }
 .task-title[data-task-id]:hover,
 .task-title[data-task-id]:focus-visible,
-.available-task-title[data-task-id]:hover,
-.available-task-title[data-task-id]:focus-visible {
+.na-title[data-task-id]:hover,
+.na-title[data-task-id]:focus-visible {
     text-decoration: underline;
     text-decoration-style: dotted;
     text-decoration-thickness: 1px;
     text-underline-offset: 2px;
 }
 .task-title[data-task-id]:focus-visible,
-.available-task-title[data-task-id]:focus-visible {
+.na-title[data-task-id]:focus-visible {
     outline: 1px dotted #3B82F6;
     outline-offset: 2px;
 }
@@ -378,54 +430,23 @@ body.light .badge-cycle {
 }
 
 /* ============================================================
-   Empty / No-task state
+   No-active-task state (inside the Active tab). The old
+   "Available Tasks" side-list is gone — superseded by the
+   Not Active tab (task f17777d2).
    ============================================================ */
 .no-task {
     display: none;
     flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
     height: 100%;
+    padding: 12px;
     color: var(--text-muted);
     font-size: 11px;
     user-select: none;
     overflow: hidden;
-}
-
-.no-task-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    background: var(--bg-header);
-    border-bottom: 1px solid var(--border-column);
-    flex-shrink: 0;
-}
-
-.no-task-header-icon {
-    font-size: 16px;
-    opacity: 0.6;
-}
-
-.no-task-header-text {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
-}
-
-.no-task-body {
-    flex: 1;
-    display: flex;
-    overflow: hidden;
-}
-
-.no-task-message {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    padding: 12px;
-    color: var(--text-muted);
+    text-align: center;
 }
 
 .no-task-message-icon {
@@ -433,144 +454,255 @@ body.light .badge-cycle {
     opacity: 0.3;
 }
 
-.no-task-message-text {
+.no-task-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.no-task-hint {
     font-size: 11px;
+    color: var(--text-muted);
 }
 
-.available-tasks {
+/* Within the Active tab: empty ⇄ populated swap */
+body.empty .hud-container { display: none; }
+body.empty .no-task       { display: flex; }
+
+/* ============================================================
+   Not Active tab — grouped open-task list (task f17777d2)
+   ============================================================ */
+.na-list {
     flex: 1;
-    padding: 6px 10px;
     overflow-y: auto;
-    border-left: 1px solid var(--border-column);
+    overflow-x: hidden;
+    padding: 6px 8px;
+    background: var(--bg-column);
 }
 
-.available-tasks-title {
+.na-group-title {
     font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-secondary);
-    margin-bottom: 6px;
+    margin: 6px 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
 }
+.na-group-title:first-child { margin-top: 0; }
 
-.available-task-card {
+.na-group-title .group-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.group-dot.in_progress { background: #3B82F6; }
+.group-dot.todo        { background: #6B7280; }
+
+.na-row {
     border: 1px solid var(--border-card);
     border-radius: 4px;
     padding: 5px 8px;
     margin-bottom: 4px;
     background: var(--bg-card);
-    cursor: default;
+    box-shadow: var(--shadow-card);
     transition: background 0.15s ease;
 }
+.na-row:hover { background: var(--bg-card-hover); }
 
-.available-task-card:hover {
-    background: var(--bg-card-hover);
+.na-row-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
 }
 
-.available-task-title {
+.na-title {
+    flex: 1;
+    min-width: 0;
     font-size: 11px;
+    font-weight: 600;
     color: var(--text-primary);
-    line-height: 1.3;
-    word-break: break-word;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
-.available-task-card .chip-priority {
-    margin-top: 3px;
+.na-desc {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 2px;
 }
 
-.no-available {
-    font-size: 11px;
+.na-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+/* Segmented per-status checklist mini-meter (column colors) */
+.na-meter {
+    display: flex;
+    width: 90px;
+    height: 5px;
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--bg-input);
+    flex-shrink: 0;
+}
+.na-meter .seg-pending { background: #6B7280; }
+.na-meter .seg-coding  { background: #3B82F6; }
+.na-meter .seg-testing { background: #F59E0B; }
+.na-meter .seg-done    { background: #10B981; }
+
+.na-counts {
+    font-size: 9px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.na-nochecklist {
+    font-size: 9px;
     color: var(--text-muted);
     font-style: italic;
 }
 
-/* Show no-task overlay, hide main layout */
-body.empty .hud-container { display: none; }
-body.empty .no-task       { display: flex; }
+.activate-btn {
+    appearance: none;
+    margin-left: auto;
+    background: rgba(16,185,129,0.12);
+    color: #10B981;
+    border: 1px solid rgba(16,185,129,0.35);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.activate-btn:hover {
+    background: rgba(16,185,129,0.25);
+}
+.activate-btn:focus-visible {
+    outline: 1px dotted #10B981;
+    outline-offset: 1px;
+}
+
+.na-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 11px;
+    user-select: none;
+}
+.na-empty-icon { font-size: 28px; opacity: 0.3; }
 </style>
 </head>
 <body class="empty">
 
-<!-- No-task overlay (shown when no active task) -->
-<div class="no-task">
-    <div class="no-task-header">
-        <span class="no-task-header-icon">&#128203;</span>
-        <span class="no-task-header-text" id="no-task-greeting">No active task</span>
-    </div>
-    <div class="no-task-body">
-        <div class="no-task-message">
-            <div class="no-task-message-icon">&#9745;</div>
-            <span class="no-task-message-text">No task assigned to this terminal</span>
-        </div>
-        <div class="available-tasks" id="available-tasks">
-            <div class="available-tasks-title">Available Tasks</div>
-            <div id="available-tasks-list">
-                <span class="no-available">No tasks in queue</span>
-            </div>
-        </div>
-    </div>
+<!-- Tab bar: Active / Not Active (task f17777d2) -->
+<div class="tab-bar">
+    <button type="button" class="tab-btn active" id="tab-btn-active" data-tab="active">Active</button>
+    <button type="button" class="tab-btn" id="tab-btn-notactive" data-tab="notactive">
+        Not Active <span class="tab-count" id="tab-count-notactive">0</span>
+    </button>
 </div>
 
-<!-- Main HUD layout -->
-<div class="hud-container">
+<!-- ============ Tab page: ACTIVE ============ -->
+<div class="tab-page visible" id="tab-active">
 
-    <!-- Header bar -->
-    <div class="hud-header">
-        <div class="header-title-row">
-            <!-- Priority chip -->
-            <span class="chip chip-priority" id="priority-chip">normal</span>
-            <!-- Task title -->
-            <span class="task-title" id="task-title">Untitled Task</span>
-            <!-- Assignee chip -->
-            <span class="chip chip-assignee" id="assignee-chip" style="display:none"></span>
-            <!-- Status chip -->
-            <span class="chip chip-status" id="status-chip"></span>
-            <!-- Progress bar -->
-            <div class="progress-container">
-                <div class="progress-bar-track">
-                    <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+    <!-- No-active-task state -->
+    <div class="no-task">
+        <div class="no-task-message-icon">&#9745;</div>
+        <div class="no-task-title" id="no-task-greeting">No active task</div>
+        <div class="no-task-hint">Pick one from the Not Active tab</div>
+    </div>
+
+    <!-- Main HUD layout -->
+    <div class="hud-container" style="display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden">
+
+        <!-- Header bar -->
+        <div class="hud-header">
+            <div class="header-title-row">
+                <!-- Priority chip -->
+                <span class="chip chip-priority" id="priority-chip">normal</span>
+                <!-- Task title -->
+                <span class="task-title" id="task-title">Untitled Task</span>
+                <!-- Assignee chip -->
+                <span class="chip chip-assignee" id="assignee-chip" style="display:none"></span>
+                <!-- Status chip -->
+                <span class="chip chip-status" id="status-chip"></span>
+                <!-- Progress bar -->
+                <div class="progress-container">
+                    <div class="progress-bar-track">
+                        <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+                    </div>
+                    <span class="progress-text" id="progress-text">0%</span>
                 </div>
-                <span class="progress-text" id="progress-text">0%</span>
+            </div>
+            <div class="header-desc-row">
+                <span class="task-description" id="task-description"></span>
             </div>
         </div>
-        <div class="header-desc-row">
-            <span class="task-description" id="task-description"></span>
+
+        <!-- Four-column grid -->
+        <div class="columns-area">
+            <div class="column" data-status="pending">
+                <div class="column-header">
+                    <span class="column-title">Pending</span>
+                    <span class="column-count" id="count-pending">0</span>
+                </div>
+                <div class="column-body" id="col-pending"></div>
+            </div>
+            <div class="column" data-status="coding">
+                <div class="column-header">
+                    <span class="column-title">Coding</span>
+                    <span class="column-count" id="count-coding">0</span>
+                </div>
+                <div class="column-body" id="col-coding"></div>
+            </div>
+            <div class="column" data-status="testing">
+                <div class="column-header">
+                    <span class="column-title">Testing</span>
+                    <span class="column-count" id="count-testing">0</span>
+                </div>
+                <div class="column-body" id="col-testing"></div>
+            </div>
+            <div class="column" data-status="done">
+                <div class="column-header">
+                    <span class="column-title">Done</span>
+                    <span class="column-count" id="count-done">0</span>
+                </div>
+                <div class="column-body" id="col-done"></div>
+            </div>
+        </div>
+
+    </div><!-- /hud-container -->
+</div><!-- /tab-active -->
+
+<!-- ============ Tab page: NOT ACTIVE ============ -->
+<div class="tab-page" id="tab-notactive">
+    <div class="na-list" id="na-list">
+        <div class="na-empty">
+            <div class="na-empty-icon">&#128203;</div>
+            <span>No other open tasks in this project</span>
         </div>
     </div>
-
-    <!-- Four-column grid -->
-    <div class="columns-area">
-        <div class="column" data-status="pending">
-            <div class="column-header">
-                <span class="column-title">Pending</span>
-                <span class="column-count" id="count-pending">0</span>
-            </div>
-            <div class="column-body" id="col-pending"></div>
-        </div>
-        <div class="column" data-status="coding">
-            <div class="column-header">
-                <span class="column-title">Coding</span>
-                <span class="column-count" id="count-coding">0</span>
-            </div>
-            <div class="column-body" id="col-coding"></div>
-        </div>
-        <div class="column" data-status="testing">
-            <div class="column-header">
-                <span class="column-title">Testing</span>
-                <span class="column-count" id="count-testing">0</span>
-            </div>
-            <div class="column-body" id="col-testing"></div>
-        </div>
-        <div class="column" data-status="done">
-            <div class="column-header">
-                <span class="column-title">Done</span>
-                <span class="column-count" id="count-done">0</span>
-            </div>
-            <div class="column-body" id="col-done"></div>
-        </div>
-    </div>
-
-</div><!-- /hud-container -->
+</div><!-- /tab-notactive -->
 
 <script>
 // ============================================================
@@ -597,51 +729,52 @@ function applyTheme(isDark) {
 }
 
 // ============================================================
-//  Clear / Empty state
+//  Tabs (task f17777d2)
+//  currentTab === null until the first hud_data arrives, so the
+//  smart default (Active when a task is active, else Not Active)
+//  applies exactly once. After that, refreshes never yank the tab
+//  away from the user — only a successful HUD-initiated activation
+//  flips back to Active.
+// ============================================================
+let currentTab = null;          // 'active' | 'notactive'
+let pendingActivateId = null;   // taskId we asked C# to activate
+
+function switchTab(tab) {
+    currentTab = tab;
+    document.getElementById('tab-active').classList.toggle('visible', tab === 'active');
+    document.getElementById('tab-notactive').classList.toggle('visible', tab === 'notactive');
+    document.getElementById('tab-btn-active').classList.toggle('active', tab === 'active');
+    document.getElementById('tab-btn-notactive').classList.toggle('active', tab === 'notactive');
+}
+
+document.getElementById('tab-btn-active').addEventListener('click', () => switchTab('active'));
+document.getElementById('tab-btn-notactive').addEventListener('click', () => switchTab('notactive'));
+
+// ============================================================
+//  Clear / Empty state (Active tab)
 // ============================================================
 function clearHud() {
     document.body.classList.add('empty');
+    // Keep the two-tab DOM consistent: a cleared HUD must not retain stale
+    // Not Active rows either (adversary finding D, f17777d2 Run 1 — the
+    // 'clear' message currently has no C# sender, but stay correct if one appears).
+    document.getElementById('tab-count-notactive').textContent = '0';
+    document.getElementById('na-list').innerHTML = `<div class="na-empty">
+        <div class="na-empty-icon">&#128203;</div>
+        <span>No other open tasks in this project</span>
+    </div>`;
 }
 
-function renderEmptyState(data) {
+function renderNoActive(terminalName) {
     document.body.classList.add('empty');
-
-    // Update greeting with terminal name
     const greeting = document.getElementById('no-task-greeting');
-    if (data.terminalName) {
-        greeting.textContent = `No active task \u2014 ${escapeHtml(data.terminalName)}`;
-    } else {
-        greeting.textContent = 'No active task';
-    }
-
-    // Render available tasks
-    const list = document.getElementById('available-tasks-list');
-    const tasks = Array.isArray(data.availableTasks) ? data.availableTasks : [];
-
-    if (tasks.length === 0) {
-        list.innerHTML = '<span class="no-available">No tasks in queue</span>';
-        return;
-    }
-
-    let html = '';
-    tasks.forEach(t => {
-        const priority = (t.priority || 'normal').toLowerCase();
-        const id = escapeHtml(t.id || '');
-        const title = escapeHtml(t.title || '');
-        // Title is clickable when t.id is present — opens Lifecycle Board for that task
-        const titleAttrs = id
-            ? `data-task-id="${id}" role="link" tabindex="0" aria-label="Open Lifecycle Board for ${title}"`
-            : '';
-        html += `<div class="available-task-card">
-            <div class="available-task-title" ${titleAttrs}>${title}</div>
-            <span class="chip chip-priority ${priority}" style="font-size:9px;padding:0 4px;margin-top:3px">${priority}</span>
-        </div>`;
-    });
-    list.innerHTML = html;
+    greeting.textContent = terminalName
+        ? `No active task — ${terminalName}`
+        : 'No active task';
 }
 
 // ============================================================
-//  Render task data
+//  Render active task (Active tab)
 // ============================================================
 function renderTask(task) {
     document.body.classList.remove('empty');
@@ -751,11 +884,120 @@ function renderColumn(status, items) {
 }
 
 // ============================================================
-//  Click-to-open Lifecycle Board (Path C)
-//  Delegated listener on document.body so it covers both the
-//  active-task title and empty-state available-task titles in
-//  one place. Triggers on click and on Enter/Space when the
-//  element has keyboard focus (a11y).
+//  Render Not Active tab (task f17777d2)
+//  Groups: In Progress (paused — most actionable) then To Do.
+//  Done tasks are excluded server-side (Owner decision).
+// ============================================================
+function renderNotActive(tasks) {
+    const list = document.getElementById('na-list');
+    const badge = document.getElementById('tab-count-notactive');
+    badge.textContent = tasks.length;
+
+    if (tasks.length === 0) {
+        list.innerHTML = `<div class="na-empty">
+            <div class="na-empty-icon">&#128203;</div>
+            <span>No other open tasks in this project</span>
+        </div>`;
+        return;
+    }
+
+    const groups = [
+        { status: 'in_progress', label: 'In Progress', items: tasks.filter(t => t.status === 'in_progress') },
+        { status: 'todo',        label: 'To Do',       items: tasks.filter(t => t.status === 'todo') }
+    ];
+
+    let html = '';
+    groups.forEach(g => {
+        if (g.items.length === 0) return;
+        html += `<div class="na-group-title"><span class="group-dot ${g.status}"></span>${g.label} (${g.items.length})</div>`;
+        g.items.forEach(t => { html += buildNaRow(t); });
+    });
+
+    list.innerHTML = html;
+}
+
+function buildNaRow(t) {
+    const id = escapeHtml(t.id || '');
+    const shortId = t.id ? String(t.id).substring(0, 8) : '';
+    const title = escapeHtml((shortId ? '[' + shortId + '] ' : '') + (t.title || 'Untitled Task'));
+    const desc = escapeHtml(t.description || '');
+    // escapeHtml even though the server validates priority to an enum — this file's
+    // contract is "every interpolated field is escaped", no exceptions (security-audit
+    // LOW, f17777d2 Run 1). Legit values (urgent/high/normal/low) pass through unchanged.
+    const priority = escapeHtml((t.priority || 'normal').toLowerCase());
+    const assignee = (t.assignee || '').trim();
+
+    const titleAttrs = id
+        ? `data-task-id="${id}" role="link" tabindex="0" aria-label="Open Lifecycle Board for ${title}"`
+        : '';
+
+    const assigneeChip = assignee
+        ? `<span class="chip chip-assignee">${escapeHtml(assignee)}</span>`
+        : '';
+
+    // Segmented checklist mini-meter in the 4 column colors + P/C/T/D counts
+    const c = t.counts || { pending: 0, coding: 0, testing: 0, done: 0, total: 0 };
+    let meterHtml;
+    if (c.total > 0) {
+        const seg = (n, cls) => n > 0
+            ? `<span class="${cls}" style="width:${(n / c.total) * 100}%"></span>`
+            : '';
+        meterHtml = `<div class="na-meter" title="${c.pending} pending, ${c.coding} coding, ${c.testing} testing, ${c.done} done">`
+            + seg(c.pending, 'seg-pending')
+            + seg(c.coding, 'seg-coding')
+            + seg(c.testing, 'seg-testing')
+            + seg(c.done, 'seg-done')
+            + `</div>
+            <span class="na-counts">${c.pending}P ${c.coding}C ${c.testing}T ${c.done}D</span>`;
+    } else {
+        meterHtml = `<span class="na-nochecklist">no checklist</span>`;
+    }
+
+    const descRow = desc ? `<div class="na-desc">${desc}</div>` : '';
+
+    return `<div class="na-row">
+        <div class="na-row-top">
+            <span class="na-title" ${titleAttrs}>${title}</span>
+            <span class="chip chip-priority ${priority}">${priority}</span>
+            ${assigneeChip}
+        </div>
+        ${descRow}
+        <div class="na-meta">
+            ${meterHtml}
+            <button type="button" class="activate-btn" data-activate-id="${id}" title="Make this the active task (parks the current one)">&#9654; Activate</button>
+        </div>
+    </div>`;
+}
+
+// ============================================================
+//  Unified hud_data render (task f17777d2)
+// ============================================================
+function renderHud(data) {
+    const active = data.activeTask || null;
+
+    if (active) {
+        renderTask(active);
+    } else {
+        renderNoActive(data.terminalName);
+    }
+
+    renderNotActive(Array.isArray(data.notActiveTasks) ? data.notActiveTasks : []);
+
+    // Tab logic: flip to Active when OUR activation request landed;
+    // otherwise smart-default exactly once on first data.
+    if (pendingActivateId && active && active.id === pendingActivateId) {
+        pendingActivateId = null;
+        switchTab('active');
+    } else if (currentTab === null) {
+        switchTab(active ? 'active' : 'notactive');
+    }
+}
+
+// ============================================================
+//  Click-to-open Lifecycle Board (Path C) + Activate buttons
+//  Delegated listeners on document.body cover the active-task
+//  title and Not Active row titles in one place. Triggers on
+//  click and on Enter/Space when focused (a11y).
 // ============================================================
 function postOpenLifecycle(taskId) {
     if (!taskId) return;
@@ -765,7 +1007,22 @@ function postOpenLifecycle(taskId) {
     }
 }
 
+function postSetTaskActive(taskId) {
+    if (!taskId) return;
+    pendingActivateId = taskId;
+    if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ type: 'set_task_active', taskId });
+    }
+}
+
 document.body.addEventListener('click', (e) => {
+    // Activate button takes precedence (it never carries data-task-id itself)
+    const activateBtn = e.target.closest('[data-activate-id]');
+    if (activateBtn) {
+        e.stopPropagation();
+        postSetTaskActive(activateBtn.getAttribute('data-activate-id'));
+        return;
+    }
     const link = e.target.closest('[data-task-id]');
     if (!link) return;
     // Defensive: skip checklist-item cards (they should never have data-task-id, but guard anyway)
@@ -776,6 +1033,11 @@ document.body.addEventListener('click', (e) => {
 
 document.body.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
+    const activateBtn = e.target.closest('[data-activate-id]');
+    if (activateBtn) {
+        // Native <button>: Enter/Space already fire 'click' — let that path handle it
+        return;
+    }
     const link = e.target.closest('[data-task-id]');
     if (!link) return;
     if (link.classList.contains('card-text')) return;
@@ -795,12 +1057,19 @@ if (window.chrome && window.chrome.webview) {
         const data = event.data;
         if (!data) return;
 
-        // Support both object and legacy string payloads
         if (typeof data === 'object') {
-            if (data.type === 'task_data' && data.task) {
-                renderTask(data.task);
-            } else if (data.type === 'empty_state') {
-                renderEmptyState(data);
+            if (data.type === 'hud_data') {
+                renderHud(data);
+            } else if (data.type === 'activate_cancelled') {
+                // C# ack: the activate request ended without the task becoming
+                // active (refused / failed / Owner cancelled the re-assign dialog).
+                // Explicit ack instead of clearing on any non-matching hud_data,
+                // because ClaimTask broadcasts an intermediate refresh BEFORE
+                // SetTaskActive completes — a passive clear would race it and
+                // suppress the Active-tab flip.
+                if (pendingActivateId && data.taskId === pendingActivateId) {
+                    pendingActivateId = null;
+                }
             } else if (data.type === 'theme') {
                 applyTheme(data.isDark !== false);
             } else if (data.type === 'clear') {
@@ -810,8 +1079,6 @@ if (window.chrome && window.chrome.webview) {
             // Legacy string protocol (for compatibility with other panels)
             if (data.startsWith('theme:')) {
                 applyTheme(data.split(':')[1] === 'dark');
-            } else if (data.startsWith('task_data:')) {
-                try { renderTask(JSON.parse(data.substring(10))); } catch(e) {}
             } else if (data === 'clear') {
                 clearHud();
             }
@@ -819,20 +1086,28 @@ if (window.chrome && window.chrome.webview) {
     });
 } else {
     // Running outside WebView2 (browser dev preview) — show placeholder data
-    renderTask({
-        id: 'preview',
-        title: 'Task HUD Preview',
-        description: 'This is a preview of the Task HUD panel for development.',
-        priority: 'high',
-        status: 'in_progress',
-        assignee: 'Charlie',
-        checklist: [
-            { item: 'Create task-hud.html layout',    status: 'done',    assignedTo: 'Charlie', cycleCount: 0 },
-            { item: 'Implement CSS variables/theme',  status: 'done',    assignedTo: 'Charlie', cycleCount: 0 },
-            { item: 'Wire WebView2 message protocol', status: 'testing', assignedTo: 'Charlie', cycleCount: 1 },
-            { item: 'Write compact card rendering',   status: 'coding',  assignedTo: 'Charlie', cycleCount: 0 },
-            { item: 'Integration testing',            status: 'pending', assignedTo: '',        cycleCount: 0 },
-            { item: 'Dark/light theme verification',  status: 'pending', assignedTo: '',        cycleCount: 0 },
+    renderHud({
+        terminalName: 'Alice',
+        activeTask: {
+            id: 'preview1',
+            title: 'Task HUD Preview',
+            description: 'This is a preview of the Task HUD panel for development.',
+            priority: 'high',
+            status: 'in_progress',
+            assignee: 'Charlie',
+            checklist: [
+                { item: 'Create task-hud.html layout',    status: 'done',    assignedTo: 'Charlie', cycleCount: 0 },
+                { item: 'Implement CSS variables/theme',  status: 'done',    assignedTo: 'Charlie', cycleCount: 0 },
+                { item: 'Wire WebView2 message protocol', status: 'testing', assignedTo: 'Charlie', cycleCount: 1 },
+                { item: 'Write compact card rendering',   status: 'coding',  assignedTo: 'Charlie', cycleCount: 0 },
+                { item: 'Integration testing',            status: 'pending', assignedTo: '',        cycleCount: 0 },
+                { item: 'Dark/light theme verification',  status: 'pending', assignedTo: '',        cycleCount: 0 },
+            ]
+        },
+        notActiveTasks: [
+            { id: 'preview2', title: 'Paused refactor of MessageBroker', description: 'Extract profile region into ProfileService', priority: 'high', status: 'in_progress', assignee: 'Alice', counts: { pending: 2, coding: 1, testing: 3, done: 4, total: 10 } },
+            { id: 'preview3', title: 'Fix HUD zoom persistence', description: 'Zoom factor resets after theme switch', priority: 'normal', status: 'in_progress', assignee: 'Bob', counts: { pending: 0, coding: 2, testing: 0, done: 1, total: 3 } },
+            { id: 'preview4', title: 'Add project filter to activity feed', description: '', priority: 'low', status: 'todo', assignee: '', counts: { pending: 0, coding: 0, testing: 0, done: 0, total: 0 } },
         ]
     });
 }

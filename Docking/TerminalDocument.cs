@@ -1212,6 +1212,10 @@ namespace MultiTerminal.Docking
             // overload would silently leave _projectId null (breaks per-(project,
             // branch) outcome read/write). Debugger Run-1 finding.
             _hudGit?.SetProject(projectId, workingDirectory);
+            // Task HUD is project-scoped too: without this, an agent's active task
+            // from ANOTHER project surfaces in this terminal's HUD (task f17777d2,
+            // follow-up to 0cd2c868 — TaskHud was the one panel with no SetProject).
+            _hudTabContainer?.TaskHud?.SetProject(projectId);
             // (_hudSessions is keyed above to the canonical project path, not the
             // launch/worktree dir — see _hudNotesProjectKey resolution.)
             // Switch HUD to the Tasks tab by default when starting a terminal
@@ -3265,6 +3269,17 @@ namespace MultiTerminal.Docking
                             _hudKnowledge?.SetProject(resolvedProjectId);
                             // Pass resolvedProjectId — see comment in StartTerminal call site for rationale.
                             _hudGit?.SetProject(resolvedProjectId, folderForUi);
+                            // Task HUD tracks the terminal's project too (task f17777d2) —
+                            // see comment in StartTerminal call site for rationale.
+                            // UPGRADE-ONLY (like Notes/Sessions below): the poll's project match
+                            // is exact-path, so cd'ing into a worktree/subfolder resolves null —
+                            // passing that through would UNSCOPE the task HUD mid-session and
+                            // resurrect the cross-project leak this task fixes. A null here means
+                            // "unregistered folder", not "no project"; keep the launch scope.
+                            if (!string.IsNullOrEmpty(resolvedProjectId))
+                            {
+                                _hudTabContainer?.TaskHud?.SetProject(resolvedProjectId);
+                            }
                             // Notes/Sessions are per-project: only UPGRADE their key to a
                             // canonical registered project path; never downgrade to a raw
                             // worktree folder (which has no notes and would blank the pane).

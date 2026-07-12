@@ -2696,8 +2696,13 @@ namespace MultiTerminal.MCPServer.Services
             if (string.IsNullOrEmpty(projectId))
                 return GetTasks();
 
+            // OrdinalIgnoreCase: the project-id domain is case-insensitive (see
+            // GetMyActiveTask / ClaimTask cf32b08f family precedent). This was the
+            // lone case-sensitive holdout among project comparisons — a casing skew
+            // between a terminal's resolved projectId and the stored task ProjectId
+            // silently blanked every scoped consumer (f17777d2 adversary finding A).
             return _tasks.Values
-                .Where(t => t.ProjectId == projectId)
+                .Where(t => string.Equals(t.ProjectId, projectId, StringComparison.OrdinalIgnoreCase))
                 .OrderBy(t => t.CreatedAt)
                 .ToList();
         }
