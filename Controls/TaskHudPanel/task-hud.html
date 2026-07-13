@@ -36,6 +36,7 @@ body {
     --text-primary: #e0e0e0;
     --text-secondary: #a0a0b8;
     --text-muted: #707088;
+    --na-text: #bcbcd0;   /* Not-Active rows: readable body text (brighter than --text-muted; task 08dc9c1f) */
     --bg-header: #12122a;
     --bg-input: #252540;
     --badge-bg: rgba(255,255,255,0.1);
@@ -63,6 +64,7 @@ body.light {
     --text-primary: #333333;
     --text-secondary: #666666;
     --text-muted: #999999;
+    --na-text: #555566;   /* Not-Active rows: readable body text in light theme (task 08dc9c1f) */
     --bg-header: #e8e8e8;
     --bg-input: #ffffff;
     --badge-bg: rgba(0,0,0,0.06);
@@ -532,12 +534,13 @@ body.empty .no-task       { display: flex; }
 }
 
 .na-desc {
-    font-size: 10px;
-    color: var(--text-muted);
+    font-size: 11px;
+    color: var(--na-text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     margin-top: 2px;
+    cursor: default;
 }
 
 .na-meta {
@@ -563,17 +566,109 @@ body.empty .no-task       { display: flex; }
 .na-meter .seg-done    { background: #10B981; }
 
 .na-counts {
-    font-size: 9px;
-    color: var(--text-muted);
+    font-size: 10px;
+    color: var(--na-text);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
 
 .na-nochecklist {
-    font-size: 9px;
-    color: var(--text-muted);
+    font-size: 10px;
+    color: var(--na-text);
     font-style: italic;
 }
+
+/* Created / last-updated line under the description (task 08dc9c1f) */
+.na-date {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 3px;
+    font-size: 9px;
+    color: var(--na-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.na-date .na-date-sep { opacity: 0.5; }
+
+/* ============================================================
+   Not-Active toolbar: search + sort (task 08dc9c1f)
+   ============================================================ */
+.na-toolbar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--bg-column);
+    border-bottom: 1px solid var(--border-column);
+}
+.na-search-wrap {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.na-search {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--text-primary);
+    background: var(--bg-input);
+    border: 1px solid var(--border-card);
+    border-radius: 4px;
+    /* right padding reserves room for the × clear button so text never runs under it */
+    padding: 4px 22px 4px 8px;
+    outline: none;
+}
+.na-search::placeholder { color: var(--text-muted); }
+.na-search:focus { border-color: #3B82F6; }
+/* Inline × clear button — hidden until the field has text (toggled in JS) */
+.na-clear {
+    appearance: none;
+    position: absolute;
+    right: 3px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+}
+.na-clear.visible { display: flex; }
+.na-clear:hover { color: var(--text-primary); background: var(--bg-card-hover); }
+.na-count {
+    font-size: 10px;
+    color: var(--na-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.na-count:empty { display: none; }
+.na-sort {
+    appearance: none;
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-primary);
+    background: var(--bg-input);
+    border: 1px solid var(--border-card);
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.na-sort:hover { background: var(--bg-card-hover); border-color: #3B82F6; }
 
 .activate-btn {
     appearance: none;
@@ -696,6 +791,14 @@ body.empty .no-task       { display: flex; }
 
 <!-- ============ Tab page: NOT ACTIVE ============ -->
 <div class="tab-page" id="tab-notactive">
+    <div class="na-toolbar">
+        <div class="na-search-wrap">
+            <input type="text" id="na-search" class="na-search" placeholder="Search id, title, or description…" aria-label="Search not-active tasks" autocomplete="off" spellcheck="false" />
+            <button type="button" id="na-clear" class="na-clear" title="Clear search" aria-label="Clear search">&times;</button>
+        </div>
+        <span class="na-count" id="na-count"></span>
+        <button type="button" id="na-sort" class="na-sort" title="Toggle sort order (by created date)">&#8595; Newest</button>
+    </div>
     <div class="na-list" id="na-list">
         <div class="na-empty">
             <div class="na-empty-icon">&#128203;</div>
@@ -739,6 +842,16 @@ function applyTheme(isDark) {
 let currentTab = null;          // 'active' | 'notactive'
 let pendingActivateId = null;   // taskId we asked C# to activate
 
+// Not-Active tab view state (task 08dc9c1f): search + sort are pure client-side
+// over the delivered payload; naAllTasks holds the last-delivered task list so
+// filtering/sorting re-renders without another C# round-trip.
+let naAllTasks = [];
+let naQuery = '';
+let naSort = (function () {
+    try { return localStorage.getItem('hudNaSort') === 'oldest' ? 'oldest' : 'newest'; }
+    catch (_e) { return 'newest'; }
+})();
+
 function switchTab(tab) {
     currentTab = tab;
     document.getElementById('tab-active').classList.toggle('visible', tab === 'active');
@@ -750,6 +863,42 @@ function switchTab(tab) {
 document.getElementById('tab-btn-active').addEventListener('click', () => switchTab('active'));
 document.getElementById('tab-btn-notactive').addEventListener('click', () => switchTab('notactive'));
 
+// Not-Active search + sort controls (task 08dc9c1f)
+function updateSortButton() {
+    const btn = document.getElementById('na-sort');
+    if (!btn) return;
+    // Arrow points the way the list runs: ↓ Newest = newest first, ↑ Oldest = oldest first.
+    btn.innerHTML = naSort === 'oldest' ? '&#8593; Oldest' : '&#8595; Newest';
+    btn.setAttribute('aria-label', naSort === 'oldest'
+        ? 'Sorted oldest first — click to sort newest first'
+        : 'Sorted newest first — click to sort oldest first');
+}
+const naSearchEl = document.getElementById('na-search');
+const naClearEl = document.getElementById('na-clear');
+// The × clear button only shows when the field has text.
+function updateClearButton() {
+    if (naClearEl) naClearEl.classList.toggle('visible', naSearchEl.value.length > 0);
+}
+naSearchEl.addEventListener('input', (e) => {
+    naQuery = e.target.value;
+    updateClearButton();
+    applyNaView();
+});
+naClearEl.addEventListener('click', () => {
+    naSearchEl.value = '';
+    naQuery = '';
+    updateClearButton();
+    applyNaView();
+    naSearchEl.focus();   // keep focus in the field so the user can keep typing
+});
+document.getElementById('na-sort').addEventListener('click', () => {
+    naSort = naSort === 'oldest' ? 'newest' : 'oldest';
+    try { localStorage.setItem('hudNaSort', naSort); } catch (_e) { /* private mode: keep in-memory */ }
+    updateSortButton();
+    applyNaView();
+});
+updateSortButton();
+
 // ============================================================
 //  Clear / Empty state (Active tab)
 // ============================================================
@@ -759,10 +908,17 @@ function clearHud() {
     // Not Active rows either (adversary finding D, f17777d2 Run 1 — the
     // 'clear' message currently has no C# sender, but stay correct if one appears).
     document.getElementById('tab-count-notactive').textContent = '0';
-    document.getElementById('na-list').innerHTML = `<div class="na-empty">
-        <div class="na-empty-icon">&#128203;</div>
-        <span>No other open tasks in this project</span>
-    </div>`;
+    // Reset the Not-Active view state too (task 08dc9c1f): drop cached tasks and
+    // the live search query so a stale filter/count can't survive a clear. The
+    // sort preference is intentionally kept (it's a user setting, not row state).
+    naAllTasks = [];
+    naQuery = '';
+    const searchEl = document.getElementById('na-search');
+    if (searchEl) searchEl.value = '';
+    if (naClearEl) naClearEl.classList.remove('visible');
+    const countEl = document.getElementById('na-count');
+    if (countEl) countEl.textContent = '';
+    document.getElementById('na-list').innerHTML = naEmptyState('No other open tasks in this project');
 }
 
 function renderNoActive(terminalName) {
@@ -889,21 +1045,58 @@ function renderColumn(status, items) {
 //  Done tasks are excluded server-side (Owner decision).
 // ============================================================
 function renderNotActive(tasks) {
-    const list = document.getElementById('na-list');
-    const badge = document.getElementById('tab-count-notactive');
-    badge.textContent = tasks.length;
+    // Store the full delivered list; the tab count badge always reflects the
+    // grand total (not the filtered subset). Search/sort are applied in applyNaView.
+    naAllTasks = Array.isArray(tasks) ? tasks : [];
+    document.getElementById('tab-count-notactive').textContent = naAllTasks.length;
+    applyNaView();
+}
 
+function naEmptyState(message) {
+    return `<div class="na-empty">
+        <div class="na-empty-icon">&#128203;</div>
+        <span>${escapeHtml(message)}</span>
+    </div>`;
+}
+
+// Filter (search) + sort (created date) + group render for the Not-Active tab.
+// Pure client-side over naAllTasks — no C# round-trip on keystroke or sort toggle.
+function applyNaView() {
+    const list = document.getElementById('na-list');
+    const countEl = document.getElementById('na-count');
+    if (!list) return;
+
+    const q = naQuery.trim().toLowerCase();
+    let tasks = naAllTasks;
+    if (q) {
+        tasks = tasks.filter(t => {
+            const hay = ((t.id || '') + ' ' + (t.title || '') + ' ' + (t.description || '')).toLowerCase();
+            return hay.indexOf(q) !== -1;
+        });
+    }
+    // No tasks at all → blank the count (no 'N of M' over the "no tasks" panel).
+    if (naAllTasks.length === 0) {
+        if (countEl) countEl.textContent = '';
+        list.innerHTML = naEmptyState('No other open tasks in this project');
+        return;
+    }
+    // Have tasks: show 'N of M' while filtering, blank otherwise (incl. the
+    // no-match case below, where '0 of M' is the informative count).
+    if (countEl) countEl.textContent = q ? `${tasks.length} of ${naAllTasks.length}` : '';
     if (tasks.length === 0) {
-        list.innerHTML = `<div class="na-empty">
-            <div class="na-empty-icon">&#128203;</div>
-            <span>No other open tasks in this project</span>
-        </div>`;
+        list.innerHTML = naEmptyState('No tasks match “' + naQuery.trim() + '”');
         return;
     }
 
+    // Sort within each status group by created date. Missing/unparseable dates
+    // sort as epoch 0 (oldest). filter() gives fresh arrays, so sorting these
+    // never mutates naAllTasks.
+    const dir = naSort === 'oldest' ? 1 : -1;
+    const byDate = (a, b) => ((Date.parse(a.createdAt || '') || 0) - (Date.parse(b.createdAt || '') || 0)) * dir;
+
     const groups = [
-        { status: 'in_progress', label: 'In Progress', items: tasks.filter(t => t.status === 'in_progress') },
-        { status: 'todo',        label: 'To Do',       items: tasks.filter(t => t.status === 'todo') }
+        { status: 'in_progress', label: 'In Progress', items: tasks.filter(t => t.status === 'in_progress').sort(byDate) },
+        { status: 'todo',        label: 'To Do',       items: tasks.filter(t => t.status === 'todo').sort(byDate) }
     ];
 
     let html = '';
@@ -914,6 +1107,25 @@ function renderNotActive(tasks) {
     });
 
     list.innerHTML = html;
+}
+
+// Format an ISO timestamp as a compact relative label ("just now", "5m ago",
+// "3h ago", "2d ago", "4w ago") with an absolute local datetime for the tooltip.
+// Returns null for missing/unparseable input (caller omits that segment).
+function fmtWhen(iso) {
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (isNaN(t)) return null;
+    const d = new Date(t);
+    const sec = Math.max(0, Math.floor((Date.now() - t) / 1000)); // clamp future skew to 0
+    let rel;
+    if (sec < 45) rel = 'just now';
+    else if (sec < 3600) rel = Math.floor(sec / 60) + 'm ago';
+    else if (sec < 86400) rel = Math.floor(sec / 3600) + 'h ago';
+    else if (sec < 86400 * 7) rel = Math.floor(sec / 86400) + 'd ago';
+    else if (sec < 86400 * 30) rel = Math.floor(sec / (86400 * 7)) + 'w ago';
+    else rel = d.toLocaleDateString();
+    return { rel: rel, abs: d.toLocaleString(), t: t };
 }
 
 function buildNaRow(t) {
@@ -953,7 +1165,26 @@ function buildNaRow(t) {
         meterHtml = `<span class="na-nochecklist">no checklist</span>`;
     }
 
-    const descRow = desc ? `<div class="na-desc">${desc}</div>` : '';
+    // title= carries the FULL (escaped) description so hovering the CSS-truncated
+    // one-liner shows the complete text (task 08dc9c1f). escapeHtml escapes quotes
+    // (&quot;/&#39;), so it is safe inside this double-quoted attribute.
+    const descRow = desc ? `<div class="na-desc" title="${desc}">${desc}</div>` : '';
+
+    // Created / last-updated line (task 08dc9c1f). Relative label in the row,
+    // absolute datetime in the tooltip. Updated is suppressed when it's not
+    // meaningfully after Created (never-touched tasks have updated_at == created_at).
+    const created = fmtWhen(t.createdAt);
+    const updated = fmtWhen(t.updatedAt);
+    const dateParts = [];
+    if (created) {
+        dateParts.push(`<span title="Created ${escapeHtml(created.abs)}">Created ${escapeHtml(created.rel)}</span>`);
+    }
+    if (updated && (!created || updated.t - created.t > 1000)) {
+        dateParts.push(`<span title="Last updated ${escapeHtml(updated.abs)}">Updated ${escapeHtml(updated.rel)}</span>`);
+    }
+    const dateRow = dateParts.length
+        ? `<div class="na-date">${dateParts.join('<span class="na-date-sep">&middot;</span>')}</div>`
+        : '';
 
     return `<div class="na-row">
         <div class="na-row-top">
@@ -962,6 +1193,7 @@ function buildNaRow(t) {
             ${assigneeChip}
         </div>
         ${descRow}
+        ${dateRow}
         <div class="na-meta">
             ${meterHtml}
             <button type="button" class="activate-btn" data-activate-id="${id}" title="Make this the active task (parks the current one)">&#9654; Activate</button>

@@ -44,6 +44,14 @@ namespace MultiTerminal.MCPServer.Models
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
         /// <summary>
+        /// When the task's row was last written (tasks.updated_at). Bumped to
+        /// DateTime.UtcNow on every save/status/checklist change, so it serves as
+        /// a "last worked on" proxy. Read-only for consumers — SaveTask always
+        /// stamps UtcNow, it does not round-trip this value.
+        /// </summary>
+        public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+
+        /// <summary>
         /// Project ID this task belongs to (null if not associated with a project).
         /// </summary>
         public string ProjectId { get; set; }

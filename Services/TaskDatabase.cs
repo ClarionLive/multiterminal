@@ -1361,6 +1361,7 @@ namespace MultiTerminal.Services
                 Assignee = reader.IsDBNull(4) ? null : reader.GetString(4),
                 CreatedBy = reader.IsDBNull(5) ? null : reader.GetString(5),
                 CreatedAt = reader.GetDateTime(6),
+                UpdatedAt = reader.IsDBNull(7) ? reader.GetDateTime(6) : reader.GetDateTime(7),
                 ProjectId = reader.IsDBNull(8) ? null : reader.GetString(8),
                 SubStatus = reader.IsDBNull(9) ? null : reader.GetString(9),
                 PausedAt = reader.IsDBNull(10) ? null : reader.GetDateTime(10),

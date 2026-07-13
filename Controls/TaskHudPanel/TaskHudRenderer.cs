@@ -687,6 +687,20 @@ namespace MultiTerminal.Controls
                     priority = t.Priority,
                     status = t.Status,
                     assignee = t.Assignee,
+                    // createdAt drives the client-side Not-Active sort toggle AND the
+                    // "Created …" relative-time line (task 08dc9c1f). The DB reads these
+                    // back as Kind=Unspecified (the connection sets no DateTimeKind), so
+                    // SpecifyKind(...,Utc) is REQUIRED before serialization — otherwise
+                    // System.Text.Json emits no 'Z' and JS Date.parse treats the value as
+                    // LOCAL, shifting every relative time by the machine's UTC offset
+                    // (pipeline RUN 2: debugger FAIL / adversary HIGH). Do NOT use
+                    // ToUniversalTime() (would double-shift an Unspecified value) and do NOT
+                    // set DateTimeKind on the shared connection (breaks the compensating
+                    // .ToUniversalTime() reads at TaskDatabase.cs:3020/3113).
+                    createdAt = DateTime.SpecifyKind(t.CreatedAt, DateTimeKind.Utc),
+                    // updatedAt is the "last worked on" proxy (tasks.updated_at, bumped on
+                    // every save); same UTC-tagging contract as createdAt above.
+                    updatedAt = DateTime.SpecifyKind(t.UpdatedAt, DateTimeKind.Utc),
                     counts = CountChecklist(t)
                 })
                 .ToArray();
