@@ -37,6 +37,12 @@ namespace MultiTerminal.API.Controllers
         /// Stores in DB, fires broker event, and forwards to the in-process gateway for phone push.
         /// </summary>
         /// <param name="skipPush">When true, only record history — do not forward (caller already pushed).</param>
+        /// <param name="persistLocal">
+        /// When true, persist to notification history even when remote mode is OFF. History is
+        /// otherwise only written when the owner is remote (IsRemoteMode) or the push is explicit
+        /// (forcePush) — the hook's ambient runtime notifications send neither flag, so they stop
+        /// accumulating DB rows while the owner is at the desk (task 7da88ea0 item 4).
+        /// </param>
         /// <param name="forcePush">
         /// When true (explicit pushes, e.g. the MCP send_push_notification tool), bypass the
         /// remote-mode gate AND await the forward so the response carries the real delivery result
@@ -45,7 +51,7 @@ namespace MultiTerminal.API.Controllers
         /// a hardcoded :5100 with no secret, which 403'd whenever NotificationSecret was set.
         /// </param>
         [HttpPost]
-        public async System.Threading.Tasks.Task<IActionResult> PostNotification([FromBody] NotificationRequest request, [FromQuery] bool skipPush = false, [FromQuery] bool forcePush = false)
+        public async System.Threading.Tasks.Task<IActionResult> PostNotification([FromBody] NotificationRequest request, [FromQuery] bool skipPush = false, [FromQuery] bool forcePush = false, [FromQuery] bool persistLocal = false)
         {
             if (string.IsNullOrWhiteSpace(request.NotificationType))
                 return Problem(detail: "notification_type is required", statusCode: 400);
@@ -78,13 +84,21 @@ namespace MultiTerminal.API.Controllers
                 _rateLimitWindow.Enqueue(now);
             }
 
-            string id = _broker.RecordNotification(
-                request.NotificationType,
-                request.Title ?? request.NotificationType,
-                request.Message,
-                request.SessionId,
-                request.AgentName,
-                request.Cwd);
+            // Persist gate (task 7da88ea0 item 4): explicit pushes (forcePush) and remote-mode
+            // notifications are history the owner may need to review from the phone; the hook's
+            // ambient at-desk notifications are noise (they're already visible in-app live) unless
+            // the caller opts in with persistLocal. NotificationReceived currently has no
+            // subscribers, so skipping RecordNotification entirely drops no live behavior.
+            bool persist = _broker.IsRemoteMode || forcePush || persistLocal;
+            string id = persist
+                ? _broker.RecordNotification(
+                    request.NotificationType,
+                    request.Title ?? request.NotificationType,
+                    request.Message,
+                    request.SessionId,
+                    request.AgentName,
+                    request.Cwd)
+                : null;
 
             // Explicit push: await the forward (bypassing the remote-mode gate) and return the
             // real delivery result so the caller can report accurate success, not a bare HTTP 200.
@@ -105,7 +119,7 @@ namespace MultiTerminal.API.Controllers
             if (!skipPush)
                 _ = ForwardToGatewayAsync(request, id, bypassRemoteModeGate: false);
 
-            return Ok(new { id });
+            return Ok(new { id, persisted = persist });
         }
 
         /// <summary>
