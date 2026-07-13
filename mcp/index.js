@@ -78,7 +78,7 @@ function seg(value) {
   return encodeURIComponent(s);
 }
 
-async function apiCall(endpoint, method = "GET", body = null) {
+async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
     method,
@@ -97,7 +97,7 @@ async function apiCall(endpoint, method = "GET", body = null) {
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       if (!response.ok) {
@@ -109,7 +109,7 @@ async function apiCall(endpoint, method = "GET", body = null) {
       lastErr = err;
       if (err.name === "AbortError") {
         throw new Error(
-          `MultiTerminal API timed out after ${API_TIMEOUT_MS / 1000}s (${method} ${endpoint}). ` +
+          `MultiTerminal API timed out after ${timeoutMs / 1000}s (${method} ${endpoint}). ` +
           `The app may be busy or wedged on ${API_BASE}.`
         );
       }
@@ -618,6 +618,47 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["notification_type", "message", "agent_name"],
+        },
+      },
+      {
+        name: "ask_owner",
+        description: "Ask the owner a question and BLOCK until they answer on their phone, the timeout elapses, or remote mode is off. Preferred over the manual send_push_notification + chat-question split: one call pushes, waits, and returns the answer. Returns the answer plus a source field — 'owner' (they answered), 'default' (timed out, default_choice applied), 'timeout' (timed out, no default), or 'local' (remote mode OFF / relay unconfigured — ask in chat instead).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            question: {
+              type: "string",
+              description: "The question to ask the owner (keep it short — it renders on a phone)",
+            },
+            context: {
+              type: "string",
+              description: "Optional 1-2 lines of context shown under the question",
+            },
+            agent_name: {
+              type: "string",
+              description: "Your name (the asking agent)",
+            },
+            options: {
+              type: "array",
+              description: "Choice buttons shown on the phone. Omit for a free-text question.",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string", description: "Button text" },
+                  value: { type: "string", description: "Value returned when tapped (defaults to label)" },
+                },
+              },
+            },
+            timeout_seconds: {
+              type: "number",
+              description: "How long to wait for the owner before giving up (default 300 — the relay's 5-min window; values above 300 are capped by that window)",
+            },
+            default_choice: {
+              type: "string",
+              description: "Answer to assume on timeout. Omit to get source='timeout' and decide yourself.",
+            },
+          },
+          required: ["question", "agent_name"],
         },
       },
       {
@@ -2897,6 +2938,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "ask_owner": {
+        const askPayload = {
+          question: args.question,
+          agentName: args.agent_name,
+        };
+        if (args.context) askPayload.context = args.context;
+        if (Array.isArray(args.options) && args.options.length > 0) {
+          askPayload.options = args.options.map((o) =>
+            typeof o === "string"
+              ? { label: o, value: o }
+              : { label: o.label ?? o.value, value: o.value ?? o.label }
+          );
+        }
+        if (args.timeout_seconds > 0) askPayload.timeout_seconds = args.timeout_seconds;
+        if (args.default_choice != null) askPayload.default_choice = args.default_choice;
+
+        // This call legitimately blocks while the owner reads and answers on the phone.
+        // The server waits up to timeout_seconds (or its 5-min relay poll window when
+        // omitted); abort 30s AFTER that deadline so the timeout verdict comes from the
+        // server as {source:"timeout"|"default"}, not a client-side AbortError.
+        const serverWaitSec = args.timeout_seconds > 0 ? Math.min(args.timeout_seconds, 300) : 300;
+        const res = await apiCall("/api/ask-owner", "POST", askPayload, (serverWaitSec + 30) * 1000);
+
+        switch (res?.source) {
+          case "owner":
+            return {
+              content: [{ type: "text", text: `📱 Owner answered: ${res.answer}` }],
+            };
+          case "default":
+            return {
+              content: [{ type: "text", text: `⏱️ Owner didn't answer within ${serverWaitSec}s — proceeding with default: ${res.answer}` }],
+            };
+          case "timeout":
+            return {
+              content: [{ type: "text", text: `⏱️ Owner didn't answer within ${serverWaitSec}s and no default_choice was set. Decide yourself or ask in chat and continue other work.` }],
+            };
+          case "local":
+            return {
+              content: [{ type: "text", text: `🖥️ Remote mode is OFF (owner at desk) or the relay isn't configured — ask the question in chat instead.` }],
+            };
+          default:
+            return {
+              content: [{ type: "text", text: `⚠️ ask_owner returned an unexpected response: ${JSON.stringify(res)}` }],
+            };
+        }
       }
 
       case "send_push_notification": {
