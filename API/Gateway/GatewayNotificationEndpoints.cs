@@ -331,7 +331,24 @@ namespace MultiTerminal.API.Gateway
                 var json = File.ReadAllText(_seenPath);
                 var data = JsonSerializer.Deserialize<SeenState>(json);
                 if (data != null && data.LastSeenAt > _lastSeenAt)
-                    _lastSeenAt = data.LastSeenAt;
+                {
+                    // Repair poisoned state (pipeline Run-3 security medium): a far-future
+                    // watermark persisted by the pre-hardening endpoint (or corruption) would
+                    // otherwise survive the request-time clamp and blind every future alert.
+                    var loaded = data.LastSeenAt;
+                    var now = DateTime.UtcNow;
+                    if (loaded > now)
+                        loaded = now;
+                    _lastSeenAt = loaded;
+                }
+
+                // Carry the monotonic invariant across restarts (pipeline Run-3, flagged
+                // convergently by debugger + adversary): seed the assignment high-water mark
+                // from the watermark so the first post-restart insert is born strictly NEWER
+                // than anything already acknowledged — even if the wall clock regressed below
+                // the persisted watermark, arrivals can never be born-seen.
+                if (_lastSeenAt > _lastAssignedReceivedAt)
+                    _lastAssignedReceivedAt = _lastSeenAt;
             }
             catch
             {
