@@ -2,6 +2,45 @@
 
 let notificationsLoaded = false;
 
+// ── Alerts badge ─────────────────────────────────────────────
+// Home-tile arrival indicator for the Alerts (notifications) view. Counts unread
+// notification_events; clears when the owner opens the Alerts view (markNotificationsSeen).
+// Mirrors the inbox badge pattern in inbox.js. Note: notification history is only
+// persisted in remote-mode / forcePush / persistLocal (task 7da88ea0 item 4), so this
+// badge lights up for exactly the remote pushes the owner needs to notice.
+let notificationsBadgePollTimer = null;
+
+function startNotificationsBadgePoll() {
+    updateNotificationsBadge();
+    if (notificationsBadgePollTimer) clearInterval(notificationsBadgePollTimer);
+    notificationsBadgePollTimer = setInterval(updateNotificationsBadge, 30000);
+}
+
+async function updateNotificationsBadge() {
+    const data = await api('/api/notifications/unread-count');
+    if (!data) return;
+    setNotificationsBadge(data.count || 0);
+}
+
+function setNotificationsBadge(count) {
+    const badge = document.getElementById('notifications-badge');
+    if (!badge) return;
+    if (count > 0) {
+        badge.textContent = count > 99 ? '99+' : count;
+        badge.classList.remove('d-none');
+    } else {
+        badge.classList.add('d-none');
+    }
+}
+
+// Marks all alerts read so the badge clears. Called when the owner opens the Alerts
+// view (an explicit "I've seen these" gesture) — NOT from the background push handler,
+// which must not silently clear an unseen count.
+async function markNotificationsSeen() {
+    await api('/api/notifications/read-all', { method: 'POST' });
+    setNotificationsBadge(0);
+}
+
 async function loadNotifications() {
     const list = document.getElementById('notifications-list');
     if (!list) return;

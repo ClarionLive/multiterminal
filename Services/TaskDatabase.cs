@@ -6691,6 +6691,19 @@ namespace MultiTerminal.Services
             return Convert.ToInt32(cmd.ExecuteScalar());
         }
 
+        /// <summary>
+        /// Marks every unread notification as read. Used by the phone's Alerts view so the
+        /// home-tile badge (arrival indication) clears when the owner opens the list — mirrors
+        /// the inbox read-all path. Returns the number of rows updated.
+        /// </summary>
+        public int MarkAllNotificationsRead()
+        {
+            using var gate = LockConn();
+            const string sql = "UPDATE notification_events SET read_at = datetime('now') WHERE read_at IS NULL";
+            using var cmd = new SQLiteCommand(sql, _connection);
+            return cmd.ExecuteNonQuery();
+        }
+
         #endregion
 
         #region Agent Invocations

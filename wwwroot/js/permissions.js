@@ -113,6 +113,26 @@ function updatePermissionsBadge(count) {
     }
 }
 
+// Background badge poll — keeps the home-tile pending count fresh even when the
+// Permissions view isn't open, so the owner sees that an ask_owner / permission
+// prompt is waiting without relying on a push. Mirrors startInboxBadgePoll in
+// inbox.js. The count is the live pending-queue depth (/api/permissions), so it
+// clears on its own when the owner answers — no "mark seen" needed.
+let permissionsBadgePollTimer = null;
+
+function startPermissionsBadgePoll() {
+    updatePermissionsBadgeCount();
+    if (permissionsBadgePollTimer) clearInterval(permissionsBadgePollTimer);
+    permissionsBadgePollTimer = setInterval(updatePermissionsBadgeCount, 30000);
+}
+
+async function updatePermissionsBadgeCount() {
+    const data = await api('/api/permissions');
+    if (!data) return;
+    const pending = Array.isArray(data.requests) ? data.requests : [];
+    updatePermissionsBadge(pending.length);
+}
+
 // Dispatch by request_type. Unknown/missing types fall through to a
 // forward-compat "unsupported" card so a new type added in the Worker
 // doesn't break older phones that haven't shipped a renderer yet.
