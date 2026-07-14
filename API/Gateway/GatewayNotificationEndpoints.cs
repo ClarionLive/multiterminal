@@ -43,6 +43,13 @@ namespace MultiTerminal.API.Gateway
         private static readonly object _seenSaveLock = new object();
         private static string _seenPath;
 
+        // Strictly monotonic ReceivedAt assignment (pipeline Run-2 HIGH): two arrivals
+        // sharing a DateTime.UtcNow tick would let a read-all whose seenThrough equals the
+        // rendered newest entry acknowledge an unrendered same-tick sibling. Nudging +1 tick
+        // under _lock makes every ReceivedAt unique and ordered, so the watermark boundary
+        // is exact; it also absorbs NTP backward steps.
+        private static DateTime _lastAssignedReceivedAt = DateTime.MinValue;
+
         private static readonly HashSet<string> ValidTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "task_complete", "ready_for_testing", "escalation", "helper_request",
@@ -131,11 +138,17 @@ namespace MultiTerminal.API.Gateway
                     Body = body,
                     AgentName = req.AgentName,
                     SessionId = req.SessionId,
-                    ReceivedAt = DateTime.UtcNow,
                 };
 
                 lock (_lock)
                 {
+                    // Unique, strictly-increasing ReceivedAt — see _lastAssignedReceivedAt.
+                    var receivedAt = DateTime.UtcNow;
+                    if (receivedAt <= _lastAssignedReceivedAt)
+                        receivedAt = _lastAssignedReceivedAt.AddTicks(1);
+                    _lastAssignedReceivedAt = receivedAt;
+                    record.ReceivedAt = receivedAt;
+
                     _history.Insert(0, record);
                     if (_history.Count > MaxHistory)
                         _history.RemoveRange(MaxHistory, _history.Count - MaxHistory);
@@ -185,9 +198,10 @@ namespace MultiTerminal.API.Gateway
 
             app.MapPost("/api/notifications/read-all", async (HttpContext context) =>
             {
-                // seenThrough = newest ReceivedAt the client actually rendered while visible.
-                // Absent (older client / empty body), fall back to the newest entry currently
-                // in history — a server-side "as of now" snapshot, still bounded by insert time.
+                // seenThrough = newest ReceivedAt the client actually RENDERED while visible,
+                // and it is MANDATORY (pipeline Run-2 HIGH): a bodyless/malformed request must
+                // NOT fall back to "mark current history seen" — that would let a stale cached
+                // PWA client (or garbage input) blanket-clear alerts the owner never saw.
                 ReadAllRequest req = null;
                 try
                 {
@@ -195,14 +209,22 @@ namespace MultiTerminal.API.Gateway
                 }
                 catch
                 {
-                    // Empty or malformed body → fallback watermark below.
+                    // Empty or malformed body → rejected below; never a watermark mutation.
                 }
+                if (req?.SeenThrough == null)
+                    return Results.BadRequest(new { error = "seenThrough is required" });
 
                 int updated;
                 lock (_lock)
                 {
-                    var seenThrough = req?.SeenThrough
-                        ?? (_history.Count > 0 ? _history[0].ReceivedAt : _lastSeenAt);
+                    // Clamp to the newest entry actually in history (pipeline Run-2 security
+                    // medium): a far-future seenThrough must not durably blind the badge to
+                    // notifications that haven't happened yet.
+                    var seenThrough = req.SeenThrough.Value;
+                    var newest = _history.Count > 0 ? _history[0].ReceivedAt : _lastSeenAt;
+                    if (seenThrough > newest)
+                        seenThrough = newest;
+
                     var previous = _lastSeenAt;
                     if (seenThrough > _lastSeenAt)
                         _lastSeenAt = seenThrough;
