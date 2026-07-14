@@ -24,6 +24,8 @@ function init() {
     initRemoteMode();
     restoreFontSize();
     if (typeof startInboxBadgePoll === 'function') startInboxBadgePoll();
+    if (typeof startPermissionsBadgePoll === 'function') startPermissionsBadgePoll();
+    if (typeof startNotificationsBadgePoll === 'function') startNotificationsBadgePoll();
 
     // Deep-link: open the view specified in ?view= query param (e.g. from notification tap)
     const params = new URLSearchParams(window.location.search);
@@ -42,6 +44,14 @@ function init() {
             if (event.data?.type === 'push-received') {
                 if (typeof loadNotifications === 'function') loadNotifications();
                 if (typeof updateInboxBadge === 'function') updateInboxBadge();
+                if (typeof updatePermissionsBadgeCount === 'function') updatePermissionsBadgeCount();
+                // Refresh the alerts count on arrival; if the owner is already looking at
+                // the Alerts view, mark it seen so the badge doesn't linger.
+                if (currentView === 'notifications') {
+                    if (typeof markNotificationsSeen === 'function') markNotificationsSeen();
+                } else if (typeof updateNotificationsBadge === 'function') {
+                    updateNotificationsBadge();
+                }
             }
             if (event.data?.type === 'switch-view' && event.data.view) {
                 switchView(event.data.view, event.data.agent_name);
@@ -214,6 +224,8 @@ function switchView(view, agentName) {
     }
     if (view === 'notifications') {
         if (typeof loadNotifications === 'function') loadNotifications();
+        // Opening Alerts is an explicit "seen" gesture — clear the arrival badge.
+        if (typeof markNotificationsSeen === 'function') markNotificationsSeen();
     }
     if (view === 'permissions') {
         if (typeof loadPermissions === 'function') loadPermissions();

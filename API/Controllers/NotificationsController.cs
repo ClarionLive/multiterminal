@@ -156,6 +156,18 @@ namespace MultiTerminal.API.Controllers
             return Ok(new { count });
         }
 
+        /// <summary>
+        /// POST /api/notifications/read-all — Mark all unread notifications as read.
+        /// The phone's Alerts view calls this on open so the home-tile arrival badge clears
+        /// (mirrors the inbox read-all path). Returns the number of rows updated.
+        /// </summary>
+        [HttpPost("read-all")]
+        public IActionResult MarkAllRead()
+        {
+            int updated = _broker.MarkAllNotificationsRead();
+            return Ok(new { updated });
+        }
+
         /// <summary>Outcome of forwarding a notification to the in-process phone gateway.</summary>
         private sealed class ForwardOutcome
         {
@@ -174,6 +186,34 @@ namespace MultiTerminal.API.Controllers
 
         private static int GetInt(JsonElement el, string prop) =>
             el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;
+
+        /// <summary>
+        /// Extracts a short, human-readable detail from a gateway error body for the outcome
+        /// reason. The gateway returns { "error": "..." } on 400; fall back to the raw body
+        /// when it isn't that shape. Trimmed to keep the reason compact and avoid echoing a
+        /// large body up to the caller.
+        /// </summary>
+        private static string SummarizeGatewayError(string body)
+        {
+            if (string.IsNullOrWhiteSpace(body)) return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("error", out var e)
+                    && e.ValueKind == JsonValueKind.String)
+                {
+                    body = e.GetString() ?? body;
+                }
+            }
+            catch
+            {
+                // Not JSON — use the raw body as-is.
+            }
+
+            body = body.Trim();
+            return body.Length > 120 ? body.Substring(0, 117) + "..." : body;
+        }
 
         private async System.Threading.Tasks.Task<ForwardOutcome> ForwardToGatewayAsync(NotificationRequest request, string id, bool bypassRemoteModeGate)
         {
@@ -221,7 +261,15 @@ namespace MultiTerminal.API.Controllers
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    outcome.Reason = $"gateway-error:{(int)response.StatusCode}";
+                    // Surface the gateway's rejection detail in the reason, not just the bare
+                    // status, so a caller/log sees e.g. "gateway-error:400: Unknown
+                    // notification_type: info" instead of an opaque code. That breadcrumb was
+                    // exactly what was missing when a hand-crafted type silently 400'd during
+                    // 7da88ea0 testing. Detail is still ALSO written to the debug log below.
+                    var detail = SummarizeGatewayError(body);
+                    outcome.Reason = string.IsNullOrEmpty(detail)
+                        ? $"gateway-error:{(int)response.StatusCode}"
+                        : $"gateway-error:{(int)response.StatusCode}: {detail}";
                     _broker.DebugLogService?.Warning("NotificationsController",
                         $"Gateway rejected notification {id} with {(int)response.StatusCode} {response.ReasonPhrase}: {body}");
                     return outcome;

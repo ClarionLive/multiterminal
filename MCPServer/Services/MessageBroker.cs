@@ -252,6 +252,9 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>Count unread notifications.</summary>
         public int GetUnreadNotificationCount() => _taskDb.GetUnreadNotificationCount();
 
+        /// <summary>Mark every unread notification read (phone Alerts view "seen" action).</summary>
+        public int MarkAllNotificationsRead() => _taskDb.MarkAllNotificationsRead();
+
         /// <summary>
         /// Callback for push delivery to terminal UI.
         /// Parameters: messageId, recipientId, senderName, messageContent
