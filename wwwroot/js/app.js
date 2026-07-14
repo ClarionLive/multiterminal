@@ -38,17 +38,26 @@ function init() {
     // Auto-refresh every 30 seconds
     setInterval(() => refreshCurrentView(), 30000);
 
+    // Returning to a backgrounded Alerts view is the moment the owner actually sees the
+    // list — re-render and mark seen then (pairs with the visibility gate on push-received).
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && currentView === 'notifications') {
+            if (typeof loadNotificationsAndMarkSeen === 'function') loadNotificationsAndMarkSeen();
+        }
+    });
+
     // Instant refresh when a push notification arrives
     if ('serviceWorker' in navigator) {
         navigator.serviceWorker.addEventListener('message', (event) => {
             if (event.data?.type === 'push-received') {
-                if (typeof loadNotifications === 'function') loadNotifications();
                 if (typeof updateInboxBadge === 'function') updateInboxBadge();
                 if (typeof updatePermissionsBadgeCount === 'function') updatePermissionsBadgeCount();
-                // Refresh the alerts count on arrival; if the owner is already looking at
-                // the Alerts view, mark it seen so the badge doesn't linger.
-                if (currentView === 'notifications') {
-                    if (typeof markNotificationsSeen === 'function') markNotificationsSeen();
+                // Alerts: the SW broadcasts to EVERY window client, including backgrounded
+                // ones — only a VISIBLE Alerts view may render + mark seen; anything else
+                // just refreshes the count (pipeline Run-1 HIGH: a hidden tab must never
+                // clear arrivals the owner didn't see).
+                if (currentView === 'notifications' && document.visibilityState === 'visible') {
+                    if (typeof loadNotificationsAndMarkSeen === 'function') loadNotificationsAndMarkSeen();
                 } else if (typeof updateNotificationsBadge === 'function') {
                     updateNotificationsBadge();
                 }
@@ -223,9 +232,10 @@ function switchView(view, agentName) {
         if (typeof loadInbox === 'function') loadInbox();
     }
     if (view === 'notifications') {
-        if (typeof loadNotifications === 'function') loadNotifications();
-        // Opening Alerts is an explicit "seen" gesture — clear the arrival badge.
-        if (typeof markNotificationsSeen === 'function') markNotificationsSeen();
+        // Render first, then mark exactly what was rendered as seen (visibility-gated
+        // and success-gated inside loadNotificationsAndMarkSeen).
+        if (typeof loadNotificationsAndMarkSeen === 'function') loadNotificationsAndMarkSeen();
+        else if (typeof loadNotifications === 'function') loadNotifications();
     }
     if (view === 'permissions') {
         if (typeof loadPermissions === 'function') loadPermissions();
