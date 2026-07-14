@@ -32,6 +32,17 @@ namespace MultiTerminal.API.Gateway
         private static readonly object _togglesSaveLock = new object();
         private static string _togglesPath;
 
+        // "Seen" watermark for the phone's Alerts badge (task 8fc66298). Unread = history
+        // entries with ReceivedAt > _lastSeenAt. The phone advances the watermark ONLY to the
+        // newest entry it actually RENDERED while visible (never a blanket mark-all), which is
+        // what closes the pipeline Run-1 findings: a backgrounded tab can't clear arrivals it
+        // never displayed, and an entry landing mid-request stays unread. Monotonic; persisted
+        // so a restart doesn't resurrect old alerts as unread (history itself is in-memory, so
+        // after a restart both the list and the unread count start empty — consistent).
+        private static DateTime _lastSeenAt = DateTime.MinValue;
+        private static readonly object _seenSaveLock = new object();
+        private static string _seenPath;
+
         private static readonly HashSet<string> ValidTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "task_complete", "ready_for_testing", "escalation", "helper_request",
@@ -42,6 +53,8 @@ namespace MultiTerminal.API.Gateway
         {
             _togglesPath = Path.Combine(GatewayPaths.DataDir(app.Configuration), "notification-toggles.json");
             LoadToggles();
+            _seenPath = Path.Combine(GatewayPaths.DataDir(app.Configuration), "notification-seen.json");
+            LoadSeen();
 
             // Map-time read is ONLY for the startup warning. The shared secret is resolved
             // settings-first → appsettings fallback and published on GatewayRuntimeConfig by
@@ -157,6 +170,48 @@ namespace MultiTerminal.API.Gateway
                 return Results.Ok(items);
             });
 
+            // Alerts home-tile badge (task 8fc66298). NOTE: these must live HERE, not on
+            // NotificationsController — the gateway mounts a controller whitelist that
+            // excludes it, so controller routes 404 from the phone.
+            app.MapGet("/api/notifications/unread-count", () =>
+            {
+                int count;
+                lock (_lock)
+                {
+                    count = _history.Count(r => r.ReceivedAt > _lastSeenAt);
+                }
+                return Results.Ok(new { count });
+            });
+
+            app.MapPost("/api/notifications/read-all", async (HttpContext context) =>
+            {
+                // seenThrough = newest ReceivedAt the client actually rendered while visible.
+                // Absent (older client / empty body), fall back to the newest entry currently
+                // in history — a server-side "as of now" snapshot, still bounded by insert time.
+                ReadAllRequest req = null;
+                try
+                {
+                    req = await context.Request.ReadFromJsonAsync<ReadAllRequest>();
+                }
+                catch
+                {
+                    // Empty or malformed body → fallback watermark below.
+                }
+
+                int updated;
+                lock (_lock)
+                {
+                    var seenThrough = req?.SeenThrough
+                        ?? (_history.Count > 0 ? _history[0].ReceivedAt : _lastSeenAt);
+                    var previous = _lastSeenAt;
+                    if (seenThrough > _lastSeenAt)
+                        _lastSeenAt = seenThrough;
+                    updated = _history.Count(r => r.ReceivedAt > previous && r.ReceivedAt <= _lastSeenAt);
+                }
+                SaveSeen();
+                return Results.Ok(new { updated });
+            });
+
             app.MapGet("/api/notifications/settings", () =>
             {
                 var types = new[] { "task_complete", "ready_for_testing", "escalation", "helper_request", "agent_stopped", "permission_request", "error" };
@@ -245,6 +300,45 @@ namespace MultiTerminal.API.Gateway
             }
         }
 
+        private static void LoadSeen()
+        {
+            if (_seenPath == null || !File.Exists(_seenPath))
+                return;
+            try
+            {
+                var json = File.ReadAllText(_seenPath);
+                var data = JsonSerializer.Deserialize<SeenState>(json);
+                if (data != null && data.LastSeenAt > _lastSeenAt)
+                    _lastSeenAt = data.LastSeenAt;
+            }
+            catch
+            {
+            }
+        }
+
+        private static void SaveSeen()
+        {
+            if (_seenPath == null)
+                return;
+            lock (_seenSaveLock)
+            {
+                try
+                {
+                    DateTime seen;
+                    lock (_lock) { seen = _lastSeenAt; }
+                    File.WriteAllText(_seenPath, JsonSerializer.Serialize(new SeenState { LastSeenAt = seen }, new JsonSerializerOptions { WriteIndented = true }));
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private sealed class SeenState
+        {
+            public DateTime LastSeenAt { get; set; }
+        }
+
         private static (string title, string body) MapNotification(RuntimeNotification n)
         {
             var agent = n.AgentName ?? "Agent";
@@ -322,5 +416,11 @@ namespace MultiTerminal.API.Gateway
     {
         public string Type { get; init; }
         public bool Enabled { get; init; }
+    }
+
+    public record ReadAllRequest
+    {
+        [JsonPropertyName("seenThrough")]
+        public DateTime? SeenThrough { get; init; }
     }
 }

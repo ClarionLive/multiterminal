@@ -3,12 +3,16 @@
 let notificationsLoaded = false;
 
 // ── Alerts badge ─────────────────────────────────────────────
-// Home-tile arrival indicator for the Alerts (notifications) view. Counts unread
-// notification_events; clears when the owner opens the Alerts view (markNotificationsSeen).
-// Mirrors the inbox badge pattern in inbox.js. Note: notification history is only
-// persisted in remote-mode / forcePush / persistLocal (task 7da88ea0 item 4), so this
-// badge lights up for exactly the remote pushes the owner needs to notice.
+// Home-tile arrival indicator for the Alerts (notifications) view. The unread count
+// comes from the GATEWAY's notification history + a lastSeenAt watermark — the gateway
+// mounts a controller whitelist, so these are gateway minimal-API routes, not
+// NotificationsController. Mark-seen advances the watermark only to the newest entry
+// this client actually RENDERED while VISIBLE (pipeline Run-1: a backgrounded tab must
+// never clear arrivals it didn't display, and the badge is only cleared after the
+// server confirms the write).
 let notificationsBadgePollTimer = null;
+let notificationsNewestRenderedAt = null; // newest receivedAt this client has rendered
+let notificationsBadgeEpoch = 0;          // bumped on mark-seen; stale in-flight polls discard
 
 function startNotificationsBadgePoll() {
     updateNotificationsBadge();
@@ -17,8 +21,17 @@ function startNotificationsBadgePoll() {
 }
 
 async function updateNotificationsBadge() {
+    const epoch = notificationsBadgeEpoch;
     const data = await api('/api/notifications/unread-count');
     if (!data) return;
+    // A mark-seen committed while this GET was in flight — its count is stale.
+    if (epoch !== notificationsBadgeEpoch) return;
+    // While the owner is visibly looking at the Alerts list, the home tile is hidden
+    // anyway — suppress the badge rather than "unread while reading".
+    if (currentView === 'notifications' && document.visibilityState === 'visible') {
+        setNotificationsBadge(0);
+        return;
+    }
     setNotificationsBadge(data.count || 0);
 }
 
@@ -33,27 +46,54 @@ function setNotificationsBadge(count) {
     }
 }
 
-// Marks all alerts read so the badge clears. Called when the owner opens the Alerts
-// view (an explicit "I've seen these" gesture) — NOT from the background push handler,
-// which must not silently clear an unseen count.
+// Advances the seen-watermark to the newest entry this client has rendered, and clears
+// the badge ONLY once the server confirms. Never a blanket mark-all: entries that
+// arrived after the rendered snapshot stay unread.
 async function markNotificationsSeen() {
-    await api('/api/notifications/read-all', { method: 'POST' });
-    setNotificationsBadge(0);
+    if (!notificationsNewestRenderedAt) return; // nothing rendered yet — nothing to mark
+    const res = await api('/api/notifications/read-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seenThrough: notificationsNewestRenderedAt })
+    });
+    if (res) {
+        notificationsBadgeEpoch++;
+        setNotificationsBadge(0);
+    } else {
+        // Write failed — do NOT pretend the alerts were acknowledged; re-sync from server.
+        updateNotificationsBadge();
+    }
+}
+
+// The one sanctioned "owner saw the alerts" path: render the list, then — only if the
+// page is actually visible — mark what was rendered as seen. Called on view open, on
+// push arrival while visibly viewing, and on returning visibility to an open view.
+async function loadNotificationsAndMarkSeen() {
+    const loaded = await loadNotifications();
+    if (loaded && document.visibilityState === 'visible') {
+        await markNotificationsSeen();
+    }
 }
 
 async function loadNotifications() {
     const list = document.getElementById('notifications-list');
-    if (!list) return;
+    if (!list) return null;
 
     const data = await api('/api/notifications?limit=50');
     if (!data) {
         list.innerHTML = '<div class="cr-empty"><i class="bi bi-wifi-off"></i>Could not load notifications</div>';
-        return;
+        return null;
+    }
+
+    // History is newest-first; remember the newest entry this client has rendered —
+    // it's the seen-watermark markNotificationsSeen() sends.
+    if (data.length > 0 && data[0].receivedAt) {
+        notificationsNewestRenderedAt = data[0].receivedAt;
     }
 
     if (data.length === 0) {
         list.innerHTML = '<div class="cr-empty"><i class="bi bi-bell"></i>No notifications yet</div>';
-        return;
+        return data;
     }
 
     list.innerHTML = data.map(n => `
@@ -73,6 +113,7 @@ async function loadNotifications() {
     `).join('');
 
     notificationsLoaded = true;
+    return data;
 }
 
 function notificationIcon(type) {
