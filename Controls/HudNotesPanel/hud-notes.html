@@ -192,11 +192,14 @@ body.light {
 .tab-add:hover { background: var(--bg-tab-hover); color: var(--accent); }
 
 /* ── Delete confirmation ── */
+/* position:fixed + body-appended: the tab bar is a clipped scroll row
+   (.tab-bar overflow:hidden, .tab-scroll overflow-x:auto), so a popup
+   absolutely positioned inside a tab at top:100% is clipped invisible —
+   that was the "x does nothing" bug (task d8a1d0c4). Fixed positioning
+   escapes every ancestor clip; JS sets left/top from the tab's rect. */
 .delete-confirm {
     display: none;
-    position: absolute;
-    top: 100%;
-    left: 0;
+    position: fixed;
     background: var(--bg-tab-active);
     border: 1px solid var(--danger);
     border-radius: 4px;
@@ -301,6 +304,10 @@ let deleteConfirmEl = null;
 // ── Tab rendering ──
 
 function renderTabs() {
+    // The confirm popup is body-appended (not inside a tab), so a re-render
+    // no longer removes it implicitly — dismiss it here or it would linger
+    // detached over rebuilt tabs.
+    hideDeleteConfirm();
     tabScroll.innerHTML = '';
     tabs.forEach((tab, i) => {
         const el = document.createElement('div');
@@ -425,10 +432,21 @@ function showDeleteConfirm(tabEl, name) {
         e.stopPropagation();
         hideDeleteConfirm();
     });
-    tabEl.appendChild(deleteConfirmEl);
 
-    // Close on outside click
+    // Body-appended + fixed coordinates so the tab bar's overflow clipping
+    // can't hide it (the popup used to render inside the tab, below the
+    // clipped strip — invisible). Position under the tab, clamped to the
+    // viewport so a right-edge tab doesn't push it offscreen.
+    document.body.appendChild(deleteConfirmEl);
+    const rect = tabEl.getBoundingClientRect();
+    const popupW = deleteConfirmEl.offsetWidth;
+    deleteConfirmEl.style.left = Math.max(4, Math.min(rect.left, window.innerWidth - popupW - 4)) + 'px';
+    deleteConfirmEl.style.top = (rect.bottom + 2) + 'px';
+
+    // Close on outside click; also on tab-strip scroll so the popup can't
+    // float detached from a tab that scrolled away.
     setTimeout(() => document.addEventListener('click', hideDeleteConfirm, { once: true }), 0);
+    tabScroll.addEventListener('scroll', hideDeleteConfirm, { once: true });
 }
 
 function hideDeleteConfirm() {
