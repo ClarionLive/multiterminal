@@ -37,9 +37,20 @@ namespace MultiTerminal.API.Gateway
             _configPath = Path.Combine(GatewayPaths.DataDir(config), "push-config.json");
             // VapidSubject resolves Multi-Connect settings-first → appsettings fallback (task 642c14e3).
             // VAPID KEY generation stays automatic (LoadOrGenerateVapid) — only the subject is configurable.
+            // The default must NOT be a localhost-domain mailto: Apple validates the JWT sub claim and
+            // rejects every send with 403 BadJwtToken for localhost-style domains (task 8fc66298 item [4]
+            // live probe: real mailto domains and https URLs pass, mailto:*@localhost* fails). The old
+            // default "mailto:admin@localhost" silently broke ALL push on Apple devices for any install
+            // that never configured a subject.
             _vapidSubject = MultiConnectConfig.Resolve(
                 MultiTerminal.Services.SettingsService.Default.GetMultiConnectVapidSubject(),
-                config.GetValue<string>("MultiRemote:VapidSubject")) ?? "mailto:admin@localhost";
+                config.GetValue<string>("MultiRemote:VapidSubject")) ?? "https://github.com/peterparker57/MultiTerminal";
+            if (_vapidSubject.Contains("localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning(
+                    "Configured VAPID subject '{Subject}' contains a localhost domain — Apple rejects these with 403 BadJwtToken and push will not deliver. Set a real mailto: address or https: URL in Multi-Connect / MultiRemote:VapidSubject.",
+                    _vapidSubject);
+            }
             LoadOrGenerateVapid();
             LoadSubscriptions();
         }
@@ -261,7 +272,14 @@ namespace MultiTerminal.API.Gateway
                 {
                     errorCount++;
                     results.Add(new { endpoint = sub.Endpoint.Substring(0, Math.Min(60, sub.Endpoint.Length)), status = "error", code = ex.StatusCode.ToString(), message = ex.Message });
-                    if (ex.StatusCode == System.Net.HttpStatusCode.Gone)
+                    // Prune dead subscriptions: 410 Gone is the spec signal, but Apple also reports
+                    // permanently-invalid tokens as 400 {"reason":"BadDeviceToken"} (task 8fc66298
+                    // item [4] live probe — a stale sub that never received a successful send).
+                    // Match on the reason string, NOT bare 400: a generic 400 could be OUR payload
+                    // bug, and pruning healthy devices on our own defect would silently unsubscribe
+                    // everyone.
+                    if (ex.StatusCode == System.Net.HttpStatusCode.Gone ||
+                        (ex.StatusCode == System.Net.HttpStatusCode.BadRequest && ex.Message.Contains("BadDeviceToken", StringComparison.Ordinal)))
                         expired.Add(sub.Ref);
                 }
                 catch (OperationCanceledException)
