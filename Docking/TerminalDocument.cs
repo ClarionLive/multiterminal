@@ -271,6 +271,12 @@ namespace MultiTerminal.Docking
         // path at launch and only ever upgraded (never downgraded to a raw
         // worktree path) by the StatusLinePoll folder correction.
         private string _hudNotesProjectKey;
+        // Project scope last pushed to the HUD Dashboard. Like _hudNotesProjectKey this
+        // is UPGRADE-ONLY under the StatusLinePoll folder correction: a folder that fails
+        // project resolution (unregistered dir) must not null out an established scope,
+        // or the dashboard's Recent Project Activity feed falls back to an unfiltered
+        // all-projects query (task e8c6b52f).
+        private string _hudDashboardProjectId;
 
         // Track the last known working directory for session persistence
         private string _lastKnownDirectory;
@@ -1194,6 +1200,7 @@ namespace MultiTerminal.Docking
 
             // Update all HUD tabs with project context
             _hudDashboard?.SetProject(projectId, workingDirectory, _projectName);
+            _hudDashboardProjectId = projectId;
             _hudDispatchedFolder = workingDirectory;
             // Notes/Sessions are per-PROJECT: key them to the canonical registered
             // project path, not the launch dir (which for an active-task terminal is
@@ -3237,19 +3244,17 @@ namespace MultiTerminal.Docking
                             string resolvedProjectName = null;
                             try
                             {
-                                var projects = _messageBroker?.ProjectService?.GetAllRegisteredProjects();
-                                if (projects != null)
+                                // Containment match (deepest registered root that contains the
+                                // folder), not exact-path: an active-task terminal's real cwd is
+                                // a worktree under .claude\worktrees\, which never exact-matches
+                                // a registered root — the old exact match resolved null here and
+                                // unscoped the HUD panels to a cross-project view (task e8c6b52f).
+                                var match = Services.ProjectPathResolver.ResolveByContainment(
+                                    _messageBroker?.ProjectService?.GetAllRegisteredProjects(), folderForUi);
+                                if (match != null)
                                 {
-                                    var match = projects.FirstOrDefault(p =>
-                                        !string.IsNullOrEmpty(p.Path) &&
-                                        string.Equals(p.Path.TrimEnd('\\', '/'),
-                                                      folderForUi.TrimEnd('\\', '/'),
-                                                      StringComparison.OrdinalIgnoreCase));
-                                    if (match != null)
-                                    {
-                                        resolvedProjectId = match.Id;
-                                        resolvedProjectName = match.Name;
-                                    }
+                                    resolvedProjectId = match.Id;
+                                    resolvedProjectName = match.Name;
                                 }
                             }
                             catch { /* non-critical — fall back to deriving name from path */ }
@@ -3265,7 +3270,13 @@ namespace MultiTerminal.Docking
                             // title tracks Claude Code's real workspace instead of
                             // the stale launch-dir lookup from StartTerminal.
                             _lastKnownDirectory = folderForUi;
-                            _hudDashboard?.SetProject(resolvedProjectId, folderForUi, resolvedProjectName);
+                            // UPGRADE-ONLY scope for the dashboard (same rationale as the TaskHud
+                            // guard below): a null resolution means "unregistered folder", not
+                            // "no project" — passing it through would unscope the Recent Project
+                            // Activity feed into a global all-projects feed (task e8c6b52f).
+                            string dashboardProjectId = resolvedProjectId ?? _hudDashboardProjectId;
+                            _hudDashboard?.SetProject(dashboardProjectId, folderForUi, resolvedProjectName);
+                            _hudDashboardProjectId = dashboardProjectId;
                             _hudKnowledge?.SetProject(resolvedProjectId);
                             // Pass resolvedProjectId — see comment in StartTerminal call site for rationale.
                             _hudGit?.SetProject(resolvedProjectId, folderForUi);
