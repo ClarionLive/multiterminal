@@ -513,6 +513,7 @@ namespace MultiTerminal.Services
                     // the caller must be able to tell "found none" from "couldn't
                     // look" — otherwise an empty result is a non-falsifiable zero.
                     result.SkippedGroups++;
+                    result.SkippedGroupRepoRoots.Add(group.RepoRoot);
                     Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync skipped group {group.RepoRoot}: {ex.Message}");
                     continue;
                 }
@@ -532,6 +533,7 @@ namespace MultiTerminal.Services
                 catch (Exception ex)
                 {
                     result.SkippedGroups++;
+                    result.SkippedGroupRepoRoots.Add(group.RepoRoot);
                     Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync child-enum failed for {group.ParentDir}: {ex.Message}");
                     continue;
                 }
@@ -549,11 +551,84 @@ namespace MultiTerminal.Services
                     if (!TryIsDirectoryEmpty(child, out bool isEmpty))
                     {
                         result.SkippedGroups++;
+                        result.SkippedGroupRepoRoots.Add(group.RepoRoot);
                         Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync empty-probe failed for {child}");
                         continue;
                     }
                     if (!isEmpty) continue;
                     result.Dirs.Add(child);
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Read-only scan (task 94356803): enumerate the pruned-worktree rows whose
+        /// owning task is done and whose <c>task/{id}</c> branch STILL exists in git
+        /// — i.e. the pending-merge findings Pass 2 flags to the activity feed — and
+        /// return them WITHOUT attempting any merge. Backs the on-demand
+        /// pending-merge surface (REST + session-start) so an unresolved finding is
+        /// visible to the next agent booting on the project, not just to whoever
+        /// happened to read the feed. Same falsifiability contract as
+        /// <see cref="ScanStrandedDirsAsync"/>: a record that could not be checked
+        /// (unresolvable project, git failure/timeout) increments
+        /// <see cref="PendingMergeScanResult.SkippedRecords"/> and degrades the scan
+        /// to partial — "found none" is never conflated with "couldn't look".
+        /// </summary>
+        /// <param name="getProjectPathForTask">Resolver: taskId → repo root, or null
+        /// when the task's project can't be located (counted as a skipped record).</param>
+        public async Task<PendingMergeScanResult> ScanPendingMergesAsync(Func<string, string> getProjectPathForTask)
+        {
+            var result = new PendingMergeScanResult();
+
+            List<MCPServer.Models.TaskWorktree> prunedDone;
+            try
+            {
+                prunedDone = _db.ListPrunedWorktreesForDoneTasks();
+            }
+            catch (Exception ex)
+            {
+                // Couldn't even enumerate — the scan is partial-with-nothing, not "ok, none".
+                result.SkippedRecords++;
+                Debug.WriteLine($"[WorktreeJanitor] ScanPendingMergesAsync list failed: {ex.Message}");
+                return result;
+            }
+
+            // A task can have multiple worktree rows (per-agent); report each live
+            // (taskId, branch) pair once.
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var record in prunedDone)
+            {
+                try
+                {
+                    string projectPath = getProjectPathForTask?.Invoke(record.TaskId);
+                    if (string.IsNullOrEmpty(projectPath))
+                    {
+                        result.SkippedRecords++;
+                        result.SkippedTaskIds.Add(record.TaskId);
+                        continue;
+                    }
+
+                    if (!seen.Add(record.TaskId + "|" + record.BranchName)) continue;
+
+                    bool branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                    if (branchExists)
+                    {
+                        result.Items.Add(new PendingMergeInfo
+                        {
+                            TaskId = record.TaskId,
+                            BranchName = record.BranchName,
+                            RepoRoot = projectPath,
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Timeout or git failure — retry-later territory, count as skipped.
+                    result.SkippedRecords++;
+                    result.SkippedTaskIds.Add(record.TaskId);
+                    Debug.WriteLine($"[WorktreeJanitor] ScanPendingMergesAsync check failed for {record.TaskId}: {ex.Message}");
                 }
             }
 
@@ -808,6 +883,54 @@ namespace MultiTerminal.Services
 
         public int SkippedGroups { get; set; }
 
+        /// <summary>
+        /// Repo roots of the skipped groups (pipeline Run-1 debugger MEDIUM): every
+        /// skip in this scan belongs to a concrete repo group, so a per-project
+        /// consumer can attribute partiality to its own repo instead of inheriting
+        /// every other repo's failures.
+        /// </summary>
+        public List<string> SkippedGroupRepoRoots { get; } = new List<string>();
+
         public bool Complete => SkippedGroups == 0;
+    }
+
+    /// <summary>
+    /// One live pending-merge finding from
+    /// <see cref="WorktreeJanitorService.ScanPendingMergesAsync"/>: a done task
+    /// whose <see cref="BranchName"/> still exists in git at <see cref="RepoRoot"/>.
+    /// </summary>
+    public class PendingMergeInfo
+    {
+        public string TaskId { get; set; }
+
+        public string BranchName { get; set; }
+
+        public string RepoRoot { get; set; }
+    }
+
+    /// <summary>
+    /// Result of <see cref="WorktreeJanitorService.ScanPendingMergesAsync"/> (task
+    /// 94356803). Same falsifiability contract as <see cref="StrandedScanResult"/>:
+    /// <see cref="SkippedRecords"/> counts rows that could not be checked
+    /// (unresolvable project, git failure/timeout, or a failed enumeration); when
+    /// &gt; 0 the scan is <see cref="Complete"/> == false (PARTIAL) and an empty
+    /// <see cref="Items"/> must not be read as a trustworthy "no pending merges".
+    /// </summary>
+    public class PendingMergeScanResult
+    {
+        public List<PendingMergeInfo> Items { get; } = new List<PendingMergeInfo>();
+
+        public int SkippedRecords { get; set; }
+
+        /// <summary>
+        /// Task ids of the skipped records (pipeline Run-1 debugger MEDIUM: lets a
+        /// per-project consumer attribute partiality to ITS project instead of
+        /// inheriting every other project's failures). A skipped enumeration (the
+        /// whole listing failed) has no task id — that skip is attributable to no
+        /// one and every project must treat the scan as partial.
+        /// </summary>
+        public List<string> SkippedTaskIds { get; } = new List<string>();
+
+        public bool Complete => SkippedRecords == 0;
     }
 }
