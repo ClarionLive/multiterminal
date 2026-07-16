@@ -396,6 +396,15 @@ namespace MultiTerminal.Controls
             var feedService = _broker.ActivityFeedService;
             if (feedService == null) return;
 
+            // No project bound → show the empty state. GetRecentActivities with a null
+            // projectId applies no WHERE clause, and a global all-projects feed under a
+            // "Recent Project Activity" header would be misleading (task e8c6b52f).
+            if (string.IsNullOrEmpty(_projectId))
+            {
+                SendMessage(new { type = "activity", items = Array.Empty<object>() });
+                return;
+            }
+
             // Fetch activities filtered by the current project
             var recentActivities = feedService.GetRecentActivities(60, projectId: _projectId);
             if (recentActivities == null || recentActivities.Count == 0)
