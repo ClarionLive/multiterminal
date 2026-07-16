@@ -3007,13 +3007,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Report ACTUAL delivery, not just that the request was accepted. MT returns
           // { forwarded, delivered, reason, push_result: { subscriptionCount, successCount, ... } }.
           const pr = (res && res.push_result) || {};
-          const subs = pr.subscriptionCount ?? 0;
           const ok = pr.successCount ?? 0;
           const errs = pr.errorCount ?? 0;
 
-          if (res && res.delivered) {
+          // Why a derived denominator, and why we don't trust `delivered` on its own (task 2f7280c2;
+          // both defects are invisible from JS — they live in C# across a process boundary, so this
+          // note is the only thing stopping a future "simplify" back to subscriptionCount).
+          //
+          // DENOMINATOR: must be what was ATTEMPTED, never subscriptionCount. The gateway prunes dead
+          // subs and only then reads _subscriptions.Count into subscriptionCount, so failures are gone
+          // from that number by the time we see it; when every failure is prunable (the common stale-sub
+          // case) the denominator collapses to exactly successCount and a partial failure renders as a
+          // perfect N/N. Observed on 8fc66298 item [4]: a 4-attempt/2-failed send displayed as "2/2".
+          // Attempted is derivable — the send loop increments exactly one of success/error per
+          // subscription — so no new field is needed.
+          //
+          // COUNTS: `delivered` is only meaningful alongside real counts, and nothing downstream
+          // guarantees they agree. NotificationsController sets Delivered (from `pushed`) and PushResult
+          // in two INDEPENDENT ifs over a nullable PushResult, so both "delivered => counts present" AND
+          // "delivered => successCount > 0" are held by belief at the point of consumption rather than
+          // enforced there. Unreachable today (the gateway emits both from one object in the same
+          // in-process build) — but guard BOTH beliefs or neither: trusting one sibling while distrusting
+          // the other just signals "handled" over an open hole. Unguarded, a missing/zeroed push_result
+          // renders a green "0/0", a non-numeric one a nonsense "2/22", and a zero-success one a green
+          // "0/5 — 5 failed" that asserts delivery no device received. All are the false-success class
+          // this handler exists to eliminate. Report the gap instead of a ratio we can't stand behind.
+          // The guard is deliberately scoped to the delivered branch only: the not-delivered branch
+          // below can garble a count under the same drift ("of 22 attempted"), but it already says NOT
+          // delivered, so it misleads on magnitude and never on outcome — no green, no wrong retry.
+          // Tightening it is reporting polish, tracked on df46f962, not a false-success hole.
+          const attempted = ok + errs;
+          const countsConfirmDelivery =
+            Number.isInteger(ok) && Number.isInteger(errs) && attempted > 0 && ok > 0;
+
+          if (res && res.delivered && !countsConfirmDelivery) {
+            // JSON.stringify, not bare interpolation: a string "2" interpolates to an innocent-looking
+            // `2` and the reader can't see why it was rejected. Quoting makes the type drift visible.
+            // Stringify the RAW pr.* values, not the `?? 0`-coalesced locals — coalescing erases evidence.
             return {
-              content: [{ type: "text", text: `✅ Push delivered to ${ok}/${subs} device(s) (${args.notification_type})` }],
+              content: [{ type: "text", text: `⚠️ Push reported delivered, but the device counts were unavailable or inconsistent (successCount=${JSON.stringify(pr.successCount)}, errorCount=${JSON.stringify(pr.errorCount)}) — delivery could NOT be confirmed; treat as unconfirmed rather than retrying blindly.` }],
+            };
+          }
+
+          if (res && res.delivered) {
+            // Name the failures: "2/4" alone reads as a truncated list, not a partial failure.
+            // Say "failed", NOT "pruned" — errorCount also counts 10s timeouts, which the gateway
+            // deliberately KEEPS rather than prunes.
+            const failed = errs > 0 ? ` — ${errs} failed` : "";
+            return {
+              content: [{ type: "text", text: `✅ Push delivered to ${ok}/${attempted} device(s) (${args.notification_type})${failed}` }],
             };
           }
 
@@ -3026,8 +3068,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           // Recorded but NOT delivered to any device — surface why so it isn't a silent false-green.
+          // Gate on attempted, NOT subscriptionCount: when every sub is dead AND prunable,
+          // subscriptionCount is 0 by the time we read it, so a `subs > 0` gate suppressed these
+          // counts in exactly the total-failure case they exist to explain (task 2f7280c2).
           const why = (res && res.reason) || pr.error || "no device accepted the push";
-          const detail = subs > 0 ? ` (${ok} ok / ${errs} failed of ${subs} sub(s))` : "";
+          const detail = attempted > 0 ? ` (${ok} ok / ${errs} failed of ${attempted} attempted)` : "";
           return {
             content: [{ type: "text", text: `⚠️ Notification recorded but NOT delivered to phone: ${why}${detail}` }],
           };
