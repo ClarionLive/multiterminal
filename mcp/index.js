@@ -4291,8 +4291,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        let regText = `✅ Session registered: ${args.sessionId} (status: ${regSessionData.processingStatus || "open"})`;
+
+        // Task 94356803: surface unresolved worktree-janitor findings for the
+        // registering project so the agent sees them at session start (the inbox
+        // alert may have scrolled by). The API omits the block when the project is
+        // clean — only render when there is something to act on.
+        // The gate includes status "partial" even with zero items (pipeline Run-1
+        // debugger MEDIUM): "couldn't fully check" must never render as silence —
+        // that's the exact found-none-vs-couldn't-look conflation this block exists
+        // to prevent. The API omits the block entirely (null) only when the scan
+        // was COMPLETE and clean.
+        const findings = regSessionData.janitorFindings;
+        if (findings && (findings.status === "unavailable" || findings.status === "partial" || (findings.pendingMerges || []).length > 0 || (findings.strandedDirs || []).length > 0)) {
+          if (findings.status === "unavailable") {
+            regText += `\n\n⚠️ JANITOR FINDINGS: scan unavailable — could not verify this project's worktree health (not a clean bill of health).`;
+          } else {
+            const pendingMerges = findings.pendingMerges || [];
+            const strandedDirs = findings.strandedDirs || [];
+            regText += `\n\n⚠️ JANITOR FINDINGS for ${findings.projectName || "this project"}${findings.status === "partial" ? " (PARTIAL scan — more may exist)" : ""}:`;
+            for (const pm of pendingMerges) {
+              regText += `\n  • PENDING MERGE: branch ${pm.branchName} of done task ${pm.taskId}${pm.taskTitle ? ` "${pm.taskTitle}"` : ""} never landed in trunk (repo: ${pm.repoRoot}). Merge it manually or re-mark the task done to retry auto-merge.`;
+            }
+            for (const dir of strandedDirs) {
+              regText += `\n  • STRANDED WORKTREE DIR: ${dir} (empty, no longer registered with git — a process held it at prune time).`;
+            }
+            if (pendingMerges.length === 0 && strandedDirs.length === 0) {
+              regText += `\n  • No findings confirmed, but some records could not be checked — this project's worktree health is NOT fully verified this session.`;
+            }
+            regText += `\n  Tell the Owner or the project's team lead if these need triage.`;
+          }
+        }
+
         return {
-          content: [{ type: "text", text: `✅ Session registered: ${args.sessionId} (status: ${regSessionData.processingStatus || "open"})` }],
+          content: [{ type: "text", text: regText }],
         };
       }
 

@@ -185,5 +185,73 @@ namespace MultiTerminal.API.Controllers
                 return Ok(new { status = "unavailable", count = 0, skippedGroups = 0, dirs = Array.Empty<string>() });
             }
         }
+
+        /// <summary>
+        /// Read-only point-in-time view of pending merges (task 94356803): done
+        /// tasks whose <c>task/{id}</c> branch still exists in git — the findings
+        /// the janitor's Pass 2 flags to the activity feed after a failed/refused
+        /// auto-merge. Backs the session-start surfacing so an unresolved finding
+        /// is shown to the next agent booting on the project instead of relying on
+        /// someone happening to read the feed. Shells <c>git branch --list</c> per
+        /// record — call on session boot / refresh cadence, not per UI repaint.
+        /// <para>Optional <paramref name="projectId"/> narrows results to one
+        /// project. Always HTTP 200 with an explicit <c>status</c> (same contract
+        /// as <c>/stranded</c>): <c>ok</c> = complete, <c>partial</c> = at least
+        /// one record couldn't be checked (<c>skippedRecords</c>), <c>unavailable</c>
+        /// = janitor missing or the scan threw — <c>count=0</c> is then NOT a
+        /// "no pending merges" signal.</para>
+        /// </summary>
+        [HttpGet("pending-merges")]
+        public async Task<IActionResult> GetPendingMerges([FromQuery] string projectId = null)
+        {
+            var janitor = _broker?.WorktreeJanitor;
+            if (janitor == null)
+            {
+                return Ok(new { status = "unavailable", count = 0, skippedRecords = 0, items = Array.Empty<object>() });
+            }
+
+            try
+            {
+                var scan = await janitor.ScanPendingMergesAsync(id => _broker.TryGetProjectPathForTask(id)).ConfigureAwait(false);
+
+                var items = new System.Collections.Generic.List<object>();
+                foreach (var pm in scan.Items)
+                {
+                    // Enrich with task title + project so the caller can route/display
+                    // without extra lookups; the projectId filter rides the same lookup.
+                    var task = _broker.GetTask(pm.TaskId);
+                    string pmProjectId = task?.ProjectId;
+                    if (!string.IsNullOrEmpty(projectId)
+                        && !string.Equals(pmProjectId, projectId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    items.Add(new
+                    {
+                        taskId = pm.TaskId,
+                        taskTitle = task?.Title,
+                        projectId = pmProjectId,
+                        branchName = pm.BranchName,
+                        repoRoot = pm.RepoRoot,
+                    });
+                }
+
+                return Ok(new
+                {
+                    status = scan.Complete ? "ok" : "partial",
+                    count = items.Count,
+                    skippedRecords = scan.SkippedRecords,
+                    items,
+                });
+            }
+            catch (Exception ex)
+            {
+                // Same contract as /stranded: transient failure reads as 'unavailable',
+                // never as a healthy-looking zero, never as a 500.
+                _broker?.DebugLogService?.Error("WorktreesController", $"pending-merge scan failed: {ex.Message}");
+                return Ok(new { status = "unavailable", count = 0, skippedRecords = 0, items = Array.Empty<object>() });
+            }
+        }
     }
 }

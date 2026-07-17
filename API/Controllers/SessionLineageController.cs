@@ -310,7 +310,7 @@ namespace MultiTerminal.API.Controllers
         /// Call this at session start before any JSONL processing.
         /// </summary>
         [HttpPost("register")]
-        public IActionResult RegisterSession([FromBody] RegisterSessionRequest request)
+        public async System.Threading.Tasks.Task<IActionResult> RegisterSession([FromBody] RegisterSessionRequest request)
         {
             if (string.IsNullOrWhiteSpace(request?.SessionId))
                 return Problem(detail: "sessionId is required", statusCode: 400);
@@ -325,12 +325,139 @@ namespace MultiTerminal.API.Controllers
             if (record == null)
                 return Problem(detail: "Failed to register session", statusCode: 500);
 
+            // Task 94356803: surface the registering project's unresolved janitor
+            // findings (pending merges, stranded worktree dirs) at session start, so
+            // the next agent booting on an affected project sees them even if the
+            // inbox alert scrolled by. Best-effort and null when the folder doesn't
+            // resolve to a registered project — never blocks registration.
+            object janitorFindings = await BuildJanitorFindingsAsync(request.ProjectPath).ConfigureAwait(false);
+
             return Ok(new
             {
                 sessionId = record.SessionId,
                 processingStatus = record.ProcessingStatus,
-                message = "Session registered as 'open'. Previous sessions for this agent closed."
+                message = "Session registered as 'open'. Previous sessions for this agent closed.",
+                janitorFindings,
             });
+        }
+
+        /// <summary>
+        /// Build the session-start janitor-findings block for the project containing
+        /// <paramref name="projectPath"/> (containment resolution, same helper as the
+        /// statusline poll — a worktree subfolder resolves to its parent project).
+        /// Returns null when the path is empty, unregistered, or the janitor is absent;
+        /// otherwise an object with the /stranded-style explicit <c>status</c> so a
+        /// failed scan ("unavailable"/"partial") is never mistaken for "no findings".
+        /// </summary>
+        private async System.Threading.Tasks.Task<object> BuildJanitorFindingsAsync(string projectPath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectPath)) return null;
+
+                var janitor = _broker?.WorktreeJanitor;
+                if (janitor == null) return null;
+
+                var registered = _broker.ProjectService?.GetAllRegisteredProjects();
+                var entry = MultiTerminal.Services.ProjectPathResolver.ResolveByContainment(registered, projectPath);
+                if (entry == null) return null; // unregistered folder — nothing to scope findings to
+
+                // Explicit null-Path guard (pipeline Run-1 debugger LOW): the resolver
+                // only matches path-bearing entries today, but a resolved entry without
+                // a Path cannot scope stranded dirs — treat like unregistered rather
+                // than silently building a bare-"\" prefix that matches nothing.
+                if (string.IsNullOrWhiteSpace(entry.Path)) return null;
+
+                // Pending merges scoped to this project via each finding's task.ProjectId.
+                var mergeScan = await janitor.ScanPendingMergesAsync(id => _broker.TryGetProjectPathForTask(id)).ConfigureAwait(false);
+                var pendingMerges = new System.Collections.Generic.List<object>();
+                foreach (var pm in mergeScan.Items)
+                {
+                    var task = _broker.GetTask(pm.TaskId);
+                    if (!string.Equals(task?.ProjectId, entry.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                    pendingMerges.Add(new
+                    {
+                        taskId = pm.TaskId,
+                        taskTitle = task?.Title,
+                        branchName = pm.BranchName,
+                        repoRoot = pm.RepoRoot,
+                    });
+                }
+
+                // Stranded dirs scoped by path containment under the project root
+                // (segment-bounded so a sibling name-prefix doesn't match).
+                var strandedScan = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
+                string rootPrefix = entry.Path.TrimEnd('\\', '/') + System.IO.Path.DirectorySeparatorChar;
+                var strandedDirs = new System.Collections.Generic.List<string>();
+                foreach (var dir in strandedScan.Dirs)
+                {
+                    if (!string.IsNullOrEmpty(dir)
+                        && dir.Replace('/', System.IO.Path.DirectorySeparatorChar)
+                              .StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        strandedDirs.Add(dir);
+                    }
+                }
+
+                // Per-PROJECT partiality (pipeline Run-1 debugger MEDIUM): the scans are
+                // system-wide, so their global Complete flags would let an unrelated
+                // project's failure mislabel THIS fully-scanned project as partial on
+                // every register. Attribute each skip: a skipped merge record counts only
+                // when its task belongs to this project (or can't be attributed at all —
+                // an honest unknown degrades everyone); a skipped stranded group counts
+                // only when its repo root IS this project's root.
+                bool mergePartial = false;
+                if (!mergeScan.Complete)
+                {
+                    // Listing-level failures leave no per-record ids — unattributable.
+                    if (mergeScan.SkippedRecords > mergeScan.SkippedTaskIds.Count) mergePartial = true;
+                    foreach (var skippedId in mergeScan.SkippedTaskIds)
+                    {
+                        if (mergePartial) break;
+                        MultiTerminal.MCPServer.Models.KanbanTask skippedTask = null;
+                        try { skippedTask = _broker.GetTask(skippedId); } catch { /* treat as unattributable */ }
+                        if (skippedTask == null || string.IsNullOrEmpty(skippedTask.ProjectId)
+                            || string.Equals(skippedTask.ProjectId, entry.Id, StringComparison.OrdinalIgnoreCase))
+                        {
+                            mergePartial = true;
+                        }
+                    }
+                }
+
+                bool strandedPartial = false;
+                if (!strandedScan.Complete)
+                {
+                    string projectRoot = entry.Path.TrimEnd('\\', '/');
+                    if (strandedScan.SkippedGroups > strandedScan.SkippedGroupRepoRoots.Count) strandedPartial = true;
+                    foreach (var skippedRoot in strandedScan.SkippedGroupRepoRoots)
+                    {
+                        if (strandedPartial) break;
+                        if (string.IsNullOrEmpty(skippedRoot)
+                            || string.Equals(skippedRoot.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimEnd('\\'), projectRoot.Replace('/', System.IO.Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                        {
+                            strandedPartial = true;
+                        }
+                    }
+                }
+
+                bool complete = !mergePartial && !strandedPartial;
+                if (complete && pendingMerges.Count == 0 && strandedDirs.Count == 0)
+                    return null; // clean bill of health — keep the register response lean
+
+                return new
+                {
+                    status = complete ? "ok" : "partial",
+                    projectId = entry.Id,
+                    projectName = entry.Name,
+                    pendingMerges,
+                    strandedDirs,
+                };
+            }
+            catch (Exception ex)
+            {
+                _broker?.DebugLogService?.Warning("SessionLineageController", $"janitor findings enrichment failed: {ex.Message}");
+                return new { status = "unavailable" };
+            }
         }
 
         /// <summary>

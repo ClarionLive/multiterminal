@@ -84,6 +84,10 @@ namespace MultiTerminal
         // Phase 4 Track 3 worktree janitor — periodic 5-min sweep with 30-sec
         // startup delay. Disposed in OnFormClosing.
         private System.Threading.Timer _worktreeJanitorTimer;
+        // Task 94356803: routes DELIVERED actionable janitor findings to the affected
+        // project's team-lead inbox (+ phone push for the severe tier). Constructed in
+        // StartWorktreeJanitor; stateless, nothing to dispose.
+        private Services.JanitorAlertService _janitorAlerts;
         // fa1101db R2b idle-auto-on watcher — periodic 60s check. Disposed in OnFormClosing.
         private System.Threading.Timer _idleRemoteModeTimer;
         private ProfilePanel.ProfilePanelDocument _profilePanel;
@@ -204,6 +208,23 @@ namespace MultiTerminal
             {
                 var broker = _mcpServer?.Broker;
                 if (broker?.WorktreeJanitor == null) return;
+
+                // Task 94356803: directed alerts for actionable findings. Routing rules live
+                // in JanitorAlertService; MainForm only supplies the primitives. TeamLead is
+                // only on the RICH project model, hence _sharedProjectDatabase (the broker's
+                // cached project DTO doesn't carry it).
+                _janitorAlerts = new Services.JanitorAlertService(
+                    resolveTask: id =>
+                    {
+                        var task = broker.GetTask(id);
+                        return task == null ? (null, null) : (task.Title, task.ProjectId);
+                    },
+                    resolveTeamLead: projectId => _sharedProjectDatabase?.GetRichProject(projectId)?.TeamLead,
+                    defaultRecipient: () => broker.DefaultInboxRecipient,
+                    sendInbox: (recipient, taskId, taskTitle, type, summary, createdBy) =>
+                        broker.CreateInboxNotification(recipient, taskId, taskTitle, null, null, type, summary, createdBy)?.Success == true,
+                    sendSeverePush: (title, body) => { _ = SendJanitorSeverePushAsync(title, body); });
+
                 _worktreeJanitorTimer = new System.Threading.Timer(
                     _ =>
                     {
@@ -217,7 +238,7 @@ namespace MultiTerminal
                                     {
                                         // Return whether the feed write persisted so the janitor's dedup
                                         // only remembers delivered lines (a silently-failed write is retried).
-                                        return broker.RecordActivity(new MCPServer.Models.ActivityEvent
+                                        bool delivered = broker.RecordActivity(new MCPServer.Models.ActivityEvent
                                         {
                                             Terminal = "Janitor",
                                             Type = "worktree",
@@ -225,6 +246,33 @@ namespace MultiTerminal
                                             Content = content,
                                             RelatedId = relatedId,
                                         });
+
+                                        // Task 94356803: a DELIVERED actionable line also alerts a human
+                                        // (team-lead inbox; severe tier pushes). Strictly after the dedup
+                                        // + persist gate so alerts inherit once-per-condition semantics.
+                                        // Best-effort: an alert failure must never affect the delivered
+                                        // return value — that would corrupt the janitor's dedup memory.
+                                        // But it must stay OBSERVABLE (pipeline Run-1 adversary MEDIUM):
+                                        // dedup will suppress this condition until it changes/clears, so a
+                                        // failed alert is logged loudly with the full condition identity —
+                                        // it will NOT be retried automatically.
+                                        if (delivered && Services.JanitorAlertService.IsActionable(action))
+                                        {
+                                            try
+                                            {
+                                                bool alerted = _janitorAlerts?.TryAlert(action, content, relatedId) ?? false;
+                                                if (!alerted)
+                                                {
+                                                    _debugLogService?.Warning("Janitor", $"alert NOT delivered (will not auto-retry — condition is now dedup-suppressed): action={action} relatedId={relatedId ?? "<none>"} content={content}");
+                                                }
+                                            }
+                                            catch (Exception alertEx)
+                                            {
+                                                _debugLogService?.Error("Janitor", $"alert routing failed for action={action} relatedId={relatedId ?? "<none>"}: {alertEx.Message}");
+                                            }
+                                        }
+
+                                        return delivered;
                                     }
                                     catch (Exception ex) { _debugLogService?.Error("Janitor", $"activity log failed: {ex.Message}"); return false; }
                                 },
@@ -244,6 +292,39 @@ namespace MultiTerminal
             catch (Exception ex)
             {
                 _debugLogService?.Error("MainForm", $"Failed to start worktree janitor: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Task 94356803: severe-tier janitor push (HALF-MERGED checkout — manual cleanup
+        /// needed). Loopback POST to our own :5050 notifications endpoint with forcePush,
+        /// which bypasses the remote-mode gate (Owner-approved: rare + severe warrants a
+        /// buzz even at the desk) and reuses the controller's gateway-secret/type handling.
+        /// Fire-and-forget best-effort: the janitor sweep must never block on push I/O, and
+        /// a client-side timeout doesn't cancel server-side delivery (the controller doesn't
+        /// flow the request's cancellation into the gateway forward).
+        /// </summary>
+        private async System.Threading.Tasks.Task SendJanitorSeverePushAsync(string title, string body)
+        {
+            try
+            {
+                var payload = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    notification_type = "error",
+                    title,
+                    message = body,
+                    agent_name = "Janitor",
+                });
+                using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+                using var response = await _channelHttpClient.PostAsync("http://localhost:5050/api/notifications?forcePush=true", content);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _debugLogService?.Warning("Janitor", $"Severe push rejected: HTTP {(int)response.StatusCode}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("Janitor", $"Severe push failed: {ex.Message}");
             }
         }
 
