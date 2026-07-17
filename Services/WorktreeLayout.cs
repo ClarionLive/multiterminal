@@ -5,10 +5,14 @@ using System.IO;
 namespace MultiTerminal.Services
 {
     /// <summary>
-    /// Shared helpers for the two on-disk worktree layouts used by this repo:
+    /// Shared helpers for the three on-disk worktree layouts used by this repo:
     ///
     /// <list type="bullet">
-    ///   <item><b>New (child) layout:</b>
+    ///   <item><b>Current layout:</b>
+    ///   <c>{repoRoot}/.claude/worktrees/{taskIdShort}/</c> — parent dir is
+    ///   named <c>worktrees</c> under a <c>.claude</c> dir; repo root is the
+    ///   great-grandparent.</item>
+    ///   <item><b>Legacy (child) layout:</b>
     ///   <c>{repoRoot}/worktrees/{taskIdShort}/</c> — parent dir is named
     ///   <c>worktrees</c>; repo root is the grandparent.</item>
     ///   <item><b>Legacy (sibling) layout:</b>
@@ -34,34 +38,30 @@ namespace MultiTerminal.Services
 
         /// <summary>
         /// Derive the repo root for a worktree-parent directory. Returns null
-        /// when the parent doesn't match either layout, OR when the derived
+        /// when the parent doesn't match any layout, OR when the derived
         /// candidate isn't itself a git repo (no <c>.git</c> file/dir).
         /// The git-presence check is what stops Pass 3 from wandering into
         /// an unrelated source tree that happens to live under a directory
         /// literally named <c>worktrees</c>.
+        ///
+        /// <para>Delegates to <see cref="TryDeriveRepoRootFromWorktreesDir"/> so
+        /// all three layouts resolve identically here and in
+        /// <see cref="TryMapWorktreePath"/>. Task e85eba13: this method still
+        /// carried a pre-<c>.claude</c> copy of that derivation, so the current
+        /// <c>{repoRoot}/.claude/worktrees</c> layout resolved to the
+        /// <c>.claude</c> dir, failed the <c>.git</c> check, and returned null —
+        /// silently blinding the janitor's Pass 3 and stranded scan to every
+        /// modern-layout parent.</para>
         /// </summary>
         public static string DeriveRepoRootFromParent(string parentDir)
         {
             if (string.IsNullOrWhiteSpace(parentDir)) return null;
 
-            string parentName = Path.GetFileName(parentDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            string candidate = null;
-
-            if (string.Equals(parentName, NewSubfolder, StringComparison.OrdinalIgnoreCase))
-            {
-                candidate = Path.GetDirectoryName(parentDir);
-            }
-            else if (!string.IsNullOrEmpty(parentName) && parentName.EndsWith(LegacySuffix, StringComparison.OrdinalIgnoreCase))
-            {
-                string repoName = parentName.Substring(0, parentName.Length - LegacySuffix.Length);
-                string grand = Path.GetDirectoryName(parentDir);
-                if (!string.IsNullOrEmpty(grand) && !string.IsNullOrEmpty(repoName))
-                {
-                    candidate = Path.Combine(grand, repoName);
-                }
-            }
-
-            return IsLikelyGitRepoRoot(candidate) ? candidate : null;
+            // TryDeriveRepoRootFromWorktreesDir reads the last segment via
+            // Path.GetFileName, which returns "" for a trailing-slash input —
+            // trim first so "...\worktrees\" derives the same as "...\worktrees".
+            string trimmed = parentDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return TryDeriveRepoRootFromWorktreesDir(trimmed, out string repoRoot) ? repoRoot : null;
         }
 
         /// <summary>

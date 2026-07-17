@@ -427,13 +427,25 @@ namespace MultiTerminal.API.Controllers
                 bool strandedPartial = false;
                 if (!strandedScan.Complete)
                 {
-                    string projectRoot = entry.Path.TrimEnd('\\', '/');
+                    string projectRoot = entry.Path.TrimEnd('\\', '/').Replace('/', System.IO.Path.DirectorySeparatorChar);
                     if (strandedScan.SkippedGroups > strandedScan.SkippedGroupRepoRoots.Count) strandedPartial = true;
                     foreach (var skippedRoot in strandedScan.SkippedGroupRepoRoots)
                     {
                         if (strandedPartial) break;
-                        if (string.IsNullOrEmpty(skippedRoot)
-                            || string.Equals(skippedRoot.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimEnd('\\'), projectRoot.Replace('/', System.IO.Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                        if (string.IsNullOrEmpty(skippedRoot))
+                        {
+                            strandedPartial = true;
+                            continue;
+                        }
+
+                        // Task e85eba13: the skipped entry may be a worktree PARENT
+                        // dir rather than a repo root (an underivable-layout skip
+                        // carries the only path it has). Segment-bounded containment
+                        // — equal to the project root, or under it — attributes both
+                        // shapes; bare equality missed the parent-dir shape entirely.
+                        string skipped = skippedRoot.Replace('/', System.IO.Path.DirectorySeparatorChar).TrimEnd('\\');
+                        if (string.Equals(skipped, projectRoot, StringComparison.OrdinalIgnoreCase)
+                            || skipped.StartsWith(projectRoot + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                         {
                             strandedPartial = true;
                         }
