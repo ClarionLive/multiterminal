@@ -212,6 +212,30 @@ namespace MultiTerminal.Tests
             Assert.Equal(husk, Assert.Single(scan.Dirs));
         }
 
+        /// <summary>
+        /// Child-shape gate (both codex gates, Run 1): an empty dir under a valid
+        /// modern parent whose name is NOT an MT worktree id (a user folder, or a
+        /// Claude-Code "agent-*" worktree husk) must be neither reported nor —
+        /// by the mirrored Pass 3 gate — deleted. The janitor owns 8-hex ids only.
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task ScanStranded_NonIdEmptyChild_NotReported()
+        {
+            string repo = MakeGitRepoRoot("gatedrepo");
+            InitGit(repo);
+            string parent = Path.Combine(repo, ".claude", "worktrees");
+            Directory.CreateDirectory(Path.Combine(parent, "agent-a8f22f387a78c0bc7")); // CC-style, not 8-hex
+            Directory.CreateDirectory(Path.Combine(parent, "notes"));                   // user folder
+            string realHusk = Path.Combine(parent, "cafe0004");
+            Directory.CreateDirectory(realHusk);                                        // MT-shaped husk
+            SeedWorktreeRow("cafe0004", realHusk);
+
+            var scan = await NewJanitor().ScanStrandedDirsAsync();
+
+            Assert.True(scan.Complete);
+            Assert.Equal(realHusk, Assert.Single(scan.Dirs)); // id-shaped reported; non-id children invisible
+        }
+
         // ---- helpers -------------------------------------------------------
 
         /// <summary>Dir with a .git SUBDIR only — enough for IsLikelyGitRepoRoot.</summary>

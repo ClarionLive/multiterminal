@@ -407,6 +407,17 @@ namespace MultiTerminal.Services
                         try
                         {
                             if (registered.Contains(NormalizePath(child))) continue;
+
+                            // Child-shape gate (e85eba13, flagged independently by
+                            // BOTH codex gates): the janitor owns only MT-shaped
+                            // worktree dirs (8-hex id, optionally id--slug). Now
+                            // that the modern .claude/worktrees parent is finally
+                            // scanned, an empty non-MT dir placed there (a user
+                            // folder, or a Claude-Code-created "agent-*" worktree
+                            // husk) must NOT be swept up — the registered/.git
+                            // guards validate the PARENT, not each child's
+                            // ownership. Non-MT husks are their creator's to clean.
+                            if (!WorktreeLayout.IsWorktreeIdSegment(Path.GetFileName(child))) continue;
                             if (!IsDirectoryEmpty(child)) continue;
 
                             Directory.Delete(child, recursive: false);
@@ -570,6 +581,11 @@ namespace MultiTerminal.Services
                 foreach (var child in children)
                 {
                     if (registered.Contains(NormalizePath(child))) continue;
+
+                    // Child-shape gate (e85eba13): mirror Pass 3 — report only
+                    // MT-shaped ids, so the API never advertises (and session-start
+                    // never nags about) husks the janitor will refuse to remove.
+                    if (!WorktreeLayout.IsWorktreeIdSegment(Path.GetFileName(child))) continue;
 
                     // Tri-state emptiness probe (task 248cc2ce, adversary run 3).
                     // The bare IsDirectoryEmpty swallows probe exceptions and returns

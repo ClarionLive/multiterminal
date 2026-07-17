@@ -386,8 +386,14 @@ namespace MultiTerminal.API.Controllers
 
                 // Stranded dirs scoped by path containment under the project root
                 // (segment-bounded so a sibling name-prefix doesn't match).
+                // Normalize entry.Path's separators BEFORE building the prefix
+                // (e85eba13 adversary MEDIUM): a project registered with forward
+                // slashes ("H:/Repo") otherwise yields a prefix no backslash
+                // scan path can ever start with — silently dropping the
+                // project's own strands from a clean-looking response.
                 var strandedScan = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
-                string rootPrefix = entry.Path.TrimEnd('\\', '/') + System.IO.Path.DirectorySeparatorChar;
+                string rootPrefix = entry.Path.TrimEnd('\\', '/').Replace('/', System.IO.Path.DirectorySeparatorChar)
+                    + System.IO.Path.DirectorySeparatorChar;
                 var strandedDirs = new System.Collections.Generic.List<string>();
                 foreach (var dir in strandedScan.Dirs)
                 {
