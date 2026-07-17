@@ -365,7 +365,16 @@ namespace MultiTerminal.Services
             try
             {
                 var allPaths = _db.ListAllWorktreePaths();
-                var groups = DeriveWorktreeGroups(allPaths);
+                var groups = DeriveWorktreeGroups(allPaths, out var underivableParents);
+
+                // Task e85eba13: parents dropped by derivation are logged (not
+                // fed to result.Errors — a dead repo's leftover rows would make
+                // the sweep summary chronically noisy). The on-demand stranded
+                // scan is the completeness reporter; it counts these as skips.
+                foreach (var parent in underivableParents)
+                {
+                    Debug.WriteLine($"[WorktreeJanitor] Pass 3: repo root underivable for worktree parent {parent} — parent not scanned this sweep");
+                }
 
                 // Cycle-2 fix: opportunistically union in legacy parent dirs
                 // for every known repo root. After WorktreeLayoutMigrationService
@@ -398,6 +407,17 @@ namespace MultiTerminal.Services
                         try
                         {
                             if (registered.Contains(NormalizePath(child))) continue;
+
+                            // Child-shape gate (e85eba13, flagged independently by
+                            // BOTH codex gates): the janitor owns only MT-shaped
+                            // worktree dirs (8-hex id, optionally id--slug). Now
+                            // that the modern .claude/worktrees parent is finally
+                            // scanned, an empty non-MT dir placed there (a user
+                            // folder, or a Claude-Code-created "agent-*" worktree
+                            // husk) must NOT be swept up — the registered/.git
+                            // guards validate the PARENT, not each child's
+                            // ownership. Non-MT husks are their creator's to clean.
+                            if (!WorktreeLayout.IsWorktreeIdSegment(Path.GetFileName(child))) continue;
                             if (!IsDirectoryEmpty(child)) continue;
 
                             Directory.Delete(child, recursive: false);
@@ -492,8 +512,28 @@ namespace MultiTerminal.Services
         {
             var result = new StrandedScanResult();
             var allPaths = _db.ListAllWorktreePaths();
-            var groups = DeriveWorktreeGroups(allPaths);
+            var groups = DeriveWorktreeGroups(allPaths, out var underivableParents);
             AppendLegacyParentsFromActiveRepos(groups);
+
+            // Task e85eba13: a parent whose repo root can't be derived (unknown
+            // layout, or .git gone at the candidate) is a couldn't-look — count
+            // it as a skipped group so the scan degrades to 'partial' instead of
+            // a silent authoritative-looking ok/0. Only when the parent still
+            // exists on disk: a parent of a fully deleted repo has nothing left
+            // to scan, and counting it would make every scan chronically partial
+            // on old DB rows. The parent dir (not a repo root — deriving one is
+            // exactly what failed) goes into SkippedGroupRepoRoots so per-project
+            // attribution can containment-match it.
+            foreach (var parent in underivableParents)
+            {
+                bool exists;
+                try { exists = Directory.Exists(parent); }
+                catch { exists = true; } // probe failure: assume present — report, don't hide
+                if (!exists) continue;
+                result.SkippedGroups++;
+                result.SkippedGroupRepoRoots.Add(parent);
+                Debug.WriteLine($"[WorktreeJanitor] ScanStrandedDirsAsync: repo root underivable for existing worktree parent {parent} — counted as skipped group");
+            }
 
             foreach (var group in groups)
             {
@@ -541,6 +581,11 @@ namespace MultiTerminal.Services
                 foreach (var child in children)
                 {
                     if (registered.Contains(NormalizePath(child))) continue;
+
+                    // Child-shape gate (e85eba13): mirror Pass 3 — report only
+                    // MT-shaped ids, so the API never advertises (and session-start
+                    // never nags about) husks the janitor will refuse to remove.
+                    if (!WorktreeLayout.IsWorktreeIdSegment(Path.GetFileName(child))) continue;
 
                     // Tri-state emptiness probe (task 248cc2ce, adversary run 3).
                     // The bare IsDirectoryEmpty swallows probe exceptions and returns
@@ -643,8 +688,28 @@ namespace MultiTerminal.Services
         /// isn't a git repo) are skipped.
         /// </summary>
         internal static List<WorktreeGroup> DeriveWorktreeGroups(IEnumerable<string> worktreePaths)
+            => DeriveWorktreeGroups(worktreePaths, out _);
+
+        /// <summary>
+        /// Overload with dropped-parent accounting (task e85eba13). A parent dir
+        /// whose repo-root derivation fails is a "couldn't look", not a "found
+        /// none": before this overload existed, such parents silently vanished
+        /// here — BEFORE any group was formed — so neither Pass 3 nor
+        /// <see cref="ScanStrandedDirsAsync"/> ever visited them, no skip counter
+        /// fired, and the stranded scan reported an authoritative-looking
+        /// ok/0/0 while real strands sat on disk (that is exactly how the
+        /// <c>.claude/worktrees</c> layout blindness stayed invisible). Callers
+        /// that report scan completeness MUST surface
+        /// <paramref name="underivableParents"/>; kept side-effect-free (no
+        /// <c>Directory.Exists</c> probe here) so it stays a pure, testable
+        /// derivation — callers decide whether a missing-on-disk parent is worth
+        /// reporting.
+        /// </summary>
+        internal static List<WorktreeGroup> DeriveWorktreeGroups(IEnumerable<string> worktreePaths, out List<string> underivableParents)
         {
             var groups = new Dictionary<string, WorktreeGroup>(StringComparer.OrdinalIgnoreCase);
+            var dropped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            underivableParents = new List<string>();
             if (worktreePaths == null) return new List<WorktreeGroup>();
 
             foreach (var p in worktreePaths)
@@ -662,16 +727,20 @@ namespace MultiTerminal.Services
                 }
                 if (string.IsNullOrEmpty(parentDir)) continue;
 
-                string repoRoot = WorktreeLayout.DeriveRepoRootFromParent(parentDir);
-                if (string.IsNullOrEmpty(repoRoot)) continue;
-
                 string key = NormalizePath(parentDir);
-                if (!groups.ContainsKey(key))
+                if (groups.ContainsKey(key) || dropped.ContainsKey(key)) continue;
+
+                string repoRoot = WorktreeLayout.DeriveRepoRootFromParent(parentDir);
+                if (string.IsNullOrEmpty(repoRoot))
                 {
-                    groups[key] = new WorktreeGroup { ParentDir = parentDir, RepoRoot = repoRoot };
+                    dropped[key] = parentDir;
+                    continue;
                 }
+
+                groups[key] = new WorktreeGroup { ParentDir = parentDir, RepoRoot = repoRoot };
             }
 
+            underivableParents.AddRange(dropped.Values);
             return new List<WorktreeGroup>(groups.Values);
         }
 
