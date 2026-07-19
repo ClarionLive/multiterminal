@@ -3,7 +3,7 @@
 ; https://jrsoftware.org/isinfo.php
 
 #define AppName "MultiTerminal"
-#define AppVersion "2.0.0"
+#define AppVersion "2.1.0"
 #define AppPublisher "MultiTerminal"
 #define AppExeName "MultiTerminal.exe"
 #define AppURL "https://github.com/peterparker57"
