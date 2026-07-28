@@ -280,18 +280,100 @@ namespace MultiTerminal.Tests
             Assert.Equal(new[] { TaskId }, scan.SkippedTaskIds);
         }
 
+        /// <summary>
+        /// Batched path (task 1ce9ddaf): several records against the SAME repo are
+        /// answered from one `git for-each-ref` listing — live and deleted branches
+        /// are still told apart correctly and the scan stays Complete.
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task MultipleRecordsSameRepo_BatchListingStaysCorrect()
+        {
+            RunGit(_repoRoot, "branch", "task/alive001");
+            SavePrunedDoneRow(taskId: "alive001", branchName: "task/alive001");
+            SavePrunedDoneRow(taskId: "gone0002", branchName: "task/gone0002"); // branch never created
+
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => _repoRoot);
+
+            Assert.True(scan.Complete);
+            var item = Assert.Single(scan.Items);
+            Assert.Equal("alive001", item.TaskId);
+            Assert.Equal("task/alive001", item.BranchName);
+        }
+
+        /// <summary>
+        /// Falsifiability under the batch shape (task 1ce9ddaf): when the repo's
+        /// branch listing itself fails (path is not a git repo), EVERY record of
+        /// that repo counts as skipped — the scan degrades to partial instead of
+        /// reading as a trustworthy "no pending merges".
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task RepoListingFailure_SkipsAllOfThatReposRecords()
+        {
+            string notARepo = Path.Combine(Path.GetTempPath(), $"mt_janalert_norepo_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(notARepo);
+            try
+            {
+                SavePrunedDoneRow(taskId: "aaaa1111", branchName: "task/aaaa1111");
+                SavePrunedDoneRow(taskId: "bbbb2222", branchName: "task/bbbb2222");
+
+                var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => notARepo);
+
+                Assert.False(scan.Complete, "an unlistable repo means its records were NOT checked");
+                Assert.Equal(2, scan.SkippedRecords);
+                Assert.Contains("aaaa1111", scan.SkippedTaskIds);
+                Assert.Contains("bbbb2222", scan.SkippedTaskIds);
+                Assert.Empty(scan.Items);
+            }
+            finally
+            {
+                TryDeleteDir(notARepo);
+            }
+        }
+
+        /// <summary>
+        /// A record whose branch lies OUTSIDE refs/heads/task/ isn't covered by the
+        /// batch listing — the per-record fallback probe must still find it.
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task NonTaskNamespaceBranch_FallbackProbeStillReports()
+        {
+            RunGit(_repoRoot, "branch", "hotfix/feed1234");
+            SavePrunedDoneRow(branchName: "hotfix/feed1234");
+
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => _repoRoot);
+
+            Assert.True(scan.Complete);
+            var item = Assert.Single(scan.Items);
+            Assert.Equal("hotfix/feed1234", item.BranchName);
+        }
+
+        /// <summary>ParseBranchNames: LF and CRLF output, whitespace, and empty input.</summary>
+        [Fact]
+        public void ParseBranchNames_HandlesLineEndingsAndEmpty()
+        {
+            var set = WorktreeJanitorService.ParseBranchNames("task/aaaa1111\r\ntask/bbbb2222\ntask/cccc3333\r\n");
+            Assert.Equal(3, set.Count);
+            Assert.Contains("task/aaaa1111", set);
+            Assert.Contains("task/bbbb2222", set);
+            Assert.Contains("task/cccc3333", set);
+
+            Assert.Empty(WorktreeJanitorService.ParseBranchNames(string.Empty));
+            Assert.Empty(WorktreeJanitorService.ParseBranchNames(null));
+            Assert.Empty(WorktreeJanitorService.ParseBranchNames("\r\n\n"));
+        }
+
         // ---- helpers ------------------------------------------------------
 
-        private void SavePrunedDoneRow()
+        private void SavePrunedDoneRow(string taskId = TaskId, string branchName = CanonicalBranch)
         {
-            _db.SaveTask(new KanbanTask { Id = TaskId, Title = "Feed fix", Status = "done", CreatedAt = DateTime.UtcNow });
+            _db.SaveTask(new KanbanTask { Id = taskId, Title = "Feed fix", Status = "done", CreatedAt = DateTime.UtcNow });
             _db.SaveWorktreeRecord(
-                TaskId,
+                taskId,
                 agentName: "Alice",
-                worktreePath: Path.Combine(_repoRoot, ".claude", "worktrees", TaskId),
-                branchName: CanonicalBranch,
+                worktreePath: Path.Combine(_repoRoot, ".claude", "worktrees", taskId),
+                branchName: branchName,
                 isCanonical: true);
-            _db.MarkWorktreePruned(TaskId, "Alice");
+            _db.MarkWorktreePruned(taskId, "Alice");
         }
 
         private static void InitRepo(string dir)

@@ -643,6 +643,19 @@ namespace MultiTerminal.Services
             // A task can have multiple worktree rows (per-agent); report each live
             // (taskId, branch) pair once.
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Per-scan cache of task/* branch names per repo root (task 1ce9ddaf):
+            // one `git for-each-ref` per DISTINCT repo replaces one `git branch
+            // --list` subprocess per record. At 228 pruned-done records the old
+            // shape cost ~40s of sequential process spawns on every caller — and
+            // this scan runs inline in POST /api/session-lineage/register, whose
+            // clients abandon the request at 15s. A repo whose batch listing
+            // fails or times out lands in failedRepos: every one of its records
+            // counts as skipped (scan degrades to 'partial'), preserving the
+            // timeout-is-retry-later-not-gone-evidence contract.
+            var taskBranchesByRepo = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            var failedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var record in prunedDone)
             {
                 try
@@ -657,7 +670,43 @@ namespace MultiTerminal.Services
 
                     if (!seen.Add(record.TaskId + "|" + record.BranchName)) continue;
 
-                    bool branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                    string repoKey = NormalizePath(projectPath);
+                    if (failedRepos.Contains(repoKey))
+                    {
+                        result.SkippedRecords++;
+                        result.SkippedTaskIds.Add(record.TaskId);
+                        continue;
+                    }
+
+                    bool branchExists;
+                    if (record.BranchName != null && record.BranchName.StartsWith("task/", StringComparison.Ordinal))
+                    {
+                        if (!taskBranchesByRepo.TryGetValue(repoKey, out var taskBranches))
+                        {
+                            try
+                            {
+                                taskBranches = await ListTaskBranchesAsync(projectPath).ConfigureAwait(false);
+                                taskBranchesByRepo[repoKey] = taskBranches;
+                            }
+                            catch (Exception ex)
+                            {
+                                failedRepos.Add(repoKey);
+                                result.SkippedRecords++;
+                                result.SkippedTaskIds.Add(record.TaskId);
+                                Debug.WriteLine($"[WorktreeJanitor] ScanPendingMergesAsync branch listing failed for {projectPath}: {ex.Message}");
+                                continue;
+                            }
+                        }
+
+                        branchExists = taskBranches.Contains(record.BranchName);
+                    }
+                    else
+                    {
+                        // Non-canonical branch name — outside the refs/heads/task/
+                        // namespace the batch listing covers; keep the per-record probe.
+                        branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                    }
+
                     if (branchExists)
                     {
                         result.Items.Add(new PendingMergeInfo
@@ -886,6 +935,44 @@ namespace MultiTerminal.Services
             public string ParentDir { get; set; }
 
             public string RepoRoot { get; set; }
+        }
+
+        /// <summary>
+        /// Batched branch listing (task 1ce9ddaf): every <c>refs/heads/task/</c>
+        /// branch name of one repo in a single subprocess, so callers checking
+        /// many records against the same repo don't pay one process spawn per
+        /// record. Same contract as <see cref="BranchExistsAsync"/>: a timeout
+        /// throws — retry-later, never evidence that branches are gone.
+        /// </summary>
+        private static async Task<HashSet<string>> ListTaskBranchesAsync(string repoRoot)
+        {
+            var result = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/task/").ConfigureAwait(false);
+            if (result.TimedOut)
+            {
+                throw new TimeoutException($"git for-each-ref timed out for {repoRoot} — retry next sweep");
+            }
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"git for-each-ref exit {result.ExitCode}: {result.Stderr.Trim()}");
+            }
+            return ParseBranchNames(result.Stdout);
+        }
+
+        /// <summary>
+        /// Parse <c>git for-each-ref --format=%(refname:short)</c> output into a
+        /// branch-name set. Ordinal comparison — git ref names are case-sensitive.
+        /// Internal for direct test coverage.
+        /// </summary>
+        internal static HashSet<string> ParseBranchNames(string stdout)
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            if (string.IsNullOrEmpty(stdout)) return set;
+            foreach (var line in stdout.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var name = line.Trim();
+                if (name.Length > 0) set.Add(name);
+            }
+            return set;
         }
 
         private static async Task<bool> BranchExistsAsync(string repoRoot, string branchName)

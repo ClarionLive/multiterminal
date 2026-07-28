@@ -16,6 +16,15 @@ namespace MultiTerminal.API.Controllers
     [Route("api/session-lineage")]
     public class SessionLineageController : ControllerBase
     {
+        /// <summary>
+        /// Hard budget for the janitor-findings enrichment inside POST register
+        /// (task 1ce9ddaf). Registration must respond well inside the MCP
+        /// client's 15s call timeout regardless of how expensive the janitor
+        /// scans have grown; findings are advisory and degrade to
+        /// status="unavailable" on overrun.
+        /// </summary>
+        private const int JanitorFindingsBudgetMs = 3000;
+
         private readonly MessageBroker _broker;
 
         public SessionLineageController(MessageBroker broker)
@@ -330,7 +339,32 @@ namespace MultiTerminal.API.Controllers
             // the next agent booting on an affected project sees them even if the
             // inbox alert scrolled by. Best-effort and null when the folder doesn't
             // resolve to a registered project — never blocks registration.
-            object janitorFindings = await BuildJanitorFindingsAsync(request.ProjectPath).ConfigureAwait(false);
+            //
+            // Task 1ce9ddaf: "never blocks" is enforced with a hard budget. The
+            // scans shell git per repo and their cost grows with board history —
+            // unbudgeted they held this response ~43s at 228 pruned-done records
+            // while every client abandoned the call at 15s (the registration DB
+            // write above had already committed, so retries looked like an
+            // endpoint wedge). On overrun the response ships status="unavailable"
+            // (couldn't look ≠ nothing found, same tri-state as /stranded) and
+            // the scan finishes in the background with its duration logged so
+            // cost drift stays visible.
+            var findingsStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var findingsTask = BuildJanitorFindingsAsync(request.ProjectPath);
+            var (janitorFindings, findingsTimedOut) = await RaceJanitorFindingsAsync(findingsTask, JanitorFindingsBudgetMs).ConfigureAwait(false);
+            if (findingsTimedOut)
+            {
+                _ = findingsTask.ContinueWith(
+                    t =>
+                    {
+                        findingsStopwatch.Stop();
+                        string outcome = t.IsFaulted ? $"faulted: {t.Exception?.GetBaseException().Message}" : "completed";
+                        _broker?.DebugLogService?.Warning(
+                            "SessionLineageController",
+                            $"janitor findings exceeded the {JanitorFindingsBudgetMs}ms register budget ({outcome} after {findingsStopwatch.ElapsedMilliseconds}ms) — response shipped status=unavailable");
+                    },
+                    System.Threading.Tasks.TaskScheduler.Default);
+            }
 
             return Ok(new
             {
@@ -339,6 +373,29 @@ namespace MultiTerminal.API.Controllers
                 message = "Session registered as 'open'. Previous sessions for this agent closed.",
                 janitorFindings,
             });
+        }
+
+        /// <summary>
+        /// Race the janitor-findings enrichment against its budget (task 1ce9ddaf).
+        /// Returns the findings when they arrive in time; on overrun returns the
+        /// <c>status="unavailable"</c> tri-state marker ("couldn't look", never a
+        /// clean-looking null) with <c>TimedOut=true</c> so the caller can observe
+        /// the stray task. No CancellationTokenSource — the abandoned
+        /// <see cref="System.Threading.Tasks.Task.Delay(int)"/> on the success path
+        /// rides the shared timer queue (ratified Option A pattern, task b840ddee).
+        /// Internal + static for direct test coverage without a broker.
+        /// </summary>
+        internal static async System.Threading.Tasks.Task<(object Findings, bool TimedOut)> RaceJanitorFindingsAsync(
+            System.Threading.Tasks.Task<object> findingsTask, int budgetMs)
+        {
+            var timeoutTask = System.Threading.Tasks.Task.Delay(budgetMs);
+            var winner = await System.Threading.Tasks.Task.WhenAny(findingsTask, timeoutTask).ConfigureAwait(false);
+            if (winner == findingsTask)
+            {
+                return (await findingsTask.ConfigureAwait(false), false);
+            }
+
+            return (new { status = "unavailable" }, true);
         }
 
         /// <summary>
