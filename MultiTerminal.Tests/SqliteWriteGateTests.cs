@@ -175,13 +175,18 @@ namespace MultiTerminal.Tests
         [Fact]
         public async Task HighDutyCycleWriter_DoesNotStarveCompetitor()
         {
-            using var stop = new ManualResetEventSlim(false);
+            // A plain volatile flag, NOT a ManualResetEventSlim: a `using`-scoped event would be
+            // DISPOSED when this method unwinds, and if the hog is still looping at that moment (the
+            // path taken whenever the wait below times out) it would throw ObjectDisposedException on
+            // a pool thread AND keep hammering the process-wide static gate, perturbing test classes
+            // that xUnit runs in parallel. A flag cannot be disposed out from under the loop.
+            var stop = 0;
             bool competitorAdmitted = false;
 
             // Mimic the starver: reacquire immediately after each release, leaving ~no gap.
             var hog = Task.Run(() =>
             {
-                while (!stop.IsSet)
+                while (Volatile.Read(ref stop) == 0)
                 {
                     using (SqliteWriteGate.EnterWrite("Test.Hog"))
                     {
@@ -199,7 +204,7 @@ namespace MultiTerminal.Tests
             });
 
             bool finished = await CompletesAsync(competitor);
-            stop.Set();
+            Volatile.Write(ref stop, 1);
 
             // Awaited, not just signalled: a hog thread still hammering the static gate would leak into
             // sibling tests and make their acquires look contended.
@@ -253,6 +258,57 @@ namespace MultiTerminal.Tests
             {
                 Assert.True(SqliteWriteGate.IsHeldByCurrentThread);
             }
+        }
+
+        /// <summary>
+        /// Pipeline Run 1 regression guard (cross-model adversary, HIGH). The gate is only a fairness
+        /// mechanism for writers that actually ENTER it, and the first Phase 2 pass gated the sites
+        /// Phase 1 had instrumented — which did NOT include register_session, the ticket's own victim,
+        /// because it happened not to fail during the Phase 1 capture.
+        ///
+        /// <para>This asserts the shape that was missing: a writer entering the gate while a
+        /// high-duty-cycle holder is active gets ADMITTED (queued) rather than falling through ungated.
+        /// The static census check (5) in verify-writegate.mjs pins the specific METHOD names; this
+        /// test pins the BEHAVIOUR they depend on, so the guarantee survives both a code edit and a
+        /// census edit.</para>
+        /// </summary>
+        [Fact]
+        public async Task GatedWriter_IsAdmittedRatherThanFallingThrough_WhileStarverHolds()
+        {
+            var stop = 0;
+            bool admitted = false;
+
+            var starver = Task.Run(() =>
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    using (SqliteWriteGate.EnterWrite("Test.RegisterStarver"))
+                    {
+                        Thread.Sleep(5);
+                    }
+                }
+            });
+
+            // Stand-in for the register_session write unit (SaveSessionLineage / CloseOpenSessions).
+            var register = Task.Run(() =>
+            {
+                using (SqliteWriteGate.EnterWrite("Test.RegisterSessionWrite", detail: null, timeoutMs: 5000))
+                {
+                    admitted = SqliteWriteGate.IsHeldByCurrentThread;
+                }
+            });
+
+            bool finished = await CompletesAsync(register);
+            Volatile.Write(ref stop, 1);
+            bool starverStopped = await CompletesAsync(starver);
+
+            Assert.True(finished, "the register-session-shaped write never completed against a starver");
+            Assert.True(starverStopped, "starver did not stop after being signalled");
+            Assert.True(
+                admitted,
+                "the register-session-shaped write FELL THROUGH UNGATED instead of being admitted — "
+                + "queued admission regressed, which is the exact condition that leaves the ticket's "
+                + "victim racing unfairly");
         }
 
         [Fact]

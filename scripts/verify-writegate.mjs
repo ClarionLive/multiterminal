@@ -71,7 +71,42 @@ const TXN_OPEN_RE = /\b[A-Za-z_]\w*\s*\.\s*BeginTransaction\s*\(/;
 const GATE_RE = /\bSqliteWriteGate\s*\.\s*EnterWrite\s*\(/;
 const RAW_DIAG_RE = /\bWriteContentionDiagnostics\s*\.\s*BeginWrite\s*\(/;
 
+// Local (per-owner) lock acquisitions. Check (4) requires the GLOBAL gate to be taken before any of
+// these. Mirrors the gate idioms in verify-taskdb-gate.mjs, minus the read-only variants.
+const LOCAL_LOCK_RE = /using\s*\(?\s*var\s+\w+\s*=\s*LockConn\s*\(\s*\)|using\s*\(?\s*var\s+\w+\s*=\s*_gate\.Enter\s*\(\s*\)|using\s*\(?\s*var\s+\w+\s*=\s*Locked\s*\(\s*\)|lock\s*\(\s*_syncLock\s*\)|lock\s*\(\s*_dbLock\s*\)/;
+
 const GATE_FILE = 'Services/SqliteWriteGate.cs';
+
+// ── CHECK (5): NAMED REQUIRED-GATE LIST ───────────────────────────────────────────────────────────
+// Check (1) can only see TRANSACTIONS. Single-statement autocommit writes also take the SQLite write
+// lock, and there are ~204 ExecuteNonQuery sites across the owner files — far too many to demand a
+// gate on (gating all of them would serialize the whole app's writes, which is a different and much
+// riskier design). So instead of a sweep we pin the ones that DEMONSTRABLY contend, by name.
+//
+// Every entry here was gated in response to concrete evidence, not on suspicion. If a future edit
+// drops the gate from one of these, this check fails — which is what makes the fix durable rather
+// than grep-verified. Adding to this list is the correct response to any NEW autocommit writer found
+// losing a race; it is deliberately a reviewable edit to THIS file.
+const REQUIRED_GATED_METHODS = new Map([
+  ['Services/TaskDatabase.cs::SaveTerminalActivity',
+    'Phase 1 caught this losing SQLITE_BUSY (12:47:14.504) via ActivityService.UpdateActivity <- '
+    + 'OnMcpTerminalRegistered; the loss was swallowed by MessageBroker.RaiseSafe so the activity row '
+    + 'silently never wrote and no busy dump fired.'],
+  ['Services/TaskDatabase.cs::SaveSessionLineage',
+    'THE ticket victim. register_session reaches here via SessionLineageService.RegisterSession. Found '
+    + 'ungated by the pipeline Run 1 cross-model adversary (HIGH) after the first Phase 2 pass gated '
+    + 'only the sites Phase 1 had instrumented.'],
+  ['Services/TaskDatabase.cs::CloseOpenSessions',
+    'The other half of the register_session write path (close prior open sessions, then upsert). Same '
+    + 'Run 1 finding.'],
+  ['Services/CodeGraphDatabase.cs::ClearProjectRelationships',
+    'Largest-class indexer write (correlated-subquery DELETE over cg_relationships) running immediately '
+    + 'before the gated chunk pass — an ungated STARVER, found by the Run 1 debugger gate.'],
+  ['Services/CodeGraphDatabase.cs::ClearProject',
+    'Same starver class as ClearProjectRelationships; multi-statement autocommit DELETEs.'],
+  ['Services/CodeGraphDatabase.cs::ClearAll',
+    'Same starver class; deletes every cg_ table.'],
+]);
 
 // Transaction opens that legitimately have NO gate of their own because they DELEGATE the
 // transaction to a caller. Each entry must state why, and the delegated-to caller is still checked
@@ -80,9 +115,32 @@ const GATE_FILE = 'Services/SqliteWriteGate.cs';
 const DELEGATING_ACCESSORS = new Map([
   ['Services/CodeGraphDatabase.cs::BeginTransaction',
     'pure delegating accessor — hands the SQLiteTransaction to its caller and holds no write itself. '
-    + 'Its only caller is CSharpCodeGraphIndexer.ChunkedWritePass, which check (1) verifies IS gated; '
-    + 'gating here too would double-enter (harmless, the gate is reentrant) but would misreport the '
-    + 'owner in the busy dump as the accessor instead of the actual write pass.'],
+    + 'Its only PRODUCTION caller is CSharpCodeGraphIndexer.ChunkedWritePass, which check (1) verifies '
+    + 'IS gated; gating here too would double-enter (harmless, the gate is reentrant) but would '
+    + 'misreport the owner in the busy dump as the accessor instead of the actual write pass. '
+    + 'PRODUCTION is load-bearing in that sentence: MultiTerminal.Tests/CrossConnectionConcurrencyTests '
+    + 'also calls this accessor UNGATED, and MultiTerminal.Tests is in SKIP_DIRS, so the transitive '
+    + 'argument covers production callers only — a test caller is out of census scope by construction.'],
+]);
+
+// ── ORDERING EXEMPTIONS for check (4) ─────────────────────────────────────────────────────────────
+// Global-before-local is the rule, but it is a means, not the end: the point is that no thread holds a
+// contended lock while WAITING. There is one shape where hoisting the gate makes things strictly WORSE
+// — when expensive NON-write work sits between the local lock and the transaction. Hoisting would then
+// hold the process-wide WRITE gate across that work, blocking every other writer for its duration,
+// which is the very starvation this whole ticket exists to remove. In that case the narrow convoy is
+// the lesser evil and the site is exempted BY NAME with the reason.
+const ORDERING_EXEMPT = new Map([
+  ['Services/SessionMemoryDatabase.cs::IndexSessionFile',
+    'Between `_gate.Enter()` and the transaction this method reads the JSONL, filters it, chunks it, and '
+    + 'EMBEDS every chunk (embedder.Embed per chunk — ML inference, seconds for a large session). '
+    + 'Hoisting EnterWrite above the owner lock would hold the global WRITE gate across all of that '
+    + 'non-write work and starve every other writer — strictly worse than the convoy it would prevent. '
+    + 'The convoy here is also narrow: SessionMemoryDatabase._gate is contended only by session-memory '
+    + 'operations, not by TaskDatabase._dbLock\'s ~162 app-wide sites. The clean fix is to move the '
+    + 'parse/embed phase outside the owner lock and then take global-then-local; that is a restructure '
+    + 'of a method with several early returns and an under-lock IsSessionIndexed check, so it belongs in '
+    + 'its own ticket rather than in a fairness fix.'],
 ]);
 
 // Separate DB families — NOT multiterminal.db, so the multiterminal.db write gate does not apply.
@@ -222,6 +280,59 @@ function analyzeTxnGating(lines, allowKey = () => false) {
   return { violations, gated, exempt, unattributed };
 }
 
+// (4) LOCK ORDERING — global gate BEFORE any local per-owner lock.
+// The reverse order shipped in the first Phase 2 pass and was a real defect: the acquire can wait up
+// to the budget, and serving that wait while holding TaskDatabase._dbLock stalls all ~162 LockConn
+// sites (reads included) instead of just the writers. Any method using BOTH must gate first.
+// (5) REQUIRED GATE — a named autocommit writer must still enter the gate.
+// Pure over `lines` so the self-test can drive it with synthetic snippets.
+function analyzeOrderingAndRequired(lines, relPath, requiredNames = new Set(), orderExempt = () => false) {
+  const methods = parseMethods(lines);
+  const violations = [];
+  const orderedOk = [];
+  const requiredOk = [];
+  const orderExempted = [];
+  const seenRequired = new Set();
+
+  for (const m of methods) {
+    const body = maskCodeOnly(lines.slice(m.bodyOpen + 1, m.bodyClose).join('\n'));
+    const gateIdx = body.search(GATE_RE);
+    const localIdx = body.search(LOCAL_LOCK_RE);
+
+    if (gateIdx !== -1 && localIdx !== -1) {
+      if (orderExempt(m.name)) {
+        orderExempted.push(m);
+      } else if (localIdx < gateIdx) {
+        violations.push({ m, kind: 'lock-order',
+          why: `acquires its LOCAL lock (offset ${localIdx}) BEFORE the global write gate (offset `
+            + `${gateIdx}). Global-before-local is mandatory: a gate wait served while holding the `
+            + "owner's local lock stalls that owner's READS too, not just writers. Hoist the "
+            + 'SqliteWriteGate.EnterWrite line above the local lock.' });
+      } else {
+        orderedOk.push(m);
+      }
+    }
+
+    if (requiredNames.has(m.name)) {
+      seenRequired.add(m.name);
+      if (gateIdx === -1) {
+        violations.push({ m, kind: 'required-gate-missing',
+          why: 'is on the NAMED REQUIRED-GATE list in this script (it is a single-statement autocommit '
+            + 'write with evidence of losing a real race) but does not enter SqliteWriteGate. Restore '
+            + 'the gate, or remove it from REQUIRED_GATED_METHODS with a documented reason.' });
+      } else {
+        requiredOk.push(m);
+      }
+    }
+  }
+
+  // A required method that VANISHED (renamed/deleted) must fail too — otherwise the guarantee quietly
+  // evaporates on rename and the list rots into decoration.
+  const missing = [...requiredNames].filter(n => !seenRequired.has(n));
+
+  return { violations, orderedOk, requiredOk, orderExempted, missing, relPath };
+}
+
 // (2) Direct WriteContentionDiagnostics.BeginWrite use — only the gate itself may.
 function findRawDiagnostics(lines) {
   const hits = [];
@@ -326,6 +437,62 @@ function selfTest() {
     report('coext', c.name, findRawDiagnostics(c.code.split('\n')).length > 0, c.exp);
   }
 
+  // (4) lock ordering — the defect that shipped in the first Phase 2 pass must now FAIL.
+  const orderCases = [
+    { name: 'positive: gate BEFORE LockConn', exp: false,
+      code: '        public void Good()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X.Good");\n            using var gate = LockConn();\n        }' },
+    { name: 'THE Run-1 defect: LockConn BEFORE gate must FAIL', exp: true,
+      code: '        public void Bad()\n        {\n            using var gate = LockConn();\n            using var writeGate = SqliteWriteGate.EnterWrite("X.Bad");\n        }' },
+    { name: 'THE Run-1 defect, _syncLock form: lock() before gate must FAIL', exp: true,
+      code: '        public void BadSync()\n        {\n            lock (_syncLock)\n            {\n                using var writeGate = SqliteWriteGate.EnterWrite("X.BadSync");\n            }\n        }' },
+    { name: 'positive: gate before lock (_syncLock)', exp: false,
+      code: '        public void GoodSync()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X.GoodSync");\n            lock (_syncLock)\n            {\n            }\n        }' },
+    { name: 'positive: gate before _gate.Enter()', exp: false,
+      code: '        public void GoodOwnerGate()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X.GoodOwnerGate");\n            using var g = _gate.Enter();\n        }' },
+    { name: 'negative-control: local lock with NO gate is not an ordering violation', exp: false,
+      code: '        public void LockOnly()\n        {\n            using var gate = LockConn();\n        }' },
+    { name: 'negative-control: gate with no local lock is not an ordering violation', exp: false,
+      code: '        public void GateOnly()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X.GateOnly");\n        }' },
+    { name: 'a comment mentioning LockConn does not create a false ordering violation', exp: false,
+      code: '        public void CommentLock()\n        {\n            // using var gate = LockConn(); would go here\n            using var writeGate = SqliteWriteGate.EnterWrite("X.CommentLock");\n        }' },
+  ];
+  for (const c of orderCases) {
+    const r = analyzeOrderingAndRequired(c.code.split('\n'), 'Fixture.cs');
+    report('order', c.name, r.violations.some(v => v.kind === 'lock-order'), c.exp);
+  }
+
+  // The ordering exemption must be NAMED, load-bearing, and must not leak to siblings.
+  const badOrder = '        public void IndexSessionFile()\n        {\n            using var gate = _gate.Enter();\n            using var writeGate = SqliteWriteGate.EnterWrite("X");\n        }';
+  report('order-exempt', 'a NAMED ordering exemption passes despite local-before-gate',
+    analyzeOrderingAndRequired(badOrder.split('\n'), 'Fixture.cs', new Set(), n => n === 'IndexSessionFile')
+      .violations.some(v => v.kind === 'lock-order'), false);
+  report('order-exempt', 'the SAME method without the exemption FAILS (proves the entry is load-bearing)',
+    analyzeOrderingAndRequired(badOrder.split('\n'), 'Fixture.cs')
+      .violations.some(v => v.kind === 'lock-order'), true);
+  report('order-exempt', 'exempting one method does NOT exempt a sibling with the same defect',
+    analyzeOrderingAndRequired(
+      '        public void OtherWrite()\n        {\n            using var gate = _gate.Enter();\n            using var writeGate = SqliteWriteGate.EnterWrite("X");\n        }'.split('\n'),
+      'Fixture.cs', new Set(), n => n === 'IndexSessionFile').violations.some(v => v.kind === 'lock-order'), true);
+
+  // (5) named required-gate list.
+  const requiredOne = new Set(['SaveSessionLineage']);
+  report('required', 'a required autocommit writer WITH the gate passes',
+    analyzeOrderingAndRequired(
+      '        public void SaveSessionLineage()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X");\n            using var gate = LockConn();\n        }'.split('\n'),
+      'Fixture.cs', requiredOne).violations.some(v => v.kind === 'required-gate-missing'), false);
+  report('required', 'THE regression: gate REMOVED from a required writer must FAIL',
+    analyzeOrderingAndRequired(
+      '        public void SaveSessionLineage()\n        {\n            using var gate = LockConn();\n        }'.split('\n'),
+      'Fixture.cs', requiredOne).violations.some(v => v.kind === 'required-gate-missing'), true);
+  report('required', 'a required writer RENAMED away must FAIL (list cannot rot into decoration)',
+    analyzeOrderingAndRequired(
+      '        public void SaveSessionLineageV2()\n        {\n            using var gate = LockConn();\n        }'.split('\n'),
+      'Fixture.cs', requiredOne).missing.length > 0, true);
+  report('required', 'an unlisted method without the gate is NOT flagged by check (5)',
+    analyzeOrderingAndRequired(
+      '        public void SomeOtherWrite()\n        {\n            using var gate = LockConn();\n        }'.split('\n'),
+      'Fixture.cs', requiredOne).violations.some(v => v.kind === 'required-gate-missing'), false);
+
   const boundedCases = [
     { name: 'bounded `Gate.Wait(timeoutMs)` passes', exp: false, code: 'acquired = Gate.Wait(timeoutMs);' },
     { name: 'THE regression: bare `Gate.Wait()` is unbounded and FAILS', exp: true, code: 'acquired = Gate.Wait();' },
@@ -349,6 +516,9 @@ let failed = false;
 const problems = [];
 let totalGated = 0;
 let totalExempt = 0;
+let totalOrdered = 0;
+let totalRequired = 0;
+let totalOrderExempt = 0;
 const filesWithTxns = [];
 
 for (const abs of scanFiles(REPO_ROOT)) {
@@ -366,6 +536,26 @@ for (const abs of scanFiles(REPO_ROOT)) {
   }
 
   if (SEPARATE_DB.has(rel)) continue; // different DB file — the multiterminal.db gate does not apply
+
+  // (4) + (5)
+  const requiredNames = new Set(
+    [...REQUIRED_GATED_METHODS.keys()]
+      .filter(k => k.startsWith(`${rel}::`))
+      .map(k => k.slice(rel.length + 2)));
+  const ord = analyzeOrderingAndRequired(
+    lines, rel, requiredNames, name => ORDERING_EXEMPT.has(`${rel}::${name}`));
+  totalOrderExempt += ord.orderExempted.length;
+  for (const v of ord.violations) {
+    problems.push(`${rel}:${v.m.sigStart + 1} ${v.kind === 'lock-order' ? 'LOCK ORDERING' : 'REQUIRED GATE'} `
+      + `in ${v.m.name}(): ${v.why}`);
+  }
+  for (const name of ord.missing) {
+    problems.push(`${rel} REQUIRED GATE — method ${name}() is on the REQUIRED_GATED_METHODS list but was `
+      + 'NOT FOUND in this file (renamed, moved, or deleted). Update the list in the same commit so the '
+      + 'guarantee does not silently evaporate on rename.');
+  }
+  totalOrdered += ord.orderedOk.length;
+  totalRequired += ord.requiredOk.length;
 
   const allowKey = name => DELEGATING_ACCESSORS.has(`${rel}::${name}`);
   const r = analyzeTxnGating(lines, allowKey);
@@ -407,12 +597,21 @@ if (problems.length) {
   console.log(`\n  write transactions gated: ${totalGated}`);
   console.log(`  named delegating-accessor exemptions: ${totalExempt}`);
   for (const [key, why] of DELEGATING_ACCESSORS) console.log(`    - ${key}: ${why.split(' — ')[0]}`);
-  console.log('\nSCOPE (a green run does NOT mean "every write is gated"): this census covers write '
-    + 'TRANSACTIONS. Single-statement autocommit writes are out of scope — that class is real '
-    + '(TaskDatabase.SaveTerminalActivity lost SQLITE_BUSY as a bare ExecuteNonQuery in Phase 1 and is '
-    + 'now gated), but enumerating it requires classifying SQL text this script deliberately masks.');
-  console.log('\nPASS — every write transaction enters SqliteWriteGate before opening, the gate is the '
-    + 'sole entry point to the contention census, and its acquire is bounded.');
+  console.log(`  methods taking BOTH gate and a local lock, in correct global-before-local order: ${totalOrdered}`);
+  console.log(`  named ordering exemptions (hoisting would hold the gate across expensive non-write work): ${totalOrderExempt}`);
+  for (const key of ORDERING_EXEMPT.keys()) console.log(`    - ${key}`);
+  console.log(`  named autocommit writers required to stay gated: ${totalRequired}/${REQUIRED_GATED_METHODS.size}`);
+  for (const key of REQUIRED_GATED_METHODS.keys()) console.log(`    - ${key}`);
+  console.log('\nSCOPE (a green run does NOT mean "every write is gated"): check (1) covers write '
+    + 'TRANSACTIONS. Single-statement autocommit writes are covered ONLY for the names in check (5) — '
+    + `${REQUIRED_GATED_METHODS.size} methods with concrete evidence of losing a race — out of ~204 `
+    + 'ExecuteNonQuery sites across the owner files. Demanding a gate on all of them would serialize '
+    + "the whole app's writes, which is a different and riskier design. So an ungated autocommit write "
+    + 'that has never been observed contending can still be added without failing this census; the '
+    + 'correct response to finding a new one is to gate it AND add it to REQUIRED_GATED_METHODS.');
+  console.log('\nPASS — every write transaction enters SqliteWriteGate before opening, every named '
+    + 'autocommit writer is still gated, gate-before-local-lock ordering holds, the gate is the sole '
+    + 'entry point to the contention census, and its acquire is bounded.');
 }
 
 process.exit(failed ? 1 : 0);

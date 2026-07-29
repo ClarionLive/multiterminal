@@ -329,8 +329,10 @@ namespace MultiTerminal.Services
         /// </summary>
         public void BumpReferences(IEnumerable<int> ids)
         {
-            using var gate = _gate.Enter();
+            // GATE BEFORE the owner lock — never wait for the global gate while holding _gate
+            // (see SqliteWriteGate's lock-ordering note; enforced by verify-writegate.mjs check 4).
             using var writeGate = SqliteWriteGate.EnterWrite("KnowledgeDatabase.BumpReferences");
+            using var gate = _gate.Enter();
             using var transaction = _connection.BeginTransaction();
             try
             {

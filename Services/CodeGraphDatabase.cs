@@ -251,8 +251,18 @@ namespace MultiTerminal.Services
             cmd.ExecuteNonQuery();
         }
 
+        // The three Clear* methods below are GATED even though they are autocommit rather than
+        // transactions: they are the code-graph indexer's LARGEST single writes (correlated-subquery
+        // DELETEs over cg_relationships, 100k+ rows on this repo) and they run immediately BEFORE the
+        // gated chunk pass. Leaving them ungated would mean the fairness fix gated the VICTIMS while
+        // the biggest STARVER still raced them directly at the SQLite level — which is the same
+        // long-hold shape 93ad8184 introduced chunking to break up. Gate acquired BEFORE lock
+        // (_syncLock) to keep global-before-local ordering uniform (see SqliteWriteGate's lock-ordering
+        // note): a gate wait must never be served while holding a local lock.
         public void ClearProjectRelationships(int projectId)
         {
+            using var writeGate = SqliteWriteGate.EnterWrite(
+                "CodeGraphDatabase.ClearProjectRelationships", $"project {projectId}");
             lock (_syncLock)
             {
                 const string sql = @"DELETE FROM cg_relationships WHERE from_id IN (SELECT id FROM cg_symbols WHERE project_id = @pid)";
@@ -264,6 +274,8 @@ namespace MultiTerminal.Services
 
         public void ClearProject(int projectId, bool deleteProjectRow = false)
         {
+            using var writeGate = SqliteWriteGate.EnterWrite(
+                "CodeGraphDatabase.ClearProject", $"project {projectId}");
             lock (_syncLock)
             {
                 const string sqlRels = @"DELETE FROM cg_relationships WHERE from_id IN (SELECT id FROM cg_symbols WHERE project_id = @pid)
@@ -299,6 +311,7 @@ namespace MultiTerminal.Services
 
         public void ClearAll()
         {
+            using var writeGate = SqliteWriteGate.EnterWrite("CodeGraphDatabase.ClearAll");
             lock (_syncLock)
             {
                 const string sql = @"

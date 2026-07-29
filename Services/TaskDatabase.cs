@@ -1505,8 +1505,11 @@ namespace MultiTerminal.Services
             // UPDATE then writes the new rank back. Wrapped in a transaction so
             // a partial write can't leave the column half-rebalanced. Whole
             // transaction is serialized on _dbLock (runtime site: MessageBroker.ReorderTask).
-            using var gate = LockConn();
+            // GATE BEFORE LockConn — see the "lock ordering" note on SqliteWriteGate. The gate
+            // wait must NEVER be served while holding _dbLock, or a 10s acquire stalls all 162
+            // LockConn sites (reads included) instead of just the writers.
             using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.RebalanceSortOrder", status);
+            using var gate = LockConn();
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -1555,8 +1558,9 @@ namespace MultiTerminal.Services
         /// </summary>
         public List<string> SetTaskActiveTransactional(string taskId, IReadOnlyList<string> siblingIdsToPause, DateTime pausedAt)
         {
-            using var gate = LockConn();
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
             using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SetTaskActiveTransactional", taskId);
+            using var gate = LockConn();
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -2960,8 +2964,6 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveTerminalActivity(TerminalActivity activity)
         {
-            using var gate = LockConn();
-
             // Gated even though this is a single AUTOCOMMIT statement, not a transaction: it still takes
             // the SQLite file write lock and can still lose the race. Phase 1 caught exactly that —
             // 12:47:14.504, SQLITE_BUSY here via ActivityService.UpdateActivity <- OnMcpTerminalRegistered,
@@ -2969,7 +2971,10 @@ namespace MultiTerminal.Services
             // wrote. It also produced NO WriteContention dump, because a bare ExecuteNonQuery was not one
             // of the wrapped transaction sites. Entering the gate fixes both halves: the write is admitted
             // fairly, and it now appears in the busy-dump census like every other writer.
-            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SaveTerminalActivity", activity?.Terminal);
+            //
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SaveTerminalActivity", activity.Terminal);
+            using var gate = LockConn();
 
             const string sql = @"
                 INSERT INTO terminal_activity (terminal, status, activity, blocked_by, task_id, plan_id, updated_at,
@@ -4718,6 +4723,16 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SaveSessionLineage(SessionLineageRecord record)
         {
+            // GATED — this is THE victim the whole ticket is about. `register_session` reaches here
+            // via SessionLineageService.RegisterSession, and the write is a bare autocommit
+            // INSERT…ON CONFLICT: it takes the SQLite file write lock and can lose the race exactly
+            // like a transaction can. It was missed in the first Phase 2 pass because that pass
+            // gated the sites Phase 1 had INSTRUMENTED, and register_session did not happen to fail
+            // during the Phase 1 capture — so the reported victim was left outside the fairness
+            // mechanism, protected only by Phase 3's retry (a 503 instead of a 500).
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock.
+            using var writeGate = SqliteWriteGate.EnterWrite(
+                "TaskDatabase.SaveSessionLineage", record?.SessionId);
             using var gate = LockConn();
             const string sql = @"
                 INSERT INTO session_lineage
@@ -4933,9 +4948,10 @@ namespace MultiTerminal.Services
         public void SaveSessionMessages(string sessionId, List<SessionMessageRecord> messages)
         {
             // Whole transaction serialized on _dbLock (runtime site: session-import Task.Run threads).
-            using var gate = LockConn();
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock (see SqliteWriteGate).
             using var writeGate = SqliteWriteGate.EnterWrite(
                 "TaskDatabase.SaveSessionMessages", $"{sessionId} ({messages?.Count ?? 0} msgs)");
+            using var gate = LockConn();
             using var transaction = _connection.BeginTransaction();
             try
             {
@@ -5327,6 +5343,17 @@ namespace MultiTerminal.Services
         /// </summary>
         public int CloseOpenSessions(string agentName, string projectPath, string excludeSessionId = null)
         {
+            // GATED for the same reason as SaveSessionLineage: this is the OTHER half of the
+            // register_session write path (RegisterSession closes prior open sessions, then upserts
+            // the new one), and it is a bare autocommit UPDATE that takes the write lock.
+            // NOTE: the two halves are gated INDEPENDENTLY, not as one admission. Making the whole
+            // close-then-upsert unit atomic under a single gate scope would be a semantic change to
+            // RegisterSession (today the two statements are separately autocommitted, so a crash
+            // between them is already observable) — that belongs in its own ticket, not in a
+            // fairness fix. The gate is reentrant, so a future caller may wrap both if it wants one
+            // admission.
+            // GATE BEFORE LockConn — never wait for the gate while holding _dbLock.
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.CloseOpenSessions", agentName);
             using var gate = LockConn();
             string sql = @"
                 UPDATE session_lineage
@@ -6348,6 +6375,15 @@ namespace MultiTerminal.Services
             // Whole method serialized on _dbLock (runtime site: startup orphan cleanup).
             // Holding the gate across SELECT → build orphans → DELETE also keeps the
             // emptiness re-check atomic with the delete (reinforces the TOCTOU note below).
+            //
+            // GATE BEFORE LockConn — this site is WHY the ordering rule exists. It is invoked
+            // synchronously from the MainForm constructor (potentially the STA UI thread) AFTER
+            // CodeGraphWatcher has already started its high-duty-cycle reindex, so the contended
+            // acquire is the EXPECTED path here. Waiting for the gate while holding _dbLock would
+            // stall every one of the 162 LockConn sites — reads included — for up to the full
+            // acquire budget. The write-gate scope spans the whole method, so it is hoisted to the
+            // top rather than pushed down to the DELETE transaction.
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.PurgeOrphanEmptyNoteTabs");
             using var gate = LockConn();
             var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (registeredProjectPaths != null)
@@ -6388,8 +6424,10 @@ namespace MultiTerminal.Services
             // that gained content between selection and deletion is never removed —
             // closes the select-then-delete TOCTOU window.
             const string delSql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND LENGTH(COALESCE(content,'')) = 0";
-            using var writeGate = SqliteWriteGate.EnterWrite(
-                "TaskDatabase.PurgeOrphanEmptyNoteTabs", $"{orphans.Count} orphans");
+            // No EnterWrite here: the method-level scope above already holds the gate. Re-entering
+            // would be harmless (the gate is reentrant) but would report the INNER owner in a busy
+            // dump instead of the whole cleanup, and would obscure that the gate is held across the
+            // preceding SELECT too.
             using (var tx = _connection.BeginTransaction())
             {
                 foreach (var (path, name) in orphans)

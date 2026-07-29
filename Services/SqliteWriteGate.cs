@@ -34,6 +34,25 @@ namespace MultiTerminal.Services
     /// the same DB family (see <see cref="MultiterminalDb"/>). <c>busy_timeout</c> plus
     /// <see cref="SqliteBusyRetry"/> remain the backstop for that residual race. Phase 2 bounds the
     /// in-process wait; Phase 3 absorbs what is left.</para>
+    ///
+    /// <para><b>LOCK ORDERING — GLOBAL BEFORE LOCAL. Non-negotiable.</b> A writer that also takes its
+    /// owner's local lock (<c>TaskDatabase.LockConn()</c>, <c>CodeGraphDatabase</c>'s
+    /// <c>_syncLock</c>, <c>KnowledgeDatabase._gate</c>) MUST call <see cref="EnterWrite"/>
+    /// <b>first</b>, then the local lock. The reverse order was the shape shipped in the first Phase 2
+    /// pass and it is a genuine defect: the acquire below can wait up to
+    /// <see cref="DefaultAcquireTimeoutMs"/>, and serving that wait while holding
+    /// <c>TaskDatabase._dbLock</c> stalls all ~162 <c>LockConn()</c> sites — <b>reads included</b> —
+    /// rather than just the writers the gate is meant to order. It also inverted ordering relative to
+    /// <c>CodeGraph.ChunkedWritePass</c>, which always took the gate first.</para>
+    ///
+    /// <para>Global-before-local is also the safe direction: a gate holder then waiting on a local lock
+    /// cannot cycle, because the threads holding those local locks never wait on this gate. Note the
+    /// prose at <c>TaskDatabase.cs</c> says <c>LockConn()</c> must be the "FIRST statement"; the rule
+    /// that is actually machine-enforced (<c>scripts/verify-taskdb-gate.mjs</c>) is
+    /// gate-before-first-<c>_connection</c>-use, and the documented purpose is that the local lock must
+    /// span the whole command/reader/transaction lifecycle. <see cref="EnterWrite"/> touches no
+    /// connection, so hoisting it above <c>LockConn()</c> satisfies both the census and that intent.
+    /// <c>scripts/verify-writegate.mjs</c> check (4) enforces this ordering.</para>
     /// </summary>
     public static class SqliteWriteGate
     {
@@ -92,10 +111,18 @@ namespace MultiTerminal.Services
         ///
         /// <para><b>Fail-soft, never a new hang.</b> If the gate cannot be acquired within
         /// <paramref name="timeoutMs"/> the write proceeds UNGATED with a warning rather than
-        /// blocking. Worst case degrades to pre-Phase-2 behavior, so this can never be worse than the
-        /// status quo. Load-bearing: some writes run on the UI thread (e.g.
+        /// blocking. Load-bearing: some writes run on the UI thread (e.g.
         /// <c>PurgeOrphanEmptyNoteTabs</c> from MainForm startup), where an unbounded wait behind a
         /// code-graph chunk would visibly freeze the app.</para>
+        ///
+        /// <para><b>Honest bound on "no worse than the status quo".</b> An earlier revision of this doc
+        /// claimed a fall-through "can never be worse than the status quo". That is true of the SQLite
+        /// write lock itself, but it is NOT true of wall-clock latency once a local lock is involved:
+        /// the fall-through path still spent <paramref name="timeoutMs"/> waiting first, so a writer's
+        /// total worst case is the acquire budget PLUS the pre-existing <c>busy_timeout</c>. The
+        /// global-before-local ordering rule above is what keeps that added latency confined to
+        /// writers instead of stalling an owner's readers behind its local lock. Fall-throughs are
+        /// logged at Warning precisely because they are the case where the fix stops helping.</para>
         /// </summary>
         /// <param name="owner">Code path holding the write, e.g. "SessionMemory.IndexSessionFile".</param>
         /// <param name="detail">Per-call specifics (file name, chunk range) for the busy dump.</param>
