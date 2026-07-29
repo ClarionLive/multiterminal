@@ -1,0 +1,418 @@
+#!/usr/bin/env node
+// verify-writegate.mjs — falsifiable guard for the SqliteWriteGate fairness invariant (task a5ac5f71
+// Phase 4; the machine-checked form of the folded ticket 7737d613).
+//
+// WHY THIS EXISTS. Phase 1 measured the defect: CodeGraph.ChunkedWritePass ran 9 write transactions
+// across an 8.86s window with 0-1ms gaps (~99.6% write-lock duty cycle), starving a competitor that
+// burned its full 5s busy_timeout without ever seeing a window wider than 1ms. The longest single
+// hold (3151ms) was UNDER the timeout, so this was never a timeout bug — it was a FAIRNESS bug.
+// Phase 2 fixed it with Services/SqliteWriteGate.cs, a process-wide queued gate.
+//
+// The fix is only as durable as its enforcement. Phase 2's "every write transaction is gated" was
+// verified BY GREP, once, by hand. That is exactly the kind of guarantee that rots: the next person
+// to add a transaction has no way to know the rule exists. This script makes it fail the build
+// instead, in the same "enumerate, don't prose" dialect as verify-taskdb-gate.mjs / verify-logging.mjs
+// / verify-writepath.mjs.
+//
+// THREE falsifiable checks (each has --self-test negative fixtures):
+//
+//   (1) TXN GATING — every real transaction-open call site (`<receiver>.BeginTransaction(`) in
+//       production code must sit in a method that entered SqliteWriteGate FIRST. A missing gate, or a
+//       gate acquired AFTER the transaction opens (which leaves the open racing unfairly), FAILS.
+//       A transaction-open line the method walker cannot attribute also FAILS, so an oddly-formatted
+//       site cannot hide. Runs on CODE ONLY (see maskCodeOnly): the comments and the method
+//       DECLARATION `public SQLiteTransaction BeginTransaction()` are not call sites, and counting
+//       them is precisely the mistake a naive grep makes here — Services/CodeGraphDatabase.cs looks
+//       like 4 transaction sites to grep and is really 1.
+//
+//   (2) CO-EXTENSIVE ENTRY POINT (design property 4) — no production file may call
+//       `WriteContentionDiagnostics.BeginWrite(` directly; only SqliteWriteGate may. The gate scope
+//       owns BOTH the semaphore and the Phase 1 diagnostics registration, so routing around
+//       EnterWrite to get the diagnostics alone would silently produce an OBSERVED-but-UNGATED write
+//       — a site that looks instrumented in the busy dump while still racing. This keeps the gated
+//       set and the observed set provably identical: one omission to catch, not two.
+//
+//   (3) BOUNDED ACQUIRE (design property 3) — SqliteWriteGate's own semaphore wait must pass a
+//       timeout. A bare `Gate.Wait()` would wait forever and reintroduce an unbounded hang, and the
+//       fail-soft fall-through exists specifically because some writes run on the UI thread
+//       (PurgeOrphanEmptyNoteTabs from MainForm startup), where blocking behind a code-graph chunk
+//       visibly freezes the app. This regression would be silent in review and loud only in
+//       production, which is what makes it worth a guard.
+//
+// KNOWN LIMITATION — READ BEFORE TRUSTING A GREEN RUN. This census covers write TRANSACTIONS, which
+// is the scope the Phase 2 plan specifies. It does NOT prove that every single-statement autocommit
+// write is gated. That class is real: Phase 1 caught TaskDatabase.SaveTerminalActivity losing
+// SQLITE_BUSY as a bare ExecuteNonQuery, swallowed by RaiseSafe, silently never writing its row and
+// producing no busy dump because it was not a wrapped transaction. That one site is now gated, but
+// autocommit writers as a CLASS are out of scope here — enumerating them means classifying SQL text
+// that maskCodeOnly deliberately blanks. So: "green" means every write transaction is gated, NOT
+// that every write is gated. Do not let this script's PASS line be read as the stronger claim.
+//
+// Usage:
+//   node scripts/verify-writegate.mjs             # exit 1 on any violation
+//   node scripts/verify-writegate.mjs --self-test # prove the checks falsify (negative fixtures)
+//
+// Adding a transaction? Wrap it: `using var writeGate = SqliteWriteGate.EnterWrite("Owner.Method", detail);`
+// BEFORE the BeginTransaction call. Exemptions live in DELEGATING_ACCESSORS below — a NAMED,
+// reviewable edit to THIS file, never an in-code sentinel a method can quietly apply to itself.
+
+import fs from 'fs';
+import path from 'path';
+
+const doSelfTest = process.argv.slice(2).includes('--self-test');
+
+const REPO_ROOT = path.join(
+  path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1'), '..');
+
+// A real transaction OPEN: a call through a receiver. The bare declaration
+// `public SQLiteTransaction BeginTransaction()` has no receiver and is therefore not matched —
+// see check (1)'s note about CodeGraphDatabase.
+const TXN_OPEN_RE = /\b[A-Za-z_]\w*\s*\.\s*BeginTransaction\s*\(/;
+const GATE_RE = /\bSqliteWriteGate\s*\.\s*EnterWrite\s*\(/;
+const RAW_DIAG_RE = /\bWriteContentionDiagnostics\s*\.\s*BeginWrite\s*\(/;
+
+const GATE_FILE = 'Services/SqliteWriteGate.cs';
+
+// Transaction opens that legitimately have NO gate of their own because they DELEGATE the
+// transaction to a caller. Each entry must state why, and the delegated-to caller is still checked
+// by (1) independently — so the invariant holds transitively rather than on trust. If someone adds a
+// SECOND, ungated caller of a delegating accessor, that new CALL SITE fails check (1).
+const DELEGATING_ACCESSORS = new Map([
+  ['Services/CodeGraphDatabase.cs::BeginTransaction',
+    'pure delegating accessor — hands the SQLiteTransaction to its caller and holds no write itself. '
+    + 'Its only caller is CSharpCodeGraphIndexer.ChunkedWritePass, which check (1) verifies IS gated; '
+    + 'gating here too would double-enter (harmless, the gate is reentrant) but would misreport the '
+    + 'owner in the busy dump as the accessor instead of the actual write pass.'],
+]);
+
+// Separate DB families — NOT multiterminal.db, so the multiterminal.db write gate does not apply.
+// Mirrors verify-taskdb-gate.mjs's SEPARATE_DB so the two censuses agree on what is in scope.
+const SEPARATE_DB = new Set([
+  'Services/MessageQueueDatabase.cs',      // messages.db — the inter-terminal message queue.
+  'Services/GatewayIntegrationService.cs', // McpGateway DB — a separate process/DB.
+]);
+
+// Build artifacts, the test project (tests drive an isolated temp DB and may open transactions on it
+// without the production gate), and nested worktrees under .claude are out of scope.
+const SKIP_DIRS = new Set(['node_modules', 'bin', 'obj', '.git', '.claude', 'staged', 'Deploy',
+  'packages', 'TestResults', '.vs', 'MultiTerminal.Tests']);
+
+// Blank the CONTENTS of comments and string/char literals (preserving length and newlines) so
+// detection sees CODE only. Same masker as verify-taskdb-gate.mjs — a real call never lives inside a
+// comment or a string, and this codebase's SQL literals are full of words that would false-positive.
+function maskCodeOnly(src) {
+  let out = '';
+  let state = 'code'; // code | line | block | str | verq | chr
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    const c2 = i + 1 < src.length ? src[i + 1] : '';
+    if (state === 'code') {
+      if (c === '/' && c2 === '/') { state = 'line'; out += '  '; i++; continue; }
+      if (c === '/' && c2 === '*') { state = 'block'; out += '  '; i++; continue; }
+      if (c === '@' && c2 === '"') { state = 'verq'; out += '  '; i++; continue; }
+      if (c === '"') { state = 'str'; out += ' '; continue; }
+      if (c === '\'') { state = 'chr'; out += ' '; continue; }
+      out += c; continue;
+    }
+    if (state === 'line') {
+      if (c === '\n') { state = 'code'; out += '\n'; continue; }
+      out += (c === '\r' ? '\r' : ' '); continue;
+    }
+    if (state === 'block') {
+      if (c === '*' && c2 === '/') { state = 'code'; out += '  '; i++; continue; }
+      out += (c === '\n' ? '\n' : c === '\r' ? '\r' : ' '); continue;
+    }
+    if (state === 'str') {
+      if (c === '\\') { out += '  '; i++; continue; }
+      if (c === '"') { state = 'code'; out += ' '; continue; }
+      out += (c === '\n' ? '\n' : ' '); continue;
+    }
+    if (state === 'verq') {
+      if (c === '"' && c2 === '"') { out += '  '; i++; continue; }
+      if (c === '"') { state = 'code'; out += ' '; continue; }
+      out += (c === '\n' ? '\n' : ' '); continue;
+    }
+    if (state === 'chr') {
+      if (c === '\\') { out += '  '; i++; continue; }
+      if (c === '\'') { state = 'code'; out += ' '; continue; }
+      out += ' '; continue;
+    }
+  }
+  return out;
+}
+
+function stripAngleBrackets(s) {
+  let prev;
+  do { prev = s; s = s.replace(/<[^<>]*>/g, ''); } while (s !== prev);
+  return s;
+}
+
+function methodName(sig) {
+  const m = stripAngleBrackets(sig).match(/([A-Za-z_]\w*)\s*\(/);
+  return m ? m[1] : null;
+}
+
+// Parse block-methods using this codebase's consistent Allman/8-space style (same walker as
+// verify-taskdb-gate.mjs): an 8-space access-modifier signature containing `(`, a body opening at a
+// lone 8-space `{`, closing at the next lone `        }`. Nested blocks sit at >=12 spaces so their
+// braces never collide with the method frame.
+function parseMethods(lines) {
+  const methods = [];
+  const ACCESS = /^ {8}(public|private|internal|protected)\b/;
+  for (let i = 0; i < lines.length; i++) {
+    if (!ACCESS.test(lines[i])) continue;
+    let j = i;
+    let sig = '';
+    let aborted = false;
+    while (j < lines.length && lines[j].trim() !== '{') {
+      sig += lines[j] + ' ';
+      if (/;\s*$/.test(lines[j]) || /=>/.test(lines[j])) { aborted = true; break; }
+      j++;
+    }
+    if (aborted || j >= lines.length || lines[j].trim() !== '{' || !sig.includes('(')) continue;
+    const name = methodName(sig);
+    if (!name) continue;
+    let k = j + 1;
+    while (k < lines.length && lines[k] !== '        }') k++;
+    methods.push({ name, sigStart: i, bodyOpen: j, bodyClose: k });
+    i = k;
+  }
+  return methods;
+}
+
+// (1) TXN GATING for one file. `allowKey(name)` decides the DELEGATING_ACCESSORS exemption.
+// Pure over `lines` so the self-test can feed it synthetic snippets with no disk access.
+function analyzeTxnGating(lines, allowKey = () => false) {
+  const methods = parseMethods(lines);
+  const violations = [];
+  const gated = [];
+  const exempt = [];
+  const attributed = new Array(lines.length).fill(false);
+
+  for (const m of methods) {
+    for (let k = m.bodyOpen; k <= m.bodyClose; k++) attributed[k] = true;
+    const body = maskCodeOnly(lines.slice(m.bodyOpen + 1, m.bodyClose).join('\n'));
+    const txnIdx = body.search(TXN_OPEN_RE);
+    if (txnIdx === -1) continue; // no transaction opened here
+
+    if (allowKey(m.name)) { exempt.push(m); continue; }
+
+    const gateIdx = body.search(GATE_RE);
+    if (gateIdx === -1) {
+      violations.push({ m, kind: 'missing-gate',
+        why: 'opens a transaction but never enters SqliteWriteGate — this write races unfairly '
+          + '(add `using var writeGate = SqliteWriteGate.EnterWrite("Owner.Method", detail);`)' });
+    } else if (gateIdx > txnIdx) {
+      violations.push({ m, kind: 'gate-order',
+        why: `enters the gate (offset ${gateIdx}) AFTER opening the transaction (offset ${txnIdx}) `
+          + '— the open itself is still unfair; hoist the gate above BeginTransaction' });
+    } else {
+      gated.push(m);
+    }
+  }
+
+  // A transaction-open the method walker could not attribute (expression body, unusual indentation)
+  // must FAIL rather than pass silently unchecked.
+  const unattributed = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (attributed[i]) continue;
+    if (TXN_OPEN_RE.test(maskCodeOnly(lines[i]))) unattributed.push(i + 1);
+  }
+
+  return { violations, gated, exempt, unattributed };
+}
+
+// (2) Direct WriteContentionDiagnostics.BeginWrite use — only the gate itself may.
+function findRawDiagnostics(lines) {
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (RAW_DIAG_RE.test(maskCodeOnly(lines[i]))) hits.push(i + 1);
+  }
+  return hits;
+}
+
+// (3) The gate's acquire must be BOUNDED: a wait with an argument, never a bare Wait().
+// Returns a violation string, or null when the invariant holds.
+function checkBoundedAcquire(src) {
+  const code = maskCodeOnly(src);
+  if (/\bGate\s*\.\s*Wait\s*\(\s*\)/.test(code)) {
+    return 'SqliteWriteGate performs a BARE `Gate.Wait()` — an unbounded wait. Property 3 of the '
+      + 'design requires a timeout so a UI-thread write can never block behind a code-graph chunk; '
+      + 'pass the acquire budget (timeoutMs).';
+  }
+  if (!/\bGate\s*\.\s*Wait\s*\(\s*[^)\s]/.test(code)) {
+    return 'SqliteWriteGate has no recognizable bounded `Gate.Wait(<timeout>)` acquire — the gate '
+      + 'must acquire with an explicit timeout (or this guard has gone stale and needs updating '
+      + 'alongside the refactor).';
+  }
+  return null;
+}
+
+function scanFiles(root) {
+  const files = [];
+  function walk(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name)) continue;
+        walk(path.join(dir, e.name));
+      } else if (e.isFile() && e.name.endsWith('.cs')) {
+        files.push(path.join(dir, e.name));
+      }
+    }
+  }
+  walk(root);
+  return files;
+}
+
+// ---- self-test: negative fixtures prove each check falsifies. A census that cannot fail is theatre.
+function selfTest() {
+  let allOk = true;
+  const report = (label, name, got, exp) => {
+    const ok = got === exp;
+    allOk = allOk && ok;
+    console.log(`  ${ok ? 'ok  ' : 'FAIL'} [${label}] ${name} → ${got ? 'FLAGGED' : 'passed'} (expected ${exp ? 'FLAGGED' : 'passed'})`);
+  };
+
+  const gateCases = [
+    { name: 'positive: gate entered before BeginTransaction', exp: false,
+      code: '        public void Good()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X.Good");\n            using var tx = _connection.BeginTransaction();\n        }' },
+    { name: 'positive: block-form using + gate first', exp: false,
+      code: '        public void GoodBlock()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("X.GoodBlock");\n            using (var tx = _connection.BeginTransaction())\n            {\n            }\n        }' },
+    { name: 'positive: gated txn opened through another owner (_db receiver)', exp: false,
+      code: '        private void Chunk()\n        {\n            using var writeGate = SqliteWriteGate.EnterWrite("CodeGraph.ChunkedWritePass");\n            var txn = _db.BeginTransaction();\n        }' },
+    { name: '(a) THE regression: gate deleted, transaction remains', exp: true,
+      code: '        public void GateDeleted()\n        {\n            using var tx = _connection.BeginTransaction();\n        }' },
+    { name: '(b) gate acquired AFTER the transaction opens', exp: true,
+      code: '        public void OutOfOrder()\n        {\n            using var tx = _connection.BeginTransaction();\n            using var writeGate = SqliteWriteGate.EnterWrite("X.OutOfOrder");\n        }' },
+    { name: '(c) only the OLD diagnostics call, no gate (the Phase 1 -> Phase 2 backslide)', exp: true,
+      code: '        public void DiagOnly()\n        {\n            using var contention = WriteContentionDiagnostics.BeginWrite("X.DiagOnly");\n            using var tx = _connection.BeginTransaction();\n        }' },
+    { name: '(d) comment-only mention of the gate does not satisfy it', exp: true,
+      code: '        public void CommentOnly()\n        {\n            // remember SqliteWriteGate.EnterWrite("X") here\n            using var tx = _connection.BeginTransaction();\n        }' },
+    { name: 'negative-control: no transaction at all is not flagged', exp: false,
+      code: '        public void NoTxn()\n        {\n            using var cmd = new SQLiteCommand("SELECT 1", _connection);\n        }' },
+    { name: 'negative-control: the BeginTransaction DECLARATION is not a call site', exp: false,
+      code: '        public SQLiteTransaction BeginTransaction()\n        {\n            return null;\n        }' },
+  ];
+  for (const c of gateCases) {
+    const r = analyzeTxnGating(c.code.split('\n'));
+    report('txn', c.name, r.violations.length > 0 || r.unattributed.length > 0, c.exp);
+  }
+
+  // The exemption must be NAMED, and must not become a blanket pass for the whole file.
+  const accessor = '        public SQLiteTransaction BeginTransaction()\n        {\n            using var g = Locked();\n            return _connection.BeginTransaction();\n        }';
+  report('exempt', 'a NAMED delegating accessor is exempt',
+    analyzeTxnGating(accessor.split('\n'), n => n === 'BeginTransaction').violations.length > 0, false);
+  report('exempt', 'the SAME accessor without the exemption FAILS (proves the entry is load-bearing)',
+    analyzeTxnGating(accessor.split('\n')).violations.length > 0, true);
+  const otherMethod = '        public void Unrelated()\n        {\n            using var tx = _connection.BeginTransaction();\n        }';
+  report('exempt', 'exempting one method does NOT exempt a sibling in the same file',
+    analyzeTxnGating(otherMethod.split('\n'), n => n === 'BeginTransaction').violations.length > 0, true);
+
+  // Unattributed sites must fail rather than slip through unchecked.
+  report('attrib', 'a transaction open outside any parsed method FAILS',
+    analyzeTxnGating(['    var tx = _connection.BeginTransaction();']).unattributed.length > 0, true);
+
+  const diagCases = [
+    { name: 'a direct WriteContentionDiagnostics.BeginWrite call is detected', exp: true,
+      code: 'using var c = WriteContentionDiagnostics.BeginWrite("X");' },
+    { name: 'a commented-out one is not', exp: false,
+      code: '// using var c = WriteContentionDiagnostics.BeginWrite("X");' },
+    { name: 'the gate call is not mistaken for it', exp: false,
+      code: 'using var g = SqliteWriteGate.EnterWrite("X");' },
+  ];
+  for (const c of diagCases) {
+    report('coext', c.name, findRawDiagnostics(c.code.split('\n')).length > 0, c.exp);
+  }
+
+  const boundedCases = [
+    { name: 'bounded `Gate.Wait(timeoutMs)` passes', exp: false, code: 'acquired = Gate.Wait(timeoutMs);' },
+    { name: 'THE regression: bare `Gate.Wait()` is unbounded and FAILS', exp: true, code: 'acquired = Gate.Wait();' },
+    { name: 'no wait at all FAILS (guard cannot silently go stale)', exp: true, code: 'acquired = true;' },
+    { name: 'a commented-out bounded wait does not satisfy the guard', exp: true, code: '// acquired = Gate.Wait(timeoutMs);' },
+  ];
+  for (const c of boundedCases) {
+    report('bounded', c.name, checkBoundedAcquire(c.code) !== null, c.exp);
+  }
+
+  console.log(allOk
+    ? '\nSELF-TEST PASSED — txn-gating, exemption, attribution, co-extensiveness and boundedness all provably reject the bad shapes.'
+    : '\nSELF-TEST FAILED — a check does not falsify correctly.');
+  process.exit(allOk ? 0 : 1);
+}
+
+if (doSelfTest) selfTest();
+
+// -------------------------------------------------------------------------------------
+let failed = false;
+const problems = [];
+let totalGated = 0;
+let totalExempt = 0;
+const filesWithTxns = [];
+
+for (const abs of scanFiles(REPO_ROOT)) {
+  const rel = path.relative(REPO_ROOT, abs).replace(/\\/g, '/');
+  const src = fs.readFileSync(abs, 'utf8');
+  const lines = src.split(/\r?\n/);
+
+  // (2) applies to EVERY production file, including ones with no transactions: routing around the
+  // single entry point is the failure this catches, and it can happen anywhere.
+  if (rel !== GATE_FILE) {
+    for (const ln of findRawDiagnostics(lines)) {
+      problems.push(`${rel}:${ln} CO-EXTENSIVE — calls WriteContentionDiagnostics.BeginWrite directly; `
+        + 'go through SqliteWriteGate.EnterWrite so the write is GATED as well as observed');
+    }
+  }
+
+  if (SEPARATE_DB.has(rel)) continue; // different DB file — the multiterminal.db gate does not apply
+
+  const allowKey = name => DELEGATING_ACCESSORS.has(`${rel}::${name}`);
+  const r = analyzeTxnGating(lines, allowKey);
+  if (r.gated.length || r.exempt.length || r.violations.length || r.unattributed.length) {
+    filesWithTxns.push({ rel, r });
+  }
+  totalGated += r.gated.length;
+  totalExempt += r.exempt.length;
+  for (const v of r.violations) {
+    problems.push(`${rel}:${v.m.sigStart + 1} TXN GATING [${v.kind}] in ${v.m.name}(): ${v.why}`);
+  }
+  for (const ln of r.unattributed) {
+    problems.push(`${rel}:${ln} TXN GATING — transaction open not attributable to a parsed method, `
+      + 'so its gating cannot be verified; reformat it into a normal method body');
+  }
+}
+
+// (3) the gate's own boundedness.
+const gateAbs = path.join(REPO_ROOT, GATE_FILE);
+if (!fs.existsSync(gateAbs)) {
+  problems.push(`${GATE_FILE} NOT FOUND — the write gate is the subject of this invariant; if it was `
+    + 'renamed or removed, update GATE_FILE (and reconsider whether the fairness fix still exists).');
+} else {
+  const boundedViolation = checkBoundedAcquire(fs.readFileSync(gateAbs, 'utf8'));
+  if (boundedViolation) problems.push(`${GATE_FILE} BOUNDED ACQUIRE — ${boundedViolation}`);
+}
+
+if (problems.length) {
+  failed = true;
+  console.log(`\nFAIL (${problems.length}):`);
+  for (const p of problems) console.log(`  - ${p}`);
+} else {
+  console.log('Write-gate census (a5ac5f71 Phase 4 — machine-checked form of folded 7737d613):');
+  for (const { rel, r } of filesWithTxns.sort((a, b) => a.rel.localeCompare(b.rel))) {
+    const bits = [`${r.gated.length} gated`];
+    if (r.exempt.length) bits.push(`${r.exempt.length} exempt delegating accessor`);
+    console.log(`  ok  ${rel} — ${bits.join(', ')}`);
+  }
+  console.log(`\n  write transactions gated: ${totalGated}`);
+  console.log(`  named delegating-accessor exemptions: ${totalExempt}`);
+  for (const [key, why] of DELEGATING_ACCESSORS) console.log(`    - ${key}: ${why.split(' — ')[0]}`);
+  console.log('\nSCOPE (a green run does NOT mean "every write is gated"): this census covers write '
+    + 'TRANSACTIONS. Single-statement autocommit writes are out of scope — that class is real '
+    + '(TaskDatabase.SaveTerminalActivity lost SQLITE_BUSY as a bare ExecuteNonQuery in Phase 1 and is '
+    + 'now gated), but enumerating it requires classifying SQL text this script deliberately masks.');
+  console.log('\nPASS — every write transaction enters SqliteWriteGate before opening, the gate is the '
+    + 'sole entry point to the contention census, and its acquire is bounded.');
+}
+
+process.exit(failed ? 1 : 0);

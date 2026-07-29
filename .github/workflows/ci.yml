@@ -149,6 +149,19 @@ jobs:
       - name: mcp node tests
         run: node --test "mcp/test/*.test.mjs"
 
+      # ---- Invariant censuses (scripts/verify-*.mjs). These guard architectural rules the C#
+      #      compiler cannot see: one-owner-per-SQLite-connection (bb2b0104), no bare event raises,
+      #      the logging sweep, write-path locking, and the SqliteWriteGate write-fairness invariant
+      #      (a5ac5f71). Until task a5ac5f71 they ran ONLY when an agent remembered — which is exactly
+      #      how a verify-logging break shipped unnoticed. Wired here so they cannot rot again.
+      #      Self-test first: a census that cannot falsify is theatre, so the negative fixtures must
+      #      pass BEFORE the real run's green means anything.
+      - name: invariant censuses — negative fixtures
+        run: npm run verify:self-test
+
+      - name: invariant censuses — check
+        run: npm run verify
+
       - name: Upload .NET test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
