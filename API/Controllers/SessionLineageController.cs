@@ -330,7 +330,30 @@ namespace MultiTerminal.API.Controllers
             if (service == null)
                 return ServiceUnavailable();
 
-            var record = service.RegisterSession(request.SessionId, request.AgentName, request.ProjectPath);
+            // Task a5ac5f71: during MT startup, bulk indexers can hold the multiterminal.db write
+            // lock past the 5s busy_timeout, so this write can lose the race and throw SQLITE_BUSY.
+            // The write is idempotent (CloseOpenSessions is an UPDATE, SaveSessionLineage an upsert
+            // keyed by session_id), so a bounded retry converts a transient loss into a slightly
+            // slower success. If the retries are exhausted, answer 503 + Retry-After — registration
+            // is the session-lifecycle entry point, and an unhandled 500 here reads as a broken
+            // endpoint when the truth is "briefly contended, try again".
+            SessionLineageRecord record;
+            try
+            {
+                record = await SqliteBusyRetry.ExecuteAsync(
+                    "RestApi POST /api/session-lineage/register",
+                    () => service.RegisterSession(request.SessionId, request.AgentName, request.ProjectPath))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (WriteContentionDiagnostics.IsBusyException(ex))
+            {
+                Response.Headers.RetryAfter = "2";
+                return Problem(
+                    detail: "The registration write lost the database lock race (SQLITE_BUSY) even after retries — "
+                        + "the database is briefly contended, most likely by startup indexing. Retry shortly.",
+                    statusCode: 503);
+            }
+
             if (record == null)
                 return Problem(detail: "Failed to register session", statusCode: 500);
 
