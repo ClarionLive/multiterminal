@@ -1506,7 +1506,7 @@ namespace MultiTerminal.Services
             // a partial write can't leave the column half-rebalanced. Whole
             // transaction is serialized on _dbLock (runtime site: MessageBroker.ReorderTask).
             using var gate = LockConn();
-            using var contention = WriteContentionDiagnostics.BeginWrite("TaskDatabase.RebalanceSortOrder", status);
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.RebalanceSortOrder", status);
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -1556,7 +1556,7 @@ namespace MultiTerminal.Services
         public List<string> SetTaskActiveTransactional(string taskId, IReadOnlyList<string> siblingIdsToPause, DateTime pausedAt)
         {
             using var gate = LockConn();
-            using var contention = WriteContentionDiagnostics.BeginWrite("TaskDatabase.SetTaskActiveTransactional", taskId);
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SetTaskActiveTransactional", taskId);
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -2961,6 +2961,16 @@ namespace MultiTerminal.Services
         public void SaveTerminalActivity(TerminalActivity activity)
         {
             using var gate = LockConn();
+
+            // Gated even though this is a single AUTOCOMMIT statement, not a transaction: it still takes
+            // the SQLite file write lock and can still lose the race. Phase 1 caught exactly that —
+            // 12:47:14.504, SQLITE_BUSY here via ActivityService.UpdateActivity <- OnMcpTerminalRegistered,
+            // SWALLOWED by MessageBroker.RaiseSafe, so no 500 surfaced and the activity row silently never
+            // wrote. It also produced NO WriteContention dump, because a bare ExecuteNonQuery was not one
+            // of the wrapped transaction sites. Entering the gate fixes both halves: the write is admitted
+            // fairly, and it now appears in the busy-dump census like every other writer.
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.SaveTerminalActivity", activity?.Terminal);
+
             const string sql = @"
                 INSERT INTO terminal_activity (terminal, status, activity, blocked_by, task_id, plan_id, updated_at,
                                                in_critical_section, critical_section_until)
@@ -4924,7 +4934,7 @@ namespace MultiTerminal.Services
         {
             // Whole transaction serialized on _dbLock (runtime site: session-import Task.Run threads).
             using var gate = LockConn();
-            using var contention = WriteContentionDiagnostics.BeginWrite(
+            using var writeGate = SqliteWriteGate.EnterWrite(
                 "TaskDatabase.SaveSessionMessages", $"{sessionId} ({messages?.Count ?? 0} msgs)");
             using var transaction = _connection.BeginTransaction();
             try
@@ -6086,7 +6096,7 @@ namespace MultiTerminal.Services
 
             // Rebuild the table with the composite primary key, in a transaction so a
             // mid-rebuild failure leaves the original table intact.
-            using var contention = WriteContentionDiagnostics.BeginWrite("TaskDatabase.MigrateAddAgentToTaskWorktrees");
+            using var writeGate = SqliteWriteGate.EnterWrite("TaskDatabase.MigrateAddAgentToTaskWorktrees");
             using var tx = _connection.BeginTransaction();
             const string rebuildSql = @"
                 CREATE TABLE task_worktrees_new (
@@ -6378,7 +6388,7 @@ namespace MultiTerminal.Services
             // that gained content between selection and deletion is never removed —
             // closes the select-then-delete TOCTOU window.
             const string delSql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND LENGTH(COALESCE(content,'')) = 0";
-            using var contention = WriteContentionDiagnostics.BeginWrite(
+            using var writeGate = SqliteWriteGate.EnterWrite(
                 "TaskDatabase.PurgeOrphanEmptyNoteTabs", $"{orphans.Count} orphans");
             using (var tx = _connection.BeginTransaction())
             {
@@ -6463,7 +6473,7 @@ namespace MultiTerminal.Services
                 }
                 if (rows.Count == 0) return;
 
-                using var contention = WriteContentionDiagnostics.BeginWrite(
+                using var writeGate = SqliteWriteGate.EnterWrite(
                     "TaskDatabase.MigrateNormalizeNoteTabPaths", $"{rows.Count} rows");
                 using var tx = _connection.BeginTransaction();
                 foreach (var row in rows)

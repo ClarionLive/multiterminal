@@ -200,7 +200,7 @@ namespace MultiTerminal.Services
             // Write to SQLite in a transaction
             var fileLastModified = File.GetLastWriteTimeUtc(jsonlPath).ToString("o");
 
-            using var contention = WriteContentionDiagnostics.BeginWrite(
+            using var writeGate = SqliteWriteGate.EnterWrite(
                 "SessionMemory.IndexSessionFile", Path.GetFileName(jsonlPath));
             using var transaction = _connection.BeginTransaction();
             try

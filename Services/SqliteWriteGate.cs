@@ -1,0 +1,217 @@
+#nullable enable
+
+using System;
+using System.Diagnostics;
+using System.Threading;
+using MultiTerminal.Models;
+
+namespace MultiTerminal.Services
+{
+    /// <summary>
+    /// <para>Process-wide fairness gate for WRITES to the shared <c>multiterminal.db</c> file
+    /// (task a5ac5f71 Phase 2, folding ticket 7737d613's cross-owner dimension).</para>
+    ///
+    /// <para><b>The defect this fixes is FAIRNESS, not timeout or chunk size.</b> Per bb2b0104 every
+    /// connection owner (TaskDatabase, CodeGraphDatabase, SessionMemoryDatabase, KnowledgeDatabase,
+    /// ProjectDatabase, …) opens its OWN connection and serializes only ITS OWN threads
+    /// (<c>TaskDatabase.LockConn()</c>, CodeGraphDatabase's sync gate). Nothing coordinated writers
+    /// ACROSS owners. SQLite's file-level write lock is the contended resource and <c>busy_timeout</c>
+    /// retry carries <b>no fairness guarantee</b> — so a writer that reacquires every ~1ms starves a
+    /// competitor indefinitely, no matter how large the timeout.</para>
+    ///
+    /// <para>Phase 1 measured exactly that: <c>CodeGraph.ChunkedWritePass</c> ran 9 write transactions
+    /// across an 8.86s window with <b>0–1ms gaps</b> — a ~<b>99.6% write-lock duty cycle</b> — while the
+    /// longest single hold (3151ms) stayed comfortably UNDER the 5s <c>busy_timeout</c>. The victim
+    /// burned its full 5s and never saw a window wider than 1ms. Ironically the chunking introduced by
+    /// 93ad8184 (to break up one 13–23s hold) is what created this shape: it traded a
+    /// timeout-exceeding hold for a starvation chain.</para>
+    ///
+    /// <para><b>Writes only.</b> WAL readers never block and never contend, so gating reads would
+    /// serialize the whole app for zero benefit.</para>
+    ///
+    /// <para><b>Cross-process limitation (do not overclaim).</b> This gate is in-process. It cannot
+    /// serialize against <c>mcp-session-history</c>'s better-sqlite3 indexer, a separate OS process on
+    /// the same DB family (see <see cref="MultiterminalDb"/>). <c>busy_timeout</c> plus
+    /// <see cref="SqliteBusyRetry"/> remain the backstop for that residual race. Phase 2 bounds the
+    /// in-process wait; Phase 3 absorbs what is left.</para>
+    /// </summary>
+    public static class SqliteWriteGate
+    {
+        /// <summary>
+        /// How long a writer waits for the gate before giving up and proceeding UNGATED. Chosen above
+        /// the longest hold Phase 1 observed (3151ms for a 25-file code-graph chunk) with headroom for
+        /// a slower disk, so the fall-through is a genuine anomaly rather than routine.
+        /// </summary>
+        public const int DefaultAcquireTimeoutMs = 10000;
+
+        private const string LogSource = "SqliteWriteGate";
+
+        private static readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
+
+        /// <summary>
+        /// Per-thread reentrancy depth. <b>THREAD-local, deliberately not AsyncLocal.</b> The gated
+        /// surface is fully synchronous — <c>TaskDatabase</c>'s own gate is a reentrant
+        /// <c>Monitor</c> for the same reason and its docs (TaskDatabase.cs "Never in an iterator or
+        /// async method") keep these paths sync on purpose. Thread affinity therefore matches the
+        /// ratified dialect exactly. <c>AsyncLocal</c> would additionally flow into child tasks
+        /// spawned INSIDE a gate scope, making them falsely believe they already hold the gate and
+        /// letting a genuinely concurrent write slip through ungated.
+        /// </summary>
+        private static readonly ThreadLocal<int> Depth = new ThreadLocal<int>();
+
+        private static DebugLogService? _log;
+
+        /// <summary>
+        /// Wires the shared <see cref="DebugLogService"/> sink. Called once by MainForm alongside
+        /// <see cref="WriteContentionDiagnostics.SetLogger"/>. Before wiring (or in unit tests) output
+        /// falls back to <see cref="Debug.WriteLine(string)"/>.
+        /// </summary>
+        public static void SetLogger(DebugLogService? logger) => _log = logger;
+
+        /// <summary>
+        /// True when the calling thread is already inside a gate scope. Exposed for tests and for
+        /// assertions; callers should not branch on it — <see cref="EnterWrite"/> already handles
+        /// reentrancy by passing through.
+        /// </summary>
+        public static bool IsHeldByCurrentThread => Depth.Value > 0;
+
+        /// <summary>
+        /// <para>Acquires the write gate and registers the Phase 1 contention scope, returning ONE
+        /// disposable that releases both. Wrap the full lifetime of a write transaction (or a
+        /// single autocommit write statement) on multiterminal.db:</para>
+        /// <code>using var gate = SqliteWriteGate.EnterWrite("CodeGraph.ChunkedWritePass", detail);</code>
+        ///
+        /// <para><b>One entry point on purpose.</b> Acquisition is co-extensive with the Phase 1
+        /// diagnostics census, so the GATED set and the OBSERVED set cannot drift: a future write that
+        /// forgets this call forgets its diagnostics too — one omission to catch, not two.</para>
+        ///
+        /// <para><b>Reentrant.</b> If this thread already holds the gate the call passes through
+        /// without re-acquiring (a nested write would otherwise self-deadlock). The nested scope is
+        /// still registered with <see cref="WriteContentionDiagnostics"/> so a busy dump shows the
+        /// inner owner.</para>
+        ///
+        /// <para><b>Fail-soft, never a new hang.</b> If the gate cannot be acquired within
+        /// <paramref name="timeoutMs"/> the write proceeds UNGATED with a warning rather than
+        /// blocking. Worst case degrades to pre-Phase-2 behavior, so this can never be worse than the
+        /// status quo. Load-bearing: some writes run on the UI thread (e.g.
+        /// <c>PurgeOrphanEmptyNoteTabs</c> from MainForm startup), where an unbounded wait behind a
+        /// code-graph chunk would visibly freeze the app.</para>
+        /// </summary>
+        /// <param name="owner">Code path holding the write, e.g. "SessionMemory.IndexSessionFile".</param>
+        /// <param name="detail">Per-call specifics (file name, chunk range) for the busy dump.</param>
+        /// <param name="timeoutMs">Acquire budget; defaults to <see cref="DefaultAcquireTimeoutMs"/>.</param>
+        public static IDisposable EnterWrite(string owner, string? detail = null, int timeoutMs = DefaultAcquireTimeoutMs)
+        {
+            // Reentrant pass-through FIRST: a nested write must never queue behind the gate its own
+            // thread is holding. Checked before any wait, so nesting costs nothing.
+            if (Depth.Value > 0)
+            {
+                Depth.Value++;
+                return new GateScope(WriteContentionDiagnostics.BeginWrite(owner, detail), acquired: false);
+            }
+
+            bool acquired;
+            var waited = Stopwatch.StartNew();
+            try
+            {
+                acquired = Gate.Wait(timeoutMs);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Gate torn down during shutdown — never block a late write on a disposed primitive.
+                acquired = false;
+            }
+
+            waited.Stop();
+
+            if (!acquired)
+            {
+                // Fail-soft: proceed without the gate. Logged at Warning because a fall-through means
+                // this write is once again racing unfairly — the exact condition Phase 2 exists to
+                // prevent — so a recurring line here is a real signal, not noise.
+                Log(
+                    DebugLogLevel.Warning,
+                    $"Write gate NOT acquired within {timeoutMs}ms by {owner}{FormatDetail(detail)} — " +
+                    "proceeding UNGATED (fail-soft). This write races unfairly; busy_timeout and " +
+                    "SqliteBusyRetry are its only protection.");
+            }
+            else if (waited.ElapsedMilliseconds >= WriteContentionDiagnostics.LongHoldWarnMs)
+            {
+                // A long QUEUE wait is healthy behaviour (the gate working as designed) but worth
+                // seeing: it quantifies how long fairness is costing this writer, and distinguishes
+                // "waited then succeeded" from the starvation it replaced.
+                Log(
+                    DebugLogLevel.Info,
+                    $"Write gate queued {waited.ElapsedMilliseconds}ms before admitting {owner}{FormatDetail(detail)}.");
+            }
+
+            if (acquired)
+            {
+                Depth.Value = 1;
+            }
+
+            return new GateScope(WriteContentionDiagnostics.BeginWrite(owner, detail), acquired);
+        }
+
+        private static void Log(DebugLogLevel level, string message)
+        {
+            var log = _log;
+            if (log != null)
+            {
+                log.Log(LogSource, level, message);
+            }
+            else
+            {
+                Debug.WriteLine($"[{LogSource}] {level}: {message}");
+            }
+        }
+
+        private static string FormatDetail(string? detail)
+            => string.IsNullOrEmpty(detail) ? string.Empty : " [" + detail + "]";
+
+        /// <summary>
+        /// Releases, in order: the diagnostics scope, then the semaphore (only if this scope actually
+        /// acquired it — a reentrant or failed-acquire scope must NOT release someone else's permit).
+        /// Idempotent, and never throws out of Dispose.
+        /// </summary>
+        private sealed class GateScope : IDisposable
+        {
+            private readonly IDisposable _contention;
+            private readonly bool _acquired;
+            private int _disposed;
+
+            public GateScope(IDisposable contention, bool acquired)
+            {
+                _contention = contention;
+                _acquired = acquired;
+            }
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+                try
+                {
+                    _contention.Dispose();
+                }
+                finally
+                {
+                    // Depth unwinds uniformly: `using var` guarantees LIFO disposal, so a decrement is
+                    // correct for the outermost (acquired, depth 1 -> 0) and nested (depth n -> n-1)
+                    // scopes alike. A failed-acquire (ungated) scope never incremented, hence the guard.
+                    if (Depth.Value > 0)
+                    {
+                        Depth.Value--;
+                    }
+
+                    if (_acquired)
+                    {
+                        try { Gate.Release(); }
+                        catch (ObjectDisposedException) { /* shutdown; nothing to release */ }
+                        catch (SemaphoreFullException) { /* defensive: never surface from Dispose */ }
+                    }
+                }
+            }
+        }
+    }
+}

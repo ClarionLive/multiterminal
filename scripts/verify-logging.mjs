@@ -132,6 +132,16 @@ const ALLOWLIST_SITES = new Map([
     'app entry/composition shim — the 4 Trace lines are splash/loading lifecycle events that fire before/around DebugLogService construction (created inside MainForm); no sink in scope'],
   ['Terminal/WebView2EnvironmentCache.cs',
     'static utility leaf — no instance seam for a sink; single cold Debug diagnostic (data-folder create failure)'],
+
+  // ── a5ac5f71 SQLite write-contention work — both are PRE-SINK fallbacks, same shape as the ────────
+  //    RestServer/PresenceAdapter null-sink sites above. These are STATIC services whose whole reason
+  //    to exist is the startup window: they are exercised by the very first write, which happens
+  //    BEFORE MainForm reaches its SetLogger wiring (and always, in unit tests). A "the sink is not
+  //    wired yet" message provably cannot be routed through the not-yet-wired sink.
+  ['Services/WriteContentionDiagnostics.cs',
+    'converted except 1 self-fallback: LogBusy writes Debug.WriteLine ONLY when the DebugLogService sink is still null — a startup-window diagnostic cannot log a "no sink" state through the null sink (same pattern as MultiTerminalRestServer)'],
+  ['Services/SqliteWriteGate.cs',
+    'converted except 1 self-fallback: the gate logs fall-throughs/queue-waits via Debug.WriteLine ONLY before SetLogger runs — the gate is taken by the first startup write, which precedes MainForm sink wiring (same pattern as MultiTerminalRestServer)'],
 ]);
 
 // ── OWNED BY cd8ca48c (Bob's GitExec refactor) this cycle — swept in 4c86f18d, not this ticket. ─────
@@ -258,6 +268,12 @@ if (process.argv.includes('--self-test')) {
     { r: 'Terminal/ConPtyTerminal.cs', n: 0, wantFail: false, why: 'the converted terminal file passes at zero' },
     { r: 'ChatPanel/ChatPanelDocument.cs', n: 2, wantFail: true, why: '4c86f18d: dir-deferral removed — a UI-dir file not explicitly converted/allowlisted now FAILS as UNACCOUNTED' },
     { r: 'API/MultiTerminalRestServer.cs', n: 1, wantFail: false, why: 'the RestServer self-fallback site is allowlisted (cannot log a null-sink fallback through the null sink)' },
+    // a5ac5f71: the two pre-sink startup-diagnostic fallbacks are allowlisted...
+    { r: 'Services/WriteContentionDiagnostics.cs', n: 1, wantFail: false, why: 'a5ac5f71 Phase 1: the LogBusy pre-sink fallback is allowlisted' },
+    { r: 'Services/SqliteWriteGate.cs', n: 1, wantFail: false, why: 'a5ac5f71 Phase 2: the write-gate pre-sink fallback is allowlisted' },
+    // ...but the allowlist must stay a NAMED exception, not a Services/ blanket: an unlisted new
+    // service under the same directory must still FAIL as UNACCOUNTED (negative fixture).
+    { r: 'Services/SqliteWriteGateNotReal.cs', n: 1, wantFail: true, why: 'an unlisted Services/ file with a Debug site must still FAIL — the a5ac5f71 entries are per-file, not a directory carve-out' },
   ];
   let bad = 0;
   for (const c of cases) {

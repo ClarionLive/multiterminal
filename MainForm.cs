@@ -479,6 +479,11 @@ namespace MultiTerminal
             // startup window — where the SQLITE_BUSY failures live — is covered from the first write.
             Services.WriteContentionDiagnostics.SetLogger(_debugLogService);
 
+            // Same for the Phase 2 write gate: it logs gate fall-throughs (a write proceeding UNGATED
+            // after the acquire timeout) and long queue waits. Both are startup-window signals, so wire
+            // it in the same breath — an unwired gate still gates correctly, it just logs to Debug only.
+            Services.SqliteWriteGate.SetLogger(_debugLogService);
+
             // Initialize McpConfigService — used by OnMcpJsonWriteRequested
             // Pass debug log callback so CLI errors are visible in the debug panel
             _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase,
