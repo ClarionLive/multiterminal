@@ -179,6 +179,8 @@ namespace MultiTerminal.Services
             for (int start = 0; start < syntaxTrees.Count; start += IndexChunkSize)
             {
                 int end = Math.Min(start + IndexChunkSize, syntaxTrees.Count);
+                using var contention = WriteContentionDiagnostics.BeginWrite(
+                    "CodeGraph.ChunkedWritePass", $"files {start}-{end - 1} of {syntaxTrees.Count}");
                 var txn = _db.BeginTransaction();
                 try
                 {

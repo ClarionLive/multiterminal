@@ -475,6 +475,10 @@ namespace MultiTerminal
             // Create debug log service (available immediately)
             _debugLogService = new DebugLogService();
 
+            // Wire the write-contention diagnostics sink (a5ac5f71) as early as possible so the
+            // startup window — where the SQLITE_BUSY failures live — is covered from the first write.
+            Services.WriteContentionDiagnostics.SetLogger(_debugLogService);
+
             // Initialize McpConfigService — used by OnMcpJsonWriteRequested
             // Pass debug log callback so CLI errors are visible in the debug panel
             _mcpConfigService = new Services.McpConfigService(_sharedProjectDatabase,
@@ -927,16 +931,27 @@ namespace MultiTerminal
                             var projects = _mcpServer.Broker.ProjectService?.GetAllRegisteredProjects();
                             if (sessionMemDb != null && projects != null)
                             {
+                                // a5ac5f71: this loop runs AFTER the REST server is live, so its write
+                                // burst overlaps incoming API writes — the prime startup-contention window.
+                                // The markers bound that window in the WriteContention log stream.
+                                var recoverySw = System.Diagnostics.Stopwatch.StartNew();
+                                Services.WriteContentionDiagnostics.MarkPhase("Crash-recovery session indexing started (REST API is already accepting requests)");
                                 foreach (var project in projects)
                                 {
                                     if (!string.IsNullOrEmpty(project.Path))
                                         sessionMemDb.IndexProjectSessions(project.Path);
                                 }
+
+                                Services.WriteContentionDiagnostics.MarkPhase($"Crash-recovery session indexing finished in {recoverySw.ElapsedMilliseconds}ms");
                             }
                         }
                         catch (Exception crEx)
                         {
                             _debugLogService?.Error("MainForm", $"Session memory crash recovery failed: {crEx.Message}");
+                            if (Services.WriteContentionDiagnostics.IsBusyException(crEx))
+                            {
+                                Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
+                            }
                         }
 
                         // Wire terminal stream resolver: resolves any terminal identifier

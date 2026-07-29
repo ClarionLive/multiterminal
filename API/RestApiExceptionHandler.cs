@@ -39,6 +39,15 @@ namespace MultiTerminal.API
                     "RestApi",
                     DebugLogLevel.Error,
                     $"Unhandled exception on {httpContext.Request.Method} {httpContext.Request.Path}: {exception}");
+
+                // a5ac5f71: a SQLITE_BUSY loss surfacing here means an API write lost the lock race
+                // past busy_timeout. Dump who held the write lock at that instant — the one piece of
+                // evidence the plain stack trace can never carry.
+                if (WriteContentionDiagnostics.IsBusyException(exception))
+                {
+                    WriteContentionDiagnostics.LogBusy(
+                        $"RestApi {httpContext.Request.Method} {httpContext.Request.Path}");
+                }
             }
             catch
             {

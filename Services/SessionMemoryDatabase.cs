@@ -200,6 +200,8 @@ namespace MultiTerminal.Services
             // Write to SQLite in a transaction
             var fileLastModified = File.GetLastWriteTimeUtc(jsonlPath).ToString("o");
 
+            using var contention = WriteContentionDiagnostics.BeginWrite(
+                "SessionMemory.IndexSessionFile", Path.GetFileName(jsonlPath));
             using var transaction = _connection.BeginTransaction();
             try
             {
@@ -276,6 +278,12 @@ namespace MultiTerminal.Services
             string claudeFolder = SessionLineageService.GetClaudeProjectFolder(projectPath);
             if (claudeFolder == null) return 0;
 
+            // Phase markers (a5ac5f71): each per-file IndexSessionFile opens its OWN short write
+            // transaction, so this loop is a sustained burst of back-to-back write locks — the
+            // starvation-shaped suspect for startup SQLITE_BUSY. The markers make the burst's
+            // extent visible in the same log stream as the busy dumps.
+            var burst = System.Diagnostics.Stopwatch.StartNew();
+            WriteContentionDiagnostics.MarkPhase($"IndexProjectSessions start: {projectPath}");
             int totalChunks = 0;
 
             // Top-level JSONL files
@@ -317,6 +325,8 @@ namespace MultiTerminal.Services
                 }
             }
 
+            WriteContentionDiagnostics.MarkPhase(
+                $"IndexProjectSessions end: {projectPath} — {totalChunks} chunks in {burst.ElapsedMilliseconds}ms");
             return totalChunks;
         }
 

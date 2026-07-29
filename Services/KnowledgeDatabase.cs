@@ -330,6 +330,7 @@ namespace MultiTerminal.Services
         public void BumpReferences(IEnumerable<int> ids)
         {
             using var gate = _gate.Enter();
+            using var contention = WriteContentionDiagnostics.BeginWrite("KnowledgeDatabase.BumpReferences");
             using var transaction = _connection.BeginTransaction();
             try
             {

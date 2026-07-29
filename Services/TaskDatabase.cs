@@ -1506,6 +1506,7 @@ namespace MultiTerminal.Services
             // a partial write can't leave the column half-rebalanced. Whole
             // transaction is serialized on _dbLock (runtime site: MessageBroker.ReorderTask).
             using var gate = LockConn();
+            using var contention = WriteContentionDiagnostics.BeginWrite("TaskDatabase.RebalanceSortOrder", status);
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -1555,6 +1556,7 @@ namespace MultiTerminal.Services
         public List<string> SetTaskActiveTransactional(string taskId, IReadOnlyList<string> siblingIdsToPause, DateTime pausedAt)
         {
             using var gate = LockConn();
+            using var contention = WriteContentionDiagnostics.BeginWrite("TaskDatabase.SetTaskActiveTransactional", taskId);
             using var tx = _connection.BeginTransaction();
             try
             {
@@ -4922,6 +4924,8 @@ namespace MultiTerminal.Services
         {
             // Whole transaction serialized on _dbLock (runtime site: session-import Task.Run threads).
             using var gate = LockConn();
+            using var contention = WriteContentionDiagnostics.BeginWrite(
+                "TaskDatabase.SaveSessionMessages", $"{sessionId} ({messages?.Count ?? 0} msgs)");
             using var transaction = _connection.BeginTransaction();
             try
             {
@@ -6082,6 +6086,7 @@ namespace MultiTerminal.Services
 
             // Rebuild the table with the composite primary key, in a transaction so a
             // mid-rebuild failure leaves the original table intact.
+            using var contention = WriteContentionDiagnostics.BeginWrite("TaskDatabase.MigrateAddAgentToTaskWorktrees");
             using var tx = _connection.BeginTransaction();
             const string rebuildSql = @"
                 CREATE TABLE task_worktrees_new (
@@ -6373,6 +6378,8 @@ namespace MultiTerminal.Services
             // that gained content between selection and deletion is never removed —
             // closes the select-then-delete TOCTOU window.
             const string delSql = "DELETE FROM project_note_tabs WHERE project_path = @path AND tab_name = @name AND LENGTH(COALESCE(content,'')) = 0";
+            using var contention = WriteContentionDiagnostics.BeginWrite(
+                "TaskDatabase.PurgeOrphanEmptyNoteTabs", $"{orphans.Count} orphans");
             using (var tx = _connection.BeginTransaction())
             {
                 foreach (var (path, name) in orphans)
@@ -6456,6 +6463,8 @@ namespace MultiTerminal.Services
                 }
                 if (rows.Count == 0) return;
 
+                using var contention = WriteContentionDiagnostics.BeginWrite(
+                    "TaskDatabase.MigrateNormalizeNoteTabPaths", $"{rows.Count} rows");
                 using var tx = _connection.BeginTransaction();
                 foreach (var row in rows)
                 {
