@@ -108,6 +108,17 @@ namespace MultiTerminal.Services
         /// </summary>
         private static readonly ThreadLocal<int> Depth = new ThreadLocal<int>();
 
+        /// <summary>
+        /// Whether this thread currently OWNS the semaphore permit — tracked separately from
+        /// <see cref="Depth"/> because the two answer different questions and conflating them was the
+        /// a5ac5f71 pipeline Run 3 defect. <see cref="Depth"/> means "am I inside a gate scope" and drives
+        /// the reentrancy pass-through; this means "was a permit actually acquired", and is what
+        /// <see cref="IsHeldByCurrentThread"/> reports. They diverge on exactly one branch — a fail-soft
+        /// fall-through, which IS a scope (so nested writes must pass through) but does NOT hold a permit
+        /// (so callers and tests must be able to see it raced ungated).
+        /// </summary>
+        private static readonly ThreadLocal<bool> PermitHeld = new ThreadLocal<bool>();
+
         private static DebugLogService? _log;
 
         /// <summary>
@@ -122,7 +133,7 @@ namespace MultiTerminal.Services
         /// assertions; callers should not branch on it — <see cref="EnterWrite"/> already handles
         /// reentrancy by passing through.
         /// </summary>
-        public static bool IsHeldByCurrentThread => Depth.Value > 0;
+        public static bool IsHeldByCurrentThread => PermitHeld.Value;
 
         /// <summary>
         /// <para>Acquires the write gate and registers the Phase 1 contention scope, returning ONE
@@ -202,9 +213,22 @@ namespace MultiTerminal.Services
                     $"Write gate queued {waited.ElapsedMilliseconds}ms before admitting {owner}{FormatDetail(detail)}.");
             }
 
+            // Depth is incremented on BOTH branches — scope ENTRY, not acquisition.
+            //
+            // This was the a5ac5f71 pipeline Run 3 HIGH. Keying depth on `acquired` made a fail-soft outer
+            // scope INVISIBLE to nested EnterWrite calls: they saw depth 0, each took a fresh acquire at
+            // its own (default 10s) budget, and the register unit's "one admission" became three — 22s of
+            // gate waiting on exactly the contended branch the ticket is about, WORSE than before the wrap
+            // existed. Permit ownership is tracked separately on the scope (`_acquired`), so incrementing
+            // here cannot cause an over-release.
+            //
+            // Passing through on the fall-through branch is not merely a fix, it is the CORRECT semantics:
+            // the outer scope already waited its full budget and gave up, so a nested re-attempt cannot
+            // find the gate free and would only burn a second budget before failing the same way.
+            Depth.Value++;
             if (acquired)
             {
-                Depth.Value = 1;
+                PermitHeld.Value = true;
             }
 
             return new GateScope(WriteContentionDiagnostics.BeginWrite(owner, detail), acquired);
@@ -263,6 +287,9 @@ namespace MultiTerminal.Services
 
                     if (_acquired)
                     {
+                        // Only the scope that took the permit clears the flag and releases it. A nested or
+                        // fell-through scope has _acquired == false and must touch neither.
+                        PermitHeld.Value = false;
                         try { Gate.Release(); }
                         catch (ObjectDisposedException) { /* shutdown; nothing to release */ }
                         catch (SemaphoreFullException) { /* defensive: never surface from Dispose */ }

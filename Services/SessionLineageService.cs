@@ -349,18 +349,21 @@ namespace MultiTerminal.Services
             // NOT a semantic change: the statements remain separately autocommitted exactly as before. This
             // is a fairness/admission scope, NOT a SQL transaction — making the pair atomic is a different
             // ticket. The inner gates stay because other callers reach those methods directly.
+            // Computed BEFORE the gate: GetClaudeProjectFolder does filesystem probes (Directory.Exists),
+            // and non-write I/O must not sit inside the global write gate — that is the same shape the
+            // census's ORDERING_EXEMPT exists to avoid, and holding the gate across it would lengthen the
+            // hold for every other writer for no benefit.
+            string sessionFilePath = null;
+            string claudeFolder = GetClaudeProjectFolder(projectPath);
+            if (claudeFolder != null)
+                sessionFilePath = Path.Combine(claudeFolder, $"{sessionId}.jsonl");
+
             using var writeGate = SqliteWriteGate.EnterWrite(
                 "SessionLineage.RegisterSession", sessionId,
                 timeoutMs: SqliteWriteGate.RegisterPathAcquireBudgetMs);
 
             // Close any prior 'open' sessions for this agent+project
             CloseAgentSessions(agentName, projectPath, excludeSessionId: sessionId);
-
-            // Compute the expected JSONL file path
-            string sessionFilePath = null;
-            string claudeFolder = GetClaudeProjectFolder(projectPath);
-            if (claudeFolder != null)
-                sessionFilePath = Path.Combine(claudeFolder, $"{sessionId}.jsonl");
 
             var record = new SessionLineageRecord
             {

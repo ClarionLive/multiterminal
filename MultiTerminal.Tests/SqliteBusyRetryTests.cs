@@ -122,27 +122,46 @@ namespace MultiTerminal.Tests
 
             const int clientTimeoutMs = 15000;
             const int requiredMarginMs = 2000;
+            const int busyTimeoutMs = 5000; // Services/MultiterminalDb.cs: connection.BusyTimeout
 
-            // a5ac5f71 pipeline Run 2 — THE GATE ACQUIRE IS NOW A TERM.
-            // Before this, the stack was `deadline + janitor + margin` only. That model had no term for
-            // SqliteWriteGate's acquire, so it stayed GREEN after the register path started waiting on the
-            // gate — while the endpoint's real worst case moved past the client timeout. A budget guard that
-            // omits a term it should bound is worse than no guard: it reads as proof. Two independent
-            // pipeline gates found this; the guard did not.
-            // RegisterSession takes exactly ONE admission (SessionLineageService wraps the whole unit and the
-            // inner per-method gates pass through reentrantly), so the acquire is counted ONCE. If that wrap
-            // is ever removed the path takes TWO admissions and this term must double. That assumption is
-            // pinned by scripts/verify-writegate.mjs check (5), which requires
-            // SessionLineageService.RegisterSession to keep its gate wrap and fails on rename.
+            // RegisterSession takes exactly ONE gate admission: SessionLineageService wraps the whole
+            // close-then-upsert unit, and the inner per-method gates pass through reentrantly. That
+            // assumption is pinned by scripts/verify-writegate.mjs check (5), which requires
+            // SessionLineageService.RegisterSession to keep its wrap and fails on rename.
             int registerAcquireMs = SqliteWriteGate.RegisterPathAcquireBudgetMs;
 
+            // WHAT THIS BOUND COVERS — and what it does NOT. Scoped deliberately: two earlier versions of
+            // this guard were false assurances (a5ac5f71 pipeline Runs 2 and 3).
+            //
+            // (1) DefaultDeadlineMs is NOT a wall-clock cap on the operation. SqliteBusyRetry starts its
+            //     stopwatch before invoking the operation but evaluates the deadline only in the CATCH
+            //     path, after a busy failure throws. So it bounds "how long we keep RETRYING", never "how
+            //     long one slow SUCCESSFUL attempt may take". This assertion covers the BUSY-FAILURE path
+            //     only — the path the 503 + Retry-After contract lives on.
+            // (2) The gate acquire is NOT additive to the deadline. EnterWrite runs INSIDE operation(),
+            //     hence inside the stopwatch window. Run 2's guard added the two terms together and so
+            //     double-counted; that arithmetic is what drove a deadline retune that broke the retry.
+            //     The acquire is therefore absent from this sum on purpose.
             Assert.True(
-                registerAcquireMs + SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs + requiredMarginMs
-                    <= clientTimeoutMs,
-                $"register-path budget stack must clear the {clientTimeoutMs}ms client timeout with "
-                + $">= {requiredMarginMs}ms margin: gate acquire ({registerAcquireMs}ms) + retry deadline "
-                + $"({SqliteBusyRetry.DefaultDeadlineMs}ms) + janitor budget ({janitorBudgetMs}ms) "
-                + $"= {registerAcquireMs + SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs}ms");
+                SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs + requiredMarginMs <= clientTimeoutMs,
+                $"register-path BUSY-FAILURE budget must clear the {clientTimeoutMs}ms client timeout with "
+                + $">= {requiredMarginMs}ms margin: retry deadline ({SqliteBusyRetry.DefaultDeadlineMs}ms) "
+                + $"+ janitor budget ({janitorBudgetMs}ms) "
+                + $"= {SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs}ms");
+
+            // THE PROPERTY THE DEADLINE EXISTS FOR: the retry must actually be able to fire for its own
+            // documented trigger — a SQLITE_BUSY raised only AFTER a full busy_timeout wait. That attempt
+            // lands at elapsed ≈ busyTimeoutMs, and a retry is taken only if `elapsed + backoff < deadline`.
+            // Run 2 set the deadline to 5000, which made this false while every other assertion still
+            // passed: the retry silently dropped from two attempts to one in exactly the cross-process
+            // contention it exists to absorb. Asserting the VALUE (8000) would not have caught that; this
+            // asserts the BEHAVIOUR.
+            const int firstBackoffMs = 250; // SqliteBusyRetry.DefaultBackoffsMs[0]
+            Assert.True(
+                busyTimeoutMs + firstBackoffMs < SqliteBusyRetry.DefaultDeadlineMs,
+                $"retry deadline ({SqliteBusyRetry.DefaultDeadlineMs}ms) must exceed busy_timeout "
+                + $"({busyTimeoutMs}ms) + first backoff ({firstBackoffMs}ms) or the retry can NEVER fire "
+                + "for the case it was written for — a busy failure that already waited out busy_timeout");
 
             // The acquire budget for this path must stay BELOW the retry deadline. This is the specific
             // inversion that broke the endpoint: with acquire (10000) > deadline (8000), a first attempt that
@@ -160,6 +179,30 @@ namespace MultiTerminal.Tests
                 SqliteWriteGate.DefaultAcquireTimeoutMs > SqliteBusyRetry.DefaultDeadlineMs,
                 "sanity: this guard exists because the GENERIC acquire default exceeds the retry deadline; "
                 + "if that stops being true, re-derive whether the register path still needs its own budget");
+
+            // ── THE DISCLOSED RESIDUAL — the SLOW-SUCCESS path is NOT bounded by anything above. ────────
+            // RegisterSession performs TWO separate autocommit writes (CloseOpenSessions, then
+            // SaveSessionLineage). Each can wait up to the connection's busy_timeout and still SUCCEED, and
+            // a successful attempt is never cut off by the retry deadline. So the real slow-success worst
+            // case is: gate acquire + 2x busy_timeout + janitor — which does NOT clear the client timeout
+            // with margin, and no assertion here can make it. This over-subscription PREDATES the write
+            // gate (two 5s-capable writes already exceeded the post-janitor allowance on their own); the
+            // gate merely made it visible.
+            //
+            // This is asserted as an EXPLICIT INEQUALITY IN THE OTHER DIRECTION so the residual is recorded
+            // as a fact rather than as prose someone can skim past. If a future change makes the
+            // slow-success path fit — a shorter per-command timeout on this path, one bounded transaction
+            // for the pair, or deferring janitor enrichment after slow writes — this assertion FAILS and
+            // whoever did it should promote the residual into a real bound and delete this block.
+            int slowSuccessWorstCaseMs =
+                registerAcquireMs + (2 * busyTimeoutMs) + janitorBudgetMs;
+            Assert.True(
+                slowSuccessWorstCaseMs + requiredMarginMs > clientTimeoutMs,
+                $"the slow-SUCCESS worst case ({slowSuccessWorstCaseMs}ms) now fits inside the "
+                + $"{clientTimeoutMs}ms client timeout with {requiredMarginMs}ms margin. That is GOOD news, "
+                + "but it means this documented residual is stale: replace this inverted assertion with a "
+                + "real forward bound and update the register-path budget docs on SqliteWriteGate "
+                + "(RegisterPathAcquireBudgetMs) and SqliteBusyRetry (DefaultDeadlineMs).");
         }
     }
 }

@@ -311,6 +311,80 @@ namespace MultiTerminal.Tests
                 + "victim racing unfairly");
         }
 
+        /// <summary>
+        /// Pipeline Run 3 regression guard (debugger, HIGH). Reentrancy must key on SCOPE ENTRY, not on
+        /// successful acquisition.
+        ///
+        /// <para>The shipped defect: <c>Depth</c> was incremented only when the acquire SUCCEEDED, so a
+        /// fail-soft outer scope was invisible to nested <c>EnterWrite</c> calls. Each nested call then took
+        /// a fresh acquire at its own budget. On the register path that turned one 2s admission into
+        /// 2s + 10s + 10s — WORSE than before the wrap existed, and precisely on the contended branch the
+        /// ticket is about. The "one admission" property was asserted by a census pin and a budget guard,
+        /// but both only held on the success path, so nothing caught it.</para>
+        ///
+        /// <para>This asserts the property on the branch that actually broke: while a competitor holds the
+        /// gate, an outer scope that FALLS THROUGH must still suppress a nested acquire.</para>
+        /// </summary>
+        [Fact]
+        public async Task FallThroughOuterScope_StillSuppressesNestedAcquire()
+        {
+            var stop = 0;
+            var holderReady = 0;
+            bool nestedFellThroughToo = false;
+            var nestedWait = TimeSpan.Zero;
+
+            var holder = Task.Run(() =>
+            {
+                using (SqliteWriteGate.EnterWrite("Test.NestSuppressHolder"))
+                {
+                    // Signalled from INSIDE the scope: IsHeldByCurrentThread is thread-local, so the test
+                    // thread cannot observe the holder's permit directly.
+                    Volatile.Write(ref holderReady, 1);
+                    while (Volatile.Read(ref stop) == 0) Thread.Sleep(5);
+                }
+            });
+
+            var spun = Stopwatch.StartNew();
+            while (Volatile.Read(ref holderReady) == 0 && spun.ElapsedMilliseconds < 5000) Thread.Sleep(5);
+            Assert.Equal(1, Volatile.Read(ref holderReady));
+
+            var work = Task.Run(() =>
+            {
+                // Outer: short budget, WILL fall through because the holder owns the permit.
+                using (SqliteWriteGate.EnterWrite("Test.NestOuter", detail: null, timeoutMs: 200))
+                {
+                    Assert.False(SqliteWriteGate.IsHeldByCurrentThread);
+
+                    // Nested: a LONG budget. If reentrancy were keyed on acquisition, this would not pass
+                    // through and would block for the full budget — the shipped defect. Timing it is what
+                    // makes the assertion meaningful: a pass-through returns effectively instantly.
+                    var nested = Stopwatch.StartNew();
+                    using (SqliteWriteGate.EnterWrite("Test.NestInner", detail: null, timeoutMs: 10000))
+                    {
+                        nestedFellThroughToo = !SqliteWriteGate.IsHeldByCurrentThread;
+                    }
+
+                    nested.Stop();
+                    nestedWait = nested.Elapsed;
+                }
+            });
+
+            bool finished = await CompletesAsync(work);
+            Volatile.Write(ref stop, 1);
+            await CompletesAsync(holder);
+
+            Assert.True(finished, "nested EnterWrite inside a fell-through scope did not complete");
+            Assert.True(
+                nestedWait < TimeSpan.FromMilliseconds(1000),
+                $"nested EnterWrite waited {nestedWait.TotalMilliseconds:F0}ms inside an outer scope that had "
+                + "already fallen through — it must PASS THROUGH, not take a second acquire. Re-attempting "
+                + "cannot help: the outer already waited its full budget and gave up.");
+            Assert.True(
+                nestedFellThroughToo,
+                "the nested scope reported holding the permit, but the outer scope never acquired one");
+            Assert.False(SqliteWriteGate.IsHeldByCurrentThread);
+        }
+
         [Fact]
         public void AcquireTimeout_DefaultExceedsLongestObservedHold()
         {

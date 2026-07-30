@@ -326,9 +326,11 @@ function analyzeOrderingAndRequired(
       seenRequired.add(m.name);
       if (gateIdx === -1) {
         violations.push({ m, kind: 'required-gate-missing',
-          why: 'is on the NAMED REQUIRED-GATE list in this script (it is a single-statement autocommit '
-            + 'write with evidence of losing a real race) but does not enter SqliteWriteGate. Restore '
-            + 'the gate, or remove it from REQUIRED_GATED_METHODS with a documented reason.' });
+          why: 'is on the NAMED REQUIRED-GATE list in this script but does not enter SqliteWriteGate. '
+            + 'Entries are there for a recorded reason — either the method is an autocommit write with '
+            + 'evidence of losing a real race, or it holds a single admission that a latency budget '
+            + 'depends on. See its entry in REQUIRED_GATED_METHODS for which. Restore the gate, or '
+            + 'remove the entry with a documented reason.' });
       } else {
         requiredOk.push(m);
       }
