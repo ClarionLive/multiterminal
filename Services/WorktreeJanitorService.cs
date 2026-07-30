@@ -266,6 +266,34 @@ namespace MultiTerminal.Services
             try
             {
                 var prunedDone = _db.ListPrunedWorktreesForDoneTasks();
+
+                // Batched branch existence (task 36b0b9d5 item ④, deferred by 1ce9ddaf's
+                // plan): one `git for-each-ref` per DISTINCT repo instead of one
+                // `git branch --list` per record — the same collapse Pass 1's read-only
+                // scan already got, which took it from 228 spawns (~40s) to ~7.
+                //
+                // THIS PASS MUTATES, so two things differ from the read-only scan:
+                //
+                // 1. `seen` DEDUP IS LOAD-BEARING HERE, not just an optimisation. Pass 2
+                //    MERGES AND DELETES branches as it goes, so a list cached at the top
+                //    goes stale behind this pass's own mutations. A task with per-agent
+                //    worktree rows can yield several records naming the SAME branch; with
+                //    per-record probing the second one saw the branch already deleted and
+                //    skipped, but a cached set would still say "exists" and drive a second
+                //    merge attempt at an already-merged branch. Deduping on
+                //    taskId|branchName — exactly as ScanPendingMergesCoreAsync does —
+                //    means the duplicate never reaches the cache at all.
+                //
+                // 2. A LISTING FAILURE MUST NOT LOOK LIKE "GONE". ListTaskBranchesAsync
+                //    THROWS on timeout/non-zero exit (unlike BranchExistsAsync, which
+                //    returns false), so the repo goes into failedRepos and its records are
+                //    left for the next sweep. Note this is strictly MORE visible than the
+                //    old behaviour: a git failure used to surface as a silent false — no
+                //    action, no record — and now leaves an Errors entry naming the repo.
+                var taskBranchesByRepo = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                var failedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+
                 foreach (var record in prunedDone)
                 {
                     try
@@ -273,7 +301,38 @@ namespace MultiTerminal.Services
                         string projectPath = getProjectPathForTask?.Invoke(record.TaskId);
                         if (string.IsNullOrEmpty(projectPath)) continue;
 
-                        var branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                        if (!seen.Add(record.TaskId + "|" + record.BranchName)) continue;
+
+                        string repoKey = NormalizePath(projectPath);
+                        if (failedRepos.Contains(repoKey)) continue; // retry-later, never "gone"
+
+                        bool branchExists;
+                        if (record.BranchName != null && record.BranchName.StartsWith("task/", StringComparison.Ordinal))
+                        {
+                            if (!taskBranchesByRepo.TryGetValue(repoKey, out var taskBranches))
+                            {
+                                try
+                                {
+                                    taskBranches = await ListTaskBranchesAsync(projectPath).ConfigureAwait(false);
+                                    taskBranchesByRepo[repoKey] = taskBranches;
+                                }
+                                catch (Exception ex)
+                                {
+                                    failedRepos.Add(repoKey);
+                                    result.Errors.Add($"Pass 2 branch listing {projectPath}: {ex.Message}");
+                                    continue;
+                                }
+                            }
+
+                            branchExists = taskBranches.Contains(record.BranchName);
+                        }
+                        else
+                        {
+                            // Non-canonical branch name — outside the refs/heads/task/
+                            // namespace the batch listing covers; keep the per-record probe.
+                            branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                        }
+
                         if (branchExists)
                         {
                             // Bounded one-shot recovery: attempt the auto-merge
@@ -989,9 +1048,20 @@ namespace MultiTerminal.Services
         /// record. Same contract as <see cref="BranchExistsAsync"/>: a timeout
         /// throws — retry-later, never evidence that branches are gone.
         /// </summary>
+        /// <remarks>
+        /// Formats with <c>%(refname)</c> and strips <c>refs/heads/</c> in
+        /// <see cref="ParseBranchNames"/> (task 36b0b9d5 item ③, from 1ce9ddaf's Run-1
+        /// debugger LOW). <c>%(refname:short)</c> was ambiguous: it shortens
+        /// <c>refs/heads/task/foo</c> to <c>task/foo</c> only while nothing else claims
+        /// that name, and a tag <c>refs/tags/task/foo</c> makes git emit
+        /// <c>heads/task/foo</c> instead — whereupon the set lookup misses and a LIVE
+        /// branch reads as GONE, silently dropping its pending-merge finding.
+        /// <c>%(refname)</c> is unambiguous by construction, so the parse no longer
+        /// depends on what else happens to exist in the repo.
+        /// </remarks>
         private static async Task<HashSet<string>> ListTaskBranchesAsync(string repoRoot)
         {
-            var result = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/task/").ConfigureAwait(false);
+            var result = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/task/").ConfigureAwait(false);
             if (result.TimedOut)
             {
                 throw new TimeoutException($"git for-each-ref timed out for {repoRoot} — retry next sweep");
@@ -1004,17 +1074,32 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Parse <c>git for-each-ref --format=%(refname:short)</c> output into a
-        /// branch-name set. Ordinal comparison — git ref names are case-sensitive.
-        /// Internal for direct test coverage.
+        /// Parse <c>git for-each-ref --format=%(refname)</c> output into a branch-name
+        /// set, stripping the fully-qualified <c>refs/heads/</c> prefix so the entries
+        /// match the plain <c>task/{id}</c> names the worktree records carry. Ordinal
+        /// comparison — git ref names are case-sensitive. Internal for direct test coverage.
         /// </summary>
+        /// <remarks>
+        /// Only a LEADING <c>refs/heads/</c> is removed, and only once, so a branch whose
+        /// own name happens to embed that string keeps it. Lines without the prefix are
+        /// passed through unchanged — a defensive no-op that also keeps this tolerant of
+        /// already-short input. See <see cref="ListTaskBranchesAsync"/> for why the
+        /// format is <c>%(refname)</c> rather than <c>%(refname:short)</c> (task 36b0b9d5 ③).
+        /// </remarks>
         internal static HashSet<string> ParseBranchNames(string stdout)
         {
+            const string FullyQualifiedPrefix = "refs/heads/";
+
             var set = new HashSet<string>(StringComparer.Ordinal);
             if (string.IsNullOrEmpty(stdout)) return set;
             foreach (var line in stdout.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var name = line.Trim();
+                if (name.StartsWith(FullyQualifiedPrefix, StringComparison.Ordinal))
+                {
+                    name = name.Substring(FullyQualifiedPrefix.Length);
+                }
+
                 if (name.Length > 0) set.Add(name);
             }
             return set;
