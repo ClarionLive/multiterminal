@@ -387,6 +387,21 @@ namespace MultiTerminal.API.Controllers
                     t =>
                     {
                         findingsStopwatch.Stop();
+
+                        // The faulted arm is DEAD TODAY and deliberately kept (task
+                        // 36b0b9d5 item ⑤, 1ce9ddaf code-reviewer NIT). BuildJanitorFindingsAsync
+                        // wraps its entire body in try/catch and returns the unavailable
+                        // marker, so this task cannot fault as currently written.
+                        //
+                        // Kept rather than dropped because the shape around it changed:
+                        // the enrichment is now invoked through a factory dispatched on
+                        // Task.Run (item ①) and reaches the janitor through a coalescer
+                        // (item ②), so a later edit that moves any work outside that
+                        // try/catch makes this arm live. If it were dropped, that edit
+                        // would silently log "completed" for a fault — a wrong log line
+                        // is worse than an unused branch. SessionLineageRegisterRaceTests
+                        // .FactoryThrowingSynchronously_PropagatesRatherThanBeingSwallowed
+                        // pins the surrounding behaviour.
                         string outcome = t.IsFaulted ? $"faulted: {t.Exception?.GetBaseException().Message}" : "completed";
                         _broker?.DebugLogService?.Warning(
                             "SessionLineageController",
