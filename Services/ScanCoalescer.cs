@@ -23,18 +23,34 @@ namespace MultiTerminal.Services
     /// WHY COALESCING RATHER THAN CANCELLATION. Cancellation bounds ONE scan; it does
     /// not stop N callers starting N scans. Single-flight makes concurrent callers
     /// SHARE a scan, which attacks the amplification directly, and it introduces no
-    /// staleness at all — a joined result was computed concurrently with the request.
+    /// staleness beyond the shared run's own duration — a joined result was computed
+    /// concurrently with the request, not before it.
     ///
     /// TWO SEPARATE GUARANTEES, deliberately not conflated:
     ///
-    ///   SINGLE-FLIGHT is unconditional. At most one run is in flight at a time; later
-    ///   callers join the running one. This is the property that caps resource use, so
-    ///   it is not opt-in and cannot be switched off.
+    ///   SINGLE-FLIGHT is unconditional. At most one run is in flight at a time. This is
+    ///   the property that caps resource use, so it is not opt-in and cannot be switched off.
     ///
-    ///   TTL REUSE is opt-in per call (<c>maxStalenessMs</c>, default 0 = never reuse).
-    ///   This is where staleness enters, so callers choose. Session-start enrichment
-    ///   opts in — janitor findings change on task-completion timescales, not per second.
-    ///   Explicit REST refresh endpoints pass 0 and still get single-flight.
+    ///   FRESHNESS is opt-in per call (<c>maxStalenessMs</c>, default 0 = strictest).
+    ///   It governs BOTH forms of reuse — see the next paragraph, which is the part that
+    ///   was wrong in the first cut of this class.
+    ///
+    /// STALENESS HAS TWO SOURCES, NOT ONE (task 36b0b9d5 pipeline Run 1, Codex adversary
+    /// MEDIUM). The obvious one is reusing a COMPLETED result. The one the first cut
+    /// missed is JOINING AN IN-FLIGHT RUN: a run that started before the caller arrived
+    /// snapshotted state the caller may specifically be asking about. The original code
+    /// returned <c>_inFlight</c> unconditionally, so <c>GET /api/worktrees/pending-merges</c> —
+    /// documented as the explicit-refresh path and passing 0 — could join a scan that began
+    /// before the very task completion it was invoked to reveal, and answer
+    /// <c>status: ok, count: 0</c>. A confident wrong answer, which is the failure class
+    /// this whole line of work exists to prevent. Both sources are now governed by the
+    /// SAME <c>maxStalenessMs</c>: a caller joins an in-flight run only if that run STARTED
+    /// within its staleness allowance, and a caller passing 0 never joins one.
+    ///
+    /// A caller that cannot join does NOT start a competing run — it attaches to a single
+    /// shared FOLLOW-UP that is promoted the moment the current run finishes. So the
+    /// resource bound survives the freshness fix: at most one run executing, plus at most
+    /// one queued behind it, no matter how many callers arrive.
     ///
     /// FALSIFIABILITY. The cached value is the scan RESULT OBJECT, carried whole. For the
     /// janitor scans that means their <c>Complete</c> / <c>SkippedRecords</c> /
@@ -46,14 +62,35 @@ namespace MultiTerminal.Services
     /// FAILURES ARE NOT CACHED. A faulted run propagates to everyone sharing it and is
     /// not remembered, so the next caller retries rather than inheriting a stale failure.
     /// </remarks>
-    /// <typeparam name="T">The scan result. Reference type — the cache stores it by reference.</typeparam>
+    /// <typeparam name="T">
+    /// The scan result. Reference type — the cache stores it BY REFERENCE, so the same
+    /// instance is handed to every joiner and to every TTL reuser. Callers must therefore
+    /// treat a returned result as READ-ONLY; mutating it mutates what other callers see.
+    /// </typeparam>
     internal sealed class ScanCoalescer<T>
         where T : class
     {
         private readonly object _sync = new object();
 
-        /// <summary>The run everyone currently joins, or null when idle.</summary>
+        /// <summary>The run currently executing, or null when idle.</summary>
         private Task<T>? _inFlight;
+
+        /// <summary>
+        /// <see cref="Environment.TickCount64"/> when <see cref="_inFlight"/> STARTED.
+        /// Load-bearing for freshness: a caller may join that run only if it began within
+        /// the caller's staleness allowance, because the run's snapshot is as old as its start.
+        /// </summary>
+        private long _inFlightStartedMs;
+
+        /// <summary>
+        /// The single shared follow-up run, promoted when <see cref="_inFlight"/> finishes.
+        /// Callers too strict to join the current run attach here instead of starting a
+        /// competing one — that is what keeps the freshness fix from costing the resource bound.
+        /// </summary>
+        private TaskCompletionSource<T>? _queuedNext;
+
+        /// <summary>Factory the queued follow-up will run (the first strict caller's).</summary>
+        private Func<Task<T>>? _queuedFactory;
 
         /// <summary>Last successful result, eligible for TTL reuse. Never a failure.</summary>
         private T? _last;
@@ -72,8 +109,11 @@ namespace MultiTerminal.Services
         /// sync-pre-await trap item ① fixed in the register budget).
         /// </param>
         /// <param name="maxStalenessMs">
-        /// Reuse the last successful result if it completed within this many ms.
-        /// 0 (the default) disables reuse — the caller still gets single-flight.
+        /// How old the data may be. Governs BOTH reuse of a completed result AND joining a
+        /// run already in flight (a run's snapshot is as old as its start). 0 — the default,
+        /// and what the explicit REST refresh endpoints pass — means neither: the caller is
+        /// guaranteed a run that begins after it arrived. It still never starts a competing
+        /// run; it queues behind the current one.
         /// </param>
         public Task<T> RunAsync(Func<Task<T>> factory, int maxStalenessMs = 0)
         {
@@ -81,16 +121,36 @@ namespace MultiTerminal.Services
 
             lock (_sync)
             {
+                long now = Environment.TickCount64;
+
                 if (maxStalenessMs > 0
                     && _last != null
-                    && Environment.TickCount64 - _lastCompletedMs <= maxStalenessMs)
+                    && now - _lastCompletedMs <= maxStalenessMs)
                 {
                     return Task.FromResult(_last);
                 }
 
                 if (_inFlight != null)
                 {
-                    return _inFlight;
+                    // Join only a run whose SNAPSHOT is fresh enough for this caller. With
+                    // maxStalenessMs == 0 this is never true, which is the whole point:
+                    // an explicit-refresh caller must not be handed a scan that started
+                    // before the state change it was invoked to observe.
+                    if (maxStalenessMs > 0 && now - _inFlightStartedMs <= maxStalenessMs)
+                    {
+                        return _inFlight;
+                    }
+
+                    // Too stale to join — attach to the ONE shared follow-up instead of
+                    // starting a competing run. Promoted by CompleteAsync under the lock,
+                    // so there is no window where a queued run exists but nothing is in flight.
+                    if (_queuedNext == null)
+                    {
+                        _queuedNext = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _queuedFactory = factory;
+                    }
+
+                    return _queuedNext.Task;
                 }
 
                 // Publish the handle BEFORE starting the work, so completion can never
@@ -116,6 +176,7 @@ namespace MultiTerminal.Services
                 // SynchronousPrologue_DoesNotRunUnderTheLock deadlocks.
                 var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
                 _inFlight = tcs.Task;
+                _inFlightStartedMs = now;
 
                 // Runs synchronously only as far as the Task.Run dispatch inside —
                 // no scan work happens under the lock.
@@ -127,6 +188,9 @@ namespace MultiTerminal.Services
 
         private async Task CompleteAsync(TaskCompletionSource<T> tcs, Func<Task<T>> factory)
         {
+            TaskCompletionSource<T>? promoted;
+            Func<Task<T>>? promotedFactory;
+
             try
             {
                 var result = await Task.Run(factory).ConfigureAwait(false);
@@ -138,7 +202,7 @@ namespace MultiTerminal.Services
                 {
                     _last = result;
                     _lastCompletedMs = Environment.TickCount64;
-                    _inFlight = null;
+                    promoted = PromoteQueuedLocked(out promotedFactory);
                 }
 
                 tcs.SetResult(result);
@@ -149,11 +213,45 @@ namespace MultiTerminal.Services
                 // the next caller must be free to retry rather than inherit it.
                 lock (_sync)
                 {
-                    _inFlight = null;
+                    promoted = PromoteQueuedLocked(out promotedFactory);
                 }
 
                 tcs.SetException(ex);
             }
+
+            // Start the follow-up AFTER completing this run's waiters, and outside the
+            // lock. A queued run inherits nothing from this one — in particular a failed
+            // predecessor does not fail it.
+            if (promoted != null && promotedFactory != null)
+            {
+                _ = CompleteAsync(promoted, promotedFactory);
+            }
+        }
+
+        /// <summary>
+        /// Hand the in-flight slot to the queued follow-up, or clear it when nothing is
+        /// waiting. Must be called while holding <see cref="_sync"/>: doing the clear and
+        /// the promote in one atomic step is what prevents a third caller from seeing an
+        /// idle coalescer and starting a competing run while a follow-up is pending.
+        /// </summary>
+        private TaskCompletionSource<T>? PromoteQueuedLocked(out Func<Task<T>>? factory)
+        {
+            var queued = _queuedNext;
+            factory = _queuedFactory;
+            _queuedNext = null;
+            _queuedFactory = null;
+
+            if (queued != null)
+            {
+                _inFlight = queued.Task;
+                _inFlightStartedMs = Environment.TickCount64;
+            }
+            else
+            {
+                _inFlight = null;
+            }
+
+            return queued;
         }
     }
 }

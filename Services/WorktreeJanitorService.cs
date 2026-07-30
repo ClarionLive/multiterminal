@@ -281,8 +281,26 @@ namespace MultiTerminal.Services
                 //    per-record probing the second one saw the branch already deleted and
                 //    skipped, but a cached set would still say "exists" and drive a second
                 //    merge attempt at an already-merged branch. Deduping on
-                //    taskId|branchName — exactly as ScanPendingMergesCoreAsync does —
-                //    means the duplicate never reaches the cache at all.
+                //    taskId|branchName means such a duplicate never reaches the cache.
+                //
+                //    BUT THE DEDUP IS NOT THE WHOLE DEFENCE — an earlier version of this
+                //    comment claimed it was, and that was wrong (pipeline Run 1, debugger).
+                //    The dedup key is (taskId, branchName); the MUTATION's key is taskId
+                //    ALONE, because WorktreeMergeService derives CanonicalBranch(taskId)
+                //    regardless of which record triggered it. So a canonical row
+                //    (task/<id>) and a helper row (task/<id>--<agent>) produce DISTINCT
+                //    dedup keys, both are visited, and the helper's merge deletes the
+                //    CANONICAL branch — which the cache still lists. The eviction below,
+                //    plus the merge service's own fresh re-probe, are what actually close
+                //    that; the dedup only covers the same-key case.
+                //
+                //    ScanPendingMergesCoreAsync's equivalent dedup uses OrdinalIgnoreCase.
+                //    This one uses Ordinal deliberately: git ref names ARE case-sensitive
+                //    (the same rationale ParseBranchNames states), so folding case here
+                //    could merge two genuinely distinct branches into one key. The sibling
+                //    is the one that should change; that is filed, not done here, because
+                //    it is 1ce9ddaf's code and its dedup semantics are not this ticket's
+                //    to alter silently.
                 //
                 // 2. A LISTING FAILURE MUST NOT LOOK LIKE "GONE". ListTaskBranchesAsync
                 //    THROWS on timeout/non-zero exit (unlike BranchExistsAsync, which
@@ -367,6 +385,28 @@ namespace MultiTerminal.Services
                                     result.MergesRecovered++;
                                     bool cleanupPending = !string.IsNullOrWhiteSpace(retry.Stderr);
                                     string shortId = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
+
+                                    // Evict what this merge actually DELETED from the cached
+                                    // set (task 36b0b9d5 pipeline Run 1, debugger LOW). The
+                                    // merge is keyed on taskId and acts on
+                                    // CanonicalBranch(taskId) whichever record triggered it,
+                                    // so after a helper row's merge the canonical branch is
+                                    // gone while the cache still lists it — and a later
+                                    // record for that task would be judged "still alive" and
+                                    // emit a false pending-merge for a branch THIS SWEEP just
+                                    // deleted. The pre-batching per-record probe returned
+                                    // false there and skipped, so this is a regression the
+                                    // eviction closes, not a pre-existing gap.
+                                    //
+                                    // NOT evicted when cleanupPending: on that path the merge
+                                    // landed but `branch -d` failed, so the branch is STILL
+                                    // ALIVE and the cache is telling the truth. Evicting there
+                                    // would hide a leftover branch the next record should see.
+                                    if (!cleanupPending
+                                        && taskBranchesByRepo.TryGetValue(repoKey, out var mergedRepoBranches))
+                                    {
+                                        mergedRepoBranches.Remove(WorktreeNaming.CanonicalBranch(record.TaskId));
+                                    }
                                     recordActivity?.Invoke(
                                         "janitor_merge_recovered",
                                         cleanupPending

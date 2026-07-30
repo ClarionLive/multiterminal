@@ -498,6 +498,71 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// PIPELINE RUN 1, debugger LOW — the stale-cache regression the eviction closes.
+        ///
+        /// The seen-dedup keys on (taskId, branchName), but the MUTATION keys on taskId
+        /// alone: WorktreeMergeService derives CanonicalBranch(taskId) whichever record
+        /// triggered it. So a helper row (task/&lt;id&gt;--&lt;agent&gt;) and the canonical row
+        /// (task/&lt;id&gt;) get DISTINCT dedup keys, both are visited, and the helper's merge
+        /// deletes the CANONICAL branch — which the cached set still lists. When the second
+        /// merge attempt then fails (detached HEAD, wrong trunk, …), Pass 2 emitted a false
+        /// "Branch X still alive for done task Y" for a branch THIS SWEEP had just deleted.
+        /// The pre-batching per-record probe returned false there and skipped, so this was a
+        /// regression introduced by the batching, not a pre-existing gap.
+        ///
+        /// Without the eviction this fails with a spurious PendingMerges entry.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_MergeDeletingTheCanonicalBranch_EvictsItSoNoFalsePendingMergeIsEmitted()
+        {
+            RunGit(_repoRoot, "branch", CanonicalBranch);
+            RunGit(_repoRoot, "branch", "task/feed1234--bob");
+
+            // ListPrunedWorktreesForDoneTasks is ORDER BY created_at DESC, so the row saved
+            // LAST is visited FIRST. The helper must be visited first — its merge is what
+            // deletes the CANONICAL branch — so the canonical row is saved first here.
+            // Getting this backwards makes the test pass vacuously (verified: with the rows
+            // the other way round it passed even with the eviction removed).
+            SavePrunedDoneRow();
+            System.Threading.Thread.Sleep(15); // distinct created_at — the ordering is the fixture
+            SaveExtraPrunedAgentRow("Bob", branchName: "task/feed1234--bob");
+
+            int mergeCalls = 0;
+            var janitor = new WorktreeJanitorService(_db);
+            var flagged = new List<string>();
+
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (action, content, relatedId) =>
+                {
+                    if (action == "janitor_pending_merge") flagged.Add(content);
+                    return true;
+                },
+                tryMergeForTask: (taskId, _) =>
+                {
+                    // First call succeeds and deletes the canonical branch (no Stderr, so
+                    // this is the clean "merged and deleted" path). Every later call fails
+                    // the way a wrong-trunk / detached-HEAD guard would.
+                    if (Interlocked.Increment(ref mergeCalls) == 1)
+                    {
+                        RunGit(_repoRoot, "branch", "-D", CanonicalBranch);
+                        return Task.FromResult(new MergeResult { Merged = true, Success = true, MergedInto = "master" });
+                    }
+
+                    return Task.FromResult(new MergeResult { Merged = false, Success = false, Stderr = "refusing: main checkout is on the wrong branch" });
+                });
+
+            // Assert on the BRANCH NAMED in the message, not on PendingMerges: both rows
+            // carry the same taskId, so a legitimate helper-branch pending merge and a
+            // false canonical one are indistinguishable by id. And a substring test would
+            // false-positive, because "task/feed1234--bob" contains "task/feed1234" — so
+            // match the exact rendered phrase.
+            Assert.DoesNotContain(
+                flagged,
+                c => c.Contains($"Branch {CanonicalBranch} still alive", StringComparison.Ordinal));
+        }
+
+        /// <summary>
         /// A branch outside the refs/heads/task/ namespace the batch listing covers
         /// still gets its per-record probe, so batching cannot silently stop seeing it.
         /// </summary>
