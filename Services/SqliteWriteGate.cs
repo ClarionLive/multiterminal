@@ -129,9 +129,12 @@ namespace MultiTerminal.Services
         public static void SetLogger(DebugLogService? logger) => _log = logger;
 
         /// <summary>
-        /// True when the calling thread is already inside a gate scope. Exposed for tests and for
-        /// assertions; callers should not branch on it — <see cref="EnterWrite"/> already handles
-        /// reentrancy by passing through.
+        /// True when the calling thread OWNS the gate permit — deliberately NOT "is inside a gate scope".
+        /// A fail-soft fall-through IS a scope (so nested writes pass through) but holds no permit and
+        /// reports false here; see <see cref="PermitHeld"/>. That distinction is what lets a test tell
+        /// "admitted" apart from "raced ungated", which a scope-based answer would silently conflate.
+        /// Exposed for tests and assertions; callers should not branch on it — <see cref="EnterWrite"/>
+        /// already handles reentrancy by passing through.
         /// </summary>
         public static bool IsHeldByCurrentThread => PermitHeld.Value;
 
@@ -278,8 +281,12 @@ namespace MultiTerminal.Services
                 finally
                 {
                     // Depth unwinds uniformly: `using var` guarantees LIFO disposal, so a decrement is
-                    // correct for the outermost (acquired, depth 1 -> 0) and nested (depth n -> n-1)
-                    // scopes alike. A failed-acquire (ungated) scope never incremented, hence the guard.
+                    // correct for the outermost (depth 1 -> 0) and nested (depth n -> n-1) scopes alike.
+                    // EVERY scope increments on entry — acquired, nested, and fell-through — so this
+                    // guard is purely defensive against an unbalanced dispose, not a branch that is
+                    // expected to fire. (It previously read "a failed-acquire scope never incremented";
+                    // that was the pre-Run-3 semantics and is exactly the invariant this class now
+                    // inverts, because keying depth on acquisition let nested writes re-acquire.)
                     if (Depth.Value > 0)
                     {
                         Depth.Value--;
