@@ -485,7 +485,13 @@ namespace MultiTerminal.API.Controllers
                 if (string.IsNullOrWhiteSpace(entry.Path)) return null;
 
                 // Pending merges scoped to this project via each finding's task.ProjectId.
-                var mergeScan = await janitor.ScanPendingMergesAsync(id => _broker.TryGetProjectPathForTask(id)).ConfigureAwait(false);
+                // Coalesced with a short staleness allowance (task 36b0b9d5 item ②):
+                // session start is a burst — several agents registering within seconds
+                // share ONE scan instead of each spawning their own git fan-out. The
+                // explicit /api/worktrees/* refresh endpoints pass 0 and always scan.
+                var mergeScan = await janitor.ScanPendingMergesAsync(
+                    id => _broker.TryGetProjectPathForTask(id),
+                    MultiTerminal.Services.WorktreeJanitorService.SessionStartScanStalenessMs).ConfigureAwait(false);
                 var pendingMerges = new System.Collections.Generic.List<object>();
                 foreach (var pm in mergeScan.Items)
                 {
@@ -507,7 +513,8 @@ namespace MultiTerminal.API.Controllers
                 // slashes ("H:/Repo") otherwise yields a prefix no backslash
                 // scan path can ever start with — silently dropping the
                 // project's own strands from a clean-looking response.
-                var strandedScan = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
+                var strandedScan = await janitor.ScanStrandedDirsAsync(
+                    MultiTerminal.Services.WorktreeJanitorService.SessionStartScanStalenessMs).ConfigureAwait(false);
                 string rootPrefix = entry.Path.TrimEnd('\\', '/').Replace('/', System.IO.Path.DirectorySeparatorChar)
                     + System.IO.Path.DirectorySeparatorChar;
                 var strandedDirs = new System.Collections.Generic.List<string>();

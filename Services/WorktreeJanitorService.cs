@@ -68,6 +68,24 @@ namespace MultiTerminal.Services
         private readonly object _sweepGate = new object();
         private bool _sweepRunning;
 
+        // Scan coalescing (task 36b0b9d5 item ②). Both read-only scans are SYSTEM-WIDE —
+        // neither takes a project argument; per-project scoping happens afterwards in the
+        // caller — so one coalescer per scan TYPE is the correct granularity, not one per
+        // project. Single-flight is unconditional (caps concurrent scans at one apiece);
+        // TTL reuse is opt-in per call. See ScanCoalescer for why coalescing rather than
+        // cancellation was chosen.
+        private readonly ScanCoalescer<StrandedScanResult> _strandedScans = new ScanCoalescer<StrandedScanResult>();
+        private readonly ScanCoalescer<PendingMergeScanResult> _pendingMergeScans = new ScanCoalescer<PendingMergeScanResult>();
+
+        /// <summary>
+        /// Staleness a session-start enrichment will accept from a coalesced scan
+        /// (task 36b0b9d5 item ②). Sized to cover a multi-agent boot burst — several
+        /// terminals registering within seconds share one scan instead of each paying
+        /// for their own. Janitor findings change when tasks complete, not per second,
+        /// so this is cheap staleness. Explicit refresh endpoints pass 0 instead.
+        /// </summary>
+        public const int SessionStartScanStalenessMs = 15000;
+
         public WorktreeJanitorService(TaskDatabase db)
         {
             _db = db ?? throw new ArgumentNullException(nameof(db));
@@ -508,7 +526,15 @@ namespace MultiTerminal.Services
         /// orphan dir. Best-effort: a group whose <c>git worktree list</c> fails
         /// is skipped (conservative — never reports a registered dir as stranded).
         /// </summary>
-        public async Task<StrandedScanResult> ScanStrandedDirsAsync()
+        /// <param name="maxStalenessMs">
+        /// Accept a coalesced result this recent (task 36b0b9d5 item ②). 0 — the default,
+        /// used by the explicit REST refresh endpoints — always scans, though it still
+        /// JOINS any scan already in flight rather than starting a second one.
+        /// </param>
+        public Task<StrandedScanResult> ScanStrandedDirsAsync(int maxStalenessMs = 0)
+            => _strandedScans.RunAsync(ScanStrandedDirsCoreAsync, maxStalenessMs);
+
+        private async Task<StrandedScanResult> ScanStrandedDirsCoreAsync()
         {
             var result = new StrandedScanResult();
             var allPaths = _db.ListAllWorktreePaths();
@@ -623,7 +649,26 @@ namespace MultiTerminal.Services
         /// </summary>
         /// <param name="getProjectPathForTask">Resolver: taskId → repo root, or null
         /// when the task's project can't be located (counted as a skipped record).</param>
-        public async Task<PendingMergeScanResult> ScanPendingMergesAsync(Func<string, string> getProjectPathForTask)
+        /// <param name="maxStalenessMs">
+        /// Accept a coalesced result this recent (task 36b0b9d5 item ②). 0 — the default,
+        /// used by the explicit REST refresh endpoints — always scans, though it still
+        /// JOINS any scan already in flight rather than starting a second one.
+        /// </param>
+        /// <remarks>
+        /// COALESCING CAVEAT (task 36b0b9d5 item ②): callers are coalesced on the scan
+        /// TYPE, not on <paramref name="getProjectPathForTask"/> — a joiner receives the
+        /// result produced with the FIRST caller's resolver. Safe today because both
+        /// production call sites (session-start enrichment and GET /api/worktrees/pending-merges)
+        /// pass the same <c>id =&gt; broker.TryGetProjectPathForTask(id)</c> lookup, so the
+        /// resolvers are behaviourally identical. A future caller passing a resolver with
+        /// DIFFERENT semantics must not rely on getting its own — key the coalescer or
+        /// bypass it.
+        /// </remarks>
+        public Task<PendingMergeScanResult> ScanPendingMergesAsync(
+            Func<string, string> getProjectPathForTask, int maxStalenessMs = 0)
+            => _pendingMergeScans.RunAsync(() => ScanPendingMergesCoreAsync(getProjectPathForTask), maxStalenessMs);
+
+        private async Task<PendingMergeScanResult> ScanPendingMergesCoreAsync(Func<string, string> getProjectPathForTask)
         {
             var result = new PendingMergeScanResult();
 
