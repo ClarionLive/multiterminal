@@ -425,6 +425,23 @@ namespace MultiTerminal.Services
                                 // .Success, reporting "merged into trunk" for a no-op.
                                 if (retry != null && retry.Success)
                                 {
+                                    // Evict here TOO (task 36b0b9d5 pipeline Run 2, debugger
+                                    // LOW — the Run 1 eviction was incomplete). Both sub-cases
+                                    // of Success-without-merge mean the canonical branch is
+                                    // GONE: WorktreeMergeService runs `branch -d <canonical>`
+                                    // when the branch is not ahead of trunk, and the other
+                                    // sub-case is "already deleted". Gating the eviction on
+                                    // retry.Merged alone left this delete path stale, so a
+                                    // later record for the same task whose merge call fails
+                                    // for a NON-branch reason (task flipped out of 'done',
+                                    // rev-parse failure, null callback) could still be judged
+                                    // "still alive" off the stale set — the same false
+                                    // pending-merge, reached by a different route.
+                                    if (taskBranchesByRepo.TryGetValue(repoKey, out var settledRepoBranches))
+                                    {
+                                        settledRepoBranches.Remove(WorktreeNaming.CanonicalBranch(record.TaskId));
+                                    }
+
                                     continue;
                                 }
                             }

@@ -560,6 +560,74 @@ namespace MultiTerminal.Tests
             Assert.DoesNotContain(
                 flagged,
                 c => c.Contains($"Branch {CanonicalBranch} still alive", StringComparison.Ordinal));
+
+            // ANTI-VACUITY GUARD (pipeline Run 2, debugger LOW). The assertion above is
+            // satisfied by the WRONG visit order as well as by the fix: if the two rows
+            // land on the same created_at tick, SQLite falls back to rowid order, the
+            // canonical row is visited first, the stale-cache path is never exercised, and
+            // the test passes while proving nothing. Only Thread.Sleep(15) separates the
+            // timestamps, so that tie is possible.
+            //
+            // In the intended order NOTHING is flagged at all (the canonical row is
+            // correctly skipped and the helper row's merge succeeded), whereas the vacuous
+            // order flags the helper branch. So asserting emptiness makes a collision fail
+            // LOUDLY instead of degrading into a green no-op.
+            Assert.Empty(flagged);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 2, debugger LOW — the SECOND delete path, which Run 1's eviction missed.
+        ///
+        /// WorktreeMergeService also deletes the canonical branch on the not-ahead-of-trunk
+        /// path, returning Success=true, Merged=false. Run 1 gated the eviction on
+        /// retry.Merged alone, so that route left the same stale cache entry and the same
+        /// false "still alive" was reachable by a different door. Identical shape to the
+        /// Merged-path test above, differing only in the first merge's result.
+        ///
+        /// Without the eviction on the Success branch this fails with the spurious flag.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_SuccessWithoutMergeDeletingTheBranch_AlsoEvictsIt()
+        {
+            RunGit(_repoRoot, "branch", CanonicalBranch);
+            RunGit(_repoRoot, "branch", "task/feed1234--bob");
+
+            // Canonical saved first so the helper (saved last) is VISITED first —
+            // ORDER BY created_at DESC. Same fixture contract as the test above.
+            SavePrunedDoneRow();
+            System.Threading.Thread.Sleep(15);
+            SaveExtraPrunedAgentRow("Bob", branchName: "task/feed1234--bob");
+
+            int mergeCalls = 0;
+            var janitor = new WorktreeJanitorService(_db);
+            var flagged = new List<string>();
+
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (action, content, relatedId) =>
+                {
+                    if (action == "janitor_pending_merge") flagged.Add(content);
+                    return true;
+                },
+                tryMergeForTask: (taskId, _) =>
+                {
+                    // Call 1: the "nothing to merge, branch deleted" path — Success WITHOUT
+                    // Merged. The branch really is gone afterwards.
+                    if (Interlocked.Increment(ref mergeCalls) == 1)
+                    {
+                        RunGit(_repoRoot, "branch", "-D", CanonicalBranch);
+                        return Task.FromResult(new MergeResult { Merged = false, Success = true });
+                    }
+
+                    // Call 2 fails for a NON-branch reason, which is what stops the merge
+                    // service's own fresh re-probe from masking the stale entry.
+                    return Task.FromResult(new MergeResult { Merged = false, Success = false, Stderr = "task no longer 'done'" });
+                });
+
+            Assert.DoesNotContain(
+                flagged,
+                c => c.Contains($"Branch {CanonicalBranch} still alive", StringComparison.Ordinal));
+            Assert.Empty(flagged);
         }
 
         /// <summary>

@@ -190,10 +190,11 @@ namespace MultiTerminal.Services
         {
             TaskCompletionSource<T>? promoted;
             Func<Task<T>>? promotedFactory;
+            T result;
 
             try
             {
-                var result = await Task.Run(factory).ConfigureAwait(false);
+                result = await Task.Run(factory).ConfigureAwait(false);
 
                 // Record and release BEFORE completing the TCS: a waiter woken by
                 // SetResult must never observe a state where the run is still
@@ -204,8 +205,6 @@ namespace MultiTerminal.Services
                     _lastCompletedMs = Environment.TickCount64;
                     promoted = PromoteQueuedLocked(out promotedFactory);
                 }
-
-                tcs.SetResult(result);
             }
             catch (Exception ex)
             {
@@ -216,15 +215,34 @@ namespace MultiTerminal.Services
                     promoted = PromoteQueuedLocked(out promotedFactory);
                 }
 
-                tcs.SetException(ex);
+                // Completing OUTSIDE the try, with Try* (task 36b0b9d5 pipeline Run 2,
+                // debugger hardening note). If completion sat inside the try and ever threw
+                // — only reachable via double-completion, which a fresh TCS makes impossible
+                // today — the catch would run PromoteQueuedLocked a SECOND time, nulling
+                // _inFlight after the slot was already handed to the follow-up and discarding
+                // the promoted reference. The queued run would then never start and never
+                // complete: its waiters hang forever while the coalescer advertises itself
+                // as idle. Cheaper to make that shape unreachable by construction than to
+                // rely on it staying unreachable.
+                tcs.TrySetException(ex);
+                StartFollowUp(promoted, promotedFactory);
+                return;
             }
 
-            // Start the follow-up AFTER completing this run's waiters, and outside the
-            // lock. A queued run inherits nothing from this one — in particular a failed
-            // predecessor does not fail it.
-            if (promoted != null && promotedFactory != null)
+            tcs.TrySetResult(result);
+            StartFollowUp(promoted, promotedFactory);
+        }
+
+        /// <summary>
+        /// Kick off the promoted follow-up, outside the lock and after the finished run's
+        /// waiters have been completed. A queued run inherits nothing from its predecessor —
+        /// in particular a failed predecessor does not fail it.
+        /// </summary>
+        private void StartFollowUp(TaskCompletionSource<T>? promoted, Func<Task<T>>? factory)
+        {
+            if (promoted != null && factory != null)
             {
-                _ = CompleteAsync(promoted, promotedFactory);
+                _ = CompleteAsync(promoted, factory);
             }
         }
 
