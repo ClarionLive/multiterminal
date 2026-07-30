@@ -92,6 +92,14 @@ const REQUIRED_GATED_METHODS = new Map([
     'Phase 1 caught this losing SQLITE_BUSY (12:47:14.504) via ActivityService.UpdateActivity <- '
     + 'OnMcpTerminalRegistered; the loss was swallowed by MessageBroker.RaiseSafe so the activity row '
     + 'silently never wrote and no busy dump fired.'],
+  ['Services/SessionLineageService.cs::RegisterSession',
+    'Holds the SINGLE write-gate admission for the whole register_session unit. Load-bearing for the '
+    + "endpoint's LATENCY BUDGET, not just fairness: the inner gates on CloseOpenSessions and "
+    + 'SaveSessionLineage pass through reentrantly because of this wrap, so the path costs ONE acquire '
+    + 'instead of two. Remove the wrap and the acquire term in SqliteBusyRetryTests.BudgetHeadroom_* '
+    + 'doubles, pushing the endpoint past the MCP client 15s timeout — and because SqliteBusyRetry only '
+    + 'checks its deadline BETWEEN attempts, the retry backstop would silently stop firing (a5ac5f71 '
+    + 'pipeline Run 2, found by two independent gates).'],
   ['Services/TaskDatabase.cs::SaveSessionLineage',
     'THE ticket victim. register_session reaches here via SessionLineageService.RegisterSession. Found '
     + 'ungated by the pipeline Run 1 cross-model adversary (HIGH) after the first Phase 2 pass gated '
@@ -286,7 +294,8 @@ function analyzeTxnGating(lines, allowKey = () => false) {
 // sites (reads included) instead of just the writers. Any method using BOTH must gate first.
 // (5) REQUIRED GATE — a named autocommit writer must still enter the gate.
 // Pure over `lines` so the self-test can drive it with synthetic snippets.
-function analyzeOrderingAndRequired(lines, relPath, requiredNames = new Set(), orderExempt = () => false) {
+function analyzeOrderingAndRequired(
+  lines, relPath, requiredNames = new Set(), orderExempt = () => false, exemptNames = new Set()) {
   const methods = parseMethods(lines);
   const violations = [];
   const orderedOk = [];
@@ -330,7 +339,13 @@ function analyzeOrderingAndRequired(lines, relPath, requiredNames = new Set(), o
   // evaporates on rename and the list rots into decoration.
   const missing = [...requiredNames].filter(n => !seenRequired.has(n));
 
-  return { violations, orderedOk, requiredOk, orderExempted, missing, relPath };
+  // Same trap for the ORDERING exemptions. An exemption is a documented WAIVER of a safety rule; if the
+  // method it waives no longer exists, the waiver must not silently persist and quietly pre-authorize a
+  // future method that happens to reuse the name. (verify-logging.mjs applies the same rule to its
+  // allowlist; check (5) above already did — (4) was the inconsistent one.)
+  const staleExempt = [...exemptNames].filter(n => !methods.some(m => m.name === n));
+
+  return { violations, orderedOk, requiredOk, orderExempted, missing, staleExempt, relPath };
 }
 
 // (2) Direct WriteContentionDiagnostics.BeginWrite use — only the gate itself may.
@@ -380,9 +395,13 @@ function scanFiles(root) {
 // ---- self-test: negative fixtures prove each check falsifies. A census that cannot fail is theatre.
 function selfTest() {
   let allOk = true;
+  // Counted and PRINTED (like verify-logging's "SELF-TEST PASSED (n/n)"): a hand-derived fixture count
+  // in a commit message was already wrong once. Let the script be the source of truth.
+  let ran = 0;
   const report = (label, name, got, exp) => {
     const ok = got === exp;
     allOk = allOk && ok;
+    ran++;
     console.log(`  ${ok ? 'ok  ' : 'FAIL'} [${label}] ${name} → ${got ? 'FLAGGED' : 'passed'} (expected ${exp ? 'FLAGGED' : 'passed'})`);
   };
 
@@ -469,6 +488,13 @@ function selfTest() {
   report('order-exempt', 'the SAME method without the exemption FAILS (proves the entry is load-bearing)',
     analyzeOrderingAndRequired(badOrder.split('\n'), 'Fixture.cs')
       .violations.some(v => v.kind === 'lock-order'), true);
+  report('order-exempt', 'a STALE ordering exemption (method gone) must FAIL, like the required-gate trap',
+    analyzeOrderingAndRequired(
+      '        public void SomethingElse()\n        {\n        }'.split('\n'),
+      'Fixture.cs', new Set(), n => n === 'IndexSessionFile', new Set(['IndexSessionFile'])).staleExempt.length > 0, true);
+  report('order-exempt', 'a LIVE ordering exemption is not reported stale',
+    analyzeOrderingAndRequired(badOrder.split('\n'), 'Fixture.cs', new Set(),
+      n => n === 'IndexSessionFile', new Set(['IndexSessionFile'])).staleExempt.length > 0, false);
   report('order-exempt', 'exempting one method does NOT exempt a sibling with the same defect',
     analyzeOrderingAndRequired(
       '        public void OtherWrite()\n        {\n            using var gate = _gate.Enter();\n            using var writeGate = SqliteWriteGate.EnterWrite("X");\n        }'.split('\n'),
@@ -504,8 +530,9 @@ function selfTest() {
   }
 
   console.log(allOk
-    ? '\nSELF-TEST PASSED — txn-gating, exemption, attribution, co-extensiveness and boundedness all provably reject the bad shapes.'
-    : '\nSELF-TEST FAILED — a check does not falsify correctly.');
+    ? `\nSELF-TEST PASSED (${ran}/${ran}) — txn-gating, exemptions, attribution, co-extensiveness, `
+      + 'lock ordering, required-gate and boundedness all provably reject the bad shapes.'
+    : `\nSELF-TEST FAILED (${ran} fixtures ran) — a check does not falsify correctly.`);
   process.exit(allOk ? 0 : 1);
 }
 
@@ -519,6 +546,7 @@ let totalExempt = 0;
 let totalOrdered = 0;
 let totalRequired = 0;
 let totalOrderExempt = 0;
+let autocommitSiteCount = 0;
 const filesWithTxns = [];
 
 for (const abs of scanFiles(REPO_ROOT)) {
@@ -535,6 +563,11 @@ for (const abs of scanFiles(REPO_ROOT)) {
     }
   }
 
+  // Self-counted so the printed scope caveat states a REAL number. A hand-derived count in this file's
+  // own commit message was already wrong once (fixtures: "32" vs the actual 35), which is exactly the
+  // failure mode a census exists to prevent — so the script counts its own denominators.
+  autocommitSiteCount += (maskCodeOnly(src).match(/\bExecuteNonQuery\s*\(/g) || []).length;
+
   if (SEPARATE_DB.has(rel)) continue; // different DB file — the multiterminal.db gate does not apply
 
   // (4) + (5)
@@ -542,9 +575,18 @@ for (const abs of scanFiles(REPO_ROOT)) {
     [...REQUIRED_GATED_METHODS.keys()]
       .filter(k => k.startsWith(`${rel}::`))
       .map(k => k.slice(rel.length + 2)));
+  const exemptNames = new Set(
+    [...ORDERING_EXEMPT.keys()]
+      .filter(k => k.startsWith(`${rel}::`))
+      .map(k => k.slice(rel.length + 2)));
   const ord = analyzeOrderingAndRequired(
-    lines, rel, requiredNames, name => ORDERING_EXEMPT.has(`${rel}::${name}`));
+    lines, rel, requiredNames, name => ORDERING_EXEMPT.has(`${rel}::${name}`), exemptNames);
   totalOrderExempt += ord.orderExempted.length;
+  for (const name of ord.staleExempt) {
+    problems.push(`${rel} ORDERING EXEMPTION — method ${name}() is in ORDERING_EXEMPT but was NOT FOUND in `
+      + 'this file (renamed, moved, or deleted). Remove the waiver in the same commit — a stale exemption '
+      + 'silently pre-authorizes any future method that reuses the name.');
+  }
   for (const v of ord.violations) {
     problems.push(`${rel}:${v.m.sigStart + 1} ${v.kind === 'lock-order' ? 'LOCK ORDERING' : 'REQUIRED GATE'} `
       + `in ${v.m.name}(): ${v.why}`);
@@ -604,8 +646,9 @@ if (problems.length) {
   for (const key of REQUIRED_GATED_METHODS.keys()) console.log(`    - ${key}`);
   console.log('\nSCOPE (a green run does NOT mean "every write is gated"): check (1) covers write '
     + 'TRANSACTIONS. Single-statement autocommit writes are covered ONLY for the names in check (5) — '
-    + `${REQUIRED_GATED_METHODS.size} methods with concrete evidence of losing a race — out of ~204 `
-    + 'ExecuteNonQuery sites across the owner files. Demanding a gate on all of them would serialize '
+    + `${REQUIRED_GATED_METHODS.size} methods with concrete evidence of losing a race — out of `
+    + `${autocommitSiteCount} ExecuteNonQuery sites counted across the scanned files. Demanding a gate on `
+    + 'all of them would serialize '
     + "the whole app's writes, which is a different and riskier design. So an ungated autocommit write "
     + 'that has never been observed contending can still be added without failing this census; the '
     + 'correct response to finding a new one is to gate it AND add it to REQUIRED_GATED_METHODS.');

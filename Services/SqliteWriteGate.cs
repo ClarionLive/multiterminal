@@ -45,8 +45,16 @@ namespace MultiTerminal.Services
     /// rather than just the writers the gate is meant to order. It also inverted ordering relative to
     /// <c>CodeGraph.ChunkedWritePass</c>, which always took the gate first.</para>
     ///
-    /// <para>Global-before-local is also the safe direction: a gate holder then waiting on a local lock
-    /// cannot cycle, because the threads holding those local locks never wait on this gate. Note the
+    /// <para><b>Why the reverse direction is nonetheless safe — boundedness, NOT acyclicity.</b> It is
+    /// tempting to argue that a gate holder waiting on a local lock cannot cycle "because nothing holding
+    /// a local lock ever waits on this gate". That argument is FALSE, and its counterexample is named in
+    /// this very design: <c>SessionMemoryDatabase.IndexSessionFile</c> holds its owner lock and then waits
+    /// on this gate (it is the one entry in <c>ORDERING_EXEMPT</c>, because hoisting there would hold the
+    /// global write gate across per-chunk embedding). So a cycle IS constructible on paper. What makes it
+    /// harmless is that <b>this acquire is bounded</b>: after <paramref name="timeoutMs"/> the waiter
+    /// gives up and proceeds ungated, so the worst case is a bounded stall plus a Warning, never a
+    /// permanent hang. Do not upgrade this to an acyclicity claim, and do not make the acquire unbounded
+    /// on the theory that no cycle exists. Note the
     /// prose at <c>TaskDatabase.cs</c> says <c>LockConn()</c> must be the "FIRST statement"; the rule
     /// that is actually machine-enforced (<c>scripts/verify-taskdb-gate.mjs</c>) is
     /// gate-before-first-<c>_connection</c>-use, and the documented purpose is that the local lock must
@@ -62,6 +70,28 @@ namespace MultiTerminal.Services
         /// a slower disk, so the fall-through is a genuine anomaly rather than routine.
         /// </summary>
         public const int DefaultAcquireTimeoutMs = 10000;
+
+        /// <summary>
+        /// <para>Acquire budget for the <c>register_session</c> write unit specifically — deliberately far
+        /// below <see cref="DefaultAcquireTimeoutMs"/> (task a5ac5f71 pipeline Run 2).</para>
+        ///
+        /// <para>That endpoint is the only gated path with a HARD external deadline: the MCP client gives up
+        /// after 15s. Its budget stack is near-saturated before the gate is even considered, because
+        /// <c>RegisterSession</c> performs two autocommit writes that can each burn the 5s
+        /// <c>busy_timeout</c> — an over-subscription that predates this ticket. The default 10s acquire did
+        /// not fit in what remains, and because <see cref="SqliteBusyRetry"/> only evaluates its deadline
+        /// BETWEEN attempts, a first attempt that burned the default silently disabled the retry that is
+        /// this endpoint's designed backstop.</para>
+        ///
+        /// <para>2000ms is chosen to stay useful rather than decorative: it still absorbs a typical
+        /// code-graph chunk hold, while a longer wait than this is better served by failing soft and letting
+        /// <see cref="SqliteBusyRetry"/> return 503 + <c>Retry-After</c> than by making the caller wait. The
+        /// honest trade: against the 3151ms worst-case hold Phase 1 measured, this budget can fall through,
+        /// and then the write races as it did pre-Phase-2 — which is precisely what the retry is for.
+        /// <c>BudgetHeadroom_*</c> in the tests keeps this value inside the client timeout with every other
+        /// term named, so it cannot drift silently again.</para>
+        /// </summary>
+        public const int RegisterPathAcquireBudgetMs = 2000;
 
         private const string LogSource = "SqliteWriteGate";
 

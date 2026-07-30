@@ -333,6 +333,26 @@ namespace MultiTerminal.Services
             if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(agentName))
                 return null;
 
+            // ONE write-gate admission for the whole register unit (task a5ac5f71 pipeline Run 2).
+            //
+            // Both writes below (CloseOpenSessions, then SaveSessionLineage) are individually gated in
+            // TaskDatabase. Entering here first means those inner scopes hit the gate's REENTRANT
+            // pass-through and cost nothing, so this path takes ONE admission instead of two. That halves
+            // the acquire term in this endpoint's latency budget, which is what makes it fit under the MCP
+            // client's 15s timeout at all — two independent admissions could burn 2x the budget inside a
+            // SINGLE SqliteBusyRetry attempt, and since the retry only checks its deadline BETWEEN attempts,
+            // that silently disabled the retry this endpoint depends on.
+            //
+            // It also makes the two statements ONE fair admission rather than two separately-queued ones, so
+            // the pair can no longer be split apart by an interleaving writer.
+            //
+            // NOT a semantic change: the statements remain separately autocommitted exactly as before. This
+            // is a fairness/admission scope, NOT a SQL transaction — making the pair atomic is a different
+            // ticket. The inner gates stay because other callers reach those methods directly.
+            using var writeGate = SqliteWriteGate.EnterWrite(
+                "SessionLineage.RegisterSession", sessionId,
+                timeoutMs: SqliteWriteGate.RegisterPathAcquireBudgetMs);
+
             // Close any prior 'open' sessions for this agent+project
             CloseAgentSessions(agentName, projectPath, excludeSessionId: sessionId);
 

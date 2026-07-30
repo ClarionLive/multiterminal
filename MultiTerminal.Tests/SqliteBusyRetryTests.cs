@@ -122,10 +122,44 @@ namespace MultiTerminal.Tests
 
             const int clientTimeoutMs = 15000;
             const int requiredMarginMs = 2000;
+
+            // a5ac5f71 pipeline Run 2 — THE GATE ACQUIRE IS NOW A TERM.
+            // Before this, the stack was `deadline + janitor + margin` only. That model had no term for
+            // SqliteWriteGate's acquire, so it stayed GREEN after the register path started waiting on the
+            // gate — while the endpoint's real worst case moved past the client timeout. A budget guard that
+            // omits a term it should bound is worse than no guard: it reads as proof. Two independent
+            // pipeline gates found this; the guard did not.
+            // RegisterSession takes exactly ONE admission (SessionLineageService wraps the whole unit and the
+            // inner per-method gates pass through reentrantly), so the acquire is counted ONCE. If that wrap
+            // is ever removed the path takes TWO admissions and this term must double. That assumption is
+            // pinned by scripts/verify-writegate.mjs check (5), which requires
+            // SessionLineageService.RegisterSession to keep its gate wrap and fails on rename.
+            int registerAcquireMs = SqliteWriteGate.RegisterPathAcquireBudgetMs;
+
             Assert.True(
-                SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs + requiredMarginMs <= clientTimeoutMs,
-                $"retry deadline ({SqliteBusyRetry.DefaultDeadlineMs}ms) + janitor budget ({janitorBudgetMs}ms) "
-                + $"must leave >= {requiredMarginMs}ms headroom under the {clientTimeoutMs}ms client timeout");
+                registerAcquireMs + SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs + requiredMarginMs
+                    <= clientTimeoutMs,
+                $"register-path budget stack must clear the {clientTimeoutMs}ms client timeout with "
+                + $">= {requiredMarginMs}ms margin: gate acquire ({registerAcquireMs}ms) + retry deadline "
+                + $"({SqliteBusyRetry.DefaultDeadlineMs}ms) + janitor budget ({janitorBudgetMs}ms) "
+                + $"= {registerAcquireMs + SqliteBusyRetry.DefaultDeadlineMs + janitorBudgetMs}ms");
+
+            // The acquire budget for this path must stay BELOW the retry deadline. This is the specific
+            // inversion that broke the endpoint: with acquire (10000) > deadline (8000), a first attempt that
+            // burned the acquire was already past the deadline, and since the deadline is only evaluated
+            // BETWEEN attempts the retry could never fire — the backstop was silently dead exactly when the
+            // gate had given up and the write was racing ungated.
+            Assert.True(
+                registerAcquireMs < SqliteBusyRetry.DefaultDeadlineMs,
+                $"register-path gate acquire ({registerAcquireMs}ms) must be < the retry deadline "
+                + $"({SqliteBusyRetry.DefaultDeadlineMs}ms), or a single attempt can exhaust the whole "
+                + "deadline in the gate and the retry will never fire");
+
+            // The generic default must never be used on this path: it exceeds the deadline on its own.
+            Assert.True(
+                SqliteWriteGate.DefaultAcquireTimeoutMs > SqliteBusyRetry.DefaultDeadlineMs,
+                "sanity: this guard exists because the GENERIC acquire default exceeds the retry deadline; "
+                + "if that stops being true, re-derive whether the register path still needs its own budget");
         }
     }
 }

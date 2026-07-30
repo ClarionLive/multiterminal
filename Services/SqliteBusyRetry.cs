@@ -30,13 +30,24 @@ namespace MultiTerminal.Services
         public const int DefaultMaxAttempts = 3;
 
         /// <summary>
-        /// Default total-elapsed ceiling across all attempts, in milliseconds. Sized for the
-        /// register endpoint's budget stack: each busy attempt may itself have burned the full 5s
-        /// busy_timeout, and the caller still needs headroom for the 3s janitor-findings budget
-        /// inside the MCP client's 15s call timeout — 8s + 3s leaves 4s of margin. A reflection
-        /// guard in the tests holds this relationship.
+        /// <para>Default total-elapsed ceiling across all attempts, in milliseconds.</para>
+        ///
+        /// <para><b>Retuned 8000 → 5000 by task a5ac5f71 pipeline Run 2.</b> The previous value predated
+        /// <see cref="SqliteWriteGate"/> and its doc reasoned only about `busy_timeout + janitor`. Once the
+        /// register path also waits on the write gate, that model was wrong in a way the old reflection
+        /// guard could not see: it had no term for the gate acquire, so it stayed green while the endpoint's
+        /// real worst case moved past the MCP client's 15s call timeout. Worse, the deadline is only
+        /// evaluated BETWEEN attempts (see <see cref="ExecuteAsync"/>), so a first attempt that burned a 10s
+        /// acquire was already past an 8s deadline and the retry — this endpoint's whole backstop — could
+        /// never fire.</para>
+        ///
+        /// <para>The budget now stacks explicitly, and <c>BudgetHeadroom_*</c> in the tests holds every term:
+        /// <c>RegisterPathAcquireBudgetMs</c> (gate, one admission) + this deadline + the controller's
+        /// janitor-findings budget + margin ≤ the 15s client timeout. Do not raise this without re-running
+        /// that guard — the terms are near-saturated because the endpoint's two autocommit writes can each
+        /// burn the 5s <c>busy_timeout</c>, an over-subscription that PREDATES this ticket.</para>
         /// </summary>
-        public const int DefaultDeadlineMs = 8000;
+        public const int DefaultDeadlineMs = 5000;
 
         private static readonly int[] DefaultBackoffsMs = { 250, 750 };
 
