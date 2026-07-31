@@ -1251,11 +1251,12 @@ Returns git identity and GitHub config.
 }
 ```
 
-### Get GitHub Token
-```
-GET /api/owner-profile/github-token
-```
-Returns the stored GitHub token for agent use during git operations. Returns 404 if not configured.
+> **Removed:** `GET /api/owner-profile/github-token` returned the stored PAT for agent use during git
+> operations. It was deleted by task **ea7d9cf9** along with the two source-account token endpoints —
+> no consumer was ever written for any of them, and every fetch wrote the secret into an agent's
+> session transcript on disk. `hasGitHubToken` above reports presence without disclosing the value.
+> Need authenticated work done? Have the service perform the operation and return its result;
+> `scripts/verify-no-secret-serialization.mjs` fails the build if an endpoint serializes a credential.
 
 ---
 
