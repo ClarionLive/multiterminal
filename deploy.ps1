@@ -1,8 +1,16 @@
 # Deploy script for MultiTerminal
 #
-# Default flow: copy from the SHARED staged folder
-# (H:\DevLaptop\ClarionPowerShell\staged -- overridable via env var
-# MULTITERMINAL_STAGED_PATH) to the Deploy folder. Whoever built last wins.
+# Default flow: copy from the SHARED staged folder to the Deploy folder.
+# Whoever built last wins.
+#
+# Machine-specific paths come from env vars so the same script works on every
+# dev machine (the H:\DevLaptop\... defaults match John's laptop layout):
+#   MULTITERMINAL_STAGED_PATH  -- staged build source (default H:\DevLaptop\ClarionPowerShell\staged)
+#   MULTITERMINAL_DEPLOY_PATH  -- deploy destination  (default H:\DevLaptop\ClarionPowerShell\Deploy)
+# Set them once per machine, e.g.:
+#   setx MULTITERMINAL_STAGED_PATH "D:\CarpioAI\GitHub\multiterminal-staged"
+#   setx MULTITERMINAL_DEPLOY_PATH "C:\Program Files\MultiTerminal"
+# A Program Files destination requires running this script from an elevated shell.
 # Use -Build to also Release-build from the current folder first (the old
 # behaviour, useful when running from a checked-out branch you want to deploy).
 #
@@ -18,7 +26,7 @@ param(
 )
 
 $source = if ($env:MULTITERMINAL_STAGED_PATH) { $env:MULTITERMINAL_STAGED_PATH } else { "H:\DevLaptop\ClarionPowerShell\staged" }
-$dest = "H:\DevLaptop\ClarionPowerShell\Deploy"
+$dest = if ($env:MULTITERMINAL_DEPLOY_PATH) { $env:MULTITERMINAL_DEPLOY_PATH } else { "H:\DevLaptop\ClarionPowerShell\Deploy" }
 
 Write-Host "=== MultiTerminal Deployment ===" -ForegroundColor Cyan
 Write-Host "Source: $source  (shared staged)"
@@ -119,15 +127,33 @@ if ($mtRunning) {
     exit 1
 }
 
+# Verify the destination is writable BEFORE wiping anything -- an unelevated run
+# against a Program Files install would otherwise fail the wipe with swallowed
+# access-denied errors and leave a mismatched mix of old and new files.
+if (Test-Path $dest) {
+    $probe = Join-Path $dest ".deploy-write-probe"
+    try {
+        [System.IO.File]::WriteAllText($probe, "probe")
+        Remove-Item $probe -Force
+    } catch {
+        Write-Host "ERROR: Destination is not writable: $dest" -ForegroundColor Red
+        Write-Host "If it is under Program Files, re-run this script from an elevated shell." -ForegroundColor Yellow
+        exit 1
+    }
+}
+
 # Remove old deployment (preserve .claude folder + the gitignored local config
-# override). appsettings.Local.json holds the phone-gateway secrets (auth creds,
+# override, plus installer-managed components that are NOT part of the staged
+# build output: mcp-gateway\, mcps\, docs\, tools\ and the uninstaller. Wiping
+# those on an installer-based machine would delete pieces this script cannot
+# put back). appsettings.Local.json holds the phone-gateway secrets (auth creds,
 # NotificationSecret, PermissionRelay ApiKey) and is NOT a build artifact, so it
 # never exists in the staged folder. Wiping it here without re-copying would
 # silently revert login to the committed changeme/changeme defaults and lock the
 # gateway out (task ca6c5344 item [11]). Preserve it across the wipe.
 if (Test-Path $dest) {
-    Write-Host "Removing old deployment (preserving .claude folder + appsettings.Local.json)..." -ForegroundColor Yellow
-    Get-ChildItem $dest -Exclude ".claude", "appsettings.Local.json" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Removing old deployment (preserving .claude, appsettings.Local.json, mcp-gateway, mcps, docs, tools, uninstaller)..." -ForegroundColor Yellow
+    Get-ChildItem $dest -Exclude ".claude", "appsettings.Local.json", "mcp-gateway", "mcps", "docs", "tools", "unins*" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Copy new files
