@@ -41,22 +41,113 @@ namespace MultiTerminal.Tests
                 .Where(t => t != null)
                 .ToArray();
 
+        /// <summary>
+        /// Credential vocabulary a route segment must not use — the same names
+        /// scripts/verify-no-secret-serialization.mjs denies in a response member, so the compiled
+        /// surface and the source scan agree on what "credential-shaped" means.
+        /// </summary>
+        private static readonly string[] CredentialSegments =
+        {
+            "token", "pat", "credential", "credentials", "secret", "password",
+            "apikey", "accesstoken", "privatekey", "clientsecret",
+        };
+
+        /// <summary>
+        /// True when any delimiter-separated segment of a route template is a credential name.
+        /// </summary>
+        /// <remarks>
+        /// Segment-wise, NOT substring: a substring test for "pat" would also fire on "path",
+        /// "update" and "compatible". Splitting on the delimiters that actually separate route
+        /// words means "github-token-v2" and "{id}/pat" both trip while "source-account" does not.
+        /// Exposed (and directly tested below) because the previous version of this guard carried a
+        /// comment PROMISING it caught "{id}/pat" while asserting only <c>Contains("token")</c> —
+        /// which it does not. Task ea7d9cf9's review pipeline caught the discrepancy; the lesson is
+        /// that a guarantee stated in prose has to be exercised by a test, or it is decoration.
+        /// </remarks>
+        internal static bool LooksLikeCredentialRoute(string template)
+        {
+            foreach (var segment in template.Split(
+                new[] { '/', '{', '}', '[', ']' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                // The whole segment with word separators collapsed, so the hyphenated spellings of
+                // the compound names match: "api-key" -> "apikey", "private-key" -> "privatekey".
+                // Splitting on '-' alone missed these — caught by the InlineData below, which is
+                // the entire reason this helper is exposed and tested rather than trusted.
+                var collapsed = segment.Replace("-", string.Empty)
+                    .Replace("_", string.Empty)
+                    .Replace(".", string.Empty);
+                if (CredentialSegments.Contains(collapsed, StringComparer.OrdinalIgnoreCase))
+                    return true;
+
+                // Individual words, so a decorated revival still trips: "github-token-v2" -> token.
+                if (segment.Split(new[] { '-', '_', '.' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Any(word => CredentialSegments.Contains(word, StringComparer.OrdinalIgnoreCase)))
+                    return true;
+            }
+
+            return false;
+        }
+
+        [Theory]
+        // The routes this ticket actually deleted.
+        [InlineData("{id}/token", true)]
+        [InlineData("github-token", true)]
+        // Differently-spelled revivals. The old assertion caught only the first of these.
+        [InlineData("github-token-v2", true)]
+        [InlineData("{id}/pat", true)]
+        [InlineData("{id}/credential", true)]
+        [InlineData("github-credentials", true)]
+        [InlineData("{id}/secret", true)]
+        [InlineData("{id}/api-key", true)]
+        [InlineData("{id}/apikey", true)]
+        [InlineData("{id}/access-token", true)]
+        [InlineData("{id}/private-key", true)]
+        [InlineData("{id}/client-secret", true)]
+        // Legitimate routes that must NOT trip it — including the one this controller still serves,
+        // and the substring traps a naive Contains("pat") would fire on.
+        [InlineData("/api/projects/{projectId}/source-account", false)]
+        [InlineData("{id}/path", false)]
+        [InlineData("{id}/update", false)]
+        [InlineData("compatible-accounts", false)]
+        [InlineData("", false)]
+        public void Credential_route_detection_is_falsifiable(string template, bool expected)
+        {
+            // Guards the guard. Without this, LooksLikeCredentialRoute's promise rests on a comment.
+            Assert.Equal(expected, LooksLikeCredentialRoute(template));
+        }
+
         [Theory]
         [InlineData(typeof(SourceControlAccountsController))]
         [InlineData(typeof(OwnerProfileController))]
-        public void No_action_declares_a_token_returning_route(Type controller)
+        public void No_action_declares_a_credential_returning_route(Type controller)
         {
             // Falsifies on reintroduction: restoring [HttpGet("{id}/token")] or [HttpGet("github-token")]
-            // fails here. Matching on the SEGMENT rather than the exact template is deliberate — a
-            // differently-spelled revival (e.g. "{id}/pat", "github-token-v2") should still trip it.
+            // fails here, and so does a differently-spelled revival — see the InlineData above, which
+            // proves it rather than asserting it in prose.
             foreach (var template in RouteTemplatesOf(controller))
             {
                 Assert.False(
-                    template.Contains("token", StringComparison.OrdinalIgnoreCase),
+                    LooksLikeCredentialRoute(template),
                     $"{controller.Name} declares route '{template}', which looks like a credential-returning "
                     + "endpoint. Task ea7d9cf9 removed those: have the service perform the authenticated "
                     + "operation and return its RESULT, never the credential.");
             }
+        }
+
+        [Fact]
+        public void Surviving_owner_profile_actions_are_exactly_the_profile_getter()
+        {
+            // The SourceControlAccountsController equivalent already existed; OwnerProfileController
+            // had no exact-action list, so a `github-pat` revival there would have been caught only
+            // by the census. Both credential-adjacent controllers are now pinned the same way.
+            var actions = typeof(OwnerProfileController)
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                .Where(m => m.GetCustomAttributes<HttpMethodAttribute>().Any())
+                .Select(m => m.Name)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.Equal(new[] { "GetProfile" }, actions);
         }
 
         [Theory]

@@ -56,8 +56,17 @@
 // two credential-bearing models expose only booleans". It does NOT prove no secret can reach a
 // response by some other route — e.g. a Services/ type that serializes itself, a secret embedded in
 // an error message or log line, or a credential under a name this script does not know. Check (2)'s
-// name list is a denylist, and a denylist is only as good as its entries: a member named
-// `credentials` or `ghp` would pass. Do not read PASS as "no secret can ever escape".
+// name list is a DENYLIST, and a denylist is only as good as its entries: a member named
+// `credentials` or `ghp`, or a typed DTO whose property carries the secret under an unlisted name,
+// would pass. Do not read PASS as "no secret can ever escape".
+//
+// The review pipeline for ea7d9cf9 proved this is not a theoretical caveat. It found FOUR fail-open
+// paths in the first cut of this script, every one of which let a REAL leak through a green run:
+// a getter split across lines (check 1 matched per line), an `@$"` string that silently masked the
+// rest of the file, any responder other than Ok()/Results.* (Json, StatusCode, BadRequest…), and a
+// dictionary key. Each is now covered and fixtured. The correct inference is NOT "it is airtight
+// now" — it is that a name/shape-matching census needs adversarial probing to stay honest, so
+// probe it again whenever a new credential or response shape appears.
 //
 // Usage:
 //   node scripts/verify-no-secret-serialization.mjs             # exit 1 on any violation
@@ -78,7 +87,14 @@ const REPO_ROOT = path.join(
 // Credential accessors. A call through a receiver (`_accountService.GetToken(`) — the bare method
 // DECLARATION in the service itself has no receiver and is not matched, which is why the services
 // that legitimately own these are not flagged by scoping alone.
-const CRED_GETTER_RE = /\b[A-Za-z_]\w*\s*\.\s*(GetToken|GetGitHubToken)\s*\(/;
+// Matched over the WHOLE masked source, not line by line: `\s*` spans newlines, so the fluent form
+//     _accountService
+//         .GetToken(id)
+// is caught. Line-anchored matching missed it, and `API/` already contains 46 lines starting with
+// `.`, so that is house style rather than an exotic shape. Found by the ea7d9cf9 review pipeline —
+// with a non-secret member name (`value = ...`) check (2) stays silent too, so ONE NEWLINE used to
+// take the whole census green over a real leak.
+const CRED_GETTER_RE = /\b[A-Za-z_]\w*\s*\??\s*\.\s*(GetToken|GetGitHubToken)\s*\(/g;
 
 // Secret-named members, matched ONLY inside the argument list of an HTTP response call (see
 // findSecretMembers). Scoping to the response call is what makes this precise rather than noisy: an
@@ -102,19 +118,43 @@ const SECRET_NAMES = new Set(['token', 'secret', 'password', 'pat', 'apikey', 'a
 // a bare `Validate(token)` cannot be an anonymous-object member at all — C# requires a name).
 const MEMBER_PATH_RE = /^[A-Za-z_]\w*(?:\s*\??\.\s*[A-Za-z_]\w*)*$/;
 
+// `cts.Token` is a CancellationToken read, not a credential. Without this, the idiomatic ASP.NET
+// overload `await context.Response.WriteAsJsonAsync(payload, cts.Token)` was FLAGGED — a false
+// positive in a BUILD-FAILING census, which is worse than a gap because it blocks legitimate work.
+// Deliberately narrow: it keys on the RECEIVER looking like a cancellation source, so `account.Token`
+// (a genuine leak shape) still flags. Found by the ea7d9cf9 review pipeline; the fixture that was
+// supposed to cover this passed vacuously because its call was not a response call at all.
+const CANCELLATION_SOURCE_PATH_RE =
+  /(?:^|\.)\s*(?:\w*[Cc]ts|\w*[Tt]okenSource|\w*[Cc]ancellation\w*)\s*\??\.\s*Token$/;
+
+// Secret member name inside a dictionary-style initializer, where the name lives in a STRING
+// literal — `Ok(new Dictionary<string,string> { ["token"] = pat })` serializes as {"token":"…"}.
+// Scanned against the strings-PRESERVING masking, since default masking blanks exactly the text
+// that carries the name. Flagged by two independent gates in the ea7d9cf9 review pipeline.
+const DICT_KEY_SECRET_RE =
+  /\[\s*"(token|secret|password|pat|apiKey|accessToken|privateKey|clientSecret)"\s*\]\s*=(?!=)/gi;
+
 // Object-initializer bodies: `new {`, `new Foo {`, `new Dictionary<string, object> {`, and
 // `new Foo(args) {`. Stops at the opening brace; the caller takes the balanced body from there.
 const NEW_INITIALIZER_RE = /\bnew\b[^{};]*\{/g;
 
 // HTTP response idioms used across this codebase's controllers (`return Ok(new { ... })`) and the
 // gateway's minimal-API handlers (`Results.Ok(...)`, `Results.Json(...)`).
+// Every ControllerBase responder that SERIALIZES its argument, not just the ones API/ happens to
+// use today (it is `return Ok(` at 207 sites). Deriving the list from current usage was a mistake:
+// `return Json(new { token });` and `return StatusCode(200, new { token });` are ordinary and
+// serialize identically, and REINTRODUCTION — by definition code that does not exist yet — is the
+// whole threat model. Found by the ea7d9cf9 review pipeline.
 const RESPONSE_CALL_RE =
-  /\b(?:Results\s*\.\s*(?:Ok|Json|Content)|Ok|Created|CreatedAtAction|Accepted|WriteAsJsonAsync)\s*\(/g;
+  /\b(?:Results\s*\.\s*(?:Ok|Json|Content|Text|Created|Accepted)|Ok|Created|CreatedAtAction|CreatedAtRoute|Accepted|AcceptedAtAction|AcceptedAtRoute|Json|Content|BadRequest|NotFound|Conflict|UnprocessableEntity|UnauthorizedObjectResult|StatusCode|WriteAsJsonAsync|new\s+JsonResult|new\s+ObjectResult|new\s+ContentResult)\s*\(/g;
 
 // Property declarations that would put a raw secret on a serialized model. `HasToken` is fine —
 // the boundary is a `string`-typed secret, not the presence flag.
+// Allows the modifier and nullability forms C# actually uses — `public string? Token`,
+// `public required string Token`, and a bare field — all of which serialize identically and all of
+// which the original `public\s+string\s+` form missed.
 const SECRET_PROPERTY_RE =
-  /\bpublic\s+string\s+(Token|Password|Secret|Pat|ApiKey|AccessToken|PrivateKey|ClientSecret)\b/i;
+  /\bpublic\s+(?:required\s+|virtual\s+|override\s+|readonly\s+|init\s+)*string\s*\??\s+(Token|Password|Secret|Pat|ApiKey|AccessToken|PrivateKey|ClientSecret)\b/i;
 
 const API_DIR = 'API';
 const GUARDED_MODELS = ['Models/SourceControlAccount.cs', 'Models/OwnerProfile.cs'];
@@ -127,10 +167,11 @@ const GUARDED_MODELS = ['Models/SourceControlAccount.cs', 'Models/OwnerProfile.c
 const ALLOWED_CRED_GETTERS = new Map();
 const ALLOWED_SECRET_MEMBERS = new Map();
 
-// Build artifacts, the test project, and nested worktrees. MultiTerminal.Tests is skipped for the
-// SAME reason verify-writegate.mjs skips it — and it matters here: the ea7d9cf9 regression tests
-// deliberately name the forbidden shapes in order to assert their ABSENCE, so scanning them would
-// make the census fail on its own proof.
+// Build artifacts and nested worktrees. NOTE: MultiTerminal.Tests is already out of scope because
+// scanFiles only walks API/ — the entry below is belt-and-braces for a future widening of the scan
+// root, not the thing currently excluding the test project. It would matter then: the ea7d9cf9
+// regression tests deliberately name the forbidden shapes in order to assert their ABSENCE, so
+// scanning them would make the census fail on its own proof.
 const SKIP_DIRS = new Set(['node_modules', 'bin', 'obj', '.git', '.claude', 'staged', 'Deploy',
   'packages', 'TestResults', '.vs', 'MultiTerminal.Tests']);
 
@@ -138,18 +179,31 @@ const SKIP_DIRS = new Set(['node_modules', 'bin', 'obj', '.git', '.claude', 'sta
 // detection sees CODE only. Same masker as verify-writegate.mjs / verify-taskdb-gate.mjs. This is
 // load-bearing here, not decorative: both controllers now carry long remarks EXPLAINING the removed
 // token endpoints, and a naive grep would flag the very comments documenting the fix.
-function maskCodeOnly(src) {
+// `keepStrings` preserves string CONTENTS while still blanking comments. Needed by the
+// dictionary-key check, whose member name lives INSIDE a literal (`["token"] = pat`) and is
+// therefore invisible to the default masking. Length and newlines are preserved in both modes, so
+// offsets computed on one masking are valid in the other.
+function maskCodeOnly(src, keepStrings = false) {
   let out = '';
   let state = 'code'; // code | line | block | str | verq | chr
+  const lit = c => (keepStrings ? c : (c === '\n' ? '\n' : c === '\r' ? '\r' : ' '));
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
     const c2 = i + 1 < src.length ? src[i + 1] : '';
     if (state === 'code') {
       if (c === '/' && c2 === '/') { state = 'line'; out += '  '; i++; continue; }
       if (c === '/' && c2 === '*') { state = 'block'; out += '  '; i++; continue; }
-      if (c === '@' && c2 === '"') { state = 'verq'; out += '  '; i++; continue; }
-      if (c === '"') { state = 'str'; out += ' '; continue; }
-      if (c === '\'') { state = 'chr'; out += ' '; continue; }
+      // Verbatim-interpolated `@$"` (legal since C# 8) must enter the VERBATIM state. Missing it
+      // sent `@$"C:\temp\"` into the escaped-string state, where the trailing `\"` reads as an
+      // escape, the literal never closes, and EVERY subsequent line masks to spaces — silently
+      // blinding all three checks for the rest of the file. `$@"` already worked because `@"` is
+      // still adjacent. Found by the ea7d9cf9 review pipeline.
+      if (c === '@' && c2 === '$' && src[i + 2] === '"') {
+        state = 'verq'; out += keepStrings ? '@$"' : '   '; i += 2; continue;
+      }
+      if (c === '@' && c2 === '"') { state = 'verq'; out += keepStrings ? '@"' : '  '; i++; continue; }
+      if (c === '"') { state = 'str'; out += keepStrings ? '"' : ' '; continue; }
+      if (c === '\'') { state = 'chr'; out += keepStrings ? '\'' : ' '; continue; }
       out += c; continue;
     }
     if (state === 'line') {
@@ -161,19 +215,19 @@ function maskCodeOnly(src) {
       out += (c === '\n' ? '\n' : c === '\r' ? '\r' : ' '); continue;
     }
     if (state === 'str') {
-      if (c === '\\') { out += '  '; i++; continue; }
-      if (c === '"') { state = 'code'; out += ' '; continue; }
-      out += (c === '\n' ? '\n' : ' '); continue;
+      if (c === '\\') { out += keepStrings ? c + c2 : '  '; i++; continue; }
+      if (c === '"') { state = 'code'; out += keepStrings ? '"' : ' '; continue; }
+      out += lit(c); continue;
     }
     if (state === 'verq') {
-      if (c === '"' && c2 === '"') { out += '  '; i++; continue; }
-      if (c === '"') { state = 'code'; out += ' '; continue; }
-      out += (c === '\n' ? '\n' : ' '); continue;
+      if (c === '"' && c2 === '"') { out += keepStrings ? '""' : '  '; i++; continue; }
+      if (c === '"') { state = 'code'; out += keepStrings ? '"' : ' '; continue; }
+      out += lit(c); continue;
     }
     if (state === 'chr') {
-      if (c === '\\') { out += '  '; i++; continue; }
-      if (c === '\'') { state = 'code'; out += ' '; continue; }
-      out += ' '; continue;
+      if (c === '\\') { out += keepStrings ? c + c2 : '  '; i++; continue; }
+      if (c === '\'') { state = 'code'; out += keepStrings ? '\'' : ' '; continue; }
+      out += lit(c); continue;
     }
   }
   return out;
@@ -181,11 +235,13 @@ function maskCodeOnly(src) {
 
 // (1) credential-getter call sites. Pure over `lines` so the self-test needs no disk access.
 function findCredGetters(lines) {
+  const src = maskCodeOnly(lines.join('\n'));
   const hits = [];
-  const masked = maskCodeOnly(lines.join('\n')).split('\n');
-  for (let i = 0; i < masked.length; i++) {
-    const m = masked[i].match(CRED_GETTER_RE);
-    if (m) hits.push({ line: i + 1, name: m[1] });
+  const lineOf = idx => src.slice(0, idx).split('\n').length;
+  CRED_GETTER_RE.lastIndex = 0;
+  let m;
+  while ((m = CRED_GETTER_RE.exec(src)) !== null) {
+    hits.push({ line: lineOf(m.index), name: m[1] });
   }
   return hits;
 }
@@ -240,6 +296,7 @@ function splitTopLevel(s) {
 function shorthandMemberName(expr) {
   const trimmed = expr.trim();
   if (!MEMBER_PATH_RE.test(trimmed)) return null;
+  if (CANCELLATION_SOURCE_PATH_RE.test(trimmed)) return null; // cts.Token is not a credential
   const segments = trimmed.split('.').map(seg => seg.replace(/\?\s*$/, '').trim());
   return segments[segments.length - 1];
 }
@@ -267,7 +324,11 @@ function hasTopLevelAssignment(s) {
 // Scoped deliberately: a secret assigned to an out-param, a local, or a typed object destined for
 // disk is NOT a serialization leak, and flagging those made the check noise rather than a guard.
 function findSecretMembers(lines) {
-  const src = maskCodeOnly(lines.join('\n'));
+  const joined = lines.join('\n');
+  const src = maskCodeOnly(joined);
+  // Same length and newlines as `src`, but string CONTENTS survive — the dictionary-key form (2d)
+  // carries its member name inside a literal, so it is invisible in `src`.
+  const srcWithStrings = maskCodeOnly(joined, true);
   const hits = [];
   const seen = new Set();
 
@@ -320,6 +381,18 @@ function findSecretMembers(lines) {
       if (seen.has(abs)) continue;
       seen.add(abs);
       hits.push({ line: lineOf(abs), name });
+    }
+
+    // (2d) dictionary-key form — `Ok(new Dictionary<string,string> { ["token"] = pat })`. Scanned
+    // over the strings-preserving masking at the SAME offsets (both maskings preserve length).
+    const spanWithStrings = srcWithStrings.slice(openIdx, end === -1 ? src.length : end);
+    DICT_KEY_SECRET_RE.lastIndex = 0;
+    let dict;
+    while ((dict = DICT_KEY_SECRET_RE.exec(spanWithStrings)) !== null) {
+      const abs = openIdx + dict.index;
+      if (seen.has(abs)) continue;
+      seen.add(abs);
+      hits.push({ line: lineOf(abs), name: dict[1] });
     }
   }
   return hits.sort((a, b) => a.line - b.line);
@@ -382,6 +455,24 @@ function selfTest() {
       code: '            var account = _accountService.Get(id);' },
     { name: 'negative-control: HasToken presence flag is not a getter', exp: false,
       code: '                hasToken = account.HasToken' },
+    // ---- FLUENT LINE-SPLIT. The blocking find of the ea7d9cf9 review pipeline: check (1) matched
+    //      per LINE, so one newline hid a real getter. `API/` has 46 lines starting with `.`, so
+    //      this is house style. With a non-secret member name check (2) is silent too, which made
+    //      the combination pass the ENTIRE census over a genuine leak (reproduced on a probe
+    //      controller: 57 files scanned, exit 0).
+    { name: 'THE blocking regression: getter split across lines, fluent style', exp: true,
+      code: '            return Ok(new { value = _accountService\n                .GetToken(id) });' },
+    { name: 'fluent split with a comment between receiver and dot', exp: true,
+      code: '            var t = _accountService   // resolve lazily\n                .GetToken(id);' },
+    { name: 'null-conditional getter call', exp: true,
+      code: '            var t = _accountService?.GetToken(id);' },
+    // ---- `@$"` VERBATIM-INTERPOLATED MASKING. Missing this state sent the rest of the file into a
+    //      never-closing string literal, masking it all to spaces — a silent, TOTAL blinding of all
+    //      three checks. Zero `@$"` in the repo today, which is exactly why it needs a fixture.
+    { name: 'a leak AFTER an @$" string with a trailing backslash is still seen', exp: true,
+      code: '            var p = @$"C:\\temp\\";\n            var t = _accountService.GetToken(id);' },
+    { name: 'negative-control: the @$" string contents themselves do not flag', exp: false,
+      code: '            var p = @$"call _accountService.GetToken(id) here";' },
   ];
   for (const c of getterCases) report('getter', c.name, findCredGetters([c.code]).length > 0, c.exp);
 
@@ -443,8 +534,40 @@ function selfTest() {
       code: '            var newCfg = new PushConfig\n            {\n                PublicKey = keys.PublicKey,\n                PrivateKey = keys.PrivateKey,\n            };\n            File.WriteAllText(_configPath, JsonSerializer.Serialize(newCfg));' },
     { name: 'negative-control: `cts.Token` property read (no assignment)', exp: false,
       code: '                        cancellationToken, timeoutCts.Token);' },
-    { name: 'negative-control: a CancellationToken argument inside a response-shaped call', exp: false,
-      code: '            await _host.StopAsync(linkedCts.Token);' },
+    // ---- CANCELLATION TOKENS. The fixture that used to sit here called `_host.StopAsync(...)`,
+    //      which is NOT a response call, so it passed VACUOUSLY while the real ASP.NET overload
+    //      below was a false positive. A false positive in a build-failing census is worse than a
+    //      gap — it blocks legitimate work. Both shapes are now asserted against real response calls.
+    { name: 'THE false positive: idiomatic WriteAsJsonAsync(payload, cts.Token) must NOT flag', exp: false,
+      code: '            await context.Response.WriteAsJsonAsync(payload, cts.Token);' },
+    { name: 'negative-control: linked/timeout cancellation sources in a response call', exp: false,
+      code: '            await context.Response.WriteAsJsonAsync(payload, linkedCts.Token);' },
+    { name: 'negative-control: a named CancellationTokenSource in a response call', exp: false,
+      code: '            return Ok(await _svc.RunAsync(cancellationTokenSource.Token));' },
+    { name: 'but a genuine `account.Token` direct return still flags (exclusion is receiver-keyed)', exp: true,
+      code: '            return Ok(account.Token);' },
+    // ---- RESPONDERS BEYOND Ok(). Derived from current usage originally, which missed every other
+    //      ControllerBase responder. Reintroduction is by definition code that does not exist yet.
+    { name: 'THE second blocking shape: Json(new { token }) was invisible', exp: true,
+      code: '            return Json(new { token });' },
+    { name: 'StatusCode(200, new { token })', exp: true,
+      code: '            return StatusCode(200, new { token });' },
+    { name: 'BadRequest(new { token })', exp: true,
+      code: '            return BadRequest(new { token });' },
+    { name: 'NotFound(new { token })', exp: true,
+      code: '            return NotFound(new { token });' },
+    { name: 'new JsonResult(new { token })', exp: true,
+      code: '            return new JsonResult(new { token });' },
+    // ---- DICTIONARY-KEY FORM. Member name lives in a string literal, which the default masking
+    //      blanks. Flagged independently by the security and adversary gates.
+    { name: 'dictionary-key form: Ok(new Dictionary<string,string> { ["token"] = pat })', exp: true,
+      code: '            return Ok(new Dictionary<string, string> { ["token"] = pat });' },
+    { name: 'dictionary-key form with apiKey', exp: true,
+      code: '            return Results.Json(new Dictionary<string, string> { ["apiKey"] = k });' },
+    { name: 'negative-control: innocent dictionary key', exp: false,
+      code: '            return Ok(new Dictionary<string, string> { ["username"] = u });' },
+    { name: 'negative-control: a secret-named dictionary key OUTSIDE a response call', exp: false,
+      code: '            var cache = new Dictionary<string, string> { ["token"] = pat };' },
     { name: 'negative-control: private field assignment `_token = `', exp: false,
       code: '            _token = GenerateToken();' },
     { name: 'negative-control: `var token = ` local outside any response call', exp: false,
@@ -467,8 +590,16 @@ function selfTest() {
       code: '        public bool HasToken { get; set; }' },
     { name: 'negative-control: HasGitHubToken boolean', exp: false,
       code: '        public bool HasGitHubToken { get; set; }' },
+    { name: 'nullable form `public string? Token` flags', exp: true,
+      code: '        public string? Token { get; set; }' },
+    { name: '`public required string Token` flags', exp: true,
+      code: '        public required string Token { get; set; }' },
+    { name: 'a bare public field flags', exp: true,
+      code: '        public string AccessToken;' },
     { name: 'negative-control: an ordinary string property', exp: false,
       code: '        public string Username { get; set; }' },
+    { name: 'negative-control: an ordinary nullable string property', exp: false,
+      code: '        public string? Username { get; set; }' },
     { name: 'a commented-out secret property does not flag', exp: false,
       code: '        // public string Token { get; set; }' },
   ];
@@ -476,8 +607,9 @@ function selfTest() {
 
   console.log(allOk
     ? `\nSELF-TEST PASSED (${ran}/${ran}) — credential-getter, response-member and model-property `
-      + 'checks all provably reject the bad shapes, and none of them fire on comments, doc refs, '
-      + 'CancellationToken, or the HasToken presence flags.'
+      + 'checks all provably reject the bad shapes (including fluent line-splits, non-Ok responders '
+      + 'and dictionary keys), and none of them fire on comments, doc refs, cancellation-source '
+      + '.Token reads inside real response calls, or the HasToken presence flags.'
     : `\nSELF-TEST FAILED (${ran} fixtures ran) — a check does not falsify correctly.`);
   process.exit(allOk ? 0 : 1);
 }
