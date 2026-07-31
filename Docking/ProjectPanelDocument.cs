@@ -283,6 +283,23 @@ namespace MultiTerminal.Docking
                 GitRepoUrl = project.GitRepoUrl,
                 GitDefaultBranch = project.GitDefaultBranch,
                 GitAutoCommit = project.GitAutoCommit,
+                // Omitting this made the Source Account dropdown read as empty on every
+                // re-render: the renderer serializes `SourceControlAccountId ?? ""`, and
+                // panel.html's applySourceAccountOptions only assigns select.value when that
+                // string is truthy — so the selection silently fell back to "(None)" while
+                // SQLite still held the correct value.
+                SourceControlAccountId = project.SourceControlAccountId,
+                // Same omission, worse symptom: Project initialises DefaultTerminal to
+                // "claude-code", so leaving it out did not blank the dropdown — it silently
+                // rendered a Codex project AS Claude Code on every re-render.
+                DefaultTerminal = project.DefaultTerminal,
+                // Not currently serialized by ProjectPanelRenderer (so the panel's status badge,
+                // guarded by `project.status !== undefined`, never renders). Copied anyway so the
+                // clone is complete; surfacing the badge is a separate change.
+                Status = project.Status,
+                // Not sent to the panel today. Copied to keep this a total copy — the point of
+                // ProjectPanelCopyCompletenessTests is that no property is silently left behind.
+                TeamAgents = project.TeamAgents,
                 // Team lead
                 TeamLead = project.TeamLead
             };
