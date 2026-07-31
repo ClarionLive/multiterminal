@@ -30,10 +30,20 @@
 //       it. This is the broad check — it fails long before the value reaches a response object.
 //
 //   (2) NO SECRET-NAMED RESPONSE MEMBER — no anonymous-object member named token/secret/password/
-//       pat/apiKey/accessToken/privateKey may be assigned in an API/ file. Check (1) catches the
-//       value arriving from a known getter; this catches it arriving from ANYWHERE else (a field, a
-//       parameter, a future service with a differently-named accessor). This is the exact shape that
-//       shipped: `token = _accountService.GetToken(account.Id)` inside an `Ok(new { ... })`.
+//       pat/apiKey/accessToken/privateKey may reach an HTTP response in an API/ file. Check (1)
+//       catches the value arriving from a known getter; this catches it arriving from ANYWHERE else
+//       (a field, a parameter, a future service with a differently-named accessor). Three member
+//       forms are covered, because C# has three ways to put a secret in a response object:
+//         (a) assignment      `token = _accountService.GetToken(account.Id)`  — one shape that shipped
+//         (b) SHORTHAND       `return Ok(new { token });`                     — the OTHER shape that
+//             shipped, on the deleted GET /api/source-accounts/{id}/token. C# projects the member
+//             name from the identifier, so there is no `=` anywhere and an assignment-only regex is
+//             blind to it. `new { account.Token }` is the same hazard via a dotted path.
+//         (c) direct return   `return Ok(token);`                             — no object at all.
+//       Form (b) is not hypothetical and is why this check is not merely an `=` scan: the census's
+//       own falsification pass (task ea7d9cf9, item ③) restored the real deleted endpoint and found
+//       that only check (1) fired. Combined with a non-getter source — `var token = _someCache[id];
+//       return Ok(new { token });` — BOTH checks would have passed a genuine leak.
 //
 //   (3) CREDENTIAL-BEARING MODELS STAY SECRET-FREE — Models/SourceControlAccount.cs and
 //       Models/OwnerProfile.cs may expose only PRESENCE booleans (HasToken / HasGitHubToken), never a
@@ -79,6 +89,22 @@ const CRED_GETTER_RE = /\b[A-Za-z_]\w*\s*\.\s*(GetToken|GetGitHubToken)\s*\(/;
 // None of those reach a response body. All three are now negative-control fixtures in the self-test.
 const SECRET_MEMBER_RE =
   /\b(token|secret|password|pat|apiKey|accessToken|privateKey|clientSecret)\s*=(?!=)/gi;
+
+// The same names as bare words, for the shorthand and direct-return forms (2b/2c), which have no
+// `=` for SECRET_MEMBER_RE to anchor on. Lowercased; membership is tested case-insensitively.
+const SECRET_NAMES = new Set(['token', 'secret', 'password', 'pat', 'apikey', 'accesstoken',
+  'privatekey', 'clientsecret']);
+
+// An expression that is JUST an identifier or a dotted/null-conditional path — i.e. something C#
+// can project into a shorthand member name. `new { token }` yields a member named `token`;
+// `new { account.Token }` and `new { account?.Token }` both yield `Token`. Anything with a call,
+// operator, or literal in it is NOT shorthand (`valid = Validate(token)` has an `=` and is form 2a;
+// a bare `Validate(token)` cannot be an anonymous-object member at all — C# requires a name).
+const MEMBER_PATH_RE = /^[A-Za-z_]\w*(?:\s*\??\.\s*[A-Za-z_]\w*)*$/;
+
+// Object-initializer bodies: `new {`, `new Foo {`, `new Dictionary<string, object> {`, and
+// `new Foo(args) {`. Stops at the opening brace; the caller takes the balanced body from there.
+const NEW_INITIALIZER_RE = /\bnew\b[^{};]*\{/g;
 
 // HTTP response idioms used across this codebase's controllers (`return Ok(new { ... })`) and the
 // gateway's minimal-API handlers (`Results.Ok(...)`, `Results.Json(...)`).
@@ -179,6 +205,64 @@ function matchingParen(src, openIdx) {
   return -1;
 }
 
+// Offset just past the '}' matching the '{' at openIdx. -1 when unbalanced, same contract as
+// matchingParen: the caller scans to end-of-input rather than going quiet.
+function matchingBrace(src, openIdx) {
+  let depth = 0;
+  for (let i = openIdx; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+// Split on commas at nesting depth 0, keeping each piece's offset within `s`. Used for both an
+// initializer's member list and a call's argument list, where a naive split would cut through
+// nested calls and objects (`new { a = F(x, y), token }` is TWO members, not three).
+function splitTopLevel(s) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '(' || c === '{' || c === '[') depth++;
+    else if (c === ')' || c === '}' || c === ']') depth--;
+    else if (c === ',' && depth === 0) { out.push({ text: s.slice(start, i), offset: start }); start = i + 1; }
+  }
+  out.push({ text: s.slice(start), offset: start });
+  return out;
+}
+
+// The member name a shorthand expression would project, or null when it is not a bare path.
+function shorthandMemberName(expr) {
+  const trimmed = expr.trim();
+  if (!MEMBER_PATH_RE.test(trimmed)) return null;
+  const segments = trimmed.split('.').map(seg => seg.replace(/\?\s*$/, '').trim());
+  return segments[segments.length - 1];
+}
+
+// True when a top-level piece carries an assignment (form 2a), so the shorthand pass must skip it
+// and leave it to SECRET_MEMBER_RE. `==`, `=>`, `<=`, `>=`, `!=` are comparisons/lambdas, not
+// assignments — mis-classifying `token == expected` as an assignment would resurrect a fixed bug.
+function hasTopLevelAssignment(s) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '(' || c === '{' || c === '[') depth++;
+    else if (c === ')' || c === '}' || c === ']') depth--;
+    else if (c === '=' && depth === 0) {
+      const prev = i > 0 ? s[i - 1] : '';
+      const next = i + 1 < s.length ? s[i + 1] : '';
+      if (next === '=' || next === '>' || prev === '=' || prev === '!' || prev === '<' || prev === '>') continue;
+      return true;
+    }
+  }
+  return false;
+}
+
 // (2) secret-named members inside an HTTP RESPONSE call's arguments.
 // Scoped deliberately: a secret assigned to an out-param, a local, or a typed object destined for
 // disk is NOT a serialization leak, and flagging those made the check noise rather than a guard.
@@ -197,6 +281,7 @@ function findSecretMembers(lines) {
     const end = matchingParen(src, openIdx);
     const span = src.slice(openIdx, end === -1 ? src.length : end);
 
+    // (2a) assignment form — `token = ...`.
     SECRET_MEMBER_RE.lastIndex = 0;
     let m;
     while ((m = SECRET_MEMBER_RE.exec(span)) !== null) {
@@ -204,6 +289,37 @@ function findSecretMembers(lines) {
       if (seen.has(abs)) continue; // nested/overlapping response calls must not double-report
       seen.add(abs);
       hits.push({ line: lineOf(abs), name: m[1] });
+    }
+
+    // (2b) shorthand form — `new { token }` / `new { account.Token }`. Every object initializer
+    // inside the response call is examined, so a secret nested in an inner `new { ... }` is caught
+    // too (the outer member is `account = new { ... }`, which form 2a sees as a non-secret name).
+    NEW_INITIALIZER_RE.lastIndex = 0;
+    let init;
+    while ((init = NEW_INITIALIZER_RE.exec(span)) !== null) {
+      const braceIdx = init.index + init[0].length - 1;
+      const braceEnd = matchingBrace(span, braceIdx);
+      const body = span.slice(braceIdx + 1, braceEnd === -1 ? span.length : braceEnd - 1);
+      for (const piece of splitTopLevel(body)) {
+        if (hasTopLevelAssignment(piece.text)) continue; // form 2a's territory
+        const name = shorthandMemberName(piece.text);
+        if (!name || !SECRET_NAMES.has(name.toLowerCase())) continue;
+        const abs = openIdx + braceIdx + 1 + piece.offset
+          + (piece.text.length - piece.text.trimStart().length);
+        if (seen.has(abs)) continue;
+        seen.add(abs);
+        hits.push({ line: lineOf(abs), name });
+      }
+    }
+
+    // (2c) direct-return form — `return Ok(token);` with no wrapping object at all.
+    for (const arg of splitTopLevel(span.slice(1, end === -1 ? span.length : span.length - 1))) {
+      const name = shorthandMemberName(arg.text);
+      if (!name || !SECRET_NAMES.has(name.toLowerCase())) continue;
+      const abs = openIdx + 1 + arg.offset + (arg.text.length - arg.text.trimStart().length);
+      if (seen.has(abs)) continue;
+      seen.add(abs);
+      hits.push({ line: lineOf(abs), name });
     }
   }
   return hits.sort((a, b) => a.line - b.line);
@@ -274,8 +390,41 @@ function selfTest() {
       code: '            return Ok(new\n            {\n                username = account.Username,\n                hasToken = account.HasToken,\n                token = _accountService.GetToken(account.Id)\n            });' },
     { name: 'a secret arriving from a NON-getter source still flags (check 1 would miss it)', exp: true,
       code: '            return Ok(new { token = _someFutureCache[id] });' },
-    { name: 'the other removed shape: Ok(new { token })-style single member', exp: true,
+    { name: 'self-assigned member `token = token`', exp: true,
       code: '            return Ok(new { token = token });' },
+    // ---- SHORTHAND (form 2b). These were the census's own blind spot until item ③'s falsification
+    //      pass restored the real deleted endpoint and found only check (1) firing. The fixture that
+    //      used to sit here CLAIMED to cover `Ok(new { token })` but actually tested
+    //      `Ok(new { token = token })` — a form the shipped code never used — so 31/31 green was
+    //      measured against a paraphrase of the leak rather than the leak.
+    { name: 'THE second removed shape, verbatim: the deleted {id}/token endpoint ended `Ok(new { token })`', exp: true,
+      code: '            var token = _accountService.GetToken(id);\n            return Ok(new { token });' },
+    { name: 'the leak that would have passed BOTH checks: shorthand from a non-getter source', exp: true,
+      code: '            var token = _someFutureCache[id];\n            return Ok(new { token });' },
+    { name: 'shorthand via a dotted path projects the last segment as the member name', exp: true,
+      code: '            return Ok(new { account.Token });' },
+    { name: 'shorthand via a null-conditional path', exp: true,
+      code: '            return Ok(new { account?.PrivateKey });' },
+    { name: 'shorthand alongside innocent members still flags', exp: true,
+      code: '            return Ok(new { username, hasToken, token });' },
+    { name: 'shorthand nested in an inner initializer still flags', exp: true,
+      code: '            return Ok(new { account = new { id, apiKey } });' },
+    { name: 'direct return of a bare secret with no wrapping object (form 2c)', exp: true,
+      code: '            return Ok(token);' },
+    { name: 'direct return of a secret via a dotted path', exp: true,
+      code: '            return Ok(account.Token);' },
+    { name: 'negative-control: innocent shorthand members', exp: false,
+      code: '            return Ok(new { username, hasToken, provider });' },
+    { name: 'real site: ListAccounts `Ok(new { count = accounts.Count, accounts })`', exp: false,
+      code: '            return Ok(new { count = accounts.Count, accounts });' },
+    { name: 'negative-control: a secret used only INSIDE an expression, under a non-secret name', exp: false,
+      code: '            return Ok(new { valid = Validate(token) });' },
+    { name: 'negative-control: tokenTotal shorthand is a metric, not a credential', exp: false,
+      code: '            return Ok(new { tokenTotal });' },
+    { name: 'negative-control: a trailing CancellationToken argument is not a response member', exp: false,
+      code: '            await context.Response.WriteAsJsonAsync(payload, cancellationToken);' },
+    { name: 'negative-control: shorthand in a NON-response initializer is out of scope', exp: false,
+      code: '            var cfg = new { token };' },
     { name: 'minimal-API form: Results.Ok', exp: true,
       code: '                return Results.Ok(new { apiKey = configured });' },
     { name: 'Results.Json form', exp: true,
@@ -363,7 +512,8 @@ for (const abs of scanFiles(apiRoot)) {
   for (const hit of findSecretMembers(lines)) {
     const key = `${rel}::${hit.name}`;
     if (ALLOWED_SECRET_MEMBERS.has(key)) { memberSites++; continue; }
-    problems.push(`${rel}:${hit.line} SECRET RESPONSE MEMBER — assigns a member named '${hit.name}'. `
+    problems.push(`${rel}:${hit.line} SECRET RESPONSE MEMBER — serializes a member named '${hit.name}' `
+      + '(assigned, C# shorthand, or returned directly). '
       + 'This is the exact shape ea7d9cf9 removed (a PAT serialized into a response body, which then '
       + "landed in agents' session transcripts on disk). Return a RESULT, not a credential.");
   }
