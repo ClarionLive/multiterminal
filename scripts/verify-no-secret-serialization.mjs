@@ -59,9 +59,13 @@
 // two credential-bearing models expose only booleans". It does NOT prove no secret can reach a
 // response by some other route — e.g. a Services/ type that serializes itself, a secret embedded in
 // an error message or log line, or a credential under a name this script does not know. Check (2)'s
-// name list is a DENYLIST, and a denylist is only as good as its entries: a member named
-// `credentials` or `ghp`, or a typed DTO whose property carries the secret under an unlisted name,
-// would pass. Do not read PASS as "no secret can ever escape".
+// name list is a DENYLIST, and a denylist is only as good as its entries: a member named `ghp`,
+// `bearer` or `sessionKey`, or a typed DTO whose property carries the secret under an unlisted name,
+// would pass. (`credentials` USED to be the example here; it is covered as of a423953, and leaving a
+// covered name as the illustration of a gap is the same prose-vs-code drift this file keeps
+// producing — hence the swap to names that really are uncovered.) Nor is an identifier-path the only
+// shape: a ternary or method call inside a response argument is not a path, so
+// `Ok(x is string secret ? secret : null)` passes. Do not read PASS as "no secret can ever escape".
 //
 // The review pipeline for ea7d9cf9 proved this is not a theoretical caveat. It found FOUR fail-open
 // paths in the first cut of this script, every one of which let a REAL leak through a green run:
@@ -119,7 +123,12 @@ const CRED_GETTER_RE = /\b[A-Za-z_]\w*\s*\??\s*\.\s*(GetToken|GetGitHubToken)\s*
 // KEEP IN SYNC with NoCredentialEndpointsTests.CredentialSegments (C#). The two cannot share a
 // source across languages, so BOTH sides pin themselves to this same expected set in their own test
 // — the JS self-test's [vocab] fixture and the C# Credential_vocabulary_matches_the_census test.
-// Editing one without the other fails that side's build rather than silently opening a hole.
+// Editing this array alone fails the JS self-test; editing the C# list alone fails that test.
+// HONEST LIMIT of that scheme (stated because this ticket's recurring defect is guarantees that read
+// stronger than they are): both JS literals live in THIS file, so an edit that changes the array AND
+// its expected set together passes here while C# stays untouched. It makes a unilateral edit
+// deliberate on each side; it is NOT a machine-checked cross-language invariant. A real one needs a
+// shared generated source — see follow-up 52eea2f0.
 const CREDENTIAL_NAMES = [
   'accessToken', 'clientSecret', 'credentials', 'credential', 'privateKey',
   'password', 'apiKey', 'secret', 'token', 'pat',
@@ -404,6 +413,9 @@ function findSecretMembers(lines) {
       // design). No hole: if that lambda then returns `new { token }`, form (2b) still catches it.
       // Demonstrated by the ea7d9cf9 review pipeline; widening RESPONSE_CALL_RE enlarged the set of
       // spans this applies to, which is what surfaced it.
+      // Knows four type spellings; a lambda-local declared with another explicit type would still
+      // trip. No such site exists in API/ today, and the failure mode is a visible build error
+      // rather than a silent miss, so the list grows when one appears.
       if (/(?:\bvar|\bstring\s*\??|\bobject|\bdynamic)\s+$/.test(span.slice(0, m.index))) continue;
       const abs = openIdx + m.index;
       if (seen.has(abs)) continue; // nested/overlapping response calls must not double-report
@@ -834,7 +846,8 @@ if (getterSites || memberSites) {
 console.log('\nSCOPE (a green run does NOT mean "no secret can ever escape"): this census covers the '
   + `${API_DIR}/ tree and ${GUARDED_MODELS.length} named models. It does not prove a secret cannot reach a `
   + 'response by another route — a Services/ type that serializes itself, a credential in an error '
-  + "message or log line, or one named outside check (2)'s denylist (e.g. `credentials`). Widen the "
+  + "message or log line, one named outside check (2)'s denylist (e.g. `ghp`, `bearer`), or one "
+  + 'reached by an expression rather than an identifier path (a ternary or call). Widen the '
   + 'lists when a new credential shape appears.');
 console.log('\nPASS — the HTTP layer reads no credential, serializes no secret-named member, and the '
   + 'credential-bearing models expose presence booleans only.');
