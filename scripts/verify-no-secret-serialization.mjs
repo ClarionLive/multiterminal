@@ -32,14 +32,17 @@
 //   (2) NO SECRET-NAMED RESPONSE MEMBER — no anonymous-object member named token/secret/password/
 //       pat/apiKey/accessToken/privateKey may reach an HTTP response in an API/ file. Check (1)
 //       catches the value arriving from a known getter; this catches it arriving from ANYWHERE else
-//       (a field, a parameter, a future service with a differently-named accessor). Three member
-//       forms are covered, because C# has three ways to put a secret in a response object:
+//       (a field, a parameter, a future service with a differently-named accessor). FOUR member
+//       forms are covered, because C# has four ways to put a secret in a response payload:
 //         (a) assignment      `token = _accountService.GetToken(account.Id)`  — one shape that shipped
 //         (b) SHORTHAND       `return Ok(new { token });`                     — the OTHER shape that
 //             shipped, on the deleted GET /api/source-accounts/{id}/token. C# projects the member
 //             name from the identifier, so there is no `=` anywhere and an assignment-only regex is
 //             blind to it. `new { account.Token }` is the same hazard via a dotted path.
 //         (c) direct return   `return Ok(token);`                             — no object at all.
+//         (d) dictionary key  `Ok(new Dictionary<string,string> { ["token"] = pat })` — the member
+//             name lives inside a STRING LITERAL, which the default masking blanks, so this one is
+//             scanned against a strings-PRESERVING masking of the same source.
 //       Form (b) is not hypothetical and is why this check is not merely an `=` scan: the census's
 //       own falsification pass (task ea7d9cf9, item ③) restored the real deleted endpoint and found
 //       that only check (1) fired. Combined with a non-getter source — `var token = _someCache[id];
@@ -103,13 +106,32 @@ const CRED_GETTER_RE = /\b[A-Za-z_]\w*\s*\??\s*\.\s*(GetToken|GetGitHubToken)\s*
 // and a typed config initializer written to a local FILE (`PrivateKey = keys.PrivateKey` in
 // PushNotificationService, where persisting the VAPID key is required or every phone re-subscribes).
 // None of those reach a response body. All three are now negative-control fixtures in the self-test.
-const SECRET_MEMBER_RE =
-  /\b(token|secret|password|pat|apiKey|accessToken|privateKey|clientSecret)\s*=(?!=)/gi;
+// ── CREDENTIAL VOCABULARY — ONE list drives every pattern below ───────────────────────────────────
+// These names were previously repeated across four separate literals in three casings. The ea7d9cf9
+// review pipeline found them ALREADY DIVERGED: the C# route guard listed `credential`/`credentials`
+// while this file did not, so `Ok(new { credentials = pat })` passed the census — and a comment in
+// the C# file asserted the two lists were "the same names". Deriving every pattern from one array is
+// what stops that recurring; a name can no longer be added to three places out of four.
+//
+// Ordered longest-first so alternation cannot match a prefix and strand the rest (`credential` vs
+// `credentials`). Membership tests are case-insensitive throughout.
+//
+// KEEP IN SYNC with NoCredentialEndpointsTests.CredentialSegments (C#). The two cannot share a
+// source across languages, so BOTH sides pin themselves to this same expected set in their own test
+// — the JS self-test's [vocab] fixture and the C# Credential_vocabulary_matches_the_census test.
+// Editing one without the other fails that side's build rather than silently opening a hole.
+const CREDENTIAL_NAMES = [
+  'accessToken', 'clientSecret', 'credentials', 'credential', 'privateKey',
+  'password', 'apiKey', 'secret', 'token', 'pat',
+];
+
+const NAMES_ALT = CREDENTIAL_NAMES.join('|');
+
+const SECRET_MEMBER_RE = new RegExp(`\\b(${NAMES_ALT})\\s*=(?!=)`, 'gi');
 
 // The same names as bare words, for the shorthand and direct-return forms (2b/2c), which have no
-// `=` for SECRET_MEMBER_RE to anchor on. Lowercased; membership is tested case-insensitively.
-const SECRET_NAMES = new Set(['token', 'secret', 'password', 'pat', 'apikey', 'accesstoken',
-  'privatekey', 'clientsecret']);
+// `=` for SECRET_MEMBER_RE to anchor on.
+const SECRET_NAMES = new Set(CREDENTIAL_NAMES.map(n => n.toLowerCase()));
 
 // An expression that is JUST an identifier or a dotted/null-conditional path — i.e. something C#
 // can project into a shorthand member name. `new { token }` yields a member named `token`;
@@ -124,15 +146,27 @@ const MEMBER_PATH_RE = /^[A-Za-z_]\w*(?:\s*\??\.\s*[A-Za-z_]\w*)*$/;
 // Deliberately narrow: it keys on the RECEIVER looking like a cancellation source, so `account.Token`
 // (a genuine leak shape) still flags. Found by the ea7d9cf9 review pipeline; the fixture that was
 // supposed to cover this passed vacuously because its call was not a response call at all.
+// Each alternative is a REAL cancellation-source spelling, not a loose wildcard. The first cut used
+// `\w*[Cc]ts` and `\w*[Cc]ancellation\w*`, and the ea7d9cf9 review pipeline demonstrated BOTH were
+// far wider than intended:
+//   `\w*[Cc]ts`            matched any identifier merely ENDING in the letters "cts" — so
+//                          `Ok(new { projects.Token })` and `Ok(products.Token)` passed the census
+//                          at exit 0, along with objects/contacts/artifacts/subjects. `projects` is
+//                          a first-class noun here: the retained endpoint is /api/projects/{id}/…
+//   `\w*[Cc]ancellation\w*` matched any identifier CONTAINING "cancellation" — so a credential
+//                          object named `cancellationAccount` smuggled `.Token` straight through.
+// Since form (2b/2c) is the only defense against a secret from a NON-getter source, a sloppy
+// exemption here is a hole in the census's core promise. Now: the bare name (optionally
+// underscore-prefixed), a camelCase `…Cts` SUFFIX, a `…TokenSource`, or a name ENDING in
+// "cancellation" — nothing more.
 const CANCELLATION_SOURCE_PATH_RE =
-  /(?:^|\.)\s*(?:\w*[Cc]ts|\w*[Tt]okenSource|\w*[Cc]ancellation\w*)\s*\??\.\s*Token$/;
+  /(?:^|\.)\s*(?:_?[Cc]ts|\w+Cts|\w*[Tt]okenSource|\w*[Cc]ancellation)\s*\??\.\s*Token$/;
 
 // Secret member name inside a dictionary-style initializer, where the name lives in a STRING
 // literal — `Ok(new Dictionary<string,string> { ["token"] = pat })` serializes as {"token":"…"}.
 // Scanned against the strings-PRESERVING masking, since default masking blanks exactly the text
 // that carries the name. Flagged by two independent gates in the ea7d9cf9 review pipeline.
-const DICT_KEY_SECRET_RE =
-  /\[\s*"(token|secret|password|pat|apiKey|accessToken|privateKey|clientSecret)"\s*\]\s*=(?!=)/gi;
+const DICT_KEY_SECRET_RE = new RegExp(`\\[\\s*"(${NAMES_ALT})"\\s*\\]\\s*=(?!=)`, 'gi');
 
 // Object-initializer bodies: `new {`, `new Foo {`, `new Dictionary<string, object> {`, and
 // `new Foo(args) {`. Stops at the opening brace; the caller takes the balanced body from there.
@@ -140,21 +174,35 @@ const NEW_INITIALIZER_RE = /\bnew\b[^{};]*\{/g;
 
 // HTTP response idioms used across this codebase's controllers (`return Ok(new { ... })`) and the
 // gateway's minimal-API handlers (`Results.Ok(...)`, `Results.Json(...)`).
-// Every ControllerBase responder that SERIALIZES its argument, not just the ones API/ happens to
-// use today (it is `return Ok(` at 207 sites). Deriving the list from current usage was a mistake:
-// `return Json(new { token });` and `return StatusCode(200, new { token });` are ordinary and
-// serialize identically, and REINTRODUCTION — by definition code that does not exist yet — is the
-// whole threat model. Found by the ea7d9cf9 review pipeline.
+// The responders below are the ones this census scans. That is an ENUMERATION, not a completeness
+// claim — every name here is pinned by a self-test fixture, and anything absent is simply not
+// covered by check (2).
+//
+// This list has now been wrong twice, in opposite ways, and both are worth remembering:
+//   - The first cut derived it from current usage (`API/` is `return Ok(` at 207 sites), so
+//     `Json`, `StatusCode`, `BadRequest`, `NotFound` and `new JsonResult` all served secrets
+//     invisibly. Deriving from today's code is the wrong method when REINTRODUCTION — code that by
+//     definition does not exist yet — is the entire threat model.
+//   - The second cut said "every ControllerBase responder that serializes its argument" and STILL
+//     omitted `Problem` (247 sites across 30 files in API/ — more than `Ok`), `Unauthorized(value)`,
+//     `ValidationProblem`, and the concrete `*ObjectResult` classes. Claiming completeness did not
+//     produce it. Hence the enumeration framing above: the list is only as good as its fixtures.
+//
+// NOTE on Problem/ValidationProblem: these carry error payloads, and the header's KNOWN LIMITATION
+// still says secrets in ERROR MESSAGES are out of scope. Including them here is deliberate
+// belt-and-braces for the structured-member case (`Problem(new { token })`), not a claim that free
+// text inside a `detail:` string is inspected — it is masked like any other literal.
 const RESPONSE_CALL_RE =
-  /\b(?:Results\s*\.\s*(?:Ok|Json|Content|Text|Created|Accepted)|Ok|Created|CreatedAtAction|CreatedAtRoute|Accepted|AcceptedAtAction|AcceptedAtRoute|Json|Content|BadRequest|NotFound|Conflict|UnprocessableEntity|UnauthorizedObjectResult|StatusCode|WriteAsJsonAsync|new\s+JsonResult|new\s+ObjectResult|new\s+ContentResult)\s*\(/g;
+  /\b(?:Results\s*\.\s*(?:Ok|Json|Content|Text|Created|Accepted|Problem)|Ok|Created|CreatedAtAction|CreatedAtRoute|Accepted|AcceptedAtAction|AcceptedAtRoute|Json|Content|BadRequest|NotFound|Conflict|UnprocessableEntity|Unauthorized|Forbid|Problem|ValidationProblem|StatusCode|WriteAsJsonAsync|new\s+(?:Ok|BadRequest|NotFound|Conflict|Unauthorized|UnprocessableEntity|Accepted|Created)?ObjectResult|new\s+JsonResult|new\s+ContentResult)\s*\(/g;
 
 // Property declarations that would put a raw secret on a serialized model. `HasToken` is fine —
 // the boundary is a `string`-typed secret, not the presence flag.
 // Allows the modifier and nullability forms C# actually uses — `public string? Token`,
 // `public required string Token`, and a bare field — all of which serialize identically and all of
 // which the original `public\s+string\s+` form missed.
-const SECRET_PROPERTY_RE =
-  /\bpublic\s+(?:required\s+|virtual\s+|override\s+|readonly\s+|init\s+)*string\s*\??\s+(Token|Password|Secret|Pat|ApiKey|AccessToken|PrivateKey|ClientSecret)\b/i;
+const SECRET_PROPERTY_RE = new RegExp(
+  `\\bpublic\\s+(?:required\\s+|virtual\\s+|override\\s+|readonly\\s+|init\\s+)*string\\s*\\??\\s+(${NAMES_ALT})\\b`,
+  'i');
 
 const API_DIR = 'API';
 const GUARDED_MODELS = ['Models/SourceControlAccount.cs', 'Models/OwnerProfile.cs'];
@@ -215,7 +263,9 @@ function maskCodeOnly(src, keepStrings = false) {
       out += (c === '\n' ? '\n' : c === '\r' ? '\r' : ' '); continue;
     }
     if (state === 'str') {
-      if (c === '\\') { out += keepStrings ? c + c2 : '  '; i++; continue; }
+      // c2 is '' only at end-of-input, where just ONE char is consumed — emit one, or the two
+      // maskings diverge in length and every offset computed on one becomes invalid on the other.
+      if (c === '\\') { out += keepStrings ? c + c2 : (c2 === '' ? ' ' : '  '); i++; continue; }
       if (c === '"') { state = 'code'; out += keepStrings ? '"' : ' '; continue; }
       out += lit(c); continue;
     }
@@ -225,7 +275,9 @@ function maskCodeOnly(src, keepStrings = false) {
       out += lit(c); continue;
     }
     if (state === 'chr') {
-      if (c === '\\') { out += keepStrings ? c + c2 : '  '; i++; continue; }
+      // c2 is '' only at end-of-input, where just ONE char is consumed — emit one, or the two
+      // maskings diverge in length and every offset computed on one becomes invalid on the other.
+      if (c === '\\') { out += keepStrings ? c + c2 : (c2 === '' ? ' ' : '  '); i++; continue; }
       if (c === '\'') { state = 'code'; out += keepStrings ? '\'' : ' '; continue; }
       out += lit(c); continue;
     }
@@ -346,6 +398,13 @@ function findSecretMembers(lines) {
     SECRET_MEMBER_RE.lastIndex = 0;
     let m;
     while ((m = SECRET_MEMBER_RE.exec(span)) !== null) {
+      // A local DECLARATION inside a nested lambda body is not an object member. Without this,
+      // `Ok(items.Select(i => { var token = i.T; return i.Name; }))` failed the build on entirely
+      // legitimate code, and renaming the local was the only escape (there is no in-code waiver by
+      // design). No hole: if that lambda then returns `new { token }`, form (2b) still catches it.
+      // Demonstrated by the ea7d9cf9 review pipeline; widening RESPONSE_CALL_RE enlarged the set of
+      // spans this applies to, which is what surfaced it.
+      if (/(?:\bvar|\bstring\s*\??|\bobject|\bdynamic)\s+$/.test(span.slice(0, m.index))) continue;
       const abs = openIdx + m.index;
       if (seen.has(abs)) continue; // nested/overlapping response calls must not double-report
       seen.add(abs);
@@ -568,6 +627,57 @@ function selfTest() {
       code: '            return Ok(new Dictionary<string, string> { ["username"] = u });' },
     { name: 'negative-control: a secret-named dictionary key OUTSIDE a response call', exp: false,
       code: '            var cache = new Dictionary<string, string> { ["token"] = pat };' },
+    // ---- THE `*Cts` HOLE. `\w*[Cc]ts` matched any identifier merely ENDING in "cts", so these
+    //      passed the census at exit 0. `projects` is a first-class noun here — the retained
+    //      endpoint is /api/projects/{projectId}/source-account.
+    { name: 'THE receiver hole: `projects.Token` must NOT be exempted as a cancellation source', exp: true,
+      code: '            return Ok(new { projects.Token });' },
+    { name: 'direct-return form of the same hole: `products.Token`', exp: true,
+      code: '            return Ok(products.Token);' },
+    { name: 'other real nouns ending in "cts": contacts', exp: true,
+      code: '            return Ok(new { contacts.Token });' },
+    { name: 'other real nouns ending in "cts": artifacts', exp: true,
+      code: '            return Ok(artifacts.Token);' },
+    { name: 'a credential object named to look like a cancellation source is NOT exempted', exp: true,
+      code: '            return Ok(cancellationAccount.Token);' },
+    // ---- and the genuine cancellation spellings must STILL be exempt.
+    { name: 'negative-control: bare `cts.Token` in a response call', exp: false,
+      code: '            return Ok(await _svc.RunAsync(cts.Token));' },
+    { name: 'negative-control: underscore field `_cts.Token`', exp: false,
+      code: '            return Ok(await _svc.RunAsync(_cts.Token));' },
+    { name: 'negative-control: camelCase suffix `timeoutCts.Token`', exp: false,
+      code: '            return Ok(await _svc.RunAsync(timeoutCts.Token));' },
+    { name: 'negative-control: `cancellationTokenSource.Token`', exp: false,
+      code: '            return Ok(await _svc.RunAsync(cancellationTokenSource.Token));' },
+    { name: 'negative-control: a name ending in "cancellation"', exp: false,
+      code: '            return Ok(await _svc.RunAsync(requestCancellation.Token));' },
+    // ---- RESPONDERS THE SECOND CUT STILL MISSED, despite claiming "every" responder.
+    { name: 'Problem(new { token }) — Problem is the MOST used responder in API/ (247 sites)', exp: true,
+      code: '            return Problem(new { token });' },
+    { name: 'Unauthorized(new { token })', exp: true,
+      code: '            return Unauthorized(new { token });' },
+    { name: 'ValidationProblem(new { token })', exp: true,
+      code: '            return ValidationProblem(new { token });' },
+    { name: 'new OkObjectResult(new { token })', exp: true,
+      code: '            return new OkObjectResult(new { token });' },
+    { name: 'new BadRequestObjectResult(new { token })', exp: true,
+      code: '            return new BadRequestObjectResult(new { token });' },
+    { name: 'new NotFoundObjectResult(new { token })', exp: true,
+      code: '            return new NotFoundObjectResult(new { token });' },
+    { name: 'negative-control: the REAL Problem(detail:…) sites in the changed controllers', exp: false,
+      code: '            return Problem(detail: "Token access is restricted to local callers", statusCode: 403);' },
+    // ---- NEWLY COVERED VOCABULARY. `credentials` was in the C# route list but not this file.
+    { name: 'THE vocabulary divergence: Ok(new { credentials = value })', exp: true,
+      code: '            return Ok(new { credentials = _store.Fetch(id) });' },
+    { name: 'singular `credential` shorthand', exp: true,
+      code: '            return Ok(new { credential });' },
+    // ---- LAMBDA-LOCAL FALSE POSITIVE. A declaration inside a nested lambda is not a member.
+    { name: 'THE false positive: a lambda-local named token must NOT fail the build', exp: false,
+      code: '            return Ok(items.Select(i => { var token = i.T; return i.Name; }));' },
+    { name: 'negative-control: a typed lambda-local declaration', exp: false,
+      code: '            return Ok(items.Select(i => { string token = i.T; return i.Name; }));' },
+    { name: 'but a lambda that RETURNS the secret as a member still flags', exp: true,
+      code: '            return Ok(items.Select(i => { var t = i.T; return new { token = t }; }));' },
     { name: 'negative-control: private field assignment `_token = `', exp: false,
       code: '            _token = GenerateToken();' },
     { name: 'negative-control: `var token = ` local outside any response call', exp: false,
@@ -604,6 +714,41 @@ function selfTest() {
       code: '        // public string Token { get; set; }' },
   ];
   for (const c of propCases) report('model', c.name, findSecretProperties([c.code]).length > 0, c.exp);
+
+  // ---- INVARIANT: both maskings preserve length EXACTLY. findSecretMembers computes response-call
+  //      spans on the default masking and slices the strings-preserving one at those same offsets,
+  //      which is sound ONLY if this holds. It was previously asserted in a comment — in a ticket
+  //      whose recurring defect is prose asserting what the code does not do. Now it executes.
+  //      (A backslash as the FINAL character used to make the default masking one char longer.)
+  const BS = String.fromCharCode(92);
+  const maskCases = [
+    ['plain code', 'return Ok(new { token });'],
+    ['escaped string', 'var s = "a' + BS + 'nb"; var t = token;'],
+    ['string ending in a backslash at EOF', 'var s = "abc' + BS],
+    ['char literal escape at EOF', "var c = 'a" + BS],
+    ['unterminated plain string', 'var s = "abc'],
+    ['lone @ at EOF', 'var x = @'],
+    ['@$ at EOF', 'var x = @$'],
+    ['verbatim doubled quote', 'var s = @"he said ""hi""";'],
+    ['verbatim interpolated with trailing backslash', 'var s = @$"C:' + BS + 'temp' + BS + '";'],
+    ['line and block comments', '// c\n/* b */ return Ok(new { token });'],
+  ];
+  for (const [label, src] of maskCases) {
+    const a = maskCodeOnly(src, false);
+    const b = maskCodeOnly(src, true);
+    report('mask-len', `length preserved in both modes: ${label}`,
+      !(a.length === src.length && b.length === src.length), false);
+  }
+
+  // ---- INVARIANT: the credential vocabulary is exactly what both languages expect. The C# side
+  //      pins itself to this same set in Credential_vocabulary_matches_the_census. They diverged
+  //      once already (C# had credential/credentials, this file did not) behind a comment claiming
+  //      they matched, so each side now fails its own build on an unilateral edit.
+  const EXPECTED_VOCAB = ['accesstoken', 'apikey', 'clientsecret', 'credential', 'credentials',
+    'password', 'pat', 'privatekey', 'secret', 'token'];
+  const actualVocab = [...SECRET_NAMES].sort();
+  report('vocab', `credential vocabulary is the agreed set (${EXPECTED_VOCAB.length} names)`,
+    JSON.stringify(actualVocab) !== JSON.stringify(EXPECTED_VOCAB), false);
 
   console.log(allOk
     ? `\nSELF-TEST PASSED (${ran}/${ran}) — credential-getter, response-member and model-property `
@@ -645,7 +790,7 @@ for (const abs of scanFiles(apiRoot)) {
     const key = `${rel}::${hit.name}`;
     if (ALLOWED_SECRET_MEMBERS.has(key)) { memberSites++; continue; }
     problems.push(`${rel}:${hit.line} SECRET RESPONSE MEMBER — serializes a member named '${hit.name}' `
-      + '(assigned, C# shorthand, or returned directly). '
+      + '(assigned, C# shorthand, returned directly, or as a dictionary key). '
       + 'This is the exact shape ea7d9cf9 removed (a PAT serialized into a response body, which then '
       + "landed in agents' session transcripts on disk). Return a RESULT, not a credential.");
   }

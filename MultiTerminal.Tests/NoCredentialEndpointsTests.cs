@@ -42,15 +42,43 @@ namespace MultiTerminal.Tests
                 .ToArray();
 
         /// <summary>
-        /// Credential vocabulary a route segment must not use — the same names
-        /// scripts/verify-no-secret-serialization.mjs denies in a response member, so the compiled
-        /// surface and the source scan agree on what "credential-shaped" means.
+        /// Credential vocabulary a route segment must not use.
         /// </summary>
+        /// <remarks>
+        /// This list and <c>CREDENTIAL_NAMES</c> in scripts/verify-no-secret-serialization.mjs are
+        /// the SAME SET, so the compiled surface and the source scan agree on what
+        /// "credential-shaped" means. They cannot share a source across languages, so each side
+        /// pins itself to the agreed set in its own test — this file's
+        /// <see cref="Credential_vocabulary_matches_the_census"/> and the script's `[vocab]`
+        /// self-test fixture. Editing one without the other fails that side's build.
+        /// <para>
+        /// That guard exists because the two DID diverge: this list carried `credential` and
+        /// `credentials` while the census did not, so <c>Ok(new { credentials = pat })</c> passed —
+        /// behind a comment asserting the two lists already matched. Task ea7d9cf9's review pipeline
+        /// found it. Prose claiming parity is not parity.
+        /// </para>
+        /// </remarks>
         private static readonly string[] CredentialSegments =
         {
             "token", "pat", "credential", "credentials", "secret", "password",
             "apikey", "accesstoken", "privatekey", "clientsecret",
         };
+
+        [Fact]
+        public void Credential_vocabulary_matches_the_census()
+        {
+            // The agreed set, duplicated deliberately as a literal so an edit to CredentialSegments
+            // must be a conscious act rather than a silent drift away from the census.
+            var expected = new[]
+            {
+                "accesstoken", "apikey", "clientsecret", "credential", "credentials",
+                "password", "pat", "privatekey", "secret", "token",
+            };
+
+            Assert.Equal(
+                expected,
+                CredentialSegments.Select(s => s.ToLowerInvariant()).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        }
 
         /// <summary>
         /// True when any delimiter-separated segment of a route template is a credential name.
