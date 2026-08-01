@@ -1864,14 +1864,13 @@ curl "http://localhost:5050/api/session-lineage/latest?projectPath=H%3A%5CDevLap
   <h4>curl</h4>
   <pre><code>curl http://localhost:5050/api/owner-profile</code></pre>
 
-  <div class="endpoint-block">
-    <span class="method get">GET</span> <code>/api/owner-profile/github-token</code>
-  </div>
-  <p>Get the GitHub token for agent use during git operations. Returns 404 if no token is stored.</p>
-  <h4>Response</h4>
-  <pre><code>{ "token": "ghp_xxxx..." }</code></pre>
-  <h4>curl</h4>
-  <pre><code>curl http://localhost:5050/api/owner-profile/github-token</code></pre>
+  <p><strong>Removed:</strong> <code>GET /api/owner-profile/github-token</code> returned the stored PAT
+  (<code>{ "token": "ghp_xxxx..." }</code>) for agent use during git operations. Task <code>ea7d9cf9</code>
+  deleted it, together with <code>GET /api/source-accounts/{id}/token</code> and the <code>token</code>
+  field of <code>GET /api/projects/{projectId}/source-account</code>. None of the three ever had a
+  consumer, and each fetch wrote the credential into an agent's session transcript on disk. Use
+  <code>hasGitHubToken</code> above to test for presence; to do authenticated work, have the service
+  perform the operation and return its result rather than handing out the credential.</p>
 
   <!-- ================================================================== -->
   <h2 id="companions">Companions</h2>

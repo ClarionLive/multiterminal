@@ -18,7 +18,14 @@ namespace MultiTerminal.Tests
     /// panel origin); every other controller — having no <c>[EnableCors]</c> — falls to the default
     /// deny-all policy, so no browser origin (including the panel's) receives ACAO from them. This
     /// reflection check is the falsifiable proof that a panel-origin fetch of, say,
-    /// <c>OwnerProfileController.GetGitHubToken</c> gets no ACAO and cannot be read cross-origin.
+    /// <c>OwnerProfileController.GetProfile</c> gets no ACAO and cannot be read cross-origin.
+    /// </remarks>
+    /// <remarks>
+    /// These controllers are named "secret controllers" for historical reasons: they no longer serve
+    /// any credential (task ea7d9cf9 removed the token-returning endpoints outright — the example
+    /// above used to be <c>GetGitHubToken</c>). The CORS scoping assertion is still worth keeping:
+    /// deny-all is the correct default for local-only config surfaces, and this test is what stops a
+    /// future <c>[EnableCors]</c> from silently widening one.
     /// </remarks>
     public class CorsScopingTests
     {

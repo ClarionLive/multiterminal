@@ -132,7 +132,7 @@
         <div class="arch-row"><span class="arch-key">NotificationsController</span><span class="arch-val">Runtime notifications from hooks (push to phone).</span></div>
         <div class="arch-row"><span class="arch-key">BrowserTabsController</span><span class="arch-val">HUD browser-tab pooling that agents drive via MCP.</span></div>
         <div class="arch-row"><span class="arch-key">TerminalStreamController</span><span class="arch-val">WebSocket streaming of terminal output.</span></div>
-        <div class="arch-row"><span class="arch-key">OwnerProfileController</span><span class="arch-val">Git identity and the encrypted GitHub token.</span></div>
+        <div class="arch-row"><span class="arch-key">OwnerProfileController</span><span class="arch-val">Git identity and GitHub config. Metadata only — reports whether a token is stored, never its value (ea7d9cf9).</span></div>
         <div class="arch-row"><span class="arch-key">RipgrepController</span><span class="arch-val">Fast regex code search (bundled <code>rg.exe</code>).</span></div>
       </div>
       <div class="arch-note">Loopback-only. Each MCP tool call becomes exactly one HTTP request to a controller here &mdash; the API is the single seam between the agents and the app. Other controllers: Tools, AgentPanels, AgentStats, Companion, Gateway, XamlPreview, CodeGraph, Settings.</div>
