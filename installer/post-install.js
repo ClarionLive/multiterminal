@@ -6,7 +6,7 @@
  * 2. OPT-IN (--global-reg=yes, GH#2): registering MCP servers in ~/.claude.json so
  *    Claude Code sessions started OUTSIDE MultiTerminal see them. MT-spawned terminals
  *    never need this — the app regenerates %APPDATA%\multiterminal\.mcp.json at startup
- *    (GatewayIntegrationService.EnsureMcpConfig) and passes it per-launch via --mcp-config
+ *    (GatewayIntegrationService.EnsureGatewayRegistered) and passes it per-launch via --mcp-config
  *    (LaunchCommandBuilder), along with the plugin via --plugin-dir.
  * 3. Writing gateway-defaults.json for optional MCP servers (gateway auto-seeds on startup)
  * 4. Patching runtimeconfig.json for framework-dependent mode (if .NET 8 detected)

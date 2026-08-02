@@ -80,7 +80,22 @@ namespace MultiTerminal.Services
                 Path.Combine(ProductionDataGuard.ProductionRoot, "gateway", "gateway.db"),
                 envVarName: null,
                 caller: nameof(GatewayIntegrationService));
-            _gatewayExePath = Path.Combine(GatewayProjectPath, "bin", "Release", "net8.0", "McpGateway.exe");
+            _gatewayExePath = ResolveGatewayExePath();
+        }
+
+        /// <summary>
+        /// Resolves McpGateway.exe. Installed machines have it next to the app
+        /// ({app}\mcp-gateway\McpGateway.exe, per MultiTerminal.iss); dev boxes have the
+        /// Release build under <see cref="GatewayProjectPath"/>. Null when neither exists.
+        /// </summary>
+        private static string ResolveGatewayExePath()
+        {
+            string installed = Path.Combine(AppContext.BaseDirectory, "mcp-gateway", "McpGateway.exe");
+            if (File.Exists(installed))
+                return installed;
+
+            string devBuild = Path.Combine(GatewayProjectPath, "bin", "Release", "net8.0", "McpGateway.exe");
+            return File.Exists(devBuild) ? devBuild : null;
         }
 
         /// <summary>
@@ -245,8 +260,21 @@ namespace MultiTerminal.Services
 
                 bool hasServer = false;
 
-                // 1. mcp-gateway (dotnet run --project)
-                if (Directory.Exists(GatewayProjectPath))
+                // 1. mcp-gateway — prefer the built exe (installed {app}\mcp-gateway or dev
+                //    Release build); fall back to `dotnet run` for dev boxes without a build.
+                string gatewayExe = ResolveGatewayExePath();
+                if (gatewayExe != null)
+                {
+                    string escapedExe = gatewayExe.Replace("\\", "\\\\");
+                    servers.AppendLine("    \"mcp-gateway\": {");
+                    servers.AppendLine("      \"type\": \"stdio\",");
+                    servers.AppendLine($"      \"command\": \"{escapedExe}\",");
+                    servers.AppendLine("      \"args\": []");
+                    servers.Append("    }");
+                    hasServer = true;
+                    _log("Gateway", $"Added mcp-gateway ({gatewayExe}) to .mcp.json");
+                }
+                else if (Directory.Exists(GatewayProjectPath))
                 {
                     string escapedPath = GatewayProjectPath.Replace("\\", "\\\\");
                     servers.AppendLine("    \"mcp-gateway\": {");
@@ -255,11 +283,11 @@ namespace MultiTerminal.Services
                     servers.AppendLine($"      \"args\": [\"run\", \"--project\", \"{escapedPath}\"]");
                     servers.Append("    }");
                     hasServer = true;
-                    _log("Gateway", "Added mcp-gateway to .mcp.json");
+                    _log("Gateway", "Added mcp-gateway (dotnet run) to .mcp.json");
                 }
                 else
                 {
-                    _log("Gateway", $"Gateway project not found at {GatewayProjectPath}, skipping");
+                    _log("Gateway", $"Gateway not found (no installed exe, no project at {GatewayProjectPath}), skipping");
                 }
 
                 // 2. multiterminal MCP server (node index.js)
@@ -287,33 +315,12 @@ namespace MultiTerminal.Services
                 File.WriteAllText(mcpConfigPath, servers.ToString(), System.Text.Encoding.UTF8);
                 _log("Gateway", $"Wrote MCP config to {mcpConfigPath}");
 
-                // Clean up: remove mcpServers from ~/.claude.json if present
-                CleanUserScopeMcpServers();
+                // Do NOT touch ~/.claude.json here: global registration is an installer
+                // opt-in (GH#2) and stripping it at startup would override that choice.
             }
             catch (Exception ex)
             {
                 _log("Gateway", $"EnsureGatewayRegistered failed: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Removes user-scope MCP server registrations from ~/.claude.json that we now manage
-        /// via the centralized .mcp.json file. Uses `claude mcp remove` for clean removal.
-        /// </summary>
-        private void CleanUserScopeMcpServers()
-        {
-            try
-            {
-                foreach (var serverName in new[] { "mcp-gateway", "multiterminal" })
-                {
-                    var (exitCode, _, _) = RunClaudeCommand($"mcp remove {serverName} --scope user");
-                    if (exitCode == 0)
-                        _log("Gateway", $"Removed {serverName} from user scope (migrated to .mcp.json)");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log("Gateway", $"CleanUserScopeMcpServers warning: {ex.Message}");
             }
         }
 
@@ -472,40 +479,6 @@ namespace MultiTerminal.Services
                 _connection = null;
                 return null;
             }
-        }
-
-        /// <summary>
-        /// Runs a `claude` CLI command silently (mirrors McpConfigService.RunClaudeCommand).
-        /// </summary>
-        private (int ExitCode, string Stdout, string Stderr) RunClaudeCommand(string arguments)
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c claude {arguments}",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            _log("Gateway", $"Running: claude {arguments}");
-
-            using var process = System.Diagnostics.Process.Start(psi);
-            if (process == null)
-                return (-1, "", "Failed to start cmd.exe process");
-
-            string stdout = process.StandardOutput.ReadToEnd();
-            string stderr = process.StandardError.ReadToEnd();
-            bool exited = process.WaitForExit(15000);
-
-            if (!exited)
-            {
-                try { process.Kill(); } catch { }
-                return (-2, stdout, "Process timed out after 15 seconds");
-            }
-
-            return (process.ExitCode, stdout, stderr);
         }
 
         public void Dispose()

@@ -505,6 +505,11 @@ namespace MultiTerminal
             _gatewayService = new Services.GatewayIntegrationService(
                 (source, msg) => _debugLogService?.Info(source, msg));
             _mcpConfigService.GatewayService = _gatewayService;
+
+            // Regenerate %APPDATA%\multiterminal\.mcp.json so LaunchCommandBuilder can pass it
+            // per-launch via --mcp-config. Without this, terminals on installed machines get
+            // no core MCP servers (the installer only writes it for the opt-in global path).
+            _gatewayService.EnsureGatewayRegistered();
             _projectPanel.SetGatewayService(_gatewayService);
             _projectPanel.SetDebugLogService(_debugLogService); // route ProjectPanel + its renderer's diagnostics to the unified sink (4c86f18d)
 
