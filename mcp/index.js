@@ -3263,6 +3263,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         text += `\nAssignee: ${task.assignee || "unassigned"}\n`;
         text += `Priority: ${task.priority || "normal"}\n`;
 
+        // GH#13: without the description an agent dispatched to a fresh ticket
+        // (no plan/checklist yet) has no way to read what the ticket is about.
+        // Capped like the plan preview so a pathological description can't
+        // flood an agent's context.
+        if (task.description) {
+          const descPreview = task.description.length > 3000 ? task.description.substring(0, 3000) + "..." : task.description;
+          text += `\n📄 Description:\n${descPreview}\n`;
+        }
+
         if (task.continuationNotes) {
           text += `\n📌 CONTINUATION NOTES:\n${task.continuationNotes}\n`;
         }
@@ -3432,6 +3441,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         text += `Status: ${task.status} (${task.subStatus})\n`;
         text += `Assignee: ${task.assignee}\n`;
         text += `Priority: ${task.priority || "normal"}\n`;
+
+        // GH#13: same description block as get_task_detail (see comment there).
+        if (task.description) {
+          const descPreview = task.description.length > 3000 ? task.description.substring(0, 3000) + "..." : task.description;
+          text += `\n📄 Description:\n${descPreview}\n`;
+        }
 
         if (task.continuationNotes) {
           text += `\n📌 CONTINUATION NOTES:\n${task.continuationNotes}\n`;
