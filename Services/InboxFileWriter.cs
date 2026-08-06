@@ -54,6 +54,19 @@ namespace MultiTerminal.Services
                         }
                     }
 
+                    // Idempotent by messageId (GH#7, ticket 405273fd): the channel-fail path now
+                    // writes this file as a durable belt and returns "not delivered" so Tier 3
+                    // retries the channel — each retry lands here again. Without this guard every
+                    // retry appended a duplicate row (the caller's old "persist + dedup" comment
+                    // was aspirational; no dedup existed). Already-present == successfully
+                    // buffered, so return true.
+                    if (!string.IsNullOrEmpty(messageId) && messages.Exists(m => m.Id == messageId))
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[InboxFileWriter] Message {messageId} already buffered in {terminalName} inbox — skipping duplicate append");
+                        return true;
+                    }
+
                     // Append new message
                     messages.Add(new InboxMessage
                     {

@@ -2612,7 +2612,8 @@ namespace MultiTerminal.MCPServer.Services
                 return new SendResult
                 {
                     Success = true,
-                    MessageId = message.Id
+                    MessageId = message.Id,
+                    Delivered = true
                 };
             }
             else
@@ -2636,10 +2637,14 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
+            // Accepted-and-queued, NOT confirmed delivered: persisted + in-memory queued +
+            // Tier-3 retrying (and possibly inbox-file buffered by the MainForm callback).
+            // Delivered=false lets the sender-side tool say "queued" instead of lying "sent".
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = false
             };
         }
 
@@ -2895,7 +2900,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3272,7 +3278,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3400,7 +3407,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3549,7 +3557,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 

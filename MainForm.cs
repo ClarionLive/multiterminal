@@ -1758,7 +1758,7 @@ namespace MultiTerminal
             if (!_oracleBootstrapped && string.Equals(e.Name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase) && e.ChannelPort > 0)
             {
                 _oracleBootstrapped = true;
-                _ = SendOracleBootstrapAsync(e.ChannelPort.Value);
+                _ = SendOracleBootstrapAsync(e.ChannelPort.Value, e.Name);
             }
         }
 
@@ -1766,7 +1766,14 @@ namespace MultiTerminal
         /// Send Oracle its bootstrap message after channel registration.
         /// Oracle processes the daily digest and creates suggestion tasks.
         /// </summary>
-        private async Task SendOracleBootstrapAsync(int channelPort)
+        /// <param name="channelPort">Oracle's registered Claude Code Channel port.</param>
+        /// <param name="registeredName">
+        /// The name Oracle actually registered under. The caller's gate matches it against
+        /// <see cref="OracleService.OracleName"/> case-INsensitively, so passing the canonical
+        /// constant here would put a `to` on the wire that a future case-sensitive channel-server
+        /// identity check would reject for a terminal registered as e.g. "oracle" (pipeline Run 2).
+        /// </param>
+        private async Task SendOracleBootstrapAsync(int channelPort, string registeredName)
         {
             try
             {
@@ -1777,7 +1784,7 @@ namespace MultiTerminal
                     "Run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel. " +
                     "Then let the Owner know you're online and ready.";
 
-                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal");
+                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal", recipientName: registeredName);
                 if (delivered)
                     _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
                 else
@@ -2007,7 +2014,7 @@ namespace MultiTerminal
             {
                 try
                 {
-                    bool channelDelivery = await DeliverViaChannel(recipientTerminal.ChannelPort.Value, sender, message, "normal");
+                    bool channelDelivery = await DeliverViaChannel(recipientTerminal.ChannelPort.Value, sender, message, "normal", messageId, recipientName);
                     if (channelDelivery)
                     {
                         _debugLogService.Info("MainForm", $"Channel delivery SUCCESS for message {messageId} to {recipientName} (port {recipientTerminal.ChannelPort})");
@@ -2023,6 +2030,28 @@ namespace MultiTerminal
                 {
                     _debugLogService.Warning("MainForm", $"Channel delivery EXCEPTION for message {messageId}: {ex.Message}, falling back to inbox file");
                 }
+
+                // GH#7 (ticket 405273fd): a CHANNEL-ENABLED recipient whose channel POST just
+                // failed must NOT have this message laundered into "delivered" by the inbox-file
+                // fallback below. Returning true here made the broker MarkDelivered, so Tier 3
+                // never retried — the message sat in an inbox file nothing surfaces until the
+                // (possibly idle-forever) recipient's next hook run. Instead: write the file as a
+                // durable belt, but return FALSE so the queue row stays pending and the retry
+                // timer re-attempts the channel — recipients typically re-register with a fresh
+                // port within seconds of a restart. No-port recipients keep the buffered-true
+                // path below: the inbox file IS their delivery mechanism.
+                //
+                // Scope of the belt's idempotency (pipeline Run 1): WriteMessage dedups by
+                // messageId against the CURRENT file contents, so retries can't double-append
+                // WHILE THE FILE IS UNCONSUMED. The recipient's hook reads-and-DELETES it
+                // (InboxFileWriter.cs:9-13), so a retry after consumption re-creates the entry.
+                // Accepted tradeoff — a duplicate is strictly better than the silent loss this
+                // ticket exists to fix — but it is a bound, not an impossibility: worst case the
+                // recipient sees the message once per retry, and the `id` field added below is
+                // what lets a future channel server dedup properly.
+                bool belted = InboxFileWriter.WriteMessage(recipientName, messageId, sender, message);
+                _debugLogService.Warning("MainForm", $"Message {messageId} to {recipientName}: channel failed, inbox belt {(belted ? "written" : "WRITE FAILED")} — reporting NOT delivered so Tier 3 retries the channel.");
+                return false;
             }
 
             // FALLBACK: File-based delivery (legacy) — write to inbox file. Used when the
@@ -2128,9 +2157,10 @@ namespace MultiTerminal
                 });
 
                 int port = terminal.ChannelPort.Value;
+                string termName = terminal.Name;
                 _ = Task.Run(async () =>
                 {
-                    bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal").ConfigureAwait(false);
+                    bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal", recipientName: termName).ConfigureAwait(false);
                     if (!ok)
                     {
                         _debugLogService.Warning("MainForm",
@@ -2208,7 +2238,7 @@ namespace MultiTerminal
                     string termName = t.Name;
                     deliveries.Add(Task.Run(async () =>
                     {
-                        bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal").ConfigureAwait(false);
+                        bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal", recipientName: termName).ConfigureAwait(false);
                         if (!ok)
                         {
                             System.Threading.Interlocked.Increment(ref failureCount);
@@ -2257,16 +2287,23 @@ namespace MultiTerminal
         /// Delivers a message to a terminal's Claude Code Channel via HTTP POST.
         /// The channel server pushes it as a native <channel> event into the Claude Code session.
         /// </summary>
-        private async Task<bool> DeliverViaChannel(int channelPort, string sender, string message, string priority)
+        private async Task<bool> DeliverViaChannel(int channelPort, string sender, string message, string priority, string messageId = null, string recipientName = null)
         {
             try
             {
+                // id + to are forward-compatible extras (old channel servers ignore unknown
+                // fields): id lets a future channel server dedup Tier-3 re-deliveries after an
+                // inbox-file belt write; to lets it refuse a POST aimed at a different agent
+                // (stale/reused port — the GH#7 per-recipient loss signature). Plugin-side
+                // enforcement is a follow-up in the marketplace repo.
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     from = sender,
                     message = message,
                     priority = priority ?? "normal",
-                    timestamp = DateTime.UtcNow.ToString("o")
+                    timestamp = DateTime.UtcNow.ToString("o"),
+                    id = messageId,
+                    to = recipientName
                 });
 
                 using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
@@ -6148,7 +6185,7 @@ namespace MultiTerminal
             try
             {
                 string digestMessage = "Scheduled digest check: run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel.";
-                bool delivered = await DeliverViaChannel(oracleTerminal.ChannelPort.Value, "System", digestMessage, "normal");
+                bool delivered = await DeliverViaChannel(oracleTerminal.ChannelPort.Value, "System", digestMessage, "normal", recipientName: oracleTerminal.Name);
                 _debugLogService?.Info("MainForm", $"Oracle scheduled digest {(delivered ? "delivered" : "failed")}");
             }
             catch (Exception ex)
