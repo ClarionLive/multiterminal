@@ -1758,7 +1758,7 @@ namespace MultiTerminal
             if (!_oracleBootstrapped && string.Equals(e.Name, OracleService.OracleName, StringComparison.OrdinalIgnoreCase) && e.ChannelPort > 0)
             {
                 _oracleBootstrapped = true;
-                _ = SendOracleBootstrapAsync(e.ChannelPort.Value);
+                _ = SendOracleBootstrapAsync(e.ChannelPort.Value, e.Name);
             }
         }
 
@@ -1766,7 +1766,14 @@ namespace MultiTerminal
         /// Send Oracle its bootstrap message after channel registration.
         /// Oracle processes the daily digest and creates suggestion tasks.
         /// </summary>
-        private async Task SendOracleBootstrapAsync(int channelPort)
+        /// <param name="channelPort">Oracle's registered Claude Code Channel port.</param>
+        /// <param name="registeredName">
+        /// The name Oracle actually registered under. The caller's gate matches it against
+        /// <see cref="OracleService.OracleName"/> case-INsensitively, so passing the canonical
+        /// constant here would put a `to` on the wire that a future case-sensitive channel-server
+        /// identity check would reject for a terminal registered as e.g. "oracle" (pipeline Run 2).
+        /// </param>
+        private async Task SendOracleBootstrapAsync(int channelPort, string registeredName)
         {
             try
             {
@@ -1777,7 +1784,7 @@ namespace MultiTerminal
                     "Run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel. " +
                     "Then let the Owner know you're online and ready.";
 
-                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal", recipientName: OracleService.OracleName);
+                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal", recipientName: registeredName);
                 if (delivered)
                     _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
                 else
