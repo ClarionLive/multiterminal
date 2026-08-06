@@ -1777,7 +1777,7 @@ namespace MultiTerminal
                     "Run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel. " +
                     "Then let the Owner know you're online and ready.";
 
-                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal");
+                bool delivered = await DeliverViaChannel(channelPort, "System", bootstrapMessage, "normal", recipientName: OracleService.OracleName);
                 if (delivered)
                     _debugLogService?.Info("MainForm", "Oracle bootstrap message delivered");
                 else
@@ -2029,11 +2029,19 @@ namespace MultiTerminal
                 // fallback below. Returning true here made the broker MarkDelivered, so Tier 3
                 // never retried — the message sat in an inbox file nothing surfaces until the
                 // (possibly idle-forever) recipient's next hook run. Instead: write the file as a
-                // durable belt (WriteMessage is idempotent by messageId, so Tier-3 retries can't
-                // double-append), but return FALSE so the queue row stays pending and the retry
+                // durable belt, but return FALSE so the queue row stays pending and the retry
                 // timer re-attempts the channel — recipients typically re-register with a fresh
                 // port within seconds of a restart. No-port recipients keep the buffered-true
                 // path below: the inbox file IS their delivery mechanism.
+                //
+                // Scope of the belt's idempotency (pipeline Run 1): WriteMessage dedups by
+                // messageId against the CURRENT file contents, so retries can't double-append
+                // WHILE THE FILE IS UNCONSUMED. The recipient's hook reads-and-DELETES it
+                // (InboxFileWriter.cs:9-13), so a retry after consumption re-creates the entry.
+                // Accepted tradeoff — a duplicate is strictly better than the silent loss this
+                // ticket exists to fix — but it is a bound, not an impossibility: worst case the
+                // recipient sees the message once per retry, and the `id` field added below is
+                // what lets a future channel server dedup properly.
                 bool belted = InboxFileWriter.WriteMessage(recipientName, messageId, sender, message);
                 _debugLogService.Warning("MainForm", $"Message {messageId} to {recipientName}: channel failed, inbox belt {(belted ? "written" : "WRITE FAILED")} — reporting NOT delivered so Tier 3 retries the channel.");
                 return false;
@@ -2142,9 +2150,10 @@ namespace MultiTerminal
                 });
 
                 int port = terminal.ChannelPort.Value;
+                string termName = terminal.Name;
                 _ = Task.Run(async () =>
                 {
-                    bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal").ConfigureAwait(false);
+                    bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal", recipientName: termName).ConfigureAwait(false);
                     if (!ok)
                     {
                         _debugLogService.Warning("MainForm",
@@ -2222,7 +2231,7 @@ namespace MultiTerminal
                     string termName = t.Name;
                     deliveries.Add(Task.Run(async () =>
                     {
-                        bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal").ConfigureAwait(false);
+                        bool ok = await DeliverViaChannel(port, "MultiTerminal", payload, "normal", recipientName: termName).ConfigureAwait(false);
                         if (!ok)
                         {
                             System.Threading.Interlocked.Increment(ref failureCount);
@@ -6169,7 +6178,7 @@ namespace MultiTerminal
             try
             {
                 string digestMessage = "Scheduled digest check: run the /daily-intel skill to process the digest pipeline. Do NOT call get_daily_digest directly — you MUST use /daily-intel.";
-                bool delivered = await DeliverViaChannel(oracleTerminal.ChannelPort.Value, "System", digestMessage, "normal");
+                bool delivered = await DeliverViaChannel(oracleTerminal.ChannelPort.Value, "System", digestMessage, "normal", recipientName: oracleTerminal.Name);
                 _debugLogService?.Info("MainForm", $"Oracle scheduled digest {(delivered ? "delivered" : "failed")}");
             }
             catch (Exception ex)

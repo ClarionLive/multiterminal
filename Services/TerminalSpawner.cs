@@ -71,8 +71,12 @@ namespace MultiTerminal.Services
                 listener.Start();
                 return true;
             }
-            catch (System.Net.Sockets.SocketException)
+            catch (Exception)
             {
+                // Any bind failure means "don't hand this port out" — SocketException is the
+                // expected one, but this is a best-effort probe on the spawn path, so a rarer
+                // failure must degrade to "busy" rather than propagate out of AllocateChannelPort
+                // (while holding _lock) and fail a spawn that previously could not fail.
                 return false;
             }
             finally

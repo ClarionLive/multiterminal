@@ -2930,12 +2930,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Push notification handled by MT's MessageBroker (ForwardMessagePushAsync) — no duplicate needed
         }
 
-        // GH#7 honesty (ticket 405273fd): `delivered` distinguishes CONFIRMED push into the
-        // recipient's live session from accepted-and-queued (persisted, Tier-3 retrying,
-        // possibly inbox-buffered). The old unconditional "✅ sent" made silent losses look
-        // like successes — a sender seeing "queued" knows the recipient may not have it yet.
-        // Older MT builds omit the field (undefined): treat as delivered to keep the legacy
-        // message rather than falsely alarming.
+        // GH#7 honesty (ticket 405273fd): three distinct outcomes, three distinct texts.
+        //
+        // (1) success === false — the broker rejected the send outright (e.g. recipient not
+        //     found / not connected). This returns BEFORE EnqueueMessage, so nothing was
+        //     persisted, queued, or buffered. Must be checked FIRST: `delivered` is absent
+        //     here and would otherwise fall through to the QUEUED text, which claims durable
+        //     persistence that did not happen (pipeline Run 1, finding B1).
+        // (2) delivered === false — accepted and persisted, but the live-channel push failed.
+        //     Tier 3 retries it, and it is BOUNDED (MarkFailed flips the row to 'failed' once
+        //     the retry budget is spent), so do not promise indefinite retrying (finding B2).
+        // (3) otherwise — confirmed push into the recipient's live session. Older MT builds
+        //     omit `delivered` entirely (undefined): treat as delivered so a legacy backend
+        //     keeps the old message rather than falsely alarming.
+        if (sendResult?.success === false) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `❌ Message NOT sent to ${args.to}${priorityLabel} — ${sendResult.error ?? "send rejected"}. Nothing was queued; nothing will retry.`,
+              },
+            ],
+          };
+        }
         const confirmedDelivered = sendResult?.delivered !== false;
         return {
           content: [
@@ -2943,7 +2960,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: confirmedDelivered
                 ? `✅ Message sent to ${args.to}${priorityLabel}`
-                : `📮 Message QUEUED for ${args.to}${priorityLabel} — recipient's live channel is unavailable; MT persisted it and will keep retrying (also buffered to their inbox). Not yet confirmed received. [msg ${sendResult?.messageId ?? "?"}]`,
+                : `📮 Message QUEUED for ${args.to}${priorityLabel} — their live channel is down; MT persisted it and will retry a limited number of times (also buffered to their inbox). Not confirmed received. [msg ${sendResult?.messageId ?? "?"}]`,
             },
           ],
         };

@@ -3278,7 +3278,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3406,7 +3407,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3555,7 +3557,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
