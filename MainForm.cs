@@ -2007,7 +2007,7 @@ namespace MultiTerminal
             {
                 try
                 {
-                    bool channelDelivery = await DeliverViaChannel(recipientTerminal.ChannelPort.Value, sender, message, "normal");
+                    bool channelDelivery = await DeliverViaChannel(recipientTerminal.ChannelPort.Value, sender, message, "normal", messageId, recipientName);
                     if (channelDelivery)
                     {
                         _debugLogService.Info("MainForm", $"Channel delivery SUCCESS for message {messageId} to {recipientName} (port {recipientTerminal.ChannelPort})");
@@ -2023,6 +2023,20 @@ namespace MultiTerminal
                 {
                     _debugLogService.Warning("MainForm", $"Channel delivery EXCEPTION for message {messageId}: {ex.Message}, falling back to inbox file");
                 }
+
+                // GH#7 (ticket 405273fd): a CHANNEL-ENABLED recipient whose channel POST just
+                // failed must NOT have this message laundered into "delivered" by the inbox-file
+                // fallback below. Returning true here made the broker MarkDelivered, so Tier 3
+                // never retried — the message sat in an inbox file nothing surfaces until the
+                // (possibly idle-forever) recipient's next hook run. Instead: write the file as a
+                // durable belt (WriteMessage is idempotent by messageId, so Tier-3 retries can't
+                // double-append), but return FALSE so the queue row stays pending and the retry
+                // timer re-attempts the channel — recipients typically re-register with a fresh
+                // port within seconds of a restart. No-port recipients keep the buffered-true
+                // path below: the inbox file IS their delivery mechanism.
+                bool belted = InboxFileWriter.WriteMessage(recipientName, messageId, sender, message);
+                _debugLogService.Warning("MainForm", $"Message {messageId} to {recipientName}: channel failed, inbox belt {(belted ? "written" : "WRITE FAILED")} — reporting NOT delivered so Tier 3 retries the channel.");
+                return false;
             }
 
             // FALLBACK: File-based delivery (legacy) — write to inbox file. Used when the
@@ -2257,16 +2271,23 @@ namespace MultiTerminal
         /// Delivers a message to a terminal's Claude Code Channel via HTTP POST.
         /// The channel server pushes it as a native <channel> event into the Claude Code session.
         /// </summary>
-        private async Task<bool> DeliverViaChannel(int channelPort, string sender, string message, string priority)
+        private async Task<bool> DeliverViaChannel(int channelPort, string sender, string message, string priority, string messageId = null, string recipientName = null)
         {
             try
             {
+                // id + to are forward-compatible extras (old channel servers ignore unknown
+                // fields): id lets a future channel server dedup Tier-3 re-deliveries after an
+                // inbox-file belt write; to lets it refuse a POST aimed at a different agent
+                // (stale/reused port — the GH#7 per-recipient loss signature). Plugin-side
+                // enforcement is a follow-up in the marketplace repo.
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     from = sender,
                     message = message,
                     priority = priority ?? "normal",
-                    timestamp = DateTime.UtcNow.ToString("o")
+                    timestamp = DateTime.UtcNow.ToString("o"),
+                    id = messageId,
+                    to = recipientName
                 });
 
                 using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");

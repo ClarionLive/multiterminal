@@ -30,6 +30,58 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Allocates the next channel port, skipping candidates something is already listening
+        /// on (a live sibling's channel server after the 8801-8899 wrap, or any foreign
+        /// process). Falls back to the plain round-robin candidate if a full sweep finds
+        /// nothing free — the spawn still proceeds and the channel server itself will surface
+        /// the bind failure. See GH#7 / ticket 405273fd.
+        /// </summary>
+        private int AllocateChannelPort()
+        {
+            lock (_lock)
+            {
+                int span = MaxChannelPort - FirstChannelPort + 1;
+                for (int i = 0; i < span; i++)
+                {
+                    int candidate = _nextChannelPort;
+                    _nextChannelPort = _nextChannelPort >= MaxChannelPort ? FirstChannelPort : _nextChannelPort + 1;
+                    if (IsLoopbackPortFree(candidate))
+                        return candidate;
+                    Debug.WriteLine($"[TerminalSpawner] Channel port {candidate} is in use — skipping (GH#7 collision guard)");
+                }
+
+                // Every port in the range is busy (99 concurrent listeners) — previous
+                // behavior was to hand out the next candidate regardless; keep that so a
+                // pathological state degrades the same way it always did, but loudly.
+                int fallback = _nextChannelPort;
+                _nextChannelPort = _nextChannelPort >= MaxChannelPort ? FirstChannelPort : _nextChannelPort + 1;
+                Debug.WriteLine($"[TerminalSpawner] WARNING: no free channel port in {FirstChannelPort}-{MaxChannelPort}; assigning {fallback} anyway");
+                return fallback;
+            }
+        }
+
+        /// <summary>
+        /// True when nothing is listening on 127.0.0.1:{port} right now (probe-bind test).
+        /// </summary>
+        private static bool IsLoopbackPortFree(int port)
+        {
+            using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+            try
+            {
+                listener.Start();
+                return true;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+                return false;
+            }
+            finally
+            {
+                listener.Stop();
+            }
+        }
+
+        /// <summary>
         /// Detects which PowerShell executable is available on the system.
         /// Tries PowerShell Core (pwsh.exe) first, falls back to Windows PowerShell (powershell.exe).
         /// </summary>
@@ -420,13 +472,14 @@ Always use ""{agentName}"" as your name when registering, claiming tasks, or sen
             string safeType = SanitizeForPowerShell(agentType);
             string safeDir = SanitizeForPowerShell(workingDir);
 
-            // Assign a unique channel port for this terminal (wraps within allowed range)
-            int channelPort;
-            lock (_lock)
-            {
-                channelPort = _nextChannelPort;
-                _nextChannelPort = _nextChannelPort >= MaxChannelPort ? FirstChannelPort : _nextChannelPort + 1;
-            }
+            // Assign a unique channel port for this terminal (wraps within allowed range).
+            // GH#7 (ticket 405273fd): the old blind round-robin handed out ports that could
+            // still be bound by a LIVE sibling's channel server after the 8801-8899 wrap —
+            // and message delivery treats any 2xx from the recorded port as success, so a
+            // collision silently routes one agent's messages to another. Probe-bind each
+            // candidate and skip busy ones (small TOCTOU window remains; this closes the
+            // structural collision).
+            int channelPort = AllocateChannelPort();
 
             // Generate agent system prompt file for subprocess isolation
             string systemPromptFile = GenerateAgentSystemPrompt(agentName, agentType);

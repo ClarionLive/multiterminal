@@ -2910,7 +2910,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message: args.message,
         };
         if (args.priority) sendPayload.priority = args.priority;
-        await apiCall("/api/messaging/send", "POST", sendPayload);
+        const sendResult = await apiCall("/api/messaging/send", "POST", sendPayload);
         const priorityLabel = args.priority && args.priority !== "normal" ? ` [${args.priority.toUpperCase()}]` : "";
 
         // Deliver a copy to ClaudeRemote so the Messages tab picks it up via polling
@@ -2930,11 +2930,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Push notification handled by MT's MessageBroker (ForwardMessagePushAsync) — no duplicate needed
         }
 
+        // GH#7 honesty (ticket 405273fd): `delivered` distinguishes CONFIRMED push into the
+        // recipient's live session from accepted-and-queued (persisted, Tier-3 retrying,
+        // possibly inbox-buffered). The old unconditional "✅ sent" made silent losses look
+        // like successes — a sender seeing "queued" knows the recipient may not have it yet.
+        // Older MT builds omit the field (undefined): treat as delivered to keep the legacy
+        // message rather than falsely alarming.
+        const confirmedDelivered = sendResult?.delivered !== false;
         return {
           content: [
             {
               type: "text",
-              text: `✅ Message sent to ${args.to}${priorityLabel}`,
+              text: confirmedDelivered
+                ? `✅ Message sent to ${args.to}${priorityLabel}`
+                : `📮 Message QUEUED for ${args.to}${priorityLabel} — recipient's live channel is unavailable; MT persisted it and will keep retrying (also buffered to their inbox). Not yet confirmed received. [msg ${sendResult?.messageId ?? "?"}]`,
             },
           ],
         };
