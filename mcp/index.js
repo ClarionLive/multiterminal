@@ -101,7 +101,9 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+        const apiErr = new Error(`API error: ${response.status} ${response.statusText}`);
+        apiErr.status = response.status;
+        throw apiErr;
       }
       const text = await response.text();
       return text ? JSON.parse(text) : null;
@@ -4224,7 +4226,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.agentName) latestUrl += `&agentName=${encodeURIComponent(args.agentName)}`;
         if (args.excludeSessionId) latestUrl += `&excludeSessionId=${encodeURIComponent(args.excludeSessionId)}`;
         if (args.skip) latestUrl += `&skip=${encodeURIComponent(args.skip)}`;
-        const latestData = await apiCall(latestUrl);
+        let latestData;
+        try {
+          latestData = await apiCall(latestUrl);
+        } catch (err) {
+          // The REST endpoint returns 404 (not an empty 200) when no lineage
+          // rows exist for the project — a normal "nothing synced yet" state,
+          // not an error. Surface the friendly message instead of the raw 404.
+          if (err.status === 404) {
+            return {
+              content: [{ type: "text", text: "No previous session found for this project." }],
+            };
+          }
+          throw err;
+        }
         if (latestData.error || !latestData.session) {
           return {
             content: [{ type: "text", text: latestData.error ? `Error: ${latestData.error}` : "No previous session found for this project." }],

@@ -14,9 +14,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # --- Paths ---
-$RepoRoot       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)  # ClarionPowerShell
-$MultiTermDir   = Join-Path $RepoRoot 'MultiTerminal'
-$GatewayDir     = Join-Path $RepoRoot 'McpGateway'
+$RepoRoot       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)  # parent of the MultiTerminal checkout
+$MultiTermDir   = Split-Path -Parent $PSScriptRoot                       # this checkout, whatever its folder name
+# The MCP Gateway is a SEPARATE source tree (not part of this repo). By default it
+# is expected as a sibling folder named McpGateway; on machines that don't have the
+# gateway source, point MCPGATEWAY_DIR at wherever the checkout lives.
+$GatewayDir     = if ($env:MCPGATEWAY_DIR) { $env:MCPGATEWAY_DIR } else { Join-Path $RepoRoot 'McpGateway' }
 $InstallerDir   = Join-Path $MultiTermDir 'installer'
 $IssFile        = Join-Path $InstallerDir 'MultiTerminal.iss'
 
@@ -58,6 +61,11 @@ if (-not $SkipPublish) {
 
     # --- Publish MCP Gateway ---
     Write-Step "Publishing MCP Gateway..."
+    if (-not (Test-Path $GatewayDir)) {
+        throw ("MCP Gateway source not found at '$GatewayDir'. The gateway is a separate " +
+               "source tree that is not part of this repo. Set the MCPGATEWAY_DIR env var " +
+               "to its checkout location, or clone it as a sibling folder named 'McpGateway'.")
+    }
     $gwArgs = @(
         'publish'
         '-c', 'Release'
