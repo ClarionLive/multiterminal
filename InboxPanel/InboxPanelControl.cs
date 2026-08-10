@@ -27,6 +27,35 @@ namespace MultiTerminal.InboxPanel
         private string _defaultUserId = "Owner";
 
         /// <summary>
+        /// Row cap for a single inbox fetch. Passed EXPLICITLY to <see cref="MessageBroker.GetInbox"/>
+        /// rather than relying on its <c>limit = 50</c> default.
+        /// </summary>
+        /// <remarks>
+        /// Taking that default is what made this panel lie. It fetches the newest N rows of ALL
+        /// messages, while the badge renders <c>unreadCount</c> — the TRUE total. Measured on a real
+        /// inbox: 2951 rows, 259 unread, but the panel held only the newest 50, of which 46 were
+        /// unread. So 213 unread messages were unreachable — not visible, not individually clearable,
+        /// and the badge cheerfully reported all 259. Same defect class as GH#6: a counter and a list
+        /// reading different data.
+        ///
+        /// A cap still exists (this is pushed to a WebView on every refresh, so it cannot be
+        /// unbounded), but it is now (a) explicit, (b) large enough to cover a realistic unread
+        /// backlog, and (c) DISCLOSED — see <c>totalCount</c>/<c>unreadCount</c> in the payload and
+        /// the "showing N of M" line the panel renders when the list is short of the count. A capped
+        /// list that admits it is capped is honest; one that silently implies completeness is not.
+        /// </remarks>
+        private const int InboxFetchLimit = 500;
+
+        /// <summary>
+        /// Whether the panel is currently filtering to unread only. Mirrors the JS
+        /// <c>showUnreadOnly</c>, which starts <c>true</c>, and is updated by the panel whenever the
+        /// user toggles the filter. The fetch follows the view: in unread mode we ask the broker for
+        /// unread rows, so the list can show the whole unread set rather than whichever unread rows
+        /// happen to fall inside a window of recent traffic.
+        /// </summary>
+        private bool _showUnreadOnly = true;
+
+        /// <summary>
         /// Raised when the user clicks a task link to navigate to that task on the kanban board.
         /// The string argument is the task ID.
         /// </summary>
@@ -179,10 +208,28 @@ namespace MultiTerminal.InboxPanel
 
                 var type = typeElement.GetString();
 
+                // The panel owns the filter, so it reports the mode on every message that triggers a
+                // fetch. Adopting it BEFORE the switch means "ready", "refresh" and "set_filter" all
+                // fetch for the view the user is actually looking at, without three copies of this.
+                // Absent field => leave the current mode alone (older panel builds, and messages
+                // like navigate_to_task that have no opinion about filtering).
+                if (root.TryGetProperty("unreadOnly", out var unreadOnlyElement) &&
+                    (unreadOnlyElement.ValueKind == JsonValueKind.True || unreadOnlyElement.ValueKind == JsonValueKind.False))
+                {
+                    _showUnreadOnly = unreadOnlyElement.GetBoolean();
+                }
+
                 switch (type)
                 {
                     case "ready":
                         // JS is loaded and ready - send initial inbox data
+                        SendInboxData();
+                        break;
+
+                    case "set_filter":
+                        // The user toggled Unread Only / Show All. The mode was adopted above; the
+                        // re-fetch matters because the two modes are DIFFERENT QUERIES now, not two
+                        // client-side views of one payload.
                         SendInboxData();
                         break;
 
@@ -235,15 +282,25 @@ namespace MultiTerminal.InboxPanel
 
             try
             {
-                var result = _broker.GetInbox(_defaultUserId);
+                // Explicit arguments on purpose — see InboxFetchLimit. Relying on GetInbox's
+                // defaults (unreadOnly:false, limit:50) is the bug this panel had: it fetched a
+                // window of recent traffic while the badge counted the whole backlog.
+                var result = _broker.GetInbox(_defaultUserId, unreadOnly: _showUnreadOnly, limit: InboxFetchLimit);
                 if (result.Success)
                 {
+                    // `truncated` lets the panel say "showing N of M" instead of implying the list
+                    // is everything. We only claim truncation when the fetch actually hit the cap;
+                    // a short list under the cap is complete for the current filter.
+                    var returned = result.Messages?.Count ?? 0;
                     var data = new
                     {
                         type = "inbox_data",
                         messages = result.Messages,
                         unreadCount = result.UnreadCount,
-                        totalCount = result.TotalCount
+                        totalCount = result.TotalCount,
+                        unreadOnly = _showUnreadOnly,
+                        returnedCount = returned,
+                        truncated = returned >= InboxFetchLimit
                     };
                     var jsonString = JsonSerializer.Serialize(data, JsonOptions.UnicodeCamelCase);
                     PostMessage(jsonString);

@@ -152,6 +152,21 @@
         color: var(--badge-text);
     }
 
+    /* Truncation notice — shown only when the fetch hit its cap. */
+    .inbox-status {
+        display: none;
+        padding: 5px 14px;
+        background-color: var(--bg-tertiary);
+        border-bottom: 1px solid var(--border-color);
+        font-size: 11px;
+        color: var(--text-muted);
+        flex-shrink: 0;
+    }
+
+    .inbox-status.visible {
+        display: block;
+    }
+
     /* Message list */
     .message-list {
         flex: 1;
@@ -463,6 +478,10 @@
         </div>
     </div>
 
+    <!-- Truncation notice. Hidden unless the fetch actually hit its cap — a capped list must
+         never silently imply it is showing everything. -->
+    <div class="inbox-status" id="inboxStatus"></div>
+
     <!-- Message list -->
     <div class="message-list" id="messageList">
         <div class="loading-state" id="loadingState">Loading inbox...</div>
@@ -481,6 +500,11 @@
     let unreadCount = 0;
     let currentReplyId = null;
     let showUnreadOnly = true;
+    // Totals and the truncation flag come from C#. `messages` is only ever a WINDOW onto the
+    // inbox — conflating it with the whole inbox is what let 213 unread messages sit unreachable
+    // while the badge counted them.
+    let totalCount = 0;
+    let fetchTruncated = false;
 
     // --- Type metadata ---
     const typeConfig = {
@@ -534,10 +558,30 @@
             badge.classList.remove('visible');
         }
 
-        // Filter messages based on view mode
+        // Filter messages based on view mode. NOTE: this is now a belt-and-braces pass over an
+        // already-correct payload — C# runs the SAME filter as the query, so unread mode returns
+        // unread rows. It is kept because the optimistic mark-read update mutates `readAt` locally
+        // before the fresh push lands, and that item should leave the list immediately.
         const visibleMessages = showUnreadOnly
             ? (messages || []).filter(m => !m.readAt)
             : (messages || []);
+
+        // Truncation disclosure. Driven by the server's `truncated` flag rather than by comparing
+        // counts, because the two are legitimately unequal for a moment after an optimistic
+        // mark-read. Silence here is a claim of completeness, so only say nothing when the fetch
+        // really did return everything for the current filter.
+        const statusEl = document.getElementById('inboxStatus');
+        if (statusEl) {
+            const universe = showUnreadOnly ? unreadCount : totalCount;
+            const shown = visibleMessages.length;
+            if (fetchTruncated && universe > shown) {
+                const noun = showUnreadOnly ? 'unread' : 'messages';
+                statusEl.textContent = `Showing ${shown} of ${universe} ${noun} — ${universe - shown} not listed. Use Mark All Read to clear the rest.`;
+                statusEl.classList.add('visible');
+            } else {
+                statusEl.classList.remove('visible');
+            }
+        }
 
         // Show empty state or message list
         if (visibleMessages.length === 0) {
@@ -613,7 +657,7 @@
     // --- Actions ---
 
     function markRead(messageId) {
-        postMessage({ type: 'mark_read', messageId: messageId });
+        postMessage({ type: 'mark_read', messageId: messageId, unreadOnly: showUnreadOnly });
         // Optimistic update: mark as read locally and re-render
         const msg = messages.find(m => m.id === messageId);
         if (msg) {
@@ -624,7 +668,7 @@
     }
 
     function markAllRead() {
-        postMessage({ type: 'mark_all_read' });
+        postMessage({ type: 'mark_all_read', unreadOnly: showUnreadOnly });
         // Optimistic update: mark all as read locally
         const now = new Date().toISOString();
         messages.forEach(m => { if (!m.readAt) m.readAt = now; });
@@ -636,6 +680,11 @@
         showUnreadOnly = !showUnreadOnly;
         const btn = document.getElementById('filterToggle');
         if (btn) btn.textContent = showUnreadOnly ? 'Show All' : 'Unread Only';
+        // Re-fetch, don't just re-filter. The two modes are DIFFERENT QUERIES now: unread mode asks
+        // the broker for unread rows, so it can show the whole unread set instead of whichever
+        // unread rows happened to land inside a window of recent traffic. Filtering the existing
+        // payload client-side is exactly what stranded 213 unread messages.
+        postMessage({ type: 'set_filter', unreadOnly: showUnreadOnly });
         renderMessages();
     }
 
@@ -644,7 +693,7 @@
     }
 
     function refreshInbox() {
-        postMessage({ type: 'refresh' });
+        postMessage({ type: 'refresh', unreadOnly: showUnreadOnly });
     }
 
     function toggleReply(messageId) {
@@ -732,6 +781,16 @@
             case 'inbox_data':
                 messages = data.messages || [];
                 unreadCount = data.unreadCount || 0;
+                totalCount = data.totalCount || 0;
+                fetchTruncated = data.truncated === true;
+                // C# owns the filter for the QUERY; mirror it so the client-side view and the
+                // truncation wording can't drift from what was actually fetched. Older payloads
+                // omit the field, so only adopt it when present.
+                if (typeof data.unreadOnly === 'boolean') {
+                    showUnreadOnly = data.unreadOnly;
+                    const btn = document.getElementById('filterToggle');
+                    if (btn) btn.textContent = showUnreadOnly ? 'Show All' : 'Unread Only';
+                }
                 renderMessages();
                 break;
 
@@ -752,8 +811,9 @@
     }
 
     // --- Initialization ---
-    // Notify C# that JS is ready
-    postMessage({ type: 'ready' });
+    // Notify C# that JS is ready. The filter mode rides along so the very first fetch already
+    // matches the view — otherwise the initial payload is for the wrong query.
+    postMessage({ type: 'ready', unreadOnly: showUnreadOnly });
 </script>
 </body>
 </html>
