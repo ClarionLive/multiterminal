@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.MCPServer.Services;
@@ -44,6 +45,64 @@ namespace MultiTerminal.Tests
             }
             Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
             GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Regression for task 60665c6c. AppendChecklistItems rebuilds each item from a server-side
+        /// whitelist; DependsOn/Gloss were missing from it, so a planning agent could write both,
+        /// receive Success, and have both silently discarded — leaving the plan graph showing the
+        /// appended work as unconstrained and unexplained. This is the RECOMMENDED write path
+        /// (update_checklist is documented as deprecated), so it was the likely path in practice.
+        /// </summary>
+        [Fact]
+        public void AppendChecklistItems_PreservesDependsOnAndGloss()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            var json = "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"," +
+                       "\"dependsOn\":[0,2]," +
+                       "\"gloss\":{\"what\":\"Moves the code into its own file.\"," +
+                       "\"why\":\"Gated on the inventory.\"," +
+                       "\"without\":\"You find the coupling from compiler errors mid-move.\"}}]";
+
+            var r = _svc.AppendChecklistItems(id, json);
+            Assert.True(r.Success, r.Error);
+
+            var appended = _svc.GetTask(id).GetChecklist().Last();
+            Assert.Equal(new[] { 0, 2 }, appended.DependsOn);
+            Assert.NotNull(appended.Gloss);
+            Assert.Equal("Moves the code into its own file.", appended.Gloss.What);
+            Assert.Equal("Gated on the inventory.", appended.Gloss.Why);
+            Assert.Contains("compiler errors", appended.Gloss.Without, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void AppendChecklistItems_TreatsBlankGlossAsAbsent()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            var r = _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"A\",\"gloss\":{\"what\":\"  \",\"why\":null,\"without\":\"\"}}]");
+            Assert.True(r.Success, r.Error);
+
+            // "nobody wrote an explanation" and "three empty strings" must not render differently.
+            Assert.Null(_svc.GetTask(id).GetChecklist().Last().Gloss);
+        }
+
+        [Fact]
+        public void AppendChecklistItems_DefaultsDependsOnToEmpty_NotNull()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            var r = _svc.AppendChecklistItems(id, "[{\"item\":\"A\"}]");
+            Assert.True(r.Success, r.Error);
+
+            // Empty means "no declared dependency" — the graph draws no edge for it. It must never
+            // be null, or the builder's empty-list contract would depend on normalization order.
+            var appended = _svc.GetTask(id).GetChecklist().Last();
+            Assert.NotNull(appended.DependsOn);
+            Assert.Empty(appended.DependsOn);
         }
 
         [Fact]

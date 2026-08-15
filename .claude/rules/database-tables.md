@@ -61,6 +61,8 @@ paths:
 
 ## Data Storage Patterns
 
-- Checklists: JSON array in `checklist_json` -> `[{"item":"...","status":"pending|coding|testing|done","notes":[...]}]`
+- Checklists: JSON array in `checklist_json` -> `[{"item":"...","status":"pending|coding|testing|done","notes":[...],"dependsOn":[0,1],"gloss":{"what":"...","why":"...","without":"..."}}]`
+  - `dependsOn` / `gloss` were added by task 60665c6c for the 🔗 Plan graph tab. Because the checklist is JSON rather than relational columns, **no schema migration was needed** — absent fields deserialize to null and `ChecklistItem.NormalizeFromLegacy()` defaults `dependsOn` to an empty list. `gloss` is deliberately left null when unwritten (distinct from a blank one).
+  - **`dependsOn` is sibling item indices, and an empty list means NO declared dependency — never "the previous item".** Stored array order is presentation order, not a constraint. See `.claude/rules/checklist-graph.md`.
 - Plans: Markdown in `plan` field
 - Continuation notes: Free text in `continuation_notes` (session handoff context)

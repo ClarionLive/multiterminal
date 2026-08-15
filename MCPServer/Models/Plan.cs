@@ -176,6 +176,32 @@ namespace MultiTerminal.MCPServer.Models
         public int SortOrder { get; set; }
 
         /// <summary>
+        /// Zero-based indices of SIBLING checklist items that must complete before this
+        /// one can start. Drives the dependency-graph view (task 60665c6c).
+        /// <para>An empty list means "no declared dependencies" — it does NOT mean "depends on
+        /// the previous item". Stored array order is presentation order, not a constraint, and
+        /// <see cref="MultiTerminal.Services.ChecklistGraphBuilder"/> deliberately emits no edge
+        /// for an item with no entries here. Drawing list order as arrows would invent a
+        /// constraint chain nobody declared and assert it more confidently than the plan prose
+        /// does — that is worse than showing no graph at all.</para>
+        /// <para>Agent-authored, so treat as untrusted: out-of-range indices, self-references,
+        /// and cycles are all possible and are dropped (with a warning) by the graph builder
+        /// rather than throwing.</para>
+        /// </summary>
+        public List<int> DependsOn { get; set; }
+
+        /// <summary>
+        /// Plain-language explanation of this item, written at plan time so a reader can learn
+        /// what the step does instead of approving it on trust (task 60665c6c).
+        /// <para>Deliberately SEPARATE from <see cref="Notes"/>: notes are reviewer-facing and
+        /// carry jargon ("braided methods", "census allowlist"), which is useful but is not
+        /// teaching material. Null when no gloss was written — that is a meaningful distinct
+        /// state from an empty gloss, so this is NOT defaulted in
+        /// <see cref="NormalizeFromLegacy"/>.</para>
+        /// </summary>
+        public ChecklistItemGloss Gloss { get; set; }
+
+        /// <summary>
         /// Valid statuses for enhanced workflow checklist items.
         /// </summary>
         public static readonly string[] ValidStatuses = { "pending", "coding", "testing", "done" };
@@ -184,6 +210,9 @@ namespace MultiTerminal.MCPServer.Models
         /// Normalize a legacy item to the enhanced format.
         /// If Status is null, derives it from the Done flag.
         /// If Notes is null, initializes to empty list.
+        /// If DependsOn is null, initializes to empty list (no declared dependencies).
+        /// <para><see cref="Gloss"/> is intentionally NOT defaulted — null means "nobody wrote
+        /// an explanation", which the graph view renders differently from a written-but-blank one.</para>
         /// </summary>
         public void NormalizeFromLegacy()
         {
@@ -195,7 +224,48 @@ namespace MultiTerminal.MCPServer.Models
             {
                 Notes = new List<ChecklistItemNote>();
             }
+            if (DependsOn == null)
+            {
+                DependsOn = new List<int>();
+            }
         }
+    }
+
+    /// <summary>
+    /// Plain-language explanation of a single checklist item, surfaced on hover in the
+    /// dependency-graph view (task 60665c6c). Three fields, always rendered in this order,
+    /// so a reader learns where to look.
+    /// <para>"What it touched" is deliberately absent: it is derived from
+    /// <c>task_file_links</c> rows scoped to the item's index, so it is always accurate and
+    /// never needs writing by hand.</para>
+    /// </summary>
+    public class ChecklistItemGloss
+    {
+        /// <summary>
+        /// What this step does, in one plain sentence. No jargon, no internal type names.
+        /// </summary>
+        public string What { get; set; }
+
+        /// <summary>
+        /// Why the step sits where it does in the graph — what it is gated on and why,
+        /// or why it is free to run in parallel with its siblings.
+        /// </summary>
+        public string Why { get; set; }
+
+        /// <summary>
+        /// What would go wrong if this step were skipped. This is the field that actually
+        /// teaches — "what it is" describes, "without it" explains why anyone bothered.
+        /// </summary>
+        public string Without { get; set; }
+
+        /// <summary>
+        /// True when at least one field carries text. A gloss whose fields are all blank is
+        /// treated as absent by the graph view rather than rendered as three empty rows.
+        /// </summary>
+        public bool HasContent =>
+            !string.IsNullOrWhiteSpace(What) ||
+            !string.IsNullOrWhiteSpace(Why) ||
+            !string.IsNullOrWhiteSpace(Without);
     }
 
     /// <summary>

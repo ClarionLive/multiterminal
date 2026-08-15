@@ -28,6 +28,11 @@ namespace MultiTerminal.TasksPanel
         public event EventHandler<double> ZoomChanged;
 
         /// <summary>
+        /// Raised when the user clicks a card's Plan glyph (task 60665c6c, item 6).
+        /// </summary>
+        public event EventHandler<PlanGraphRequestEventArgs> PlanGraphRequested;
+
+        /// <summary>
         /// Set the zoom factor for this panel. Forwards to the inner control.
         /// </summary>
         public void SetZoomFactor(double zoom) => _control?.SetZoomFactor(zoom);
@@ -56,6 +61,7 @@ namespace MultiTerminal.TasksPanel
             // Wire up inject event from control
             _control.InjectRequested += (s, e) => InjectRequested?.Invoke(this, e);
             _control.ZoomChanged += (s, zoom) => ZoomChanged?.Invoke(this, zoom);
+            _control.PlanGraphRequested += (s, e) => PlanGraphRequested?.Invoke(this, e);
 
             Controls.Add(_control);
         }

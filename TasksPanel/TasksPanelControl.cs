@@ -76,6 +76,14 @@ namespace MultiTerminal.TasksPanel
         public event EventHandler<double> ZoomChanged;
 
         /// <summary>
+        /// Raised when the user clicks a card's Plan glyph — the board doorway into the HUD
+        /// Plan tab (task 60665c6c, item 6). The board is its own dock window and has no
+        /// reference to any TerminalDocument, so resolving which terminal's HUD to open is
+        /// MainForm's job; this event only reports what was clicked.
+        /// </summary>
+        public event EventHandler<PlanGraphRequestEventArgs> PlanGraphRequested;
+
+        /// <summary>
         /// Set the zoom factor for this panel. Applies immediately if initialized, otherwise deferred.
         /// </summary>
         public void SetZoomFactor(double zoom)
@@ -382,6 +390,24 @@ namespace MultiTerminal.TasksPanel
                     case "task_drag_end":
                         ClearPendingDragData();
                         DebugLog("Drag ended");
+                        break;
+
+                    case "open_plan_graph":
+                        // Board doorway (item 6). The card sends the assignee it is displaying
+                        // rather than us re-reading the task: what the user clicked on is what
+                        // they saw, and a task reassigned between render and click should not
+                        // silently open a different agent's HUD.
+                        if (root.TryGetProperty("taskId", out var planTaskIdEl))
+                        {
+                            var planTaskId = planTaskIdEl.GetString();
+                            var planAssignee = root.TryGetProperty("assignee", out var planAssigneeEl)
+                                ? planAssigneeEl.GetString()
+                                : null;
+                            if (!string.IsNullOrWhiteSpace(planTaskId))
+                            {
+                                PlanGraphRequested?.Invoke(this, new PlanGraphRequestEventArgs(planTaskId, planAssignee));
+                            }
+                        }
                         break;
 
                     case "open_lifecycle_board":
@@ -1296,5 +1322,36 @@ namespace MultiTerminal.TasksPanel
                 DebugLogError($"Code review verdict error: {result.Error}");
             }
         }
+    }
+
+    /// <summary>
+    /// Event args for the board's Plan-graph doorway (task 60665c6c, item 6).
+    /// </summary>
+    /// <remarks>
+    /// Constructor-set and get-only, following the TaskActiveChanged hardening convention
+    /// (task dbbb8de2): these carry the identity a subscriber uses to pick which terminal
+    /// to open, so no subscriber can rewrite them for a later one.
+    /// </remarks>
+    public class PlanGraphRequestEventArgs : EventArgs
+    {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="PlanGraphRequestEventArgs"/> class.
+        /// </summary>
+        /// <param name="taskId">The task whose plan should be shown.</param>
+        /// <param name="assignee">The assignee the card was displaying, or null if unassigned.</param>
+        public PlanGraphRequestEventArgs(string taskId, string assignee)
+        {
+            TaskId = taskId;
+            Assignee = assignee;
+        }
+
+        /// <summary>Gets the task whose plan graph should be shown.</summary>
+        public string TaskId { get; }
+
+        /// <summary>
+        /// Gets the assignee shown on the clicked card, or null when the task is unassigned.
+        /// This is the PREFERRED terminal to open, not a guarantee one exists.
+        /// </summary>
+        public string Assignee { get; }
     }
 }
