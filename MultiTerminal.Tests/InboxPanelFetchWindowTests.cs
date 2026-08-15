@@ -1,7 +1,10 @@
 using System;
+using System.Data.SQLite;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using MultiTerminal.MCPServer.Models;
+using MultiTerminal.Services;
 using Xunit;
 
 namespace MultiTerminal.Tests
@@ -139,7 +142,7 @@ namespace MultiTerminal.Tests
 
             Assert.True(
                 Regex.IsMatch(html, @"postMessage\s*\(\s*\{\s*type:\s*'set_filter'"),
-                "toggleFilter() must POST a set_filter message and trigger a re-fetch. Re-filtering the " +
+                "setUnreadFilter() must POST a set_filter message and trigger a re-fetch. Re-filtering the " +
                 "existing payload client-side is precisely what stranded the unread backlog. (Assert on " +
                 "the postMessage call, not a bare string that a comment could contain.)");
 
@@ -203,6 +206,184 @@ namespace MultiTerminal.Tests
                 "The panel must take its counts from the host payload. Deriving them from " +
                 "messages.length would make the badge agree with a truncated list and hide the " +
                 "backlog again — that is GH#6's defect wearing different clothes.");
+        }
+
+        /// <summary>
+        /// Item ⑤. The filter control must be a CHECKBOX, because the button it replaced was
+        /// unreadable: its label named the ACTION ("Show All" while you were in unread mode), which
+        /// reads naturally as a label naming the STATE. With no other mode indicator on the panel, a
+        /// correctly-working filter and a broken one looked identical — and since "all" mode
+        /// legitimately keeps read rows in the list, Mark Read appeared to do nothing. The Owner hit
+        /// exactly this and reported the fix as non-functional when the query layer was fine.
+        ///
+        /// Asserting the OLD control is gone matters as much as asserting the new one exists: a
+        /// well-meaning revert to a compact toggle reintroduces the ambiguity without breaking
+        /// anything a behavioural test would notice.
+        /// </summary>
+        [Fact]
+        public void Filter_control_is_a_checkbox_whose_state_is_the_mode()
+        {
+            string html = ReadPanelHtmlSource();
+
+            Assert.True(
+                Regex.IsMatch(html, @"<input[^>]*type=""checkbox""[^>]*id=""filterUnread""", RegexOptions.Singleline),
+                "The unread filter must be a checkbox with id 'filterUnread' — the control's state " +
+                "must BE the mode, not something the user has to infer from a verb on a button.");
+
+            Assert.True(
+                Regex.IsMatch(html, @"onchange=""setUnreadFilter\(this\.checked\)"""),
+                "The checkbox must drive setUnreadFilter(this.checked) — the handler follows the " +
+                "control rather than flipping a separate boolean that can drift out of sync with it.");
+
+            // NEGATIVE FIXTURE: the ambiguous control must not come back.
+            Assert.False(
+                html.Contains("toggleFilter") || html.Contains("filterToggle"),
+                "The old action-labelled toggle button must stay gone. It is the control that made " +
+                "a working filter indistinguishable from a broken one.");
+        }
+
+        /// <summary>
+        /// Item ⑤, second half. C# echoes <c>unreadOnly</c> back on every push, so the checkbox must
+        /// be re-synced from the payload — otherwise the box can say one thing while the list on
+        /// screen is the result of a different query. A checkbox that lies about the mode is worse
+        /// than the button it replaced, because it looks authoritative.
+        /// </summary>
+        [Fact]
+        public void Filter_checkbox_is_resynced_from_the_host_payload()
+        {
+            string html = ReadPanelHtmlSource();
+
+            Assert.True(
+                Regex.IsMatch(html, @"function\s+syncFilterCheckbox\s*\(", RegexOptions.Singleline),
+                "A single sync helper must own writing showUnreadOnly back onto the checkbox.");
+
+            // The adopt-from-payload block must actually call it. Assert on the assignment and the
+            // call together so a comment mentioning the name cannot satisfy this (the ④ lesson).
+            Assert.True(
+                Regex.IsMatch(
+                    html,
+                    @"showUnreadOnly\s*=\s*data\.unreadOnly\s*;\s*syncFilterCheckbox\s*\(\s*\)\s*;",
+                    RegexOptions.Singleline),
+                "After adopting the host's unreadOnly the panel must re-sync the checkbox, or the " +
+                "control and the query that produced the visible list can disagree.");
+        }
+
+        /// <summary>
+        /// Item ⑥, source-level half. <c>TotalCount = messages.Count</c> made the field a synonym
+        /// for "rows returned", which is why the truncation notice could never fire: the panel asks
+        /// "is the list short of the total?" and was handed two copies of the same number.
+        /// </summary>
+        [Fact]
+        public void Broker_total_count_is_not_the_returned_row_count()
+        {
+            string path = Path.Combine(RepoRoot(), "MCPServer", "Services", "MessageBroker.cs");
+            Assert.True(File.Exists(path), $"Could not locate MessageBroker.cs at '{path}'.");
+            string cs = File.ReadAllText(path);
+
+            Assert.True(
+                Regex.IsMatch(cs, @"TotalCount\s*=\s*totalCount"),
+                "GetInbox must report a real total, not the size of the page it just fetched.");
+
+            Assert.True(
+                Regex.IsMatch(cs, @"GetInboxTotalCount\s*\(\s*userId\s*\)"),
+                "The total must come from a COUNT over the whole inbox, mirroring GetInboxUnreadCount.");
+
+            Assert.False(
+                Regex.IsMatch(cs, @"TotalCount\s*=\s*messages\.Count"),
+                "REGRESSION: TotalCount = messages.Count reintroduces the defect that made the " +
+                "'showing N of M' disclosure structurally unable to render.");
+        }
+    }
+
+    /// <summary>
+    /// Item ⑥, behavioural half — the one assertion in this ticket that is NOT source-level.
+    ///
+    /// <see cref="TaskDatabase.GetInboxTotalCount"/> is plain data access with no UI in the way, so
+    /// it can be tested honestly against a real SQLite file. This is the test that would have caught
+    /// the original defect: it seeds MORE rows than the fetch limit and asserts the reported total
+    /// exceeds the number of rows handed back. Under the old <c>TotalCount = messages.Count</c> the
+    /// two were equal by construction, so no arrangement of data could have failed it.
+    /// </summary>
+    public sealed class InboxTotalCountTests : IDisposable
+    {
+        private readonly string _testDbPath;
+        private readonly TaskDatabase _taskDb;
+
+        public InboxTotalCountTests()
+        {
+            _testDbPath = Path.Combine(Path.GetTempPath(), $"multiterminal_inboxtotal_{Guid.NewGuid():N}.db");
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", _testDbPath);
+            _taskDb = new TaskDatabase();
+        }
+
+        public void Dispose()
+        {
+            _taskDb?.Dispose();
+            SQLiteConnection.ClearAllPools(); // release file locks before deletion
+            foreach (var p in new[] { _testDbPath, _testDbPath + "-wal", _testDbPath + "-shm" })
+            {
+                if (File.Exists(p)) File.Delete(p);
+            }
+            Environment.SetEnvironmentVariable("MULTITERMINAL_TEST_DB", null);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Seed(string userId, int count, bool read)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                _taskDb.SaveInboxMessage(new InboxMessage
+                {
+                    Id = Guid.NewGuid().ToString("N").Substring(0, 8),
+                    UserId = userId,
+                    TaskId = "task0001",   // user_inbox.task_id is NOT NULL
+                    TaskTitle = "seeded task",
+                    Type = "test",
+                    Summary = $"seeded {i}",
+                    CreatedAt = DateTime.UtcNow.AddSeconds(-i),
+                    CreatedBy = "test",
+                    ReadAt = read ? DateTime.UtcNow : (DateTime?)null
+                });
+            }
+        }
+
+        /// <summary>
+        /// THE CORE GUARD. Total must describe the inbox, not the window.
+        /// </summary>
+        [Fact]
+        public void Total_count_reflects_the_whole_inbox_not_the_fetch_window()
+        {
+            const int seeded = 40;
+            const int fetchLimit = 10;
+            Seed("Tester", seeded, read: true);
+
+            var page = _taskDb.GetInboxMessages("Tester", unreadOnly: false, limit: fetchLimit);
+            int total = _taskDb.GetInboxTotalCount("Tester");
+
+            Assert.Equal(fetchLimit, page.Count);   // the fetch really was capped...
+            Assert.Equal(seeded, total);            // ...and the total is unmoved by that cap
+            Assert.True(
+                total > page.Count,
+                "With more rows than the limit, the total MUST exceed the returned page — this is " +
+                "precisely the comparison the truncation notice makes, and the old code made it " +
+                "impossible by defining the total as the page size.");
+        }
+
+        /// <summary>
+        /// Total counts read and unread alike, and is not a second unread count. Guards a plausible
+        /// mis-fix: copying GetInboxUnreadCount and forgetting to drop its read_at predicate.
+        /// </summary>
+        [Fact]
+        public void Total_count_includes_read_messages_and_is_scoped_per_user()
+        {
+            Seed("Tester", 7, read: true);
+            Seed("Tester", 3, read: false);
+            Seed("Someone-Else", 5, read: false);
+
+            Assert.Equal(10, _taskDb.GetInboxTotalCount("Tester"));      // 7 read + 3 unread
+            Assert.Equal(3, _taskDb.GetInboxUnreadCount("Tester"));      // unread only
+            Assert.Equal(5, _taskDb.GetInboxTotalCount("Someone-Else")); // no bleed across users
+            Assert.Equal(0, _taskDb.GetInboxTotalCount("Nobody"));
         }
     }
 }

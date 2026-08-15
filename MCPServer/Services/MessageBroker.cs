@@ -5380,12 +5380,21 @@ namespace MultiTerminal.MCPServer.Services
             {
                 var messages = _taskDb.GetInboxMessages(userId, unreadOnly, limit);
                 var unreadCount = _taskDb.GetInboxUnreadCount(userId);
+
+                // TotalCount is the size of the INBOX, not of this page. It used to be
+                // `messages.Count`, which made it a synonym for "rows returned" and left callers
+                // with no way to tell a complete list from a capped one — the panel's
+                // "showing N of M" line compared M against N and got two copies of the same
+                // number, so it never fired. UnreadCount was always a real COUNT; this makes the
+                // two fields mean the same KIND of thing.
+                var totalCount = _taskDb.GetInboxTotalCount(userId);
+
                 return new GetInboxResult
                 {
                     Success = true,
                     Messages = messages,
                     UnreadCount = unreadCount,
-                    TotalCount = messages.Count
+                    TotalCount = totalCount
                 };
             }
             catch (Exception ex)

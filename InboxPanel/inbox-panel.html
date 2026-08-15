@@ -152,6 +152,31 @@
         color: var(--badge-text);
     }
 
+    /* Filter checkbox. Sized to sit level with the header buttons; the whole label is the hit
+       target so the text is clickable, not just the 13px box. */
+    .filter-check {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+    }
+
+    .filter-check:hover {
+        color: var(--text-primary);
+    }
+
+    .filter-check input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+        cursor: pointer;
+        accent-color: var(--accent-blue);
+    }
+
     /* Truncation notice — shown only when the fetch hit its cap. */
     .inbox-status {
         display: none;
@@ -472,7 +497,16 @@
             <span class="unread-badge" id="unreadBadge">0</span>
         </div>
         <div class="header-actions">
-            <button class="header-btn" id="filterToggle" onclick="toggleFilter()" title="Toggle filter">Show All</button>
+            <!-- A CHECKBOX, not a toggle button, and deliberately so. The old control was a
+                 button whose label named the action ("Show All" while you were in unread mode),
+                 which reads naturally as a label naming the state. There was no other mode
+                 indicator, so a correctly-working filter and a broken one looked identical — and
+                 in "all" mode Mark Read correctly leaves the row in place, so the panel appeared
+                 to ignore every click. A checkbox has no such ambiguity: the box IS the state. -->
+            <label class="filter-check" for="filterUnread" title="Show only messages you haven't read">
+                <input type="checkbox" id="filterUnread" checked onchange="setUnreadFilter(this.checked)">
+                <span>Show unread only</span>
+            </label>
             <button class="header-btn" onclick="refreshInbox()" title="Refresh">Refresh</button>
             <button class="header-btn mark-all-read" onclick="markAllRead()" title="Mark all as read">Mark All Read</button>
         </div>
@@ -676,16 +710,27 @@
         renderMessages();
     }
 
-    function toggleFilter() {
-        showUnreadOnly = !showUnreadOnly;
-        const btn = document.getElementById('filterToggle');
-        if (btn) btn.textContent = showUnreadOnly ? 'Show All' : 'Unread Only';
+    // Takes the desired mode outright rather than flipping a hidden boolean. The checkbox already
+    // carries the state, so the handler should follow it, not maintain a parallel copy that can
+    // drift out of sync with what the user can see.
+    function setUnreadFilter(unreadOnly) {
+        showUnreadOnly = !!unreadOnly;
+        syncFilterCheckbox();
         // Re-fetch, don't just re-filter. The two modes are DIFFERENT QUERIES now: unread mode asks
         // the broker for unread rows, so it can show the whole unread set instead of whichever
         // unread rows happened to land inside a window of recent traffic. Filtering the existing
         // payload client-side is exactly what stranded 213 unread messages.
         postMessage({ type: 'set_filter', unreadOnly: showUnreadOnly });
         renderMessages();
+    }
+
+    // Single place that pushes `showUnreadOnly` back onto the checkbox, for the paths that change
+    // the mode WITHOUT the user clicking it — chiefly C# echoing `unreadOnly` back on every
+    // inbox_data push. The control must always agree with the query that produced the list on
+    // screen; a checkbox that lies about the mode is worse than the button it replaced.
+    function syncFilterCheckbox() {
+        const box = document.getElementById('filterUnread');
+        if (box) box.checked = showUnreadOnly;
     }
 
     function navigateToTask(taskId) {
@@ -788,8 +833,7 @@
                 // omit the field, so only adopt it when present.
                 if (typeof data.unreadOnly === 'boolean') {
                     showUnreadOnly = data.unreadOnly;
-                    const btn = document.getElementById('filterToggle');
-                    if (btn) btn.textContent = showUnreadOnly ? 'Show All' : 'Unread Only';
+                    syncFilterCheckbox();
                 }
                 renderMessages();
                 break;
