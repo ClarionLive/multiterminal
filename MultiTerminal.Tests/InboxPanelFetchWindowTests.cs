@@ -335,6 +335,55 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// PIPELINE RUN 2 — a defect the delta re-review found in RUN 1's OWN FIX.
+        ///
+        /// The first attempt at F3 sent a full inbox_data payload with messages=[], unreadCount=0,
+        /// totalCount=0. Because the panel's handler assigns whatever it receives, that turned an
+        /// error REPORT into a state REPLACEMENT: a transient SQLite-busy on any InboxUpdated blanked
+        /// a list the user was reading. That was WORSE than the missing `else` it replaced, which at
+        /// least left the last good list standing. And the empty state still announced "No inbox
+        /// messages" beside "could not load" — two contradictory claims, the reassuring one false.
+        ///
+        /// Both halves are pinned here: the failure payload must not carry list fields, and the
+        /// empty state must not fire under an error.
+        /// </summary>
+        [Fact]
+        public void Failed_fetch_annotates_the_view_it_never_blanks_it()
+        {
+            string cs = StripComments(ReadPanelControlSource());
+            string html = StripComments(ReadPanelHtmlSource());
+
+            // The failure payload must be an annotation: mode + error, no list state.
+            var failureBlock = Regex.Match(
+                cs,
+                @"var\s+failure\s*=\s*new\s*\{(?<body>.*?)\};",
+                RegexOptions.Singleline);
+            Assert.True(failureBlock.Success, "Could not locate the failure payload in SendInboxData.");
+
+            string body = failureBlock.Groups["body"].Value;
+            foreach (string forbidden in new[] { "messages", "unreadCount", "totalCount", "returnedCount", "truncated" })
+            {
+                Assert.False(
+                    Regex.IsMatch(body, $@"\b{forbidden}\s*="),
+                    $"The failure payload carries '{forbidden}'. The panel assigns whatever it is " +
+                    $"given, so shipping list state on an error path blanks data the user was " +
+                    $"successfully reading. A failure must annotate the view, never replace it.");
+            }
+
+            // The panel must guard the list assignments on the absence of an error.
+            Assert.True(
+                Regex.IsMatch(html, @"if\s*\(\s*!\s*fetchError\s*\)\s*\{[^}]*messages\s*=\s*data\.messages", RegexOptions.Singleline),
+                "The inbox_data handler must guard its list assignments with !fetchError, so an " +
+                "error payload cannot overwrite good state.");
+
+            // The empty state must be error-aware.
+            Assert.True(
+                Regex.IsMatch(html, @"if\s*\(\s*fetchError\s*\)\s*\{\s*empty\.classList\.remove\(\s*'visible'\s*\)", RegexOptions.Singleline),
+                "The empty state must be suppressed under fetchError. 'No inbox messages' is a claim " +
+                "about the inbox that a failed fetch gives no basis for making.");
+        }
+
+        /// <summary>
         /// Item ⑤. The filter control must be a CHECKBOX, because the button it replaced was
         /// unreadable: its label named the ACTION ("Show All" while you were in unread mode), which
         /// reads naturally as a label naming the STATE. With no other mode indicator on the panel, a

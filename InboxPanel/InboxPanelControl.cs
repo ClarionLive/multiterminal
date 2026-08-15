@@ -307,27 +307,24 @@ namespace MultiTerminal.InboxPanel
                 }
                 else
                 {
-                    // A failed fetch MUST still push, and must still echo the host's mode.
-                    // GetInbox turns every exception into Success=false, so without this branch the
-                    // failure was invisible twice over: nothing logged, and nothing sent. After a
-                    // set_filter that leaves the checkbox already flipped while the list on screen
-                    // is still the PREVIOUS mode's payload, with nothing to correct it until an
-                    // unrelated InboxUpdated happens to arrive — which is item 5's original
-                    // complaint (the control disagreeing with the list) coming back through the
-                    // error path. Echoing unreadOnly re-syncs the checkbox to the data actually
-                    // being displayed.
+                    // A failed fetch MUST still be logged and still reach the panel. GetInbox turns
+                    // every exception into Success=false, so without this branch the failure was
+                    // invisible twice over: nothing logged, and nothing sent.
+                    //
+                    // This payload ANNOTATES, it does not REPLACE. It deliberately omits messages,
+                    // unreadCount, totalCount, returnedCount and truncated, because the panel's
+                    // inbox_data handler assigns whatever it is given — so sending zeros here would
+                    // blank a list the user was successfully reading a moment ago. A transient
+                    // SQLite-busy on any InboxUpdated would then destroy correct on-screen state,
+                    // which is WORSE than the missing `else` this branch replaced: that at least
+                    // left the last good list standing. Report the failure, keep the data.
                     _broker?.DebugLogService?.Error(
                         "InboxPanel",
                         $"Inbox fetch failed for '{_defaultUserId}' (unreadOnly={_showUnreadOnly}): {result.Error}");
                     var failure = new
                     {
                         type = "inbox_data",
-                        messages = Array.Empty<object>(),
-                        unreadCount = 0,
-                        totalCount = 0,
                         unreadOnly = _showUnreadOnly,
-                        returnedCount = 0,
-                        truncated = false,
                         error = result.Error ?? "Could not load your inbox."
                     };
                     PostMessage(JsonSerializer.Serialize(failure, JsonOptions.UnicodeCamelCase));

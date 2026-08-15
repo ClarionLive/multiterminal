@@ -629,10 +629,17 @@
             }
         }
 
-        // Show empty state or message list
+        // Show empty state or message list. The empty state is ERROR-AWARE: "No inbox messages" is
+        // a claim about the inbox, and we have no basis for making it when the fetch failed. Saying
+        // it next to "could not load" states two contradictory things at once, and the reassuring
+        // one is the lie. Under fetchError the status line carries the explanation alone.
         if (visibleMessages.length === 0) {
             list.style.display = 'none';
-            empty.classList.add('visible');
+            if (fetchError) {
+                empty.classList.remove('visible');
+            } else {
+                empty.classList.add('visible');
+            }
             return;
         }
 
@@ -846,15 +853,17 @@
 
         switch (data.type) {
             case 'inbox_data':
-                messages = data.messages || [];
-                unreadCount = data.unreadCount || 0;
-                totalCount = data.totalCount || 0;
-                fetchTruncated = data.truncated === true;
-                // A failed fetch arrives as an EMPTY payload carrying `error`. Without this the
-                // panel would render it as "No inbox messages" — an empty inbox is a plausible,
-                // wrong answer, and presenting one is the silent-failure class this ticket exists
-                // to remove. Say the fetch failed instead of implying there is nothing to see.
+                // A failed fetch arrives as an ANNOTATION: `error` plus the host's mode, and NO
+                // list fields. Guard the assignments on it — otherwise `data.messages || []` turns
+                // a transient failure into a blanked list, destroying data the user was reading.
+                // An error must never be able to overwrite good state.
                 fetchError = typeof data.error === 'string' && data.error ? data.error : null;
+                if (!fetchError) {
+                    messages = data.messages || [];
+                    unreadCount = data.unreadCount || 0;
+                    totalCount = data.totalCount || 0;
+                    fetchTruncated = data.truncated === true;
+                }
                 // C# owns the filter for the QUERY; mirror it so the client-side view and the
                 // truncation wording can't drift from what was actually fetched. Older payloads
                 // omit the field, so only adopt it when present.
