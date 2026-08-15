@@ -516,10 +516,16 @@
          never silently imply it is showing everything. -->
     <div class="inbox-status" id="inboxStatus"></div>
 
+    <!-- Loading state. A SIBLING of #messageList, never a child — renderMessages() assigns
+         messageList.innerHTML, so a nested loader is destroyed by the FIRST render and every
+         getElementById('loadingState') after that returns null. That made renderMessages() throw
+         on its own second call, ahead of the badge and list updates, and froze the panel at its
+         opening paint: Mark Read wrote to the database and the row never moved. Keep it out here,
+         alongside #emptyState, which survives for exactly this reason. -->
+    <div class="loading-state" id="loadingState">Loading inbox...</div>
+
     <!-- Message list -->
-    <div class="message-list" id="messageList">
-        <div class="loading-state" id="loadingState">Loading inbox...</div>
-    </div>
+    <div class="message-list" id="messageList"></div>
 
     <!-- Empty state -->
     <div class="empty-state" id="emptyState">
@@ -583,8 +589,13 @@
         const loading = document.getElementById('loadingState');
         const badge = document.getElementById('unreadBadge');
 
-        // Hide loading
-        loading.style.display = 'none';
+        // Hide loading. Null-guarded on purpose, and not as defensive noise: this bare deref threw
+        // on EVERY call after the first, because the loader used to live inside #messageList and
+        // the innerHTML assignment below deleted it. The throw landed here — before the badge and
+        // before the list — so the panel painted once and then silently ignored every subsequent
+        // push: mark-read, filter toggle, Refresh, and the optimistic update alike. A missing
+        // decoration must never be able to stop a repaint.
+        if (loading) loading.style.display = 'none';
 
         // Update badge
         if (unreadCount > 0) {
