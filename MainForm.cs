@@ -1244,33 +1244,15 @@ namespace MultiTerminal
         }
 
         /// <summary>
-        /// Subscribes every host-side handler the kanban board needs. This exists because the
-        /// board has THREE creation sites — initial startup, layout restore
-        /// (GetContentFromPersistString), and recreate-after-X-close (ToggleTasksPanel) — and
-        /// a handler wired at only one of them is dead on the other two.
+        /// Subscribes every host-side handler the kanban board needs. Call this at every
+        /// TasksPanelDocument creation site — the board has three, and an event wired at only one
+        /// of them is dead on the other two with no error anywhere (task 60665c6c).
         /// </summary>
-        /// <remarks>
-        /// Found by the pipeline debugger on task 60665c6c: PlanGraphRequested was subscribed
-        /// only at startup, so X-closing the board and reopening it left every Plan-glyph click
-        /// raising an event with a null invocation list — a permanent, silent, log-free no-op for
-        /// the rest of the session. ZoomChanged had the same hole already (the recreated board
-        /// stopped persisting its zoom), which is why this helper takes the whole set rather than
-        /// just the one event that was reported.
-        /// <para>
-        /// Call this from EVERY site that assigns <see cref="_tasksPanel"/>. Each site builds a
-        /// fresh TasksPanelDocument, so there is no double-subscribe risk; the invariant is
-        /// "constructed implies wired", and PlanGraphDoorwayTests enforces it against this file's
-        /// source so a fourth creation site cannot be added without wiring.
-        /// </para>
-        /// </remarks>
+        /// <param name="panel">The freshly constructed board.</param>
         private void WireTasksPanelEvents(TasksPanelDocument panel)
         {
-            if (panel == null) return;
-
             panel.InjectRequested += OnChatInjectRequested; // Reuse same inject handler
             panel.PlanGraphRequested += OnPlanGraphRequested;
-
-            // Save zoom level to settings whenever user ctrl+wheels in a standalone panel
             panel.ZoomChanged += (s, zoom) => _settings?.SetTasksPanelZoom(zoom);
         }
 

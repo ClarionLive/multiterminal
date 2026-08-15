@@ -271,20 +271,39 @@ namespace MultiTerminal.Tests
                 $"glyph and stops persisting its zoom, with no error anywhere — which is exactly the " +
                 $"defect this test exists for.");
 
-            // The two RECREATE sites are where the original bug lived — the user X-closes the board
-            // and reopens it. Pin them by name so a future edit can't drop the wiring from one and
-            // keep the count balanced by adding a call somewhere else.
-            foreach (string method in new[] { "private void ToggleTasksPanel(", "persistString == \"TasksPanel\"" })
+            // The two RECREATE sites are the ones that were unwired. Pin them by name so a future
+            // edit can't drop the wiring from one and keep the COUNT balanced by adding a call
+            // somewhere else — the count alone cannot see a balanced wrong edit.
+            //
+            // These checks must not be able to opt out silently. An earlier version `continue`d
+            // when an anchor didn't match, so renaming ToggleTasksPanel would have quietly deleted
+            // the strong half of this test and left only the count — a test that protects less than
+            // it appears to, which is the failure mode this whole file exists to avoid. Now the
+            // matches are counted and the count is asserted.
+            var recreateAnchors = new[] { "private void ToggleTasksPanel(", "persistString == \"TasksPanel\"" };
+            int recreateSitesChecked = 0;
+
+            foreach (string anchor in recreateAnchors)
             {
-                int at = src.IndexOf(method, StringComparison.Ordinal);
-                if (at < 0) continue; // shape changed; the count assertion above still guards
+                int at = src.IndexOf(anchor, StringComparison.Ordinal);
+                if (at < 0) continue;
+
                 string window = src.Substring(at, Math.Min(1200, src.Length - at));
                 if (!window.Contains("new TasksPanelDocument()", StringComparison.Ordinal)) continue;
+
+                recreateSitesChecked++;
                 Assert.True(
                     window.Contains("WireTasksPanelEvents(", StringComparison.Ordinal),
-                    $"The recreate site near '{method}' builds a TasksPanelDocument without calling " +
-                    $"WireTasksPanelEvents — reopening the closed board leaves the Plan glyph dead.");
+                    $"The recreate site near '{anchor}' builds a TasksPanelDocument without calling " +
+                    $"WireTasksPanelEvents — that board's Plan glyph would be dead.");
             }
+
+            Assert.True(
+                recreateSitesChecked == recreateAnchors.Length,
+                $"Only {recreateSitesChecked} of {recreateAnchors.Length} recreate sites could be located " +
+                $"and checked. An anchor stopped matching — either a method was renamed or the " +
+                $"construction moved out of its window — so this test silently stopped guarding them. " +
+                $"Update the anchors rather than letting the count assertion stand alone.");
 
             // The helper must actually carry the events; an empty helper would satisfy the above.
             string helper = BalancedBodyAfter(src, "private void WireTasksPanelEvents(", "WireTasksPanelEvents");
@@ -335,6 +354,17 @@ namespace MultiTerminal.Tests
                     $"A no_task send omits the `pinned` field: '{send.Value.Trim()}'. The view reads " +
                     $"msg.pinned to decide both the badge and the copy, so omitting it renders a " +
                     $"pinned tab as 'No active task' with no way back.");
+
+                // Presence is not enough — assert the TYPE. One of these sends previously carried
+                // the raw `_pinnedTaskId` string, which works only because JS treats a non-empty
+                // string as truthy. That is the same "two sides agree by luck, not by contract"
+                // class as the Run-1 CRITICAL (PascalCase renderer vs camelCase view), and a
+                // presence-only assertion would pass on exactly the regression it was written for.
+                Assert.True(
+                    send.Value.Contains("pinned = _pinnedTaskId != null", StringComparison.Ordinal),
+                    $"A no_task send does not pass `pinned` as a bool: '{send.Value.Trim()}'. Send " +
+                    $"`pinned = _pinnedTaskId != null`; the raw id happens to work by JS truthiness, " +
+                    $"which is a contract nobody wrote down.");
             }
         }
     }
