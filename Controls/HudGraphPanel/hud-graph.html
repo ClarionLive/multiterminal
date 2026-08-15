@@ -149,14 +149,23 @@
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
-    min-width: min-content;
   }
 
+  /* A tier WRAPS rather than forcing the canvas to scroll sideways. A ticket whose items
+     declare no dependencies puts every item on tier 0 — the common case today — and nine
+     nodes at max-width 11rem demand ~1660px, far more than the panel has. min-width:
+     min-content on #tiers plus flex-wrap: nowrap here was the pair that made the graph
+     wider than its container instead of taller; both are gone.
+
+     row-gap is deliberately much tighter than the 1.5rem inter-tier gap: a wrapped line is
+     a continuation of the SAME tier, and must never read as a tier break. That distinction
+     is the whole meaning of a row here — same row means genuinely parallel. */
   .tier {
     display: flex;
     justify-content: center;
-    gap: 0.6rem;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    column-gap: 0.6rem;
+    row-gap: 0.35rem;
   }
 
   #edges {
