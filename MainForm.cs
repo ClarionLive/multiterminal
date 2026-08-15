@@ -842,6 +842,7 @@ namespace MultiTerminal
                 _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 13: Wiring tasks panel events");
                 _tasksPanel.InjectRequested += OnChatInjectRequested; // Reuse same inject handler
+                _tasksPanel.PlanGraphRequested += OnPlanGraphRequested;
 
                 // Save zoom level to settings whenever user ctrl+wheels in a standalone panel
                 _tasksPanel.ZoomChanged += (s, zoom) => _settings?.SetTasksPanelZoom(zoom);
@@ -1242,6 +1243,61 @@ namespace MultiTerminal
                 // await Task.Delay(50);  // Let activation settle
                 await targetTerminal.InjectInputAsync(e.Content);
             }
+        }
+
+        /// <summary>
+        /// Handles the kanban board's Plan-glyph click — the board doorway into the HUD Plan
+        /// tab (task 60665c6c, item 6). The board is its own dock window with no reference to
+        /// any TerminalDocument, so this is the piece that turns "which card" into "whose HUD".
+        /// </summary>
+        /// <remarks>
+        /// Resolution is preference-ordered, not a lookup: the assignee's terminal first, because
+        /// a plan belongs with the agent working it; then the last-active terminal, so an
+        /// UNASSIGNED card still opens somewhere instead of silently doing nothing. Falling back
+        /// is safe precisely because HudGraphRenderer.SetTask PINS the view (with a visible
+        /// "pinned" badge that clicks back to following the active task) — borrowing my own HUD to
+        /// look at someone else's ticket is a read, and it is visibly undoable.
+        /// <para>
+        /// _lastActiveTerminal is preferred over _dockPanel.ActiveDocument for the same reason it
+        /// is everywhere else in this file: DockPanelSuite's ActiveDocument is unreliable with
+        /// WebView2 — and here the click ITSELF came from a WebView2 panel, so the board may well
+        /// be the active document at this moment.
+        /// </para>
+        /// </remarks>
+        private void OnPlanGraphRequested(object sender, PlanGraphRequestEventArgs e)
+        {
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(() => OnPlanGraphRequested(sender, e))); }
+                catch { }
+                return;
+            }
+
+            if (e == null || string.IsNullOrWhiteSpace(e.TaskId)) return;
+
+            TerminalDocument targetDoc = null;
+
+            if (!string.IsNullOrWhiteSpace(e.Assignee))
+            {
+                lock (_terminalDocMapLock)
+                {
+                    targetDoc = _terminalDocMap.Values.FirstOrDefault(t =>
+                        (t.CustomTitle?.Equals(e.Assignee, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                        t.TabText.Equals(e.Assignee, StringComparison.OrdinalIgnoreCase));
+                }
+            }
+
+            targetDoc ??= _lastActiveTerminal ?? _dockPanel.ActiveDocument as TerminalDocument;
+
+            if (targetDoc == null)
+            {
+                _debugLogService?.Info(
+                    "MainForm",
+                    $"PlanGraphRequested: no TerminalDocument to open for task {e.TaskId} (assignee '{e.Assignee ?? "none"}')");
+                return;
+            }
+
+            targetDoc.OpenPlanGraph(e.TaskId);
         }
 
         private async void OnChatReplyRequested(object sender, ReplyMessageEventArgs e)

@@ -93,11 +93,49 @@ Also note `TerminalDocument`'s **late-terminal-name** path: the broker commonly 
 `UpdateTaskHudTerminalName()` as well as `SetMessageBroker()`, or it sits permanently on its
 empty state for most terminals.
 
-## Known gap
+## The board doorway
 
-The **board doorway** (a glyph on a task card that opens this tab focused on that ticket) is not
-built. `HudGraphRenderer.SetTask(taskId)` is the entry point it needs; the missing piece is the
-route from the Tasks panel / lifecycle board (separate dock windows) into a specific
-`TerminalDocument`'s HUD. The established pattern to copy is `BrowserTabRequested` — a broker
-event that `MainForm` handles by resolving a terminal id to its `TerminalDocument`
-(`MainForm.cs:1355`).
+A **Plan glyph on each kanban card** opens this tab pinned to that ticket. The route:
+
+```
+tasks-panel.html  openPlanGraph(taskId)      -> postMessage {type:'open_plan_graph', taskId, assignee}
+TasksPanelControl case "open_plan_graph"     -> raises PlanGraphRequested
+TasksPanelDocument                            -> forwards it
+MainForm          OnPlanGraphRequested        -> picks a TerminalDocument
+TerminalDocument  OpenPlanGraph(taskId)       -> SetTask(taskId) then SwitchToTabById("__graph__")
+```
+
+It deliberately does NOT go through `MessageBroker`. Broker events (`BrowserTabRequested`) exist to
+carry requests in from **out of process** — MCP tools and REST. This one starts as a click in a
+sibling dock window, so it follows the panel-to-`MainForm` UI event precedent (`InjectRequested`)
+and leaves the ~5.5K-LOC broker alone.
+
+Three decisions worth keeping:
+
+- **The card sends the assignee it is displaying**, rather than the host re-reading the task. What
+  the user clicked is what they saw; a task reassigned between render and click must not silently
+  open a different agent's HUD.
+- **Resolution is preference-ordered, not a lookup.** Assignee's terminal first; then
+  `_lastActiveTerminal`, so an **unassigned** card still opens somewhere. Falling back is safe only
+  because `SetTask` PINS the view behind a visible "pinned" badge that clicks back to following the
+  active task — borrowing your own HUD to read someone else's ticket is a read, and it is visibly
+  undoable. Prefer `_lastActiveTerminal` over `_dockPanel.ActiveDocument`: DockPanelSuite's
+  `ActiveDocument` is unreliable with WebView2, and here the click itself came from a WebView2 panel.
+- **The glyph is gated on the ticket having a checklist.** The tab's honest empty state is "This
+  ticket has no checklist yet", and a doorway into an empty room reads as a broken feature rather
+  than an absent one.
+
+`SetTask` runs BEFORE the tab switch, or the tab appears still showing the previously-pinned ticket
+and then swaps under the reader. `OpenPlanGraph` calls `Activate()` — unlike the inject paths, which
+removed it to stop focus stealing: those are agent-initiated and unbidden, this is a human asking to
+be taken somewhere, and a HUD tab that changed behind a hidden document looks like a dead click.
+
+Every hop above is a **string contract across files that no compiler checks** — the same shape as
+the Run-1 CRITICAL (PascalCase renderer vs camelCase view, clean build, 442 green tests).
+`MultiTerminal.Tests/PlanGraphDoorwayTests.cs` pins them, including a cross-file check that every
+field the host reads is a field the panel actually sends.
+
+## Remaining gap
+
+The **lifecycle board** (`TaskLifecycleBoardForm`, a separate window) has no equivalent glyph. Same
+entry point, same event; only the publisher is missing.
