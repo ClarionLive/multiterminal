@@ -4366,6 +4366,30 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Get the TOTAL number of inbox rows for a user, independent of any fetch limit.
+        /// </summary>
+        /// <remarks>
+        /// Exists because <see cref="GetInboxMessages"/> is capped, so <c>messages.Count</c> is the
+        /// size of the WINDOW, not of the inbox. Reporting the window as the total is what made the
+        /// panel's "showing N of M" disclosure structurally unable to fire: with N and M both equal
+        /// to the returned row count, "is the list short of the total?" is always false, and a
+        /// truncated list silently claimed to be complete.
+        /// <para>
+        /// Mirrors <see cref="GetInboxUnreadCount"/> deliberately — that one was always a real
+        /// COUNT, which is why the unread side of the disclosure worked and the total side did not.
+        /// </para>
+        /// </remarks>
+        public int GetInboxTotalCount(string userId)
+        {
+            using var gate = LockConn();
+            const string sql = "SELECT COUNT(*) FROM user_inbox WHERE user_id = @userId";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@userId", userId);
+            return Convert.ToInt32(command.ExecuteScalar());
+        }
+
+        /// <summary>
         /// Get a single inbox message by ID.
         /// </summary>
         public InboxMessage GetInboxMessage(string messageId)

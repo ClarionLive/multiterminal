@@ -152,6 +152,46 @@
         color: var(--badge-text);
     }
 
+    /* Filter checkbox. Sized to sit level with the header buttons; the whole label is the hit
+       target so the text is clickable, not just the 13px box. */
+    .filter-check {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+    }
+
+    .filter-check:hover {
+        color: var(--text-primary);
+    }
+
+    .filter-check input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+        cursor: pointer;
+        accent-color: var(--accent-blue);
+    }
+
+    /* Truncation notice — shown only when the fetch hit its cap. */
+    .inbox-status {
+        display: none;
+        padding: 5px 14px;
+        background-color: var(--bg-tertiary);
+        border-bottom: 1px solid var(--border-color);
+        font-size: 11px;
+        color: var(--text-muted);
+        flex-shrink: 0;
+    }
+
+    .inbox-status.visible {
+        display: block;
+    }
+
     /* Message list */
     .message-list {
         flex: 1;
@@ -457,11 +497,24 @@
             <span class="unread-badge" id="unreadBadge">0</span>
         </div>
         <div class="header-actions">
-            <button class="header-btn" id="filterToggle" onclick="toggleFilter()" title="Toggle filter">Show All</button>
+            <!-- A CHECKBOX, not a toggle button, and deliberately so. The old control was a
+                 button whose label named the action ("Show All" while you were in unread mode),
+                 which reads naturally as a label naming the state. There was no other mode
+                 indicator, so a correctly-working filter and a broken one looked identical — and
+                 in "all" mode Mark Read correctly leaves the row in place, so the panel appeared
+                 to ignore every click. A checkbox has no such ambiguity: the box IS the state. -->
+            <label class="filter-check" for="filterUnread" title="Show only messages you haven't read">
+                <input type="checkbox" id="filterUnread" checked onchange="setUnreadFilter(this.checked)">
+                <span>Show unread only</span>
+            </label>
             <button class="header-btn" onclick="refreshInbox()" title="Refresh">Refresh</button>
             <button class="header-btn mark-all-read" onclick="markAllRead()" title="Mark all as read">Mark All Read</button>
         </div>
     </div>
+
+    <!-- Truncation notice. Hidden unless the fetch actually hit its cap — a capped list must
+         never silently imply it is showing everything. -->
+    <div class="inbox-status" id="inboxStatus"></div>
 
     <!-- Message list -->
     <div class="message-list" id="messageList">
@@ -481,6 +534,13 @@
     let unreadCount = 0;
     let currentReplyId = null;
     let showUnreadOnly = true;
+    // Totals and the truncation flag come from C#. `messages` is only ever a WINDOW onto the
+    // inbox — conflating it with the whole inbox is what let 213 unread messages sit unreachable
+    // while the badge counted them.
+    let totalCount = 0;
+    let fetchTruncated = false;
+    // Non-null when the last fetch FAILED. Distinct from "inbox is empty" on purpose.
+    let fetchError = null;
 
     // --- Type metadata ---
     const typeConfig = {
@@ -534,15 +594,52 @@
             badge.classList.remove('visible');
         }
 
-        // Filter messages based on view mode
+        // Filter messages based on view mode. NOTE: this is now a belt-and-braces pass over an
+        // already-correct payload — C# runs the SAME filter as the query, so unread mode returns
+        // unread rows. It is kept because the optimistic mark-read update mutates `readAt` locally
+        // before the fresh push lands, and that item should leave the list immediately.
         const visibleMessages = showUnreadOnly
             ? (messages || []).filter(m => !m.readAt)
             : (messages || []);
 
-        // Show empty state or message list
+        // Truncation disclosure. Driven by the server's `truncated` flag rather than by comparing
+        // counts, because the two are legitimately unequal for a moment after an optimistic
+        // mark-read. Silence here is a claim of completeness, so only say nothing when the fetch
+        // really did return everything for the current filter.
+        const statusEl = document.getElementById('inboxStatus');
+        if (statusEl) {
+            const universe = showUnreadOnly ? unreadCount : totalCount;
+            const shown = visibleMessages.length;
+            if (fetchError) {
+                // Failure outranks truncation: never let a failed fetch read as a complete inbox.
+                statusEl.textContent = `Could not load your inbox — ${fetchError}`;
+                statusEl.classList.add('visible');
+            } else if (fetchTruncated && universe > shown) {
+                const noun = showUnreadOnly ? 'unread' : 'messages';
+                // The remedy is BRANCHED with the noun, not appended to both. "Mark All Read" only
+                // shrinks the unlisted set when `universe` is unreadCount. In all-mode `universe` is
+                // totalCount, which marking-read does not reduce — the banner would be permanent and
+                // its instruction provably inert. A disclosure feature that gives false guidance is
+                // worse than one that gives none.
+                const remedy = showUnreadOnly ? ' Use Mark All Read to clear the rest.' : '';
+                statusEl.textContent = `Showing ${shown} of ${universe} ${noun} — ${universe - shown} not listed.${remedy}`;
+                statusEl.classList.add('visible');
+            } else {
+                statusEl.classList.remove('visible');
+            }
+        }
+
+        // Show empty state or message list. The empty state is ERROR-AWARE: "No inbox messages" is
+        // a claim about the inbox, and we have no basis for making it when the fetch failed. Saying
+        // it next to "could not load" states two contradictory things at once, and the reassuring
+        // one is the lie. Under fetchError the status line carries the explanation alone.
         if (visibleMessages.length === 0) {
             list.style.display = 'none';
-            empty.classList.add('visible');
+            if (fetchError) {
+                empty.classList.remove('visible');
+            } else {
+                empty.classList.add('visible');
+            }
             return;
         }
 
@@ -613,18 +710,26 @@
     // --- Actions ---
 
     function markRead(messageId) {
-        postMessage({ type: 'mark_read', messageId: messageId });
+        postMessage({ type: 'mark_read', messageId: messageId, unreadOnly: showUnreadOnly });
         // Optimistic update: mark as read locally and re-render
         const msg = messages.find(m => m.id === messageId);
         if (msg) {
+            const wasUnread = !msg.readAt;
             msg.readAt = new Date().toISOString();
-            unreadCount = messages.filter(m => !m.readAt).length;
+            // DECREMENT the host-supplied count; do NOT recompute it from `messages`.
+            // `messages` is a CAPPED WINDOW (InboxFetchLimit), not the unread universe — deriving a
+            // global count from it collapses `unreadCount` to the window size (900 -> 499 on one
+            // click), which also makes `universe > shown` false and silently hides the truncation
+            // disclosure. That is the same window-vs-universe conflation this ticket fixed in
+            // GetInbox.TotalCount, and the invariant the Counts_come_from_the_host_not_from_the_loaded_window
+            // test exists to defend. The authoritative value is restored by the next inbox_data push.
+            if (wasUnread) unreadCount = Math.max(0, unreadCount - 1);
             renderMessages();
         }
     }
 
     function markAllRead() {
-        postMessage({ type: 'mark_all_read' });
+        postMessage({ type: 'mark_all_read', unreadOnly: showUnreadOnly });
         // Optimistic update: mark all as read locally
         const now = new Date().toISOString();
         messages.forEach(m => { if (!m.readAt) m.readAt = now; });
@@ -632,11 +737,27 @@
         renderMessages();
     }
 
-    function toggleFilter() {
-        showUnreadOnly = !showUnreadOnly;
-        const btn = document.getElementById('filterToggle');
-        if (btn) btn.textContent = showUnreadOnly ? 'Show All' : 'Unread Only';
+    // Takes the desired mode outright rather than flipping a hidden boolean. The checkbox already
+    // carries the state, so the handler should follow it, not maintain a parallel copy that can
+    // drift out of sync with what the user can see.
+    function setUnreadFilter(unreadOnly) {
+        showUnreadOnly = !!unreadOnly;
+        syncFilterCheckbox();
+        // Re-fetch, don't just re-filter. The two modes are DIFFERENT QUERIES now: unread mode asks
+        // the broker for unread rows, so it can show the whole unread set instead of whichever
+        // unread rows happened to land inside a window of recent traffic. Filtering the existing
+        // payload client-side is exactly what stranded 213 unread messages.
+        postMessage({ type: 'set_filter', unreadOnly: showUnreadOnly });
         renderMessages();
+    }
+
+    // Single place that pushes `showUnreadOnly` back onto the checkbox, for the paths that change
+    // the mode WITHOUT the user clicking it — chiefly C# echoing `unreadOnly` back on every
+    // inbox_data push. The control must always agree with the query that produced the list on
+    // screen; a checkbox that lies about the mode is worse than the button it replaced.
+    function syncFilterCheckbox() {
+        const box = document.getElementById('filterUnread');
+        if (box) box.checked = showUnreadOnly;
     }
 
     function navigateToTask(taskId) {
@@ -644,7 +765,7 @@
     }
 
     function refreshInbox() {
-        postMessage({ type: 'refresh' });
+        postMessage({ type: 'refresh', unreadOnly: showUnreadOnly });
     }
 
     function toggleReply(messageId) {
@@ -694,8 +815,10 @@
         if (msg) {
             msg.replyText = text;
             msg.repliedAt = new Date().toISOString();
-            if (!msg.readAt) msg.readAt = msg.repliedAt;
-            unreadCount = messages.filter(m => !m.readAt).length;
+            const wasUnread = !msg.readAt;
+            if (wasUnread) msg.readAt = msg.repliedAt;
+            // Same rule as markRead(): decrement, never recompute from the capped window.
+            if (wasUnread) unreadCount = Math.max(0, unreadCount - 1);
             renderMessages();
         }
     }
@@ -730,8 +853,24 @@
 
         switch (data.type) {
             case 'inbox_data':
-                messages = data.messages || [];
-                unreadCount = data.unreadCount || 0;
+                // A failed fetch arrives as an ANNOTATION: `error` plus the host's mode, and NO
+                // list fields. Guard the assignments on it — otherwise `data.messages || []` turns
+                // a transient failure into a blanked list, destroying data the user was reading.
+                // An error must never be able to overwrite good state.
+                fetchError = typeof data.error === 'string' && data.error ? data.error : null;
+                if (!fetchError) {
+                    messages = data.messages || [];
+                    unreadCount = data.unreadCount || 0;
+                    totalCount = data.totalCount || 0;
+                    fetchTruncated = data.truncated === true;
+                }
+                // C# owns the filter for the QUERY; mirror it so the client-side view and the
+                // truncation wording can't drift from what was actually fetched. Older payloads
+                // omit the field, so only adopt it when present.
+                if (typeof data.unreadOnly === 'boolean') {
+                    showUnreadOnly = data.unreadOnly;
+                    syncFilterCheckbox();
+                }
                 renderMessages();
                 break;
 
@@ -752,8 +891,9 @@
     }
 
     // --- Initialization ---
-    // Notify C# that JS is ready
-    postMessage({ type: 'ready' });
+    // Notify C# that JS is ready. The filter mode rides along so the very first fetch already
+    // matches the view — otherwise the initial payload is for the wrong query.
+    postMessage({ type: 'ready', unreadOnly: showUnreadOnly });
 </script>
 </body>
 </html>
