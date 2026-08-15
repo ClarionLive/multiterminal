@@ -63,6 +63,27 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// Strips // line comments, /* block */ comments and &lt;!-- HTML comments --&gt; before asserting.
+        ///
+        /// This is the ④ lesson made mechanical. The comments in these files QUOTE THE CODE they
+        /// explain — several of them contain the exact strings these tests match on — so an
+        /// assertion run against raw source can be satisfied by prose describing code that was
+        /// deleted. The better the comment, the likelier the false pass. Strip first, then assert,
+        /// and a test can only be satisfied by real code.
+        ///
+        /// Used for negative fixtures too: a comment matching a forbidden shape there would cause a
+        /// false FAILURE rather than a false pass — the safe direction, but still a wrong red.
+        /// Stripping keeps both polarities keyed on code alone.
+        /// </summary>
+        private static string StripComments(string source)
+        {
+            source = Regex.Replace(source, @"<!--.*?-->", string.Empty, RegexOptions.Singleline);
+            source = Regex.Replace(source, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
+            source = Regex.Replace(source, @"^\s*//.*$", string.Empty, RegexOptions.Multiline);
+            return source;
+        }
+
+        /// <summary>
         /// THE CORE REGRESSION GUARD. A bare <c>GetInbox(_defaultUserId)</c> silently inherits
         /// <c>limit: 50</c>, which is exactly what stranded 213 unread messages. The call must pass
         /// its arguments explicitly so the window is a decision, not an inherited accident.
@@ -195,8 +216,12 @@ namespace MultiTerminal.Tests
             string cs = ReadPanelControlSource();
             string html = ReadPanelHtmlSource();
 
+            // Anchored on ASSIGNMENT SYNTAX, not on the bare identifier text. A quoted identifier
+            // inside a comment satisfies Contains(), and the comments in this very file quote code
+            // — so the weaker form would pass against deleted assignments (the ④ lesson).
             Assert.True(
-                cs.Contains("unreadCount = result.UnreadCount") && cs.Contains("totalCount = result.TotalCount"),
+                Regex.IsMatch(cs, @"unreadCount\s*=\s*result\.UnreadCount\s*,") &&
+                Regex.IsMatch(cs, @"totalCount\s*=\s*result\.TotalCount\s*,"),
                 "The payload's counts must come from the broker's result, which counts the whole " +
                 "inbox — not from the size of the fetched window.");
 
@@ -206,6 +231,107 @@ namespace MultiTerminal.Tests
                 "The panel must take its counts from the host payload. Deriving them from " +
                 "messages.length would make the badge agree with a truncated list and hide the " +
                 "backlog again — that is GH#6's defect wearing different clothes.");
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 1, F2 — converged independently by three gates (Codex cross-model adversary,
+        /// Claude code-reviewer, Claude debugger).
+        ///
+        /// The OPTIMISTIC paths are the other half of the invariant above, and they were the half
+        /// that still got it wrong. `messages` is a CAPPED WINDOW; recomputing a global count from
+        /// it collapses unreadCount to the window size (with 900 unread, one click showed 499) and,
+        /// because `universe > shown` then goes false, silently hides the truncation notice too.
+        /// Same window-vs-universe conflation the ticket fixed one layer up in GetInbox.TotalCount.
+        ///
+        /// Asserted as an INVARIANT over ALL optimistic sites rather than against the two lines the
+        /// reports named: a future third optimistic path would otherwise reintroduce it unnoticed.
+        /// </summary>
+        [Fact]
+        public void Optimistic_updates_decrement_the_count_they_never_recompute_it_from_the_window()
+        {
+            string html = ReadPanelHtmlSource();
+            string code = StripComments(html);
+
+            // Positive: both optimistic sites decrement the host-supplied value.
+            int decrements = Regex.Matches(code, @"unreadCount\s*=\s*Math\.max\(\s*0\s*,\s*unreadCount\s*-\s*1\s*\)").Count;
+            Assert.True(
+                decrements >= 2,
+                $"Expected both optimistic paths (markRead and sendReply) to DECREMENT the " +
+                $"host-supplied unreadCount; found {decrements} decrement site(s). Recomputing a " +
+                $"global count from the capped window is the defect this ticket exists to remove.");
+
+            // Negative fixture: the recompute-from-window shape must not exist anywhere.
+            Assert.False(
+                Regex.IsMatch(code, @"unreadCount\s*=\s*messages\s*\.\s*filter\("),
+                "An optimistic path is deriving the GLOBAL unread count from `messages`, which is a " +
+                "capped window, not the unread universe. That drops the badge to the window size and " +
+                "hides the truncation disclosure with it.");
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 1, F1 — found by the debugger and the code-reviewer independently.
+        ///
+        /// "Use Mark All Read to clear the rest" is only TRUE in unread mode, where `universe` is
+        /// unreadCount. In all-mode `universe` is totalCount, which marking-read does not reduce —
+        /// so the banner never clears and its instruction provably does nothing. A disclosure
+        /// feature that gives false guidance is worse than one that gives none.
+        /// </summary>
+        [Fact]
+        public void Truncation_remedy_is_offered_only_in_the_mode_where_it_would_work()
+        {
+            string code = StripComments(ReadPanelHtmlSource());
+
+            Assert.True(
+                Regex.IsMatch(code, @"const\s+remedy\s*=\s*showUnreadOnly\s*\?"),
+                "The 'Mark All Read' remedy must be branched on showUnreadOnly, not appended to " +
+                "both modes.");
+
+            // The remedy must NOT be baked into the unconditional template literal.
+            Assert.False(
+                Regex.IsMatch(code, @"not listed\.\s*Use Mark All Read"),
+                "The remedy sentence is still hard-coded into the notice for both modes. In all-mode " +
+                "it is inert and the banner is permanent.");
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 1, F3 — found only by the debugger.
+        ///
+        /// GetInbox turns EVERY exception into Success=false, and the old code had no `else`: no
+        /// log, no push, no retry. After a set_filter that leaves the checkbox already flipped while
+        /// the list on screen is still the previous mode's payload, with nothing to correct it —
+        /// item ⑤'s original complaint (the control disagreeing with the list) returning through the
+        /// error path. The failure push must therefore still echo the host's mode, and the panel
+        /// must render it as a FAILURE rather than as an empty inbox.
+        /// </summary>
+        [Fact]
+        public void Failed_fetch_still_pushes_the_mode_and_is_not_rendered_as_an_empty_inbox()
+        {
+            string cs = StripComments(ReadPanelControlSource());
+            string html = StripComments(ReadPanelHtmlSource());
+
+            Assert.True(
+                Regex.IsMatch(cs, @"else\s*\{[^}]*DebugLogService\s*\?\s*\.\s*Error", RegexOptions.Singleline),
+                "A failed inbox fetch must be logged. Success=false with no else is invisible twice: " +
+                "nothing logged and nothing sent.");
+
+            Assert.True(
+                Regex.IsMatch(cs, @"error\s*=\s*result\.Error"),
+                "The failure payload must carry the broker's error so the panel can say what went wrong.");
+
+            Assert.True(
+                Regex.Matches(cs, @"unreadOnly\s*=\s*_showUnreadOnly").Count >= 2,
+                "BOTH the success and failure payloads must echo the host's filter mode — otherwise a " +
+                "failed fetch after a toggle leaves the checkbox describing data that was never loaded.");
+
+            Assert.True(
+                Regex.IsMatch(html, @"fetchError\s*=\s*typeof\s+data\.error"),
+                "The panel must adopt the error field from the payload.");
+
+            Assert.True(
+                Regex.IsMatch(html, @"if\s*\(\s*fetchError\s*\)"),
+                "The panel must branch on the error before the truncation branch — a failed fetch " +
+                "rendered as 'No inbox messages' is a plausible wrong answer, which is the silent " +
+                "failure class this ticket exists to remove.");
         }
 
         /// <summary>

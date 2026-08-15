@@ -539,6 +539,8 @@
     // while the badge counted them.
     let totalCount = 0;
     let fetchTruncated = false;
+    // Non-null when the last fetch FAILED. Distinct from "inbox is empty" on purpose.
+    let fetchError = null;
 
     // --- Type metadata ---
     const typeConfig = {
@@ -608,9 +610,19 @@
         if (statusEl) {
             const universe = showUnreadOnly ? unreadCount : totalCount;
             const shown = visibleMessages.length;
-            if (fetchTruncated && universe > shown) {
+            if (fetchError) {
+                // Failure outranks truncation: never let a failed fetch read as a complete inbox.
+                statusEl.textContent = `Could not load your inbox — ${fetchError}`;
+                statusEl.classList.add('visible');
+            } else if (fetchTruncated && universe > shown) {
                 const noun = showUnreadOnly ? 'unread' : 'messages';
-                statusEl.textContent = `Showing ${shown} of ${universe} ${noun} — ${universe - shown} not listed. Use Mark All Read to clear the rest.`;
+                // The remedy is BRANCHED with the noun, not appended to both. "Mark All Read" only
+                // shrinks the unlisted set when `universe` is unreadCount. In all-mode `universe` is
+                // totalCount, which marking-read does not reduce — the banner would be permanent and
+                // its instruction provably inert. A disclosure feature that gives false guidance is
+                // worse than one that gives none.
+                const remedy = showUnreadOnly ? ' Use Mark All Read to clear the rest.' : '';
+                statusEl.textContent = `Showing ${shown} of ${universe} ${noun} — ${universe - shown} not listed.${remedy}`;
                 statusEl.classList.add('visible');
             } else {
                 statusEl.classList.remove('visible');
@@ -695,8 +707,16 @@
         // Optimistic update: mark as read locally and re-render
         const msg = messages.find(m => m.id === messageId);
         if (msg) {
+            const wasUnread = !msg.readAt;
             msg.readAt = new Date().toISOString();
-            unreadCount = messages.filter(m => !m.readAt).length;
+            // DECREMENT the host-supplied count; do NOT recompute it from `messages`.
+            // `messages` is a CAPPED WINDOW (InboxFetchLimit), not the unread universe — deriving a
+            // global count from it collapses `unreadCount` to the window size (900 -> 499 on one
+            // click), which also makes `universe > shown` false and silently hides the truncation
+            // disclosure. That is the same window-vs-universe conflation this ticket fixed in
+            // GetInbox.TotalCount, and the invariant the Counts_come_from_the_host_not_from_the_loaded_window
+            // test exists to defend. The authoritative value is restored by the next inbox_data push.
+            if (wasUnread) unreadCount = Math.max(0, unreadCount - 1);
             renderMessages();
         }
     }
@@ -788,8 +808,10 @@
         if (msg) {
             msg.replyText = text;
             msg.repliedAt = new Date().toISOString();
-            if (!msg.readAt) msg.readAt = msg.repliedAt;
-            unreadCount = messages.filter(m => !m.readAt).length;
+            const wasUnread = !msg.readAt;
+            if (wasUnread) msg.readAt = msg.repliedAt;
+            // Same rule as markRead(): decrement, never recompute from the capped window.
+            if (wasUnread) unreadCount = Math.max(0, unreadCount - 1);
             renderMessages();
         }
     }
@@ -828,6 +850,11 @@
                 unreadCount = data.unreadCount || 0;
                 totalCount = data.totalCount || 0;
                 fetchTruncated = data.truncated === true;
+                // A failed fetch arrives as an EMPTY payload carrying `error`. Without this the
+                // panel would render it as "No inbox messages" — an empty inbox is a plausible,
+                // wrong answer, and presenting one is the silent-failure class this ticket exists
+                // to remove. Say the fetch failed instead of implying there is nothing to see.
+                fetchError = typeof data.error === 'string' && data.error ? data.error : null;
                 // C# owns the filter for the QUERY; mirror it so the client-side view and the
                 // truncation wording can't drift from what was actually fetched. Older payloads
                 // omit the field, so only adopt it when present.
