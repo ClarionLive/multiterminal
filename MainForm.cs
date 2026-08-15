@@ -841,11 +841,9 @@ namespace MultiTerminal
                 _tasksPanel.SetDebugLogService(_debugLogService);
                 _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 13: Wiring tasks panel events");
-                _tasksPanel.InjectRequested += OnChatInjectRequested; // Reuse same inject handler
-                _tasksPanel.PlanGraphRequested += OnPlanGraphRequested;
+                WireTasksPanelEvents(_tasksPanel);
 
                 // Save zoom level to settings whenever user ctrl+wheels in a standalone panel
-                _tasksPanel.ZoomChanged += (s, zoom) => _settings?.SetTasksPanelZoom(zoom);
                 _chatPanel.ZoomChanged += (s, zoom) => _settings?.SetChatPanelZoom(zoom);
 
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Initializing inbox panel");
@@ -1243,6 +1241,37 @@ namespace MultiTerminal
                 // await Task.Delay(50);  // Let activation settle
                 await targetTerminal.InjectInputAsync(e.Content);
             }
+        }
+
+        /// <summary>
+        /// Subscribes every host-side handler the kanban board needs. This exists because the
+        /// board has THREE creation sites — initial startup, layout restore
+        /// (GetContentFromPersistString), and recreate-after-X-close (ToggleTasksPanel) — and
+        /// a handler wired at only one of them is dead on the other two.
+        /// </summary>
+        /// <remarks>
+        /// Found by the pipeline debugger on task 60665c6c: PlanGraphRequested was subscribed
+        /// only at startup, so X-closing the board and reopening it left every Plan-glyph click
+        /// raising an event with a null invocation list — a permanent, silent, log-free no-op for
+        /// the rest of the session. ZoomChanged had the same hole already (the recreated board
+        /// stopped persisting its zoom), which is why this helper takes the whole set rather than
+        /// just the one event that was reported.
+        /// <para>
+        /// Call this from EVERY site that assigns <see cref="_tasksPanel"/>. Each site builds a
+        /// fresh TasksPanelDocument, so there is no double-subscribe risk; the invariant is
+        /// "constructed implies wired", and PlanGraphDoorwayTests enforces it against this file's
+        /// source so a fourth creation site cannot be added without wiring.
+        /// </para>
+        /// </remarks>
+        private void WireTasksPanelEvents(TasksPanelDocument panel)
+        {
+            if (panel == null) return;
+
+            panel.InjectRequested += OnChatInjectRequested; // Reuse same inject handler
+            panel.PlanGraphRequested += OnPlanGraphRequested;
+
+            // Save zoom level to settings whenever user ctrl+wheels in a standalone panel
+            panel.ZoomChanged += (s, zoom) => _settings?.SetTasksPanelZoom(zoom);
         }
 
         /// <summary>
@@ -5511,7 +5540,7 @@ namespace MultiTerminal
                     if (_mcpServer?.Broker != null)
                     {
                         _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
-                        _tasksPanel.InjectRequested += OnChatInjectRequested;
+                        WireTasksPanelEvents(_tasksPanel);
                     }
                 }
                 return _tasksPanel;
@@ -6380,7 +6409,7 @@ namespace MultiTerminal
                 if (_mcpServer?.Broker != null)
                 {
                     _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
-                    _tasksPanel.InjectRequested += OnChatInjectRequested;
+                    WireTasksPanelEvents(_tasksPanel);
                 }
                 _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
                 _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));

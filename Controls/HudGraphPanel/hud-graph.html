@@ -409,7 +409,12 @@
     els = {}; nodesById = {}; edges = []; lastId = null;
     tiersEl.innerHTML = '';
     warnBox.hidden = true;
-    pinBadge.hidden = true;
+    // Keep the badge visible whenever the host says we are pinned. Hiding it unconditionally
+    // stranded the tab: _pinnedTaskId stays set host-side, so every later TasksUpdated re-enters
+    // this branch, and the badge is the ONLY unpin control — the tab could never resume following
+    // the terminal's active task. The two lines below already read msg.pinned; this one now agrees
+    // with them.
+    pinBadge.hidden = !(msg && msg.pinned);
     titleEl.textContent = msg && msg.pinned ? 'Task not found' : 'No active task';
     metaEl.textContent = '';
     detail.innerHTML = '<div class="empty">' +

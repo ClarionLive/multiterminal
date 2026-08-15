@@ -136,7 +136,10 @@ namespace MultiTerminal.Controls
 
             if (_broker == null)
             {
-                Send(new { type = "no_task" });
+                // Also carries `pinned` — SetTask can pin before the broker is wired (the board
+                // doorway calls it on a renderer that may never have been opened), so this path
+                // can legitimately be reached while pinned.
+                Send(new { type = "no_task", pinned = _pinnedTaskId != null });
                 return;
             }
 
@@ -155,7 +158,10 @@ namespace MultiTerminal.Controls
 
                 if (task == null)
                 {
-                    Send(new { type = "no_task", pinned = _pinnedTaskId });
+                    // bool, not the id — `pinned` is read as a flag on the view side (both in
+                    // renderEmpty and at `pinBadge.hidden = !data.pinned`), and the "graph"
+                    // message below already sends a bool. One key, one type, on one channel.
+                    Send(new { type = "no_task", pinned = _pinnedTaskId != null });
                     return;
                 }
 
@@ -185,7 +191,12 @@ namespace MultiTerminal.Controls
                 // A malformed checklist must never take down the tab. The builder already
                 // degrades on bad dependency data; this catches anything further upstream
                 // (a broker call failing mid-refresh) and leaves the view in its empty state.
-                Send(new { type = "no_task" });
+                //
+                // MUST carry `pinned` like the other two sends. Omitting it made the empty state
+                // claim "No active task / Activate a task to see its plan" on a tab that WAS
+                // pinned — and, with the badge hidden, offered no way back. The failure told the
+                // user the opposite of the truth about the tab's state.
+                Send(new { type = "no_task", pinned = _pinnedTaskId != null });
             }
         }
 

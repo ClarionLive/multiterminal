@@ -234,5 +234,108 @@ namespace MultiTerminal.Tests
             Assert.True(assigneeLookup < fallback, "The assignee must be PREFERRED, with the last-active terminal as the fallback.");
             Assert.Contains("OpenPlanGraph(e.TaskId)", body, StringComparison.Ordinal);
         }
+
+        /// <summary>
+        /// PIPELINE RUN 3, HIGH. The board has THREE creation sites — startup,
+        /// GetContentFromPersistString (layout restore) and ToggleTasksPanel (recreate after the
+        /// user X-closes it). PlanGraphRequested was subscribed at only ONE of them, so closing
+        /// the board and reopening it left the glyph raising an event with a null invocation list:
+        /// a permanent, silent, log-free no-op for the rest of the session.
+        ///
+        /// The bug was an ABSENCE at a site nobody looked at, so asserting "the wiring exists"
+        /// cannot catch it — the wiring DID exist, once. This test asserts the invariant instead:
+        /// every `new TasksPanelDocument()` is followed by a WireTasksPanelEvents call. Add a
+        /// fourth creation site without wiring it and this goes red, which is the only form of the
+        /// test that would have caught the original defect.
+        /// </summary>
+        [Fact]
+        public void Every_tasks_panel_creation_site_wires_its_events()
+        {
+            string src = ReadStripped("MainForm.cs");
+
+            var creations = Regex.Matches(src, @"new TasksPanelDocument\(\)");
+            Assert.True(
+                creations.Count >= 3,
+                $"Expected at least 3 TasksPanelDocument creation sites (startup, layout restore, " +
+                $"recreate-after-close); found {creations.Count}. If a site was removed, update this test.");
+
+            // One call per creation site, plus the declaration. A proximity check would be wrong
+            // here: the startup site constructs the panel in the ctor and wires it later, in
+            // InitializeMcpServerAndChatPanel, once the broker exists. Counting is the invariant
+            // that holds for both the co-located and the deferred shapes.
+            int callSites = Regex.Matches(src, @"WireTasksPanelEvents\(").Count - 1; // minus the declaration
+            Assert.True(
+                callSites == creations.Count,
+                $"Found {creations.Count} TasksPanelDocument creation sites but {callSites} " +
+                $"WireTasksPanelEvents call site(s). A board created without wiring has a dead Plan " +
+                $"glyph and stops persisting its zoom, with no error anywhere — which is exactly the " +
+                $"defect this test exists for.");
+
+            // The two RECREATE sites are where the original bug lived — the user X-closes the board
+            // and reopens it. Pin them by name so a future edit can't drop the wiring from one and
+            // keep the count balanced by adding a call somewhere else.
+            foreach (string method in new[] { "private void ToggleTasksPanel(", "persistString == \"TasksPanel\"" })
+            {
+                int at = src.IndexOf(method, StringComparison.Ordinal);
+                if (at < 0) continue; // shape changed; the count assertion above still guards
+                string window = src.Substring(at, Math.Min(1200, src.Length - at));
+                if (!window.Contains("new TasksPanelDocument()", StringComparison.Ordinal)) continue;
+                Assert.True(
+                    window.Contains("WireTasksPanelEvents(", StringComparison.Ordinal),
+                    $"The recreate site near '{method}' builds a TasksPanelDocument without calling " +
+                    $"WireTasksPanelEvents — reopening the closed board leaves the Plan glyph dead.");
+            }
+
+            // The helper must actually carry the events; an empty helper would satisfy the above.
+            string helper = BalancedBodyAfter(src, "private void WireTasksPanelEvents(", "WireTasksPanelEvents");
+            Assert.Contains("PlanGraphRequested", helper, StringComparison.Ordinal);
+            Assert.Contains("InjectRequested", helper, StringComparison.Ordinal);
+            Assert.Contains("ZoomChanged", helper, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 3, HIGH. The pin badge is the ONLY control that unpins the Plan tab.
+        /// renderEmpty() hid it unconditionally while the host kept _pinnedTaskId set, so once a
+        /// pinned task stopped resolving, every subsequent refresh re-entered the same branch and
+        /// the tab could never resume following the active task.
+        ///
+        /// Both halves are asserted, because either one alone leaves the trap: the view must show
+        /// the badge when pinned, AND all three host sends must report `pinned` — the catch path
+        /// omitted it entirely, so a pinned tab announced "No active task", telling the user the
+        /// opposite of the truth about its own state.
+        /// </summary>
+        [Fact]
+        public void Pinned_plan_tab_always_offers_a_way_back_to_the_active_task()
+        {
+            string view = ReadStripped("Controls", "HudGraphPanel", "hud-graph.html");
+            string renderEmpty = BalancedBodyAfter(view, "function renderEmpty(", "hud-graph.html renderEmpty()");
+
+            Assert.DoesNotContain(
+                "pinBadge.hidden = true",
+                renderEmpty,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "pinBadge.hidden = !(msg && msg.pinned)",
+                renderEmpty,
+                StringComparison.Ordinal);
+
+            // The badge must still be the thing that unpins, or showing it achieves nothing.
+            Assert.Contains("type: 'unpin'", view, StringComparison.Ordinal);
+
+            string renderer = ReadStripped("Controls", "HudGraphPanel", "HudGraphRenderer.cs");
+            var noTaskSends = Regex.Matches(renderer, @"type = ""no_task""[^}]*");
+            Assert.True(
+                noTaskSends.Count >= 2,
+                $"Expected at least 2 no_task sends (task-not-found and the catch path); found {noTaskSends.Count}.");
+
+            foreach (Match send in noTaskSends)
+            {
+                Assert.True(
+                    send.Value.Contains("pinned", StringComparison.Ordinal),
+                    $"A no_task send omits the `pinned` field: '{send.Value.Trim()}'. The view reads " +
+                    $"msg.pinned to decide both the badge and the copy, so omitting it renders a " +
+                    $"pinned tab as 'No active task' with no way back.");
+            }
+        }
     }
 }
