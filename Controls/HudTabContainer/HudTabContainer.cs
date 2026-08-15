@@ -430,6 +430,8 @@ namespace MultiTerminal.Controls
                     git.ApplyTheme(isDark);
                 else if (tab.Control is HudSessionsRenderer sessions)
                     sessions.ApplyTheme(isDark);
+                else if (tab.Control is HudGraphRenderer graph)
+                    graph.ApplyTheme(isDark);
             }
             _tabStrip.Invalidate();
         }
@@ -454,6 +456,8 @@ namespace MultiTerminal.Controls
                     git.SetZoomFactor(zoom);
                 else if (tab.Control is HudSessionsRenderer sessions)
                     sessions.SetZoomFactor(zoom);
+                else if (tab.Control is HudGraphRenderer graph)
+                    graph.SetZoomFactor(zoom);
             }
         }
 

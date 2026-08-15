@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Plan Graph</title>
+<style>
+  :root {
+    --ground:      #1a1a2e;
+    --surface:     #212138;
+    --rule:        #33334f;
+    --ink:         #e8ecf2;
+    --ink-soft:    #a9b3c0;
+    --ink-faint:   #77828f;
+    --accent:      #8fb0d6;
+    --accent-soft: #26314a;
+    --good:        #6fbf92;
+    --good-soft:   #1d3328;
+    --warn:        #d2a24c;
+    --warn-soft:   #33291a;
+    --live:        #63bfc0;
+    --live-soft:   #17302f;
+    --idle-soft:   #262e3b;
+    --danger:      #e08585;
+
+    --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  }
+
+  body.light {
+    --ground:      #f5f7fa;
+    --surface:     #ffffff;
+    --rule:        #dde2e9;
+    --ink:         #14181f;
+    --ink-soft:    #4a5361;
+    --ink-faint:   #79838f;
+    --accent:      #3d5a80;
+    --accent-soft: #eaeff6;
+    --good:        #2f6f4e;
+    --good-soft:   #e3f0e8;
+    --warn:        #9a6414;
+    --warn-soft:   #f5efe1;
+    --live:        #22696a;
+    --live-soft:   #ddefef;
+    --idle-soft:   #e9ecf1;
+    --danger:      #a33a3a;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.55;
+    overflow: hidden;
+  }
+
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---- header ---- */
+
+  header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface);
+  }
+
+  #taskTitle {
+    font-weight: 600;
+    font-size: 0.95rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #taskMeta {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--ink-faint);
+    white-space: nowrap;
+    flex: 0 0 auto;
+  }
+
+  #pinBadge {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    cursor: pointer;
+    background: transparent;
+    flex: 0 0 auto;
+  }
+  #pinBadge[hidden] { display: none; }
+
+  /* ---- warnings ---- */
+
+  #warnings {
+    flex: 0 0 auto;
+    background: var(--warn-soft);
+    border-bottom: 1px solid var(--warn);
+    padding: 0.5rem 0.9rem;
+    font-size: 0.78rem;
+    color: var(--ink);
+  }
+  #warnings[hidden] { display: none; }
+  #warnings ul { margin: 0.2rem 0 0; padding-left: 1.1rem; }
+  #warnings .w-head {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--warn);
+    font-weight: 600;
+  }
+
+  /* ---- body split ---- */
+
+  main {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 20rem;
+    min-height: 0;
+  }
+  @media (max-width: 46rem) {
+    main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  }
+
+  #canvas {
+    position: relative;
+    overflow: auto;
+    padding: 1.3rem 1rem 2rem;
+  }
+
+  #tiers {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    min-width: min-content;
+  }
+
+  .tier {
+    display: flex;
+    justify-content: center;
+    gap: 0.6rem;
+    flex-wrap: nowrap;
+  }
+
+  #edges {
+    position: absolute;
+    top: 0; left: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+  #edges path {
+    fill: none;
+    stroke: var(--ink-faint);
+    stroke-width: 1.4;
+    opacity: 0.5;
+    transition: opacity 140ms ease, stroke 140ms ease, stroke-width 140ms ease;
+  }
+  #edges path.rel { stroke-dasharray: 4 3; }
+  #edges path.lit { opacity: 1; stroke: var(--accent); stroke-width: 2.2; }
+  #edges path.dimmed { opacity: 0.12; }
+
+  /* ---- nodes ---- */
+
+  .node {
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+    color: var(--ink);
+    padding: 0.42rem 0.6rem;
+    min-width: 7rem;
+    max-width: 11rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
+  }
+  .node:hover { transform: translateY(-1px); }
+
+  .n-idx {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .n-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.28;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .n-meta {
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    color: var(--ink-faint);
+  }
+
+  .node[data-state="done"]     { background: var(--good-soft); border-color: var(--good); }
+  .node[data-state="testing"]  { background: var(--live-soft); border-color: var(--live); }
+  .node[data-state="coding"]   { background: var(--warn-soft); border-color: var(--warn); }
+  .node[data-state="pending"]  { background: var(--idle-soft); border-color: var(--ink-faint); }
+  .node[data-state="external"] { background: transparent; border-style: dashed; border-color: var(--accent); }
+
+  /* The node the panel is describing, once the pointer has left the graph. */
+  .node.recalled { box-shadow: 0 0 0 1px var(--accent); }
+  .node.active   { box-shadow: 0 0 0 2px var(--accent); transform: translateY(-1px); }
+  .node.dimmed   { opacity: 0.3; }
+
+  /* ---- detail panel ---- */
+
+  #detail {
+    border-left: 1px solid var(--rule);
+    background: var(--surface);
+    padding: 1rem 1.1rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+  }
+  @media (max-width: 46rem) {
+    #detail { border-left: 0; border-top: 1px solid var(--rule); max-height: 16rem; }
+  }
+
+  .d-kicker {
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  #detail h2 { margin: 0; font-size: 0.95rem; font-weight: 620; line-height: 1.3; }
+
+  .d-block { display: flex; flex-direction: column; gap: 0.15rem; }
+  .d-label {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 600;
+  }
+  .d-block p { margin: 0; font-size: 0.82rem; color: var(--ink-soft); }
+  .d-block.files p { font-family: var(--mono); font-size: 0.7rem; }
+  .d-block.missing p { color: var(--ink-faint); font-style: italic; }
+
+  .empty {
+    color: var(--ink-faint);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 2.5rem 1rem;
+    margin: auto;
+  }
+
+  /* ---- legend ---- */
+
+  footer {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.9rem;
+    padding: 0.4rem 0.9rem;
+    border-top: 1px solid var(--rule);
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 0.64rem;
+    color: var(--ink-faint);
+  }
+  footer span { display: inline-flex; align-items: center; gap: 0.3rem; }
+  .sw { width: 0.6rem; height: 0.6rem; border-radius: 2px; border: 1px solid; }
+  .sw-done    { background: var(--good-soft); border-color: var(--good); }
+  .sw-testing { background: var(--live-soft); border-color: var(--live); }
+  .sw-coding  { background: var(--warn-soft); border-color: var(--warn); }
+  .sw-pending { background: var(--idle-soft); border-color: var(--ink-faint); }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .node, #edges path { transition: none; }
+    .node:hover, .node.active { transform: none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span id="taskTitle">No active task</span>
+    <span id="taskMeta"></span>
+    <button id="pinBadge" type="button" hidden title="Showing a pinned task. Click to follow the active task instead.">pinned</button>
+  </header>
+
+  <div id="warnings" hidden>
+    <span class="w-head">Problems in the declared dependencies</span>
+    <ul id="warnList"></ul>
+  </div>
+
+  <main>
+    <div id="canvas">
+      <svg id="edges" aria-hidden="true">
+        <defs>
+          <marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,1 L7,4 L0,7 z" fill="currentColor"></path>
+          </marker>
+        </defs>
+      </svg>
+      <div id="tiers"></div>
+    </div>
+
+    <aside id="detail" aria-live="polite">
+      <div class="empty" id="detailEmpty">Hover or tab to a step to see what it does.</div>
+    </aside>
+  </main>
+
+  <footer>
+    <span><i class="sw sw-pending"></i> pending</span>
+    <span><i class="sw sw-coding"></i> coding</span>
+    <span><i class="sw sw-testing"></i> testing</span>
+    <span><i class="sw sw-done"></i> done</span>
+    <span>dashed = another ticket</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var tiersEl  = document.getElementById('tiers');
+  var svg      = document.getElementById('edges');
+  var canvas   = document.getElementById('canvas');
+  var detail   = document.getElementById('detail');
+  var titleEl  = document.getElementById('taskTitle');
+  var metaEl   = document.getElementById('taskMeta');
+  var pinBadge = document.getElementById('pinBadge');
+  var warnBox  = document.getElementById('warnings');
+  var warnList = document.getElementById('warnList');
+
+  var els = {};          // node id -> button element
+  var nodesById = {};    // node id -> node data
+  var edges = [];        // edge data
+  var paths = [];        // svg path elements
+  var lastId = null;     // node the panel is describing
+  var clearTimer = null;
+
+  // ---------- incoming messages ----------
+
+  window.chrome.webview.addEventListener('message', function (ev) {
+    var msg = ev.data;
+    if (!msg || !msg.type) { return; }
+
+    if (msg.type === 'theme') {
+      document.body.classList.toggle('light', msg.isDark === false);
+      redraw();
+    } else if (msg.type === 'graph') {
+      render(msg);
+    } else if (msg.type === 'no_task') {
+      renderEmpty(msg);
+    }
+  });
+
+  pinBadge.addEventListener('click', function () {
+    post({ type: 'unpin' });
+  });
+
+  function post(obj) {
+    try { window.chrome.webview.postMessage(obj); } catch (e) { /* host gone */ }
+  }
+
+  // ---------- rendering ----------
+
+  function renderEmpty(msg) {
+    els = {}; nodesById = {}; edges = []; paths = []; lastId = null;
+    tiersEl.innerHTML = '';
+    clearSvg();
+    warnBox.hidden = true;
+    pinBadge.hidden = true;
+    titleEl.textContent = msg && msg.pinned ? 'Task not found' : 'No active task';
+    metaEl.textContent = '';
+    detail.innerHTML = '<div class="empty">' +
+      (msg && msg.pinned
+        ? 'That ticket is no longer on the board.'
+        : 'Activate a task, or open this tab from a card, to see its plan as a graph.') +
+      '</div>';
+  }
+
+  function render(data) {
+    els = {}; nodesById = {}; paths = [];
+    edges = data.edges || [];
+    tiersEl.innerHTML = '';
+    clearSvg();
+
+    titleEl.textContent = data.taskTitle || data.taskId || 'Untitled task';
+    var bits = [];
+    if (data.taskId) { bits.push(data.taskId); }
+    if (data.assignee) { bits.push(data.assignee); }
+    if (data.taskStatus) { bits.push(data.taskStatus); }
+    metaEl.textContent = bits.join('  ·  ');
+    pinBadge.hidden = !data.pinned;
+
+    // Warnings are surfaced rather than swallowed: a bad dependency declaration should be
+    // visible to the person reading the plan, not silently simplified away.
+    var warnings = data.warnings || [];
+    if (warnings.length) {
+      warnList.innerHTML = '';
+      warnings.forEach(function (w) {
+        var li = document.createElement('li');
+        li.textContent = w;
+        warnList.appendChild(li);
+      });
+      warnBox.hidden = false;
+    } else {
+      warnBox.hidden = true;
+    }
+
+    var nodes = data.nodes || [];
+    if (!nodes.length) {
+      detail.innerHTML = '<div class="empty">This ticket has no checklist yet.</div>';
+      return;
+    }
+
+    // Group by tier. Items with no declared dependencies all sit on tier 0 — that is
+    // correct and deliberate: no declaration means no constraint to draw.
+    var byTier = {};
+    var maxTier = 0;
+    nodes.forEach(function (n) {
+      nodesById[n.id] = n;
+      var t = n.tier || 0;
+      if (t > maxTier) { maxTier = t; }
+      (byTier[t] = byTier[t] || []).push(n);
+    });
+
+    for (var t = 0; t <= maxTier; t++) {
+      if (!byTier[t]) { continue; }
+      var row = document.createElement('div');
+      row.className = 'tier';
+      byTier[t].forEach(function (n) {
+        row.appendChild(buildNode(n));
+      });
+      tiersEl.appendChild(row);
+    }
+
+    detail.innerHTML = '<div class="empty">Hover or tab to a step to see what it does.</div>';
+    redraw();
+  }
+
+  function buildNode(n) {
+    var b = document.createElement('button');
+    b.className = 'node';
+    b.type = 'button';
+    b.dataset.state = n.status || 'pending';
+    b.dataset.id = n.id;
+
+    var idx = document.createElement('span');
+    idx.className = 'n-idx';
+    idx.textContent = n.kind === 'task'
+      ? (n.relation || 'linked')
+      : ('step ' + n.itemIndex);
+    b.appendChild(idx);
+
+    var title = document.createElement('span');
+    title.className = 'n-title';
+    title.textContent = n.label || '(untitled)';
+    b.appendChild(title);
+
+    var metaBits = [];
+    if (n.assignedTo) { metaBits.push(n.assignedTo); }
+    if (n.cycleCount > 0) { metaBits.push('cycle ' + n.cycleCount); }
+    if (n.kind !== 'task' && (!n.gloss)) { metaBits.push('no gloss'); }
+    if (metaBits.length) {
+      var meta = document.createElement('span');
+      meta.className = 'n-meta';
+      meta.textContent = metaBits.join(' · ');
+      b.appendChild(meta);
+    }
+
+    b.addEventListener('mouseenter', function () { cancelClear(); select(n.id); });
+    b.addEventListener('focus',      function () { cancelClear(); select(n.id); });
+    b.addEventListener('click',      function () { cancelClear(); select(n.id); });
+    b.addEventListener('mouseleave', scheduleClear);
+    b.addEventListener('blur',       scheduleClear);
+
+    els[n.id] = b;
+    return b;
+  }
+
+  // ---------- edges ----------
+
+  function clearSvg() {
+    paths.forEach(function (p) { p.remove(); });
+    paths = [];
+  }
+
+  function redraw() {
+    clearSvg();
+    if (!edges.length) { return; }
+
+    var box = canvas.getBoundingClientRect();
+    var w = tiersEl.scrollWidth || box.width;
+    var h = tiersEl.scrollHeight || box.height;
+    svg.setAttribute('width', w);
+    svg.setAttribute('height', h);
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+
+    var origin = tiersEl.getBoundingClientRect();
+
+    edges.forEach(function (e) {
+      var a = els[e.from];
+      var b = els[e.to];
+      if (!a || !b) { return; }
+
+      var ra = a.getBoundingClientRect();
+      var rb = b.getBoundingClientRect();
+      var sameRow = Math.abs(ra.top - rb.top) < 2;
+
+      var d;
+      if (sameRow) {
+        var sx = ra.right - origin.left, sy = ra.top + ra.height / 2 - origin.top;
+        var tx = rb.left - origin.left,  ty = rb.top + rb.height / 2 - origin.top;
+        var lift = 14;
+        d = 'M' + sx + ',' + sy + ' C' + (sx + lift) + ',' + (sy - lift) +
+            ' ' + (tx - lift) + ',' + (ty - lift) + ' ' + tx + ',' + ty;
+      } else {
+        var sx2 = ra.left + ra.width / 2 - origin.left, sy2 = ra.bottom - origin.top;
+        var tx2 = rb.left + rb.width / 2 - origin.left, ty2 = rb.top - origin.top;
+        var mid = (ty2 - sy2) / 2;
+        d = 'M' + sx2 + ',' + sy2 + ' C' + sx2 + ',' + (sy2 + mid) +
+            ' ' + tx2 + ',' + (ty2 - mid) + ' ' + tx2 + ',' + ty2;
+      }
+
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('marker-end', 'url(#ah)');
+      p.dataset.from = e.from;
+      p.dataset.to = e.to;
+      if (e.kind === 'relationship') { p.classList.add('rel'); }
+      svg.appendChild(p);
+      paths.push(p);
+    });
+  }
+
+  // ---------- selection / dimming ----------
+
+  // Node-to-node moves fire mouseleave before mouseenter, so defer the undim and cancel it
+  // if the pointer lands on another step. Without the delay every hop flashes.
+  function scheduleClear() {
+    clearTimeout(clearTimer);
+    clearTimer = setTimeout(clearHighlight, 60);
+  }
+
+  function cancelClear() {
+    clearTimeout(clearTimer);
+    clearTimer = null;
+  }
+
+  // Undim everything. Deliberately leaves the detail panel populated — the dimming is a
+  // pointing gesture, not a mode, and the text stays readable after the pointer moves away.
+  function clearHighlight() {
+    clearTimer = null;
+    Object.keys(els).forEach(function (k) {
+      els[k].classList.remove('dimmed', 'active');
+      els[k].classList.toggle('recalled', k === lastId);
+    });
+    paths.forEach(function (p) { p.classList.remove('lit', 'dimmed'); });
+  }
+
+  function select(id) {
+    var n = nodesById[id];
+    if (!n) { return; }
+    lastId = id;
+
+    var related = {};
+    related[id] = true;
+    edges.forEach(function (e) {
+      if (e.from === id) { related[e.to] = true; }
+      if (e.to === id) { related[e.from] = true; }
+    });
+
+    Object.keys(els).forEach(function (k) {
+      els[k].classList.toggle('active', k === id);
+      els[k].classList.toggle('dimmed', !related[k]);
+      els[k].classList.remove('recalled');
+    });
+
+    paths.forEach(function (p) {
+      var lit = p.dataset.from === id || p.dataset.to === id;
+      p.classList.toggle('lit', lit);
+      p.classList.toggle('dimmed', !lit);
+    });
+
+    fillDetail(n);
+  }
+
+  function fillDetail(n) {
+    detail.innerHTML = '';
+
+    var kicker = document.createElement('span');
+    kicker.className = 'd-kicker';
+    kicker.textContent = n.kind === 'task'
+      ? (n.relation || 'linked ticket')
+      : ('step ' + n.itemIndex + '  ·  ' + (n.status || 'pending'));
+    detail.appendChild(kicker);
+
+    var h = document.createElement('h2');
+    h.textContent = n.label || '(untitled)';
+    detail.appendChild(h);
+
+    if (n.kind === 'task') {
+      addBlock('Another ticket', 'This node is a different ticket linked to this one. ' +
+        (n.relation === 'related_to'
+          ? 'A related_to link carries no ordering, so no arrow is drawn for it.'
+          : 'The arrow shows which side of this plan it sits on.'));
+      return;
+    }
+
+    var g = n.gloss;
+    if (g) {
+      if (g.what)    { addBlock('What it is', g.what); }
+      if (g.why)     { addBlock('Why it sits here', g.why); }
+      if (g.without) { addBlock('Without it', g.without); }
+    } else {
+      addBlock('No explanation written',
+        'Nobody wrote a plain-language gloss for this step. Ask the planning agent to add ' +
+        'one, or read the transition notes on the card.', 'missing');
+    }
+
+    if (n.files && n.files.length) {
+      addBlock('What it touched', n.files.join('\n'), 'files');
+    }
+  }
+
+  function addBlock(label, text, extraClass) {
+    var w = document.createElement('div');
+    w.className = 'd-block' + (extraClass ? ' ' + extraClass : '');
+    var l = document.createElement('span');
+    l.className = 'd-label';
+    l.textContent = label;
+    var p = document.createElement('p');
+    p.textContent = text;
+    w.appendChild(l);
+    w.appendChild(p);
+    detail.appendChild(w);
+  }
+
+  // ---------- lifecycle ----------
+
+  window.addEventListener('resize', redraw);
+  post({ type: 'ready' });
+}());
+</script>
+</body>
+</html>

@@ -614,6 +614,41 @@ namespace MultiTerminal.API.Controllers
             });
         }
 
+        /// <summary>
+        /// Get the task's checklist as a dependency graph (task 60665c6c).
+        /// <para>Backs the HUD graph tab. The graph is DERIVED from the live checklist on every
+        /// request rather than stored, so it cannot drift out of sync with the card the way a
+        /// hand-drawn diagram would.</para>
+        /// <para>Items that declare no dependencies produce no edges — stored checklist order is
+        /// presentation order, not a constraint. See <see cref="ChecklistGraphBuilder"/>.</para>
+        /// </summary>
+        [HttpGet("{taskId}/graph")]
+        public IActionResult GetTaskGraph(string taskId)
+        {
+            var task = _broker.GetTask(taskId);
+            if (task == null)
+                return Problem(detail: $"Task {taskId} not found", statusCode: 404);
+
+            var relationships = _broker.GetRelationships(taskId);
+            var relationshipList = relationships.Success ? relationships.Relationships : new List<TaskRelationship>();
+
+            var fileLinks = _broker.GetTaskFiles(taskId);
+            var fileLinkList = fileLinks.Success ? fileLinks.Files : new List<TaskFileLink>();
+
+            var graph = ChecklistGraphBuilder.Build(task, relationshipList, fileLinkList);
+
+            return Ok(new
+            {
+                graph.TaskId,
+                graph.TaskTitle,
+                taskStatus = task.Status,
+                assignee = task.Assignee,
+                nodes = graph.Nodes,
+                edges = graph.Edges,
+                warnings = graph.Warnings
+            });
+        }
+
         // =============================================
         // Relationship Endpoints
         // =============================================

@@ -44,6 +44,7 @@ namespace MultiTerminal.Docking
         private HudKnowledgeRenderer _hudKnowledge;
         private HudGitRenderer _hudGit;
         private HudSessionsRenderer _hudSessions;
+        private HudGraphRenderer _hudGraph;
         private SplitContainer _terminalAgentSplitter;
         private SplitContainer _terminalHudSplitter;
         private EmbeddedAgentPanel _embeddedAgentPanel;
@@ -469,6 +470,12 @@ namespace MultiTerminal.Docking
                 // (SetTerminalName will queue the name for when Initialize is called later).
                 taskHud.SetTerminalName(_customTitle);
             }
+
+            // The Plan graph resolves the active task by agent name, so it has to learn the
+            // name on the same late-arrival path the Tasks HUD does — otherwise it would sit
+            // permanently on "No active task" for any terminal that got its name after the
+            // broker (which is the common case).
+            _hudGraph?.SetTerminalName(_customTitle);
         }
 
         private void ShowRenameDialog()
@@ -633,10 +640,17 @@ namespace MultiTerminal.Docking
             _hudGit = new HudGitRenderer();
             _hudTabContainer.AddPermanentTab("__git__", "\ud83d\udd00 Git", _hudGit);
 
-            // Set desired tab order: Tasks, Git, Activities, Notes, Knowledge, Sessions
-            // (Owner request d788da4b). ReorderPermanentTabs also makes the FIRST tab
-            // the startup-active tab, so Tasks is the default view.
-            _hudTabContainer.ReorderPermanentTabs("__tasks__", "__git__", "__dashboard__", "__notes__", "__knowledge__", "__sessions__");
+            // \ud83d\udd17 Plan \u2014 the active task's checklist as a dependency graph, with a
+            // plain-language explanation of each step on hover (task 60665c6c). Sits next
+            // to Tasks because it answers a question about the SAME thing the Tasks tab
+            // shows: Tasks is the list you work, Plan is the shape you review.
+            _hudGraph = new HudGraphRenderer();
+            _hudTabContainer.AddPermanentTab("__graph__", "\ud83d\udd17 Plan", _hudGraph);
+
+            // Set desired tab order: Tasks, Plan, Git, Activities, Notes, Knowledge, Sessions
+            // (Owner request d788da4b for the original order). ReorderPermanentTabs also makes
+            // the FIRST tab the startup-active tab, so Tasks is the default view.
+            _hudTabContainer.ReorderPermanentTabs("__tasks__", "__graph__", "__git__", "__dashboard__", "__notes__", "__knowledge__", "__sessions__");
 
             // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
             taskHudRenderer.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
@@ -2392,6 +2406,12 @@ namespace MultiTerminal.Docking
                 _hudGit.OpenDiffPopupRequested += OnHudGitOpenDiffPopupRequested;
             }
             _hudSessions?.Initialize(broker);
+
+            // The Plan graph follows this terminal's active task, so it needs the name as
+            // well as the broker. CustomTitle may still be empty here — StartTerminal calls
+            // SetTerminalName later, and the renderer refreshes on that.
+            _hudGraph?.Initialize(broker);
+            _hudGraph?.SetTerminalName(CustomTitle);
 
             // Update status bar if terminal name is already set
             // Otherwise, StartTerminal() will call UpdateStatusBar() later
