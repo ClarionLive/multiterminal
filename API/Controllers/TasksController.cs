@@ -637,10 +637,13 @@ namespace MultiTerminal.API.Controllers
 
             var graph = ChecklistGraphBuilder.Build(task, relationshipList, fileLinkList);
 
+            // Every member named explicitly in camelCase — shorthand (`graph.TaskId`) would emit
+            // PascalCase here and diverge from the HUD renderer's envelope, which is the exact
+            // drift that produced the Run-1 wire-format bug.
             return Ok(new
             {
-                graph.TaskId,
-                graph.TaskTitle,
+                taskId = graph.TaskId,
+                taskTitle = graph.TaskTitle,
                 taskStatus = task.Status,
                 assignee = task.Assignee,
                 nodes = graph.Nodes,

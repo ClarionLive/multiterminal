@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using MultiTerminal.MCPServer.Models;
 using MultiTerminal.Services;
 using Xunit;
@@ -301,6 +303,81 @@ namespace MultiTerminal.Tests
             Assert.Equal("testing", graph.Nodes[0].Status);
             Assert.Equal(3, graph.Nodes[0].CycleCount);
             Assert.Equal("Diana", graph.Nodes[0].AssignedTo);
+        }
+
+        // ---- the wire contract with the view (Run-1 CRITICAL regression) ----
+
+        [Fact]
+        public void Graph_serializes_with_the_camelCase_keys_the_view_reads()
+        {
+            // Run 1 shipped a renderer that serialized these DTOs with default options, emitting
+            // PascalCase. hud-graph.html reads camelCase, so every field arrived undefined: all
+            // nodes collapsed onto one map key, every label read "(untitled)", and not one edge
+            // drew. Build was clean and 442 tests passed — nothing exercised this seam, and the
+            // REST transport hid it by camelCasing independently via ASP.NET.
+            // This asserts against the SAME options object the renderer uses, so it fails if
+            // anyone drops them or renames a DTO member the view depends on.
+            var task = TaskWith(Item("Inventory"), Item("Extract", 0));
+            var graph = ChecklistGraphBuilder.Build(task, new[] { Rel("T", "UP", "depends_on") });
+
+            var json = JsonSerializer.Serialize(
+                new { nodes = graph.Nodes, edges = graph.Edges },
+                ChecklistGraphBuilder.ViewJsonOptions);
+
+            foreach (var key in new[] { "id", "kind", "itemIndex", "label", "status", "tier", "files", "from", "to" })
+            {
+                Assert.Contains("\"" + key + "\":", json, StringComparison.Ordinal);
+            }
+
+            foreach (var pascal in new[] { "Id", "Kind", "ItemIndex", "Label", "Status", "Tier", "From", "To" })
+            {
+                Assert.DoesNotContain("\"" + pascal + "\":", json, StringComparison.Ordinal);
+            }
+        }
+
+        [Fact]
+        public void Gloss_serializes_with_the_camelCase_keys_the_panel_reads()
+        {
+            var item = Item("A");
+            item.Gloss = new ChecklistItemGloss { What = "w", Why = "y", Without = "n" };
+            var graph = ChecklistGraphBuilder.Build(TaskWith(item));
+
+            var json = JsonSerializer.Serialize(graph.Nodes, ChecklistGraphBuilder.ViewJsonOptions);
+
+            Assert.Contains("\"gloss\":", json, StringComparison.Ordinal);
+            Assert.Contains("\"what\":", json, StringComparison.Ordinal);
+            Assert.Contains("\"why\":", json, StringComparison.Ordinal);
+            Assert.Contains("\"without\":", json, StringComparison.Ordinal);
+        }
+
+        // ---- contradictory cross-task links (Run-1 LOW regression) ----
+
+        [Fact]
+        public void Contradictory_relationship_pair_yields_one_node_and_a_warning()
+        {
+            // Node ids are "task:{id}", so emitting both an upstream and a downstream node for the
+            // same task produced two nodes sharing one id — and the view's id->element map keeps
+            // only the last, silently redirecting every edge aimed at the first.
+            var task = TaskWith(Item("A"));
+            var rels = new[] { Rel("T", "B", "depends_on"), Rel("T", "B", "blocks") };
+
+            var graph = ChecklistGraphBuilder.Build(task, rels);
+
+            Assert.Single(graph.Nodes, n => n.Id == "task:B");
+            Assert.Contains(graph.Warnings, w => w.Contains("both ways", StringComparison.OrdinalIgnoreCase));
+        }
+
+        [Fact]
+        public void Cycle_warning_names_the_waiting_item_first()
+        {
+            // The dropped back-edge is node -> child where child is a DFS ancestor, so the
+            // PRE-EXISTING constraint ("already waiting") is node-waits-on-child. Run 1 printed
+            // the inverse, which in a feature about not misleading the reader is a real defect.
+            var graph = ChecklistGraphBuilder.Build(TaskWith(Item("A", 1), Item("B", 0)));
+
+            var cycle = graph.Warnings.Single(w => w.Contains("cycle", StringComparison.OrdinalIgnoreCase));
+            var droppedFrom = cycle.Substring(cycle.IndexOf("Edge ", StringComparison.Ordinal) + 5).Split(' ')[0];
+            Assert.Contains($"item {droppedFrom} is already waiting on", cycle, StringComparison.Ordinal);
         }
 
         // ---- helpers ----

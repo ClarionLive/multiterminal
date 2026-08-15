@@ -33,7 +33,6 @@ namespace MultiTerminal.Controls
         private MessageBroker _broker;
         private string _terminalName;
         private string _pinnedTaskId;
-        private string _pendingJson;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="HudGraphRenderer"/> class.
@@ -84,10 +83,7 @@ namespace MultiTerminal.Controls
         public void SetTerminalName(string terminalName)
         {
             _terminalName = terminalName;
-            if (_isInitialized)
-            {
-                RefreshGraph();
-            }
+            RefreshGraph();
         }
 
         /// <summary>
@@ -108,10 +104,7 @@ namespace MultiTerminal.Controls
         public void ApplyTheme(bool isDark)
         {
             _isDarkTheme = isDark;
-            if (_isInitialized)
-            {
-                PostJson(new { type = "theme", isDark });
-            }
+            Send(new { type = "theme", isDark });
         }
 
         /// <summary>
@@ -132,6 +125,15 @@ namespace MultiTerminal.Controls
         /// </summary>
         public void RefreshGraph()
         {
+            // Nothing can be delivered before the view handshakes, and the ready handler always
+            // refreshes — so returning early here is not just an optimization. TasksUpdated fires
+            // on EVERY task write by ANY agent, and without this guard each broadcast cost two
+            // broker/DB round-trips per terminal document for a tab that may never be opened.
+            if (!_isInitialized)
+            {
+                return;
+            }
+
             if (_broker == null)
             {
                 Send(new { type = "no_task" });
@@ -281,16 +283,16 @@ namespace MultiTerminal.Controls
                 {
                     _isInitialized = true;
                     _isInitializing = false;
-                    PostJson(new { type = "theme", isDark = _isDarkTheme });
-                    if (_pendingJson != null)
-                    {
-                        PostRaw(_pendingJson);
-                        _pendingJson = null;
-                    }
-                    else
-                    {
-                        RefreshGraph();
-                    }
+                    Send(new { type = "theme", isDark = _isDarkTheme });
+
+                    // ALWAYS rebuild — never replay a queued snapshot. The sibling renderers buffer
+                    // a pending payload because their data is expensive to re-fetch; this graph is
+                    // derived from live state, so a queued copy is strictly worse than a fresh read.
+                    // Buffering here also caused a real bug: a TasksUpdated firing in the window
+                    // between Initialize(broker) and the late CustomTitle would queue {"no_task"},
+                    // and flushing it on ready pinned the tab to "No active task" for a terminal
+                    // that had one.
+                    RefreshGraph();
 
                     _webView.ZoomFactorChanged += (s, ev) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
                     if (Math.Abs(_pendingZoom - 1.0) > 0.01)
@@ -331,21 +333,14 @@ namespace MultiTerminal.Controls
             RefreshGraph();
         }
 
+        /// <summary>
+        /// Serializes with <see cref="ChecklistGraphBuilder.ViewJsonOptions"/> (camelCase — the
+        /// view depends on it; see that field's docs) and posts to the WebView. Drops the message
+        /// when the view has not handshaked: callers never need to pre-check, because the ready
+        /// handler rebuilds from live state rather than replaying anything queued.
+        /// </summary>
         private void Send(object data)
         {
-            string json = JsonSerializer.Serialize(data);
-            if (_isInitialized)
-            {
-                PostRaw(json);
-            }
-            else
-            {
-                _pendingJson = json;
-            }
-        }
-
-        private void PostJson(object d)
-        {
             if (!_isInitialized || _webView?.CoreWebView2 == null)
             {
                 return;
@@ -353,23 +348,8 @@ namespace MultiTerminal.Controls
 
             try
             {
-                _webView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(d));
-            }
-            catch (InvalidOperationException)
-            {
-            }
-        }
-
-        private void PostRaw(string json)
-        {
-            if (!_isInitialized || _webView?.CoreWebView2 == null)
-            {
-                return;
-            }
-
-            try
-            {
-                _webView.CoreWebView2.PostWebMessageAsJson(json);
+                _webView.CoreWebView2.PostWebMessageAsJson(
+                    JsonSerializer.Serialize(data, ChecklistGraphBuilder.ViewJsonOptions));
             }
             catch (InvalidOperationException)
             {

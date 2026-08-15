@@ -392,9 +392,13 @@
   // ---------- rendering ----------
 
   function renderEmpty(msg) {
-    els = {}; nodesById = {}; edges = []; paths = []; lastId = null;
-    tiersEl.innerHTML = '';
+    // clearSvg() FIRST — it walks `paths` to remove the elements, so resetting the array
+    // beforehand would strand the previous render's <path> nodes in the SVG forever, at stale
+    // coordinates, accumulating on every refresh. Arrows nobody declared is the one thing this
+    // whole feature exists to avoid drawing.
     clearSvg();
+    els = {}; nodesById = {}; edges = []; lastId = null;
+    tiersEl.innerHTML = '';
     warnBox.hidden = true;
     pinBadge.hidden = true;
     titleEl.textContent = msg && msg.pinned ? 'Task not found' : 'No active task';
@@ -407,10 +411,10 @@
   }
 
   function render(data) {
-    els = {}; nodesById = {}; paths = [];
+    clearSvg();                       // must precede the reset — see renderEmpty()
+    els = {}; nodesById = {};
     edges = data.edges || [];
     tiersEl.innerHTML = '';
-    clearSvg();
 
     titleEl.textContent = data.taskTitle || data.taskId || 'Untitled task';
     var bits = [];
@@ -524,7 +528,12 @@
     svg.setAttribute('height', h);
     svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
 
-    var origin = tiersEl.getBoundingClientRect();
+    // Measure against the SVG, NOT #tiers. #edges is absolutely positioned at #canvas's
+    // padding-box origin while #tiers sits inside that padding (1.3rem 1rem), so measuring
+    // against #tiers shifted every path by (-16px, -20.8px) — comparable to the 24px tier gap,
+    // which put each arrowhead in the row above its target. Using the SVG's own rect is exact
+    // and scroll-invariant, since the abspos SVG scrolls with the content.
+    var origin = svg.getBoundingClientRect();
 
     edges.forEach(function (e) {
       var a = els[e.from];

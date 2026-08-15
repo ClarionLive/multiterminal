@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using MultiTerminal.MCPServer.Models;
 
 namespace MultiTerminal.Services
@@ -24,6 +25,20 @@ namespace MultiTerminal.Services
     /// </summary>
     public static class ChecklistGraphBuilder
     {
+        /// <summary>
+        /// Serializer options for pushing a graph into the WebView. Web defaults mean camelCase,
+        /// which the view requires: <c>hud-graph.html</c> reads <c>node.id</c>, <c>node.tier</c>,
+        /// <c>edge.from</c> and friends, and the DTOs below declare those members PascalCase.
+        /// Serialize without these options and every field arrives <c>undefined</c> — the tab
+        /// renders empty boxes and no edges, with no error anywhere.
+        /// <para>Deliberately public and shared rather than private to the renderer: this bug
+        /// shipped once precisely because the wire format was decided in two places independently
+        /// (the REST transport camelCases via ASP.NET and hid it). One options object means one
+        /// contract, and <c>ChecklistGraphBuilderTests</c> asserts the emitted key names against
+        /// this exact instance.</para>
+        /// </summary>
+        public static readonly JsonSerializerOptions ViewJsonOptions = new(JsonSerializerDefaults.Web);
+
         /// <summary>Node id prefix for checklist items.</summary>
         private const string ItemPrefix = "item:";
 
@@ -250,7 +265,10 @@ namespace MultiTerminal.Services
                         // Child is on the current stack, so this edge closes a loop.
                         if (dropped.Add((node, child)))
                         {
-                            warnings.Add($"Dependency cycle detected: item {child} is already waiting on item {node}. Edge {node} -> {child} dropped so the graph still renders.");
+                            // Direction matters in the wording: `child` is a DFS ancestor of `node`,
+                            // so the PRE-EXISTING chain is node-waits-on-child. The dropped edge is
+                            // the contradictory new claim that child also waits on node.
+                            warnings.Add($"Dependency cycle detected: item {node} is already waiting on item {child}. Edge {node} -> {child} dropped so the graph still renders.");
                         }
 
                         continue;
@@ -342,7 +360,7 @@ namespace MultiTerminal.Services
                 }
             }
 
-            var externals = ClassifyRelationships(task.Id, relationships);
+            var externals = ClassifyRelationships(task.Id, relationships, graph.Warnings);
             bool hasUpstream = externals.Any(e => e.Direction == "upstream");
             int shift = hasUpstream ? 1 : 0;
 
@@ -420,7 +438,8 @@ namespace MultiTerminal.Services
         /// </summary>
         private static List<(string TaskId, string Type, string Direction)> ClassifyRelationships(
             string taskId,
-            IEnumerable<TaskRelationship> relationships)
+            IEnumerable<TaskRelationship> relationships,
+            List<string> warnings)
         {
             var result = new List<(string TaskId, string Type, string Direction)>();
             if (relationships == null)
@@ -462,9 +481,24 @@ namespace MultiTerminal.Services
                     direction = "floating";
                 }
 
-                if (seen.Add(other + "|" + direction))
+                // De-dupe on the OTHER TASK ID ALONE, not on id+direction. The node id is
+                // "task:{id}", so a contradictory pair (A depends_on B AND A blocks B) would
+                // otherwise emit two nodes sharing one id — and the view's id->element map keeps
+                // only the last, silently redirecting every edge aimed at the first copy.
+                // First classification wins; the contradiction is surfaced as a warning rather
+                // than resolved, because guessing which link the author meant would be inventing
+                // structure, which is the one thing this builder must never do.
+                if (seen.Add(other))
                 {
                     result.Add((other, rel.Type, direction));
+                }
+                else
+                {
+                    var existing = result.Find(r => string.Equals(r.TaskId, other, StringComparison.OrdinalIgnoreCase));
+                    if (!string.Equals(existing.Direction, direction, StringComparison.Ordinal))
+                    {
+                        warnings.Add($"Task {other} is linked both ways ('{existing.Type}' and '{rel.Type}'). Showing it as {existing.Direction} only — fix the relationship rows to resolve the contradiction.");
+                    }
                 }
             }
 
