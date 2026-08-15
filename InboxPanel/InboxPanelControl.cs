@@ -325,7 +325,14 @@ namespace MultiTerminal.InboxPanel
                     {
                         type = "inbox_data",
                         unreadOnly = _showUnreadOnly,
-                        error = result.Error ?? "Could not load your inbox."
+                        // IsNullOrWhiteSpace, not ??. An empty-string Error would serialize as
+                        // `error: ""`, which JS reads as FALSY — so the panel's guard would open and
+                        // the list would blank, which is the exact defect this payload was reshaped
+                        // to prevent. Unreachable today (the only writer is ex.Message), but the
+                        // failure mode is silent and the guard costs nothing.
+                        error = string.IsNullOrWhiteSpace(result.Error)
+                            ? "Could not load your inbox."
+                            : result.Error
                     };
                     PostMessage(JsonSerializer.Serialize(failure, JsonOptions.UnicodeCamelCase));
                 }

@@ -314,9 +314,22 @@ namespace MultiTerminal.Tests
                 "A failed inbox fetch must be logged. Success=false with no else is invisible twice: " +
                 "nothing logged and nothing sent.");
 
+            // Asserts the PROPERTY (the broker's error reaches the payload), not one spelling of it.
+            // The first version of this assertion pinned the literal `error = result.Error`, and it
+            // false-failed the moment the null-coalesce was widened to an IsNullOrWhiteSpace guard —
+            // a change that strictly improved the same behaviour. An assertion that breaks when the
+            // code gets better is testing the author's phrasing, not the contract.
             Assert.True(
-                Regex.IsMatch(cs, @"error\s*=\s*result\.Error"),
+                Regex.IsMatch(cs, @"error\s*=\s*[^,}]*result\.Error", RegexOptions.Singleline),
                 "The failure payload must carry the broker's error so the panel can say what went wrong.");
+
+            // ...and must never ship an empty/whitespace error, which JS reads as falsy — that would
+            // open the panel's !fetchError guard and blank the list.
+            Assert.True(
+                Regex.IsMatch(cs, @"IsNullOrWhiteSpace\(\s*result\.Error\s*\)"),
+                "The failure payload must fall back to a human-readable string when result.Error is " +
+                "null OR blank. An empty string serializes as `error: \"\"`, which is falsy in JS, so " +
+                "the panel would treat a failure as a success and blank the list.");
 
             Assert.True(
                 Regex.Matches(cs, @"unreadOnly\s*=\s*_showUnreadOnly").Count >= 2,
@@ -381,6 +394,23 @@ namespace MultiTerminal.Tests
                 Regex.IsMatch(html, @"if\s*\(\s*fetchError\s*\)\s*\{\s*empty\.classList\.remove\(\s*'visible'\s*\)", RegexOptions.Singleline),
                 "The empty state must be suppressed under fetchError. 'No inbox messages' is a claim " +
                 "about the inbox that a failed fetch gives no basis for making.");
+
+            // ORDERING IS LOAD-BEARING, and asserting the guard EXISTS does not assert it WORKS.
+            // `fetchError` must be assigned BEFORE the guard reads it. Move the assignment below the
+            // guard and a success push arriving after a failure is evaluated against the STALE
+            // non-null fetchError: the guard stays shut, the list never repopulates, and the panel
+            // is wedged in the error state permanently. That edit is invisible to every other
+            // assertion in this file — it was the Run-3 reviewer's own observation that the one
+            // change which silently breaks recovery passes the whole suite.
+            int errorAssign = html.IndexOf("fetchError = typeof data.error", StringComparison.Ordinal);
+            int guard = html.IndexOf("if (!fetchError) {", StringComparison.Ordinal);
+            Assert.True(errorAssign >= 0, "Could not locate the fetchError assignment in the inbox_data handler.");
+            Assert.True(guard >= 0, "Could not locate the !fetchError guard in the inbox_data handler.");
+            Assert.True(
+                errorAssign < guard,
+                "fetchError is assigned AFTER the guard that reads it. A success push following a " +
+                "failure would then be tested against the previous error value, the guard would stay " +
+                "shut, and the panel could never recover — a permanent wedge with a green suite.");
         }
 
         /// <summary>
