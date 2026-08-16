@@ -207,7 +207,11 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: result.Error, statusCode: 400);
 
             // Non-empty body: the phone PWA's api() calls res.json() on 2xx, so a status change (which it reaches via a PUT compat shim) must return JSON, not an empty ack.
-            return Ok(new { status = request.Status });
+            // mergeOutcome is null unless marking this task done triggered an
+            // auto-merge (task b88e7017). A refused merge must reach the caller that
+            // caused it, not only the activity feed — the status change itself still
+            // succeeded, so this rides on the 200 rather than turning into a 400.
+            return Ok(new { status = request.Status, mergeOutcome = result.MergeOutcome });
         }
 
         /// <summary>

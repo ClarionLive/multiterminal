@@ -143,12 +143,24 @@ namespace MultiTerminal.Services
             }
             if (!string.Equals(trunk, wantTrunk, StringComparison.Ordinal))
             {
+                // Task b88e7017. The mismatch is REAL either way and we refuse either
+                // way — but WHICH SIDE is wrong changes the remedy completely, and the
+                // original code always blamed the checkout.
+                //
+                // That assumption (config is truth, HEAD is suspect) inverted on this
+                // very repo: projects.git_default_branch still said 'master' after the
+                // repo moved to 'main', so every task-done for ~7 weeks refused, and
+                // the remedy told the operator to check out a branch 320 commits
+                // stale and merge into THAT. Confidently wrong, and destructive if
+                // followed. Classify first, then speak.
+                var mismatch = await ClassifyTrunkMismatchAsync(repoRoot, trunk, wantTrunk).ConfigureAwait(false);
                 return new MergeResult
                 {
                     Success = false,
                     Merged = false,
                     MergedInto = trunk,
-                    Stderr = $"Main checkout is on '{trunk}', but the expected trunk is '{wantTrunk}'. Refusing to merge '{branchName}' into the wrong branch — check out '{wantTrunk}' in the main checkout and re-mark the task done to retry."
+                    TrunkMismatch = mismatch,
+                    Stderr = BuildTrunkMismatchMessage(mismatch, trunk, wantTrunk, branchName)
                 };
             }
 
@@ -667,15 +679,23 @@ namespace MultiTerminal.Services
             // with a genuinely unconventional trunk name must set the project's
             // git_default_branch (the authoritative source). Task branches
             // (task/<id>[--<slug>]) are excluded — they're never trunk.
-            var branches = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/").ConfigureAwait(false);
+            // %(refname), NOT %(refname:short) — task b88e7017, same defect class as
+            // 36b0b9d5 item ③ fixed in WorktreeJanitorService. :short emits
+            // 'heads/develop' rather than 'develop' when a TAG of the same name exists,
+            // so a repo carrying tag 'develop' alongside branch 'develop' would fail
+            // IsConventionalTrunkName, resolve no trunk, and fail closed forever — the
+            // same permanent-refusal shape this ticket is about. %(refname) is
+            // unambiguous by construction; ParseBranchNames strips the refs/heads/
+            // prefix and is shared rather than re-implemented so the two callers
+            // cannot drift.
+            var branches = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/").ConfigureAwait(false);
             if (branches.ExitCode == 0)
             {
                 string sole = null;
                 int count = 0;
-                foreach (var raw in branches.Stdout.Split('\n'))
+                foreach (var b in WorktreeJanitorService.ParseBranchNames(branches.Stdout))
                 {
-                    string b = raw.Trim();
-                    if (b.Length == 0 || b.StartsWith("task/", StringComparison.Ordinal)) continue;
+                    if (b.StartsWith("task/", StringComparison.Ordinal)) continue;
                     count++;
                     sole = b;
                     if (count > 1) break;
@@ -684,6 +704,108 @@ namespace MultiTerminal.Services
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Decide WHICH SIDE of a trunk mismatch is wrong (task b88e7017). Read-only:
+        /// this never mutates the repo and never changes whether the merge is refused
+        /// — it is refused in every case. It changes only what we tell the operator.
+        /// </summary>
+        /// <remarks>
+        /// The 90c2acc6 guard assumed the configured trunk was authoritative and the
+        /// checkout had wandered. Both real failures on this machine were the reverse:
+        /// <list type="bullet">
+        /// <item>CA Debugger — configured 'master' did not exist in the repo AT ALL.</item>
+        /// <item>MultiTerminal — configured 'master' existed but was 320 commits behind
+        /// 'main', which is where origin/HEAD pointed.</item>
+        /// </list>
+        /// Ordered most-conclusive first. A missing branch is unambiguous; origin/HEAD
+        /// is the remote's published answer; ancestry is the weakest but still decisive
+        /// signal (a trunk BEHIND the checkout cannot be the branch we should be
+        /// merging into). Anything else keeps 90c2acc6's original verdict.
+        /// </remarks>
+        internal static async Task<TrunkMismatchKind> ClassifyTrunkMismatchAsync(
+            string repoRoot, string trunk, string wantTrunk)
+        {
+            // (1) The configured trunk isn't a branch here at all. Nothing to check
+            // out, so "go check it out" was never actionable advice.
+            var exists = await GitExec.RunAsync(
+                repoRoot, "rev-parse", "--verify", "--quiet", $"refs/heads/{wantTrunk}").ConfigureAwait(false);
+            if (exists.ExitCode != 0) return TrunkMismatchKind.ConfiguredTrunkMissing;
+
+            // (2) The remote's published default agrees with the CHECKOUT, not with
+            // the config. Same source DetectDefaultBranchAsync trusts first, so
+            // deferring to it here keeps the two paths from contradicting each other.
+            var remote = await GitExec.RunAsync(
+                repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
+            if (remote.ExitCode == 0)
+            {
+                string r = remote.Stdout.Trim();
+                const string prefix = "origin/";
+                if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
+                if (string.Equals(r, trunk, StringComparison.Ordinal)) return TrunkMismatchKind.ConfiguredTrunkStale;
+            }
+
+            // DELIBERATELY NO ANCESTRY PROBE. The first cut of this method also asked
+            // "is wantTrunk an ancestor of trunk?" and called that staleness. It is
+            // not: a HEALTHY trunk is an ancestor of every branch cut from it, so that
+            // probe fires on the ordinary "checkout parked on a feature branch" case —
+            // precisely the case 90c2acc6 exists to catch — and would have answered it
+            // with "your config is stale" while the operator's real problem was the
+            // checkout. CheckoutGenuinelyOnWrongBranch_StillBlamesTheCheckout caught
+            // it. Ancestry cannot separate a stale trunk from normal branching, so it
+            // is not evidence and is not consulted.
+            //
+            // Both real-world failures are covered without it: a renamed trunk leaves
+            // the old name absent (probe 1), and a superseded one is contradicted by
+            // origin/HEAD (probe 2). With neither signal we do NOT guess — we keep
+            // 90c2acc6's verdict, which is the conservative one.
+            return TrunkMismatchKind.CheckoutOnWrongBranch;
+        }
+
+        /// <summary>
+        /// The branch a mismatch remedy tells the operator to MOVE TO, or <c>null</c>
+        /// when the remedy is "fix the configuration" rather than "check something out".
+        /// </summary>
+        /// <remarks>
+        /// Split out from the message text on purpose (task b88e7017 item ②). The
+        /// harmful advice we shipped — "check out 'master' … and re-mark the task done"
+        /// — was harmful precisely because the target branch was chosen implicitly
+        /// while formatting a string. Naming the target as its own value makes the
+        /// invariant testable: a remedy must never point at a branch behind HEAD.
+        /// <see cref="WorktreeMergeServiceTests"/> asserts that over every verdict.
+        /// </remarks>
+        internal static string RemedyTargetBranch(TrunkMismatchKind kind, string wantTrunk)
+            => kind == TrunkMismatchKind.CheckoutOnWrongBranch ? wantTrunk : null;
+
+        /// <summary>
+        /// Build the refusal text for a trunk mismatch. Every branch refuses; only the
+        /// remedy differs (task b88e7017).
+        /// </summary>
+        internal static string BuildTrunkMismatchMessage(
+            TrunkMismatchKind kind, string trunk, string wantTrunk, string branchName)
+        {
+            switch (kind)
+            {
+                case TrunkMismatchKind.ConfiguredTrunkMissing:
+                    return $"Refusing to merge '{branchName}': this project's configured default branch is '{wantTrunk}', "
+                        + $"but no branch named '{wantTrunk}' exists in this repository (the main checkout is on '{trunk}'). "
+                        + $"The CONFIGURATION is stale, not the checkout — set the project's default branch (git_default_branch) "
+                        + $"to '{trunk}' and re-mark the task done to retry. Do NOT create a '{wantTrunk}' branch to satisfy this check.";
+
+                case TrunkMismatchKind.ConfiguredTrunkStale:
+                    return $"Refusing to merge '{branchName}': this project's configured default branch is '{wantTrunk}', "
+                        + $"but the remote's published default (origin/HEAD) is '{trunk}' — which is what the main checkout is on. "
+                        + $"The CONFIGURATION is stale, not the checkout — set the project's default branch (git_default_branch) to '{trunk}' "
+                        + $"and re-mark the task done to retry. Merging into '{wantTrunk}' would strand the work off the line of development.";
+
+                default:
+                    // 90c2acc6's original case and message: the configured trunk is
+                    // live and not behind, so the checkout really has wandered.
+                    return $"Main checkout is on '{trunk}', but the expected trunk is '{wantTrunk}'. "
+                        + $"Refusing to merge '{branchName}' into the wrong branch — check out '{wantTrunk}' in the main checkout "
+                        + $"and re-mark the task done to retry.";
+            }
         }
 
         /// <summary>
@@ -721,9 +843,42 @@ namespace MultiTerminal.Services
     /// Conflating the two (task 90c2acc6, Suspect A) let a no-op be reported as
     /// "merged into trunk", masking the very failure this class describes.</para>
     /// </summary>
+    /// <summary>
+    /// Which side of a trunk mismatch is wrong (task b88e7017). Typed rather than
+    /// prose so the activity feed, the janitor and the tests can branch on it without
+    /// matching on message text — the text is for humans and will be reworded.
+    /// </summary>
+    public enum TrunkMismatchKind
+    {
+        /// <summary>No trunk mismatch occurred.</summary>
+        None = 0,
+
+        /// <summary>The configured default branch does not exist in the repository.</summary>
+        ConfiguredTrunkMissing,
+
+        /// <summary>
+        /// The configured default branch exists but is behind the checkout and/or
+        /// contradicted by origin/HEAD — the config is stale, not the checkout.
+        /// </summary>
+        ConfiguredTrunkStale,
+
+        /// <summary>
+        /// The configured trunk is live and not behind: the main checkout really is
+        /// parked on the wrong branch. Task 90c2acc6's original Suspect-B case.
+        /// </summary>
+        CheckoutOnWrongBranch,
+    }
+
     public class MergeResult
     {
         public bool Success { get; set; }
+
+        /// <summary>
+        /// Set when the merge was refused because the checkout's branch didn't match
+        /// the expected trunk, recording WHICH SIDE was judged wrong (task b88e7017).
+        /// <see cref="TrunkMismatchKind.None"/> for every other outcome.
+        /// </summary>
+        public TrunkMismatchKind TrunkMismatch { get; set; }
 
         /// <summary>
         /// True ONLY when a real <c>git merge</c> (fast-forward or merge commit)

@@ -670,7 +670,11 @@ namespace MultiTerminal.Tests
             public WorktreeMergeService Merge => null;
             public object TaskWorktreeLock(string taskId) => _lock;
             public WorktreePruningEventArgs FireWorktreePruning(string taskId, string worktreePath, string repoRoot, string agentName) => null;
-            public void PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath) { }
+            public TaskDoneMergeOutcome PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath)
+                => PostPruneMergeOutcome;
+
+            /// <summary>What the stubbed post-prune merge reports back (task b88e7017).</summary>
+            public TaskDoneMergeOutcome PostPruneMergeOutcome { get; set; }
             public bool CommitAndIntegrateHelpers(KanbanTask task, string repoRoot, out List<string> integratedBranches) { integratedBranches = new List<string>(); return false; }
             public ActivityService ActivityService => null;
             public SummaryService SummaryService => null;

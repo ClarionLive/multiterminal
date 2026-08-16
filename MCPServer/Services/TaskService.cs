@@ -1011,6 +1011,11 @@ namespace MultiTerminal.MCPServer.Services
             // predicate isn't called when status != "done", so an inline out var
             // wouldn't be assigned on every path into the else.
             string doneSkipReason = null;
+            // Task b88e7017 — declared at method scope so it reaches the return below.
+            // Stays null whenever no merge was attempted (any non-done status, worktree
+            // mode off, an ineligible task), which is exactly what "no merge outcome to
+            // report" should look like to the caller.
+            TaskDoneMergeOutcome mergeOutcome = null;
             if (status == "done"
                 && _host.TryResolveWorktreeEligibility(task, out string doneProjPath, out _, out doneSkipReason))
             {
@@ -1202,6 +1207,19 @@ namespace MultiTerminal.MCPServer.Services
                         });
                         // No prune attempt → don't auto-merge this pass either;
                         // janitor's retry will get there once the prune lands.
+                        //
+                        // Task b88e7017: report the postponement. "Merge did not happen
+                        // yet, something else will do it later" is indistinguishable
+                        // from "merge succeeded" if we say nothing, and the janitor's
+                        // retry can be minutes away.
+                        mergeOutcome = new TaskDoneMergeOutcome
+                        {
+                            Merged = false,
+                            NeedsAttention = false,
+                            BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                            Message = "Worktree prune was deferred (the pre-prune broadcast did not complete in time), "
+                                + "so the auto-merge has NOT run yet. The janitor will retry the prune and then the merge on its next sweep."
+                        };
                     }
                     else
                     {
@@ -1223,6 +1241,17 @@ namespace MultiTerminal.MCPServer.Services
                                 Content = $"Worktree prune failed for '{task.Title}'. Auto-merge skipped — see debug log for details.",
                                 RelatedId = taskId
                             });
+                            // Task b88e7017: a failed prune means the merge never ran.
+                            // NeedsAttention — unlike the deferred case, nothing is
+                            // scheduled to come back and finish this.
+                            mergeOutcome = new TaskDoneMergeOutcome
+                            {
+                                Merged = false,
+                                NeedsAttention = true,
+                                BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                                Message = $"Worktree prune failed ({ex.Message}), so the auto-merge did NOT run. "
+                                    + "The task branch has not landed in trunk."
+                            };
                         }
                     }
 
@@ -1271,7 +1300,9 @@ namespace MultiTerminal.MCPServer.Services
                         }
                     }
 
-                    _host.PerformPostPruneMergeAndFireReady(taskId, task, doneProjPath, worktreePathToPrune);
+                    // Task b88e7017: keep the outcome so the caller learns whether the
+                    // branch actually landed. Previously discarded here.
+                    mergeOutcome = _host.PerformPostPruneMergeAndFireReady(taskId, task, doneProjPath, worktreePathToPrune);
                 }
             }
             else if (status == "done"
@@ -1319,7 +1350,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            return new UpdateTaskStatusResult { Success = true };
+            return new UpdateTaskStatusResult { Success = true, MergeOutcome = mergeOutcome };
         }
 
 
