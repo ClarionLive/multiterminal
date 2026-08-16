@@ -368,6 +368,61 @@ namespace MultiTerminal.MCPServer.Models
     {
         public bool Success { get; set; }
         public string Error { get; set; }
+
+        /// <summary>
+        /// What the post-prune auto-merge did, when marking a task <c>done</c>
+        /// triggered one. Null whenever no merge was attempted (any other status,
+        /// worktree mode off, an ineligible task, or a deferred prune).
+        /// </summary>
+        /// <remarks>
+        /// Task b88e7017. This field exists because its absence hid a SEVEN-WEEK
+        /// outage. The merge outcome was written to the activity feed and then
+        /// dropped on the floor, so <c>update_task_status</c> answered a bare
+        /// "✅ Task … updated to: done" while the merge was being refused one second
+        /// later — and the worktree-pruning broadcast still fired, so every visible
+        /// signal read as success. The status change genuinely succeeded, so this is
+        /// NOT an error on the status update; it is a second outcome the same call
+        /// caused, and the caller has no other way to learn it.
+        /// </remarks>
+        public TaskDoneMergeOutcome MergeOutcome { get; set; }
+    }
+
+    /// <summary>
+    /// The auto-merge outcome surfaced alongside a task-done status change
+    /// (task b88e7017).
+    /// </summary>
+    public class TaskDoneMergeOutcome
+    {
+        /// <summary>True when a real merge landed the task branch in trunk.</summary>
+        public bool Merged { get; set; }
+
+        /// <summary>
+        /// True when the merge was refused or failed and the task branch is still
+        /// outstanding. This is the case that must never again be reported silently.
+        /// </summary>
+        public bool NeedsAttention { get; set; }
+
+        /// <summary>Trunk the merge targeted (or would have), when known.</summary>
+        public string MergedInto { get; set; }
+
+        /// <summary>Task branch involved, so the caller can act without re-deriving it.</summary>
+        public string BranchName { get; set; }
+
+        /// <summary>
+        /// When the merge was refused for a trunk mismatch, the
+        /// <c>TrunkMismatchKind</c> name — which SIDE was judged wrong. Null otherwise.
+        /// Serialized as the enum's name so a client can branch on the verdict instead
+        /// of pattern-matching <see cref="Message"/>, which is prose written for humans
+        /// and expected to be reworded.
+        /// </summary>
+        public string TrunkMismatch { get; set; }
+
+        /// <summary>
+        /// Human-readable outcome. For a refusal this carries the reason AND the
+        /// remedy, in the honest-rejection style of task 405273fd: say what did not
+        /// happen and what still needs doing.
+        /// </summary>
+        public string Message { get; set; }
     }
 
     /// <summary>

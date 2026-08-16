@@ -665,9 +665,13 @@ namespace MultiTerminal.MCPServer.Services
         // Callers must only invoke this AFTER a successful prune. Failed/
         // deferred prunes don't fire WorktreeReady (the worktree may still be
         // alive on disk and rebinding to repo root would yank the user off it).
-        private void PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath)
+        private TaskDoneMergeOutcome PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath)
         {
             string taskIdShort = taskId.Substring(0, Math.Min(8, taskId.Length));
+            // Task b88e7017: the outcome is RETURNED as well as logged. Every branch
+            // below assigns it before falling through to FireWorktreeReady, so a path
+            // that forgets is a compile error rather than a silent "✅ done".
+            TaskDoneMergeOutcome outcome;
             try
             {
                 var mergeResult = _merge.MergeForTaskAsync(taskId, projectPath, ResolveConfiguredTrunk(task)).GetAwaiter().GetResult();
@@ -692,6 +696,16 @@ namespace MultiTerminal.MCPServer.Services
                             : $"Merged task branch into {mergeResult.MergedInto} for '{task.Title}'; task branch deleted.",
                         RelatedId = taskId
                     });
+                    outcome = new TaskDoneMergeOutcome
+                    {
+                        Merged = true,
+                        NeedsAttention = false,
+                        MergedInto = mergeResult.MergedInto,
+                        BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                        Message = cleanupPending
+                            ? $"Merged into {mergeResult.MergedInto}; branch cleanup pending (next janitor sweep)."
+                            : $"Merged into {mergeResult.MergedInto}; task branch deleted."
+                    };
                 }
                 else if (mergeResult.Success)
                 {
@@ -709,6 +723,17 @@ namespace MultiTerminal.MCPServer.Services
                         Content = $"Auto-merge skipped for '{task.Title}': {skipReason}",
                         RelatedId = taskId
                     });
+                    // A benign skip needs no attention: nothing landed because there
+                    // was nothing to land. Still reported, so "skipped" and "merged"
+                    // stay distinguishable to the caller (90c2acc6 Suspect A).
+                    outcome = new TaskDoneMergeOutcome
+                    {
+                        Merged = false,
+                        NeedsAttention = false,
+                        MergedInto = mergeResult.MergedInto,
+                        BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                        Message = $"No merge needed — {skipReason}."
+                    };
                 }
                 else
                 {
@@ -725,6 +750,33 @@ namespace MultiTerminal.MCPServer.Services
                         Content = $"{conflictTag} for '{task.Title}'.{(string.IsNullOrEmpty(mergeReason) ? "" : $" Reason: {mergeReason}")} Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                         RelatedId = taskId
                     });
+                    // THE CASE THIS TICKET EXISTS FOR.
+                    //
+                    // Sanitized, NOT raw (pipeline Run 2, Codex security MEDIUM). The
+                    // first cut passed mergeResult.Stderr verbatim on the theory that
+                    // "the caller is the one who can act on it" — but the caller here
+                    // is an HTTP response, including the phone gateway, and raw git
+                    // stderr routinely names absolute paths and remotes. Run 1 applied
+                    // TruncateReason to the THROW arm because that is where the finding
+                    // pointed, and left this one raw; same defect class, adjacent line.
+                    outcome = new TaskDoneMergeOutcome
+                    {
+                        Merged = false,
+                        NeedsAttention = true,
+                        MergedInto = mergeResult.MergedInto,
+                        BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                        // Carries the typed verdict, not just prose (pipeline Run 1,
+                        // code-reviewer MINOR): TrunkMismatchKind was introduced so
+                        // consumers could branch without string-matching, but it stopped
+                        // at the DTO boundary, leaving the MCP tool able to do exactly
+                        // the string-matching the enum exists to prevent.
+                        TrunkMismatch = mergeResult.TrunkMismatch == MultiTerminal.Services.TrunkMismatchKind.None
+                            ? null
+                            : mergeResult.TrunkMismatch.ToString(),
+                        Message = $"{conflictTag}: {mergeReason} "
+                            + $"Branch {MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId)} is preserved with its commits; the worktree directory was removed. "
+                            + "Nothing was lost, but the branch has NOT landed in trunk."
+                    };
                 }
             }
             catch (Exception ex)
@@ -738,9 +790,23 @@ namespace MultiTerminal.MCPServer.Services
                     Content = $"Auto-merge threw for '{task.Title}'. Reason: {TruncateReason(ex.Message)} Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                     RelatedId = taskId
                 });
+                outcome = new TaskDoneMergeOutcome
+                {
+                    Merged = false,
+                    NeedsAttention = true,
+                    BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                    // TruncateReason, matching the sibling activity-feed line above
+                    // (pipeline Run 1, code-reviewer MINOR): raw exception text is
+                    // unbounded and often carries absolute paths and git internals, and
+                    // this string now travels to an MCP tool response rather than only
+                    // to the server log.
+                    Message = $"Auto-merge threw: {TruncateReason(ex.Message)} "
+                        + $"Branch {MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId)} is preserved with its commits; it has NOT landed in trunk."
+                };
             }
 
             FireWorktreeReady(taskId, worktreePath, projectPath, task.Assignee);
+            return outcome;
         }
 
         /// <summary>
@@ -918,16 +984,7 @@ namespace MultiTerminal.MCPServer.Services
         /// etc.). Returns empty when there's nothing to show.
         /// </summary>
         private static string TruncateReason(string reason)
-        {
-            if (string.IsNullOrWhiteSpace(reason)) return string.Empty;
-            string oneLine = reason.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            const int max = 240;
-            if (oneLine.Length > max)
-            {
-                oneLine = oneLine.Substring(0, max) + "…";
-            }
-            return oneLine;
-        }
+            => MultiTerminal.Services.WorktreeMergeService.SanitizeForCaller(reason);
 
         /// <summary>
         /// Fires BranchOutcomeUpdated. Called by BranchMetadataService after a successful
@@ -1645,7 +1702,7 @@ namespace MultiTerminal.MCPServer.Services
         object ITaskServiceHost.TaskWorktreeLock(string taskId) => TaskWorktreeLock(taskId);
         WorktreePruningEventArgs ITaskServiceHost.FireWorktreePruning(string taskId, string worktreePath, string repoRoot, string agentName)
             => FireWorktreePruning(taskId, worktreePath, repoRoot, agentName);
-        void ITaskServiceHost.PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath)
+        TaskDoneMergeOutcome ITaskServiceHost.PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath)
             => PerformPostPruneMergeAndFireReady(taskId, task, projectPath, worktreePath);
         bool ITaskServiceHost.CommitAndIntegrateHelpers(KanbanTask task, string repoRoot, out List<string> integratedBranches)
             => CommitAndIntegrateHelpers(task, repoRoot, out integratedBranches);

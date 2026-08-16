@@ -809,6 +809,33 @@ namespace MultiTerminal.MCPServer.Services
 
 
         /// <summary>
+        /// Build the "the merge never ran" outcome for an abort that happens UPSTREAM
+        /// of the merge attempt (task b88e7017, pipeline Run 1 debugger MEDIUM). Always
+        /// <c>NeedsAttention</c>: unlike a deferred prune, nothing is scheduled to come
+        /// back and finish these — the branch simply has not landed.
+        /// </summary>
+        private static TaskDoneMergeOutcome NoMergeRan(string taskId, string message)
+            => new TaskDoneMergeOutcome
+            {
+                Merged = false,
+                NeedsAttention = true,
+                BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                Message = message + " The task branch has not landed in trunk.",
+            };
+
+        /// <summary>
+        /// Bound raw git/IO text before it rides back to the caller. Delegates to the
+        /// single shared sanitizer — this was briefly a second implementation that had
+        /// already drifted from MessageBroker's (200 vs 240 chars, different empty
+        /// behaviour) while both fed the same DTO field (pipeline Run 2, code-reviewer).
+        /// </summary>
+        private static string TrimForCaller(string text)
+        {
+            string sanitized = MultiTerminal.Services.WorktreeMergeService.SanitizeForCaller(text);
+            return string.IsNullOrEmpty(sanitized) ? "no detail" : sanitized;
+        }
+
+        /// <summary>
         /// Update the status of a task.
         /// Implements stack behavior: when a task is marked "done" and was active,
         /// auto-resume the most recently paused task for that assignee.
@@ -1011,6 +1038,11 @@ namespace MultiTerminal.MCPServer.Services
             // predicate isn't called when status != "done", so an inline out var
             // wouldn't be assigned on every path into the else.
             string doneSkipReason = null;
+            // Task b88e7017 — declared at method scope so it reaches the return below.
+            // Stays null whenever no merge was attempted (any non-done status, worktree
+            // mode off, an ineligible task), which is exactly what "no merge outcome to
+            // report" should look like to the caller.
+            TaskDoneMergeOutcome mergeOutcome = null;
             if (status == "done"
                 && _host.TryResolveWorktreeEligibility(task, out string doneProjPath, out _, out doneSkipReason))
             {
@@ -1072,6 +1104,12 @@ namespace MultiTerminal.MCPServer.Services
                             Content = $"Auto-commit failed for '{task.Title}'. Worktree NOT pruned — see debug log for details.",
                             RelatedId = taskId
                         });
+                        // Pipeline Run 1, debugger MEDIUM: this abort is UPSTREAM of the
+                        // prune, so control never reaches the blocks that set an outcome
+                        // and the caller got a bare "done" with the branch unmerged —
+                        // the same silence this ticket exists to remove, one step earlier.
+                        mergeOutcome = NoMergeRan(taskId,
+                            $"Auto-commit failed ({TrimForCaller(commitResult.Stderr)}), so the worktree was not pruned and the auto-merge did NOT run.");
                     }
                 }
                 catch (Exception ex)
@@ -1090,6 +1128,12 @@ namespace MultiTerminal.MCPServer.Services
                         Content = $"Auto-commit threw for '{task.Title}'. Worktree NOT pruned — see debug log for details.",
                         RelatedId = taskId
                     });
+                    // Same upstream-abort silence as the else above (pipeline Run 1,
+                    // debugger MEDIUM). Deliberately does NOT include ex.Message: the
+                    // comment above explains raw exception text leaks paths and git
+                    // details, and this string reaches the same clients.
+                    mergeOutcome = NoMergeRan(taskId,
+                        "Auto-commit threw, so the worktree was not pruned and the auto-merge did NOT run. See the debug log for details.");
                 }
 
                 // Phase 2 (helpers) + Phase 2.5 (integration) for per-agent isolation:
@@ -1113,6 +1157,13 @@ namespace MultiTerminal.MCPServer.Services
                     if (!proceedTeardown)
                     {
                         shouldPrune = false;
+                        // Third upstream abort (pipeline Run 1, debugger MEDIUM): a
+                        // helper commit failed or a helper merge conflicted, so teardown
+                        // halts and nothing is lost — but the caller must still be told
+                        // the branch did not land.
+                        mergeOutcome = NoMergeRan(taskId,
+                            "Helper-worktree commit/integration did not complete, so teardown was halted and the auto-merge did NOT run. "
+                            + "Every worktree and branch is left intact for manual resolution.");
                     }
                 }
 
@@ -1202,6 +1253,19 @@ namespace MultiTerminal.MCPServer.Services
                         });
                         // No prune attempt → don't auto-merge this pass either;
                         // janitor's retry will get there once the prune lands.
+                        //
+                        // Task b88e7017: report the postponement. "Merge did not happen
+                        // yet, something else will do it later" is indistinguishable
+                        // from "merge succeeded" if we say nothing, and the janitor's
+                        // retry can be minutes away.
+                        mergeOutcome = new TaskDoneMergeOutcome
+                        {
+                            Merged = false,
+                            NeedsAttention = false,
+                            BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                            Message = "Worktree prune was deferred (the pre-prune broadcast did not complete in time), "
+                                + "so the auto-merge has NOT run yet. The janitor will retry the prune and then the merge on its next sweep."
+                        };
                     }
                     else
                     {
@@ -1223,6 +1287,13 @@ namespace MultiTerminal.MCPServer.Services
                                 Content = $"Worktree prune failed for '{task.Title}'. Auto-merge skipped — see debug log for details.",
                                 RelatedId = taskId
                             });
+                            // Task b88e7017: a failed prune means the merge never ran.
+                            // Via NoMergeRan like the other three sites — this was a
+                            // hand-rolled twin of it, and the only path interpolating
+                            // raw ex.Message into the caller-facing DTO (pipeline Run 2,
+                            // code-reviewer MINOR).
+                            mergeOutcome = NoMergeRan(taskId,
+                                $"Worktree prune failed ({TrimForCaller(ex.Message)}), so the auto-merge did NOT run.");
                         }
                     }
 
@@ -1271,7 +1342,9 @@ namespace MultiTerminal.MCPServer.Services
                         }
                     }
 
-                    _host.PerformPostPruneMergeAndFireReady(taskId, task, doneProjPath, worktreePathToPrune);
+                    // Task b88e7017: keep the outcome so the caller learns whether the
+                    // branch actually landed. Previously discarded here.
+                    mergeOutcome = _host.PerformPostPruneMergeAndFireReady(taskId, task, doneProjPath, worktreePathToPrune);
                 }
             }
             else if (status == "done"
@@ -1319,7 +1392,7 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            return new UpdateTaskStatusResult { Success = true };
+            return new UpdateTaskStatusResult { Success = true, MergeOutcome = mergeOutcome };
         }
 
 
@@ -1361,6 +1434,7 @@ namespace MultiTerminal.MCPServer.Services
             // already-correct column (its own transaction) and is therefore a best-effort refinement, not a
             // correctness requirement. UpdateTaskStatus swaps a NEW clone into the cache, so re-fetch `task`.
             bool statusChanging = !string.IsNullOrEmpty(newStatus) && task.Status != newStatus;
+            TaskDoneMergeOutcome movedMergeOutcome = null;
 
             try
             {
@@ -1369,6 +1443,13 @@ namespace MultiTerminal.MCPServer.Services
                     var statusResult = UpdateTaskStatus(taskId, newStatus, newSortOrder);
                     if (!statusResult.Success)
                         return statusResult;
+
+                    // Task b88e7017 (pipeline Run 1, debugger MEDIUM): carry the merge
+                    // outcome out of the nested call. This is the KANBAN DRAG-TO-DONE
+                    // path — the most common way a human marks a task done — and it
+                    // previously returned a fresh { Success = true }, discarding a
+                    // refused merge exactly as the MCP tool used to.
+                    movedMergeOutcome = statusResult.MergeOutcome;
 
                     if (!_tasks.TryGetValue(taskId, out task))
                         return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
@@ -1381,7 +1462,12 @@ namespace MultiTerminal.MCPServer.Services
                     var reordered = MutateTaskInternal(taskId, t => t.SortOrder = newSortOrder,
                         _ => _taskDb.UpdateSortOrder(taskId, newSortOrder));
                     if (reordered == null)
-                        return new UpdateTaskStatusResult { Success = false, Error = $"Task not found: {taskId}" };
+                        return new UpdateTaskStatusResult
+                        {
+                            Success = false,
+                            Error = $"Task not found: {taskId}",
+                            MergeOutcome = movedMergeOutcome, // durable by now — see the catch below
+                        };
                     task = reordered;
                 }
 
@@ -1430,11 +1516,20 @@ namespace MultiTerminal.MCPServer.Services
             catch (Exception ex)
             {
                 _host.LogError($"ReorderTask: failed to persist reorder for {taskId}: {ex.Message}");
-                return new UpdateTaskStatusResult { Success = false, Error = $"Failed to persist reorder: {ex.Message}" };
+                // MergeOutcome rides along even on failure (task b88e7017, pipeline
+                // Run 2 debugger LOW): by this point the status change AND any merge
+                // refusal are already durable, so returning only the persistence error
+                // would make a real refusal vanish behind "failed to persist reorder".
+                return new UpdateTaskStatusResult
+                {
+                    Success = false,
+                    Error = $"Failed to persist reorder: {ex.Message}",
+                    MergeOutcome = movedMergeOutcome,
+                };
             }
 
             BroadcastTaskUpdate();
-            return new UpdateTaskStatusResult { Success = true };
+            return new UpdateTaskStatusResult { Success = true, MergeOutcome = movedMergeOutcome };
         }
 
 

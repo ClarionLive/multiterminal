@@ -67,7 +67,13 @@ namespace MultiTerminal.MCPServer.Services
         MultiTerminal.Services.WorktreeMergeService Merge { get; }
         object TaskWorktreeLock(string taskId);
         WorktreePruningEventArgs FireWorktreePruning(string taskId, string worktreePath, string repoRoot, string agentName);
-        void PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath);
+        /// <summary>
+        /// Runs the post-prune auto-merge and fires WorktreeReady. Returns what the
+        /// merge did so the caller can report it (task b88e7017) — this used to
+        /// return void, which is how a refused merge stayed invisible to
+        /// <c>update_task_status</c> for seven weeks.
+        /// </summary>
+        TaskDoneMergeOutcome PerformPostPruneMergeAndFireReady(string taskId, KanbanTask task, string projectPath, string worktreePath);
         bool CommitAndIntegrateHelpers(KanbanTask task, string repoRoot, out List<string> integratedBranches);
 
         // ── DI-set collaborators (assigned on the broker after construction by MainForm wire-up). Task

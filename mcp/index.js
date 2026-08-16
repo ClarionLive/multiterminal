@@ -2809,18 +2809,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_task_status": {
-        await apiCall(`/api/tasks/${seg(args.taskId)}/status`, "PATCH", {
+        const statusData = await apiCall(`/api/tasks/${seg(args.taskId)}/status`, "PATCH", {
           status: args.status,
           updatedBy: args.updatedBy,
         });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `✅ Task ${args.taskId} status updated to: ${args.status}`,
-            },
-          ],
-        };
+
+        let text = `✅ Task ${args.taskId} status updated to: ${args.status}`;
+
+        // Task b88e7017. Marking a task done also runs the auto-merge, and this
+        // response used to be thrown away — so a REFUSED merge produced a bare
+        // "✅ done" while the branch sat unmerged. That hid a 7-week outage: the
+        // worktree-pruning broadcast still fired, so every visible signal read as
+        // success. The status change did succeed, so this is reported ALONGSIDE it,
+        // not as a failure of it.
+        const merge = statusData && statusData.mergeOutcome;
+        if (merge) {
+          if (merge.needsAttention) {
+            // Honest-rejection wording (task 405273fd): say what did NOT happen.
+            text += `\n\n⚠️ BUT THE AUTO-MERGE DID NOT LAND: ${merge.message}`;
+            if (merge.branchName) {
+              text += `\nThe work is safe on ${merge.branchName} — it just is not in trunk yet. This will keep being flagged by the janitor until resolved.`;
+            }
+          } else if (merge.merged) {
+            text += `\n🔀 ${merge.message}`;
+          } else {
+            text += `\nℹ️ ${merge.message}`;
+          }
+        }
+
+        return { content: [{ type: "text", text }] };
       }
 
       case "rename_task": {
