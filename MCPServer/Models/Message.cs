@@ -111,6 +111,15 @@ namespace MultiTerminal.MCPServer.Models
         public bool Success { get; set; }
         public string MessageId { get; set; }
         public string Error { get; set; }
+
+        /// <summary>
+        /// True only when the message was CONFIRMED pushed into the recipient's live session
+        /// (Tier-2 channel/callback delivery succeeded). False means accepted-and-queued:
+        /// persisted, retrying via Tier 3, possibly buffered to the recipient's inbox file —
+        /// but NOT yet known to have reached them. GH#7 (ticket 405273fd): senders previously
+        /// could not distinguish these, so silent losses looked like successes.
+        /// </summary>
+        public bool Delivered { get; set; }
     }
 
     /// <summary>

@@ -467,7 +467,33 @@ namespace MultiTerminal.DashboardHeader
         private void OnTerminalDisconnected(object sender, TerminalInfo e) => SafeInvoke(RefreshSessions);
         private void OnTasksUpdated(object sender, List<KanbanTask> e) => SafeInvoke(() => RefreshActiveTaskFromList(e));
         private void OnTaskClaimed(object sender, TaskClaimedEventArgs e) => SafeInvoke(RefreshActiveTask);
-        private void OnInboxUpdated(object sender, InboxUpdatedEventArgs e) => SafeInvoke(() => UpdateInboxCount(e.UnreadCount));
+        // GH#6 (ticket 2b202b9a): InboxUpdatedEventArgs carries BOTH the UserId whose inbox
+        // changed AND that user's unread count. This handler used to apply the count while
+        // discarding the UserId, so a notification raised for ANY agent overwrote the badge
+        // with THAT agent's total — the badge then showed a number belonging to an inbox the
+        // user was not looking at, while the inbox list (which re-reads its own user) showed
+        // something else entirely. That mismatch is exactly what #6 reports.
+        private void OnInboxUpdated(object sender, InboxUpdatedEventArgs e) => SafeInvoke(() =>
+        {
+            if (!IsBadgeRecipient(e.UserId)) return;
+            UpdateInboxCount(e.UnreadCount);
+        });
+
+        /// <summary>
+        /// True when an inbox event belongs to the user whose count this badge displays.
+        /// </summary>
+        /// <remarks>
+        /// Resolved LIVE from the broker on every call, never cached. <see cref="MessageBroker.DefaultInboxRecipient"/>
+        /// is constructed as "Owner" and only later overwritten with the owner profile's first
+        /// name (MainForm, post-construction) — a value captured when this control is built
+        /// would pin the stale "Owner" and silently reintroduce the second half of GH#6.
+        /// </remarks>
+        private bool IsBadgeRecipient(string userId)
+        {
+            var recipient = _broker?.DefaultInboxRecipient;
+            if (string.IsNullOrEmpty(recipient) || string.IsNullOrEmpty(userId)) return false;
+            return string.Equals(userId, recipient, StringComparison.OrdinalIgnoreCase);
+        }
 
         private void RefreshSessions()
         {
@@ -512,7 +538,17 @@ namespace MultiTerminal.DashboardHeader
         private void RefreshInbox()
         {
             if (_broker == null) return;
-            var result = _broker.GetInbox("Owner");
+
+            // GH#6 (ticket 2b202b9a): this read the literal "Owner" while the inbox LIST reads
+            // Broker.DefaultInboxRecipient — which MainForm overwrites with the owner profile's
+            // first name precisely "so inbox notifications go to the actual user, not a
+            // hardcoded name". On any machine with a profile set, the badge's baseline was
+            // therefore the unread count of a user that has no inbox rows at all (observed:
+            // badge 0 while the real owner had 209 unread).
+            var recipient = _broker.DefaultInboxRecipient;
+            if (string.IsNullOrEmpty(recipient)) return;
+
+            var result = _broker.GetInbox(recipient);
             if (result.Success)
                 UpdateInboxCount(result.UnreadCount);
         }

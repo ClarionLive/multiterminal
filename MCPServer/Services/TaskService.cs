@@ -1627,6 +1627,20 @@ namespace MultiTerminal.MCPServer.Services
             // Server-side whitelist: rebuild each item from only the fields append is allowed to set.
             // A valid status is honored (defaults to "pending"); an invalid status is rejected up front
             // rather than silently corrupting the lifecycle board via RecalculateAutoStatus.
+            //
+            // DependsOn and Gloss ARE on the whitelist (task 60665c6c) — they are plan-authoring
+            // fields, exactly what append exists to set, and this is the tool agents are told to
+            // prefer over the deprecated full-array update_checklist. Omitting them meant a planning
+            // agent could write both, get "success", and have both silently discarded — leaving the
+            // graph showing appended work as unconstrained and unexplained. Lifecycle fields
+            // (Notes/AssignedTo/CycleCount) stay off the list: those belong to the workflow, not the plan.
+            //
+            // DependsOn indices are ABSOLUTE positions in the final checklist, not offsets within the
+            // appended batch. Appends land at the end and existing items keep their indices, so a
+            // reference to earlier work is stable; a reference to another appended item must account
+            // for the current length. Out-of-range values are not rejected here — ChecklistGraphBuilder
+            // drops them with a visible warning, which beats making a checklist unsaveable over a
+            // mis-numbered dependency.
             var sanitized = new List<ChecklistItem>(rawItems.Count);
             foreach (var raw in rawItems)
             {
@@ -1644,7 +1658,15 @@ namespace MultiTerminal.MCPServer.Services
                     Done = status == "done",
                     Notes = new List<ChecklistItemNote>(),
                     AssignedTo = null,
-                    CycleCount = 0
+                    CycleCount = 0,
+
+                    // Defensive copy so the caller's deserialized list can't alias cached state.
+                    DependsOn = raw.DependsOn == null ? new List<int>() : new List<int>(raw.DependsOn),
+
+                    // An all-blank gloss is stored as absent, matching ChecklistItemGloss.HasContent —
+                    // "nobody wrote an explanation" and "someone wrote three empty strings" must not
+                    // render differently in the graph view.
+                    Gloss = raw.Gloss != null && raw.Gloss.HasContent ? raw.Gloss : null
                 });
             }
 

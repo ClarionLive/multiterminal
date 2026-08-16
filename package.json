@@ -6,8 +6,8 @@
   "scripts": {
     "lint": "eslint hooks scripts",
     "lint:fix": "eslint hooks scripts --fix",
-    "verify": "node scripts/verify-logging.mjs && node scripts/verify-raisesafe.mjs && node scripts/verify-taskdb-gate.mjs && node scripts/verify-writepath.mjs && node scripts/verify-writegate.mjs",
-    "verify:self-test": "node scripts/verify-logging.mjs --self-test && node scripts/verify-raisesafe.mjs --self-test && node scripts/verify-taskdb-gate.mjs --self-test && node scripts/verify-writepath.mjs --self-test && node scripts/verify-writegate.mjs --self-test"
+    "verify": "node scripts/verify-logging.mjs && node scripts/verify-raisesafe.mjs && node scripts/verify-taskdb-gate.mjs && node scripts/verify-writepath.mjs && node scripts/verify-writegate.mjs && node scripts/verify-no-secret-serialization.mjs",
+    "verify:self-test": "node scripts/verify-logging.mjs --self-test && node scripts/verify-raisesafe.mjs --self-test && node scripts/verify-taskdb-gate.mjs --self-test && node scripts/verify-writepath.mjs --self-test && node scripts/verify-writegate.mjs --self-test && node scripts/verify-no-secret-serialization.mjs --self-test"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",

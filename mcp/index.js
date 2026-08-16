@@ -101,7 +101,9 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`);
+        const apiErr = new Error(`API error: ${response.status} ${response.statusText}`);
+        apiErr.status = response.status;
+        throw apiErr;
       }
       const text = await response.text();
       return text ? JSON.parse(text) : null;
@@ -2910,8 +2912,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message: args.message,
         };
         if (args.priority) sendPayload.priority = args.priority;
-        await apiCall("/api/messaging/send", "POST", sendPayload);
+        const sendResult = await apiCall("/api/messaging/send", "POST", sendPayload);
         const priorityLabel = args.priority && args.priority !== "normal" ? ` [${args.priority.toUpperCase()}]` : "";
+
+        // GH#7 honesty (ticket 405273fd): three distinct outcomes, three distinct texts.
+        //
+        // (1) success === false — the broker rejected the send outright (e.g. recipient not
+        //     found / not connected). This returns BEFORE EnqueueMessage, so nothing was
+        //     persisted, queued, or buffered. Must be checked FIRST: `delivered` is absent
+        //     here and would otherwise fall through to the QUEUED text, which claims durable
+        //     persistence that did not happen (pipeline Run 1, finding B1).
+        // (2) delivered === false — accepted and persisted, but the live-channel push failed.
+        //     Tier 3 retries it, and it is BOUNDED (MarkFailed flips the row to 'failed' once
+        //     the retry budget is spent), so do not promise indefinite retrying (finding B2).
+        // (3) otherwise — confirmed push into the recipient's live session. Older MT builds
+        //     omit `delivered` entirely (undefined): treat as delivered so a legacy backend
+        //     keeps the old message rather than falsely alarming.
+        //
+        // The ClaudeRemote relay copy below MUST stay after this check (pipeline Run 2): it
+        // used to fire first, so a rejected owner-directed send dispatched a relay copy and
+        // THEN told the sender "nothing was queued" — swapping one false statement for another.
+        if (sendResult?.success === false) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `❌ Message NOT sent to ${args.to}${priorityLabel} — ${sendResult.error ?? "send rejected"}. Nothing was queued; nothing will retry.`,
+              },
+            ],
+          };
+        }
 
         // Deliver a copy to ClaudeRemote so the Messages tab picks it up via polling
         let ownerName = null;
@@ -2930,11 +2961,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Push notification handled by MT's MessageBroker (ForwardMessagePushAsync) — no duplicate needed
         }
 
+        const confirmedDelivered = sendResult?.delivered !== false;
         return {
           content: [
             {
               type: "text",
-              text: `✅ Message sent to ${args.to}${priorityLabel}`,
+              text: confirmedDelivered
+                ? `✅ Message sent to ${args.to}${priorityLabel}`
+                : `📮 Message QUEUED for ${args.to}${priorityLabel} — their live channel is down; MT persisted it and will retry a limited number of times, and attempts an inbox-file copy as a backstop. Not confirmed received. [msg ${sendResult?.messageId ?? "?"}]`,
             },
           ],
         };
@@ -4192,7 +4226,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.agentName) latestUrl += `&agentName=${encodeURIComponent(args.agentName)}`;
         if (args.excludeSessionId) latestUrl += `&excludeSessionId=${encodeURIComponent(args.excludeSessionId)}`;
         if (args.skip) latestUrl += `&skip=${encodeURIComponent(args.skip)}`;
-        const latestData = await apiCall(latestUrl);
+        let latestData;
+        try {
+          latestData = await apiCall(latestUrl);
+        } catch (err) {
+          // The REST endpoint returns 404 (not an empty 200) when no lineage
+          // rows exist for the project — a normal "nothing synced yet" state,
+          // not an error. Surface the friendly message instead of the raw 404.
+          if (err.status === 404) {
+            return {
+              content: [{ type: "text", text: "No previous session found for this project." }],
+            };
+          }
+          throw err;
+        }
         if (latestData.error || !latestData.session) {
           return {
             content: [{ type: "text", text: latestData.error ? `Error: ${latestData.error}` : "No previous session found for this project." }],

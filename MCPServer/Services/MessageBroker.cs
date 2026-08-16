@@ -1551,6 +1551,24 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Null-safe leading slice of a message body, for log lines only.
+        /// </summary>
+        /// <remarks>
+        /// Three log sites used to inline <c>content.Substring(0, Math.Min(n, content.Length))</c>,
+        /// which NREs on a null body. On the send path that turned a caller's malformed request
+        /// into an opaque HTTP 500 (ticket f6800613). The send path now rejects null/empty before
+        /// logging, but routing this through one helper keeps a future log line from
+        /// reintroducing the same crash — the failure mode is a logging statement taking down a
+        /// request, which is never worth risking twice.
+        /// </remarks>
+        private static string Preview(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text))
+                return string.Empty;
+            return text.Length <= max ? text : text.Substring(0, max);
+        }
+
+        /// <summary>
         /// Logs an error message to both Debug output and DebugLogService (if available).
         /// </summary>
         private void LogError(string message)
@@ -2446,7 +2464,30 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public async Task<SendResult> SendMessage(string fromTerminalId, string toTerminalIdOrName, string content, string priority = null)
         {
-            LogTrace($"SendMessage ENTRY: from={fromTerminalId}, to={toTerminalIdOrName}, priority={priority ?? "normal"}, content={content.Substring(0, Math.Min(50, content.Length))}...");
+            // GH#7 follow-up (ticket f6800613): an empty body used to sail straight through.
+            // It was persisted with content='' and reported Success=true AND Delivered=true,
+            // while every render path then mangled it — the channel server's
+            // `msg.message || msg.content || body` chain treats "" as falsy and dumps the RAW
+            // envelope JSON at the recipient, and the inbox hook silently drops it with no
+            // trace. A NULL body was worse: it NRE'd on the log line below, surfacing to the
+            // caller as an opaque HTTP 500.
+            //
+            // Reject both here rather than in the controller: this is the single choke point
+            // every sender funnels through (REST, MCP tool, reply path), and Success=false
+            // already renders as the honest "❌ NOT sent — <error>. Nothing was queued; nothing
+            // will retry." text in mcp/index.js (:2933) that ticket 405273fd shipped. Returning
+            // 400 from the controller instead would also cut across /api/messaging/send's
+            // 200-on-rejection behavior, which is deliberately deferred scope (ticket a1c75a33).
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return new SendResult
+                {
+                    Success = false,
+                    Error = "Message body is empty — nothing to send"
+                };
+            }
+
+            LogTrace($"SendMessage ENTRY: from={fromTerminalId}, to={toTerminalIdOrName}, priority={priority ?? "normal"}, content={Preview(content, 50)}...");
 
             var fromTerminal = GetTerminal(fromTerminalId);
             if (fromTerminal == null)
@@ -2494,7 +2535,7 @@ namespace MultiTerminal.MCPServer.Services
             };
 
             // Log message ID for debugging (searchable format)
-            LogInfo($"MESSAGE SENT → [MSG-ID: {message.Id}] from [{fromTerminal.Name}] to [{toTerminal.Name}] | Content: {content.Substring(0, Math.Min(80, content.Length))}...");
+            LogInfo($"MESSAGE SENT → [MSG-ID: {message.Id}] from [{fromTerminal.Name}] to [{toTerminal.Name}] | Content: {Preview(content, 80)}...");
 
             // Add to recipient's queue (ensure queue exists — may be missing after reconnect)
             var queue = _messageQueues.GetOrAdd(toTerminal.Id, _ => new BlockingCollection<Message>());
@@ -2612,7 +2653,8 @@ namespace MultiTerminal.MCPServer.Services
                 return new SendResult
                 {
                     Success = true,
-                    MessageId = message.Id
+                    MessageId = message.Id,
+                    Delivered = true
                 };
             }
             else
@@ -2636,10 +2678,14 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
+            // Accepted-and-queued, NOT confirmed delivered: persisted + in-memory queued +
+            // Tier-3 retrying (and possibly inbox-file buffered by the MainForm callback).
+            // Delivered=false lets the sender-side tool say "queued" instead of lying "sent".
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = false
             };
         }
 
@@ -2895,7 +2941,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3272,7 +3319,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3400,7 +3448,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -3549,7 +3598,8 @@ namespace MultiTerminal.MCPServer.Services
             return new SendResult
             {
                 Success = true,
-                MessageId = message.Id
+                MessageId = message.Id,
+                Delivered = deliverySuccess
             };
         }
 
@@ -5189,7 +5239,7 @@ namespace MultiTerminal.MCPServer.Services
                     _messageHistory.RemoveAt(0);
             }
 
-            LogInfo($"TEAM MSG [{teamName ?? "?"}] {sender} → {recipient}: {content.Substring(0, Math.Min(50, content.Length))}...");
+            LogInfo($"TEAM MSG [{teamName ?? "?"}] {sender} → {recipient}: {Preview(content, 50)}...");
             RaiseSafe(MessageSent, message);
         }
 
@@ -5330,12 +5380,21 @@ namespace MultiTerminal.MCPServer.Services
             {
                 var messages = _taskDb.GetInboxMessages(userId, unreadOnly, limit);
                 var unreadCount = _taskDb.GetInboxUnreadCount(userId);
+
+                // TotalCount is the size of the INBOX, not of this page. It used to be
+                // `messages.Count`, which made it a synonym for "rows returned" and left callers
+                // with no way to tell a complete list from a capped one — the panel's
+                // "showing N of M" line compared M against N and got two copies of the same
+                // number, so it never fired. UnreadCount was always a real COUNT; this makes the
+                // two fields mean the same KIND of thing.
+                var totalCount = _taskDb.GetInboxTotalCount(userId);
+
                 return new GetInboxResult
                 {
                     Success = true,
                     Messages = messages,
                     UnreadCount = unreadCount,
-                    TotalCount = messages.Count
+                    TotalCount = totalCount
                 };
             }
             catch (Exception ex)

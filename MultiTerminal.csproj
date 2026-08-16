@@ -145,6 +145,9 @@
     <Content Include="Controls\HudSessionsPanel\hud-sessions.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Controls\HudGraphPanel\hud-graph.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="shared\markdown-renderer.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
