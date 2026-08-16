@@ -108,19 +108,36 @@ drift structurally impossible, and it is why the builder is pure: no broker, no 
 
 ## ⚠️ Trap for the NEXT HUD tab you add
 
-`HudTabContainer.ApplyTheme()` and `HudTabContainer.SetZoomFactor()` are each an
-`else if (tab.Control is XRenderer)` chain naming **every renderer type explicitly**. A new tab
-that is not added to **both** silently never themes and never zooms — no error, no warning, it
-just quietly behaves differently from every other tab.
+`HudTabContainer.ApplyTheme()` is an `else if (tab.Control is XRenderer)` chain naming **every
+renderer type explicitly**. A new tab that is not added to it silently never themes — no error, no
+warning, it just quietly behaves differently from every other tab.
 
-This is a **code shape, not a config list**, so it will bite again. Related: ticket `0d72698a`
-persists per-tab zoom and enumerates tabs by name.
+This is a **code shape, not a config list**. It has already bitten once, at full cost: the zoom side
+used to be the same chain, and six of the seven renderers were never wired into the save half of it.
+Every one of them raised `ZoomChanged` into a subscriber nobody had written, so zoom held for a
+session and vanished on restart — for months, with nothing failing. That was ticket `0d72698a`.
 
-Registering a tab is four edits, not two:
+**Zoom is no longer on this list, and that is the point.** `0d72698a` replaced the zoom chain with the
+`IZoomableTab` interface (`Controls/IZoomableTab.cs`), so the container loops over a contract instead
+of a hand-written type list. A tab that does not satisfy it **cannot be handed to the container at
+all** — the omission is a compile error, not a bug report months later.
+`MultiTerminal.Tests/ZoomableTabContractTests.cs` covers the half the compiler cannot: a renderer
+copied from an existing one has both members and may still forget the interface.
+
+**`ApplyTheme` was deliberately NOT converted** — separate concern, separate ticket. So the trap is
+reduced, not removed, and theming is now the one place it still lives.
+
+Registering a tab is three edits, not two:
 1. Field + construction in `TerminalDocument`.
 2. `AddPermanentTab("__id__", ...)` **and** add the id to `ReorderPermanentTabs(...)`.
 3. `ApplyTheme` chain in `HudTabContainer`.
-4. `SetZoomFactor` chain in `HudTabContainer`.
+
+Zoom needs no edit at all — implement `IZoomableTab` (both members: `SetZoomFactor` **and**
+`ZoomChanged`) and per-tab persistence, restore, and cross-terminal propagation follow for free.
+Permanent tabs persist under their own tab id; dynamic browser tabs share one `__browser__` bucket.
+
+**If you ever add a new per-tab obligation, prefer an interface over a chain.** The whole cost of
+`0d72698a` was one missing subscription that nothing could detect.
 
 Plus a `<Content Include>` with `PreserveNewest` in `MultiTerminal.csproj` for the panel's HTML —
 without it the tab loads a blank WebView2 with no error.

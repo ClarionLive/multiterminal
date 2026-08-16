@@ -22,7 +22,7 @@ namespace MultiTerminal.Controls
     /// status, last session summary, and recent activity feed.
     /// Lives as a permanent tab in HudTabContainer.
     /// </summary>
-    public class HudDashboardRenderer : UserControl
+    public class HudDashboardRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;

@@ -16,7 +16,7 @@ namespace MultiTerminal.Controls
     /// WebView2-based notes editor with multi-tab support.
     /// Each project gets multiple named note tabs stored in project_note_tabs.
     /// </summary>
-    public class HudNotesRenderer : UserControl
+    public class HudNotesRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;

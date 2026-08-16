@@ -128,6 +128,7 @@ namespace MultiTerminal.Controls
                 IsPermanent = true
             };
             _tabs.Add(hudEntry);
+            HookTabZoom(hudEntry);
             _contentArea.Controls.Add(_taskHud);
             _activeTabIndex = 0;
             _taskHud.Visible = true; // Active tab starts visible
@@ -183,6 +184,7 @@ namespace MultiTerminal.Controls
             // Insert after existing permanent tabs
             int insertIndex = _tabs.Count(t => t.IsPermanent);
             _tabs.Insert(insertIndex, entry);
+            HookTabZoom(entry);
             _contentArea.Controls.Add(control);
 
             UpdateTabStripVisibility();
@@ -277,6 +279,7 @@ namespace MultiTerminal.Controls
                 IsPermanent = false
             };
             _tabs.Add(entry);
+            HookTabZoom(entry);
             _contentArea.Controls.Add(page);
 
             // Navigate after adding to content area
@@ -436,29 +439,107 @@ namespace MultiTerminal.Controls
             _tabStrip.Invalidate();
         }
 
+        // NOTE: there is deliberately no "SetZoomFactor(double)" that applies one factor to every tab.
+        // That method existed before task 0d72698a and was the restore half of a global-zoom design; a
+        // single call able to move every tab at once is how Option A behaviour would quietly return.
+        // Callers name the tab they mean via SetZoomFactorForKey. The per-tab apply loop that replaced
+        // the old "is XRenderer" chain now lives there.
+
         /// <summary>
-        /// Propagates zoom to all WebView2 tabs.
+        /// The shared persistence key used by every dynamic browser tab.
         /// </summary>
-        public void SetZoomFactor(double zoom)
+        public const string BrowserZoomKey = HudTabZoomTracker.BrowserZoomKey;
+
+        /// <summary>
+        /// Key mapping and echo suppression. Pure state, extracted so it is testable without a
+        /// WinForms control tree — see <see cref="HudTabZoomTracker"/>.
+        /// </summary>
+        private readonly HudTabZoomTracker _zoomTracker = new HudTabZoomTracker();
+
+        /// <summary>
+        /// Raised when the user zooms a tab, carrying WHICH tab so the value can be stored per tab.
+        /// </summary>
+        public event EventHandler<HudTabZoomChangedEventArgs> TabZoomChanged;
+
+        /// <summary>
+        /// Gets the distinct persistence keys currently represented by the open tabs.
+        /// </summary>
+        public IEnumerable<string> ZoomKeys =>
+            _tabs.Select(ZoomKeyFor).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        /// <summary>
+        /// Applies a zoom factor to every tab sharing <paramref name="zoomKey"/>.
+        /// </summary>
+        /// <param name="zoomKey">A permanent tab's id, or <see cref="BrowserZoomKey"/>.</param>
+        /// <param name="zoom">The zoom factor to apply.</param>
+        /// <remarks>
+        /// Keyed rather than tab-id'd because one key can cover several live tabs: every open browser
+        /// tab shares <see cref="BrowserZoomKey"/>, so restoring it must reach all of them.
+        /// </remarks>
+        public void SetZoomFactorForKey(string zoomKey, double zoom)
         {
-            _taskHud.SetZoomFactor(zoom);
+            if (string.IsNullOrEmpty(zoomKey)) return;
+
+            // Record BEFORE applying: the renderers differ in whether they subscribe to WebView2's
+            // ZoomFactorChanged before or after applying a pending zoom, so applying here can echo
+            // straight back as a "change". Seeding the guard first makes that echo a no-op.
+            _zoomTracker.Record(zoomKey, zoom);
+
             foreach (var tab in _tabs)
             {
-                if (tab.Control is BrowserTabPage page)
-                    page.SetZoomFactor(zoom);
-                else if (tab.Control is HudDashboardRenderer dashboard)
-                    dashboard.SetZoomFactor(zoom);
-                else if (tab.Control is HudNotesRenderer notes)
-                    notes.SetZoomFactor(zoom);
-                else if (tab.Control is HudKnowledgeRenderer knowledge)
-                    knowledge.SetZoomFactor(zoom);
-                else if (tab.Control is HudGitRenderer git)
-                    git.SetZoomFactor(zoom);
-                else if (tab.Control is HudSessionsRenderer sessions)
-                    sessions.SetZoomFactor(zoom);
-                else if (tab.Control is HudGraphRenderer graph)
-                    graph.SetZoomFactor(zoom);
+                if (string.Equals(ZoomKeyFor(tab), zoomKey, StringComparison.OrdinalIgnoreCase)
+                    && tab.Control is IZoomableTab zoomable)
+                {
+                    zoomable.SetZoomFactor(zoom);
+                }
             }
+        }
+
+        /// <summary>
+        /// The persistence key for a tab: its own id when permanent, the shared browser bucket otherwise.
+        /// </summary>
+        private static string ZoomKeyFor(TabEntry entry) =>
+            HudTabZoomTracker.KeyFor(entry.IsPermanent, entry.Id);
+
+        /// <summary>
+        /// Subscribes a newly added tab so its zoom is observed, and applies the key's current zoom.
+        /// </summary>
+        /// <remarks>
+        /// Called from every site that adds to <c>_tabs</c>. Centralised on purpose: a per-site
+        /// subscription is the same hand-maintained-list shape that caused this ticket, one layer up.
+        /// </remarks>
+        private void HookTabZoom(TabEntry entry)
+        {
+            if (!(entry?.Control is IZoomableTab zoomable)) return;
+
+            zoomable.ZoomChanged += (s, zoom) => OnTabZoomChanged(entry, zoom);
+
+            // A tab opened after a restore (any browser tab, in practice) still adopts the remembered
+            // zoom rather than opening at 1.0 and looking like the bug this ticket fixes.
+            if (_zoomTracker.TryGetKnown(ZoomKeyFor(entry), out var known))
+            {
+                zoomable.SetZoomFactor(known);
+            }
+        }
+
+        /// <summary>
+        /// Re-fires a tab's zoom change on the container, tagged with the tab's persistence key.
+        /// </summary>
+        /// <remarks>
+        /// The value guard drops changes that merely repeat what we last applied. That covers the echo
+        /// a renderer produces when it restores a saved zoom during WebView2 initialisation — which can
+        /// arrive long after the call that caused it, so a synchronous "suppress" flag would miss it.
+        /// Comparing values instead is independent of ordering and of when the echo lands.
+        /// </remarks>
+        private void OnTabZoomChanged(TabEntry entry, double zoom)
+        {
+            string key = ZoomKeyFor(entry);
+            if (!_zoomTracker.ShouldReport(key, zoom))
+            {
+                return;
+            }
+
+            TabZoomChanged?.Invoke(this, new HudTabZoomChangedEventArgs(key, zoom));
         }
 
         // -----------------------------------------------------------------

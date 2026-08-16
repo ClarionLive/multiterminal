@@ -22,7 +22,7 @@ namespace MultiTerminal.Controls
     /// <see cref="ChecklistGraphBuilder"/> — it is a derived view, never a stored artifact, so
     /// it cannot drift away from the card it describes.</para>
     /// </summary>
-    public class HudGraphRenderer : UserControl
+    public class HudGraphRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;

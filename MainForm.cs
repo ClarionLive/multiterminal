@@ -3267,7 +3267,7 @@ namespace MultiTerminal
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
             doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
+            doc.HudTabZoomChanged += OnHudTabZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -3417,7 +3417,7 @@ namespace MultiTerminal
             {
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                ApplySavedHudTabZooms(doc);
                 doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
@@ -4132,7 +4132,7 @@ namespace MultiTerminal
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
             doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
+            doc.HudTabZoomChanged += OnHudTabZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -4177,7 +4177,7 @@ namespace MultiTerminal
             {
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                ApplySavedHudTabZooms(doc);
                 doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
@@ -4204,7 +4204,7 @@ namespace MultiTerminal
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
             doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
+            doc.HudTabZoomChanged += OnHudTabZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -4235,7 +4235,7 @@ namespace MultiTerminal
             {
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                ApplySavedHudTabZooms(doc);
                 doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
@@ -4316,21 +4316,71 @@ namespace MultiTerminal
             }
         }
 
-        private bool _suppressHudZoomSync;
+        /// <summary>
+        /// HUD zoom keys currently being propagated, so a propagation echo does not re-enter — while a
+        /// genuine change to a DIFFERENT tab arriving mid-loop is still honoured.
+        /// </summary>
+        private readonly HashSet<string> _hudZoomSyncInFlight = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private bool _suppressAgentPanelZoomSync;
 
-        private void OnTaskHudZoomChanged(object sender, double zoom)
+        /// <summary>
+        /// Persists one HUD tab's zoom and mirrors it to the SAME tab in every other open terminal.
+        /// </summary>
+        /// <remarks>
+        /// <para>Re-entrancy is guarded PER KEY, not by a single flag. Propagating a zoom applies it to
+        /// other documents, and an apply can come back as a change; a process-wide bool would also drop
+        /// a legitimate change to a DIFFERENT tab that arrived during that loop, which is a silent lost
+        /// write of exactly the kind this ticket exists to fix.</para>
+        /// <para>This replaces OnTaskHudZoomChanged, which wrote the single global TaskHudZoom. Keeping
+        /// that write here would defeat the whole ticket: the global key is the fallback for tabs that
+        /// have never been zoomed individually, so writing it from the Tasks tab would move every other
+        /// untouched tab too — Option A behaviour leaking back in through the save path.</para>
+        /// </remarks>
+        /// <summary>
+        /// Restores every HUD tab's own saved zoom into a terminal document.
+        /// </summary>
+        /// <remarks>
+        /// <para>Replaces a single global apply. Restore was already reaching every tab before this
+        /// ticket — that half was never broken — but it carried ONE value for all of them, which is what
+        /// made per-tab saving pointless without this change.</para>
+        /// <para>The browser bucket is applied even when no browser tab is open. Applying a key with no
+        /// matching tab changes nothing on screen, but it records the value in the container, so a
+        /// browser tab opened LATER adopts the remembered zoom instead of starting at 1.0 and looking
+        /// like the bug this ticket fixes.</para>
+        /// <para>Keys with no saved value fall back to the pre-per-tab global inside
+        /// <see cref="SettingsService.GetHudTabZoom"/>, so an existing install sees no change on upgrade.</para>
+        /// </remarks>
+        private void ApplySavedHudTabZooms(TerminalDocument doc)
         {
-            if (_suppressHudZoomSync) return;
-            _suppressHudZoomSync = true;
-            _settings?.SetTaskHudZoom(zoom);
-            // Apply to all other terminals
-            var source = sender as TerminalDocument;
-            foreach (var doc in _gridManager.GetTerminalDocuments())
+            if (doc == null || _settings == null) return;
+
+            foreach (var key in doc.HudZoomKeys
+                         .Concat(new[] { HudTabContainer.BrowserZoomKey })
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                if (doc != source) doc.ApplyTaskHudZoom(zoom);
+                doc.ApplyHudTabZoom(key, _settings.GetHudTabZoom(key));
             }
-            _suppressHudZoomSync = false;
+        }
+
+        private void OnHudTabZoomChanged(object sender, HudTabZoomChangedEventArgs e)
+        {
+            if (e == null || string.IsNullOrEmpty(e.ZoomKey)) return;
+            if (!_hudZoomSyncInFlight.Add(e.ZoomKey)) return;
+            try
+            {
+                _settings?.SetHudTabZoom(e.ZoomKey, e.Zoom);
+
+                // Apply to the same tab in all other terminals
+                var source = sender as TerminalDocument;
+                foreach (var doc in _gridManager.GetTerminalDocuments())
+                {
+                    if (doc != source) doc.ApplyHudTabZoom(e.ZoomKey, e.Zoom);
+                }
+            }
+            finally
+            {
+                _hudZoomSyncInFlight.Remove(e.ZoomKey);
+            }
         }
 
         private void OnEmbeddedAgentPanelZoomChanged(double zoom)
@@ -5669,7 +5719,7 @@ namespace MultiTerminal
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
             doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
+            doc.HudTabZoomChanged += OnHudTabZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -5701,7 +5751,7 @@ namespace MultiTerminal
             {
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                ApplySavedHudTabZooms(doc);
                 doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 
@@ -6716,7 +6766,7 @@ namespace MultiTerminal
             doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
             doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
             doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
-            doc.TaskHudZoomChanged += OnTaskHudZoomChanged;
+            doc.HudTabZoomChanged += OnHudTabZoomChanged;
             doc.Terminal.TerminalClicked += OnTerminalClicked;
             doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
             doc.DirectoryChanged += OnTerminalDirectoryChanged;
@@ -6745,7 +6795,7 @@ namespace MultiTerminal
             {
                 doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
                 doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
-                doc.ApplyTaskHudZoom(_settings.GetTaskHudZoom());
+                ApplySavedHudTabZooms(doc);
                 doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
             }
 

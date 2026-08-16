@@ -16,7 +16,7 @@ namespace MultiTerminal.Controls
     /// WebView2-based knowledge browser showing entries relevant to the current project.
     /// Searchable cards with category badges.
     /// </summary>
-    public class HudKnowledgeRenderer : UserControl
+    public class HudKnowledgeRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;

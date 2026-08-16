@@ -16,7 +16,7 @@ namespace MultiTerminal.Controls
     /// WebView2-based session timeline showing recent sessions for the current project.
     /// Displays agent name, session type, timestamps, and summary.
     /// </summary>
-    public class HudSessionsRenderer : UserControl
+    public class HudSessionsRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;

@@ -652,8 +652,11 @@ namespace MultiTerminal.Docking
             // the FIRST tab the startup-active tab, so Tasks is the default view.
             _hudTabContainer.ReorderPermanentTabs("__tasks__", "__graph__", "__git__", "__dashboard__", "__notes__", "__knowledge__", "__sessions__");
 
-            // Fire event when user Ctrl+wheels in the task HUD (for global propagation)
-            taskHudRenderer.ZoomChanged += (s, zoom) => { TaskHudZoomChanged?.Invoke(this, zoom); };
+            // Fire event when the user Ctrl+wheels ANY HUD tab (for per-tab persistence + propagation).
+            // This replaces a subscription to taskHudRenderer.ZoomChanged alone — which was the entire
+            // save path before task 0d72698a, and the reason only the Tasks tab remembered its zoom.
+            // The container reports every tab, tagged with the tab's persistence key.
+            _hudTabContainer.TabZoomChanged += (s, e) => { HudTabZoomChanged?.Invoke(this, e); };
 
             // Create SplitContainer: terminal (top, 75%) | task HUD (bottom, 25%)
             // Task HUD only spans terminal width, not the agent panel
@@ -1329,12 +1332,20 @@ namespace MultiTerminal.Docking
         }
 
         /// <summary>
-        /// Applies a zoom level to the task HUD WebView2 immediately.
+        /// Applies a zoom level to one HUD tab (or to every browser tab, for the shared browser key).
         /// </summary>
-        public void ApplyTaskHudZoom(double zoom)
+        /// <param name="zoomKey">The tab's persistence key.</param>
+        /// <param name="zoom">The zoom factor to apply.</param>
+        public void ApplyHudTabZoom(string zoomKey, double zoom)
         {
-            _hudTabContainer?.SetZoomFactor(zoom);
+            _hudTabContainer?.SetZoomFactorForKey(zoomKey, zoom);
         }
+
+        /// <summary>
+        /// Gets the persistence keys of the HUD tabs currently present in this document.
+        /// </summary>
+        public IEnumerable<string> HudZoomKeys =>
+            _hudTabContainer?.ZoomKeys ?? Enumerable.Empty<string>();
 
         /// <summary>
         /// Adds a browser tab to the HUD tab container.
@@ -1926,8 +1937,10 @@ namespace MultiTerminal.Docking
         /// <summary>Fired when user drags the status bar splitter. Arg is the new height in pixels.</summary>
         public event EventHandler<int> StatusBarHeightChanged;
 
-        /// <summary>Fired when user Ctrl+wheels in the task HUD. Arg is the new zoom factor.</summary>
-        public event EventHandler<double> TaskHudZoomChanged;
+        /// <summary>
+        /// Fired when the user Ctrl+wheels any HUD tab. Args carry which tab, and the new zoom factor.
+        /// </summary>
+        public event EventHandler<HudTabZoomChangedEventArgs> HudTabZoomChanged;
 
         /// <summary>
         /// Injects text input into the terminal as if the user typed it.

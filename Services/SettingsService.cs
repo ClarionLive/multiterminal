@@ -26,8 +26,23 @@ namespace MultiTerminal.Services
         public static SettingsService Default { get; } = new SettingsService();
 
         public SettingsService()
+            : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MultiTerminal"))
         {
-            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MultiTerminal");
+        }
+
+        /// <summary>
+        /// Test seam (InternalsVisibleTo -> MultiTerminal.Tests): builds a service over an isolated
+        /// settings folder instead of %APPDATA%\MultiTerminal.
+        /// </summary>
+        /// <param name="settingsDirectory">Folder to hold settings.txt.</param>
+        /// <remarks>
+        /// Without this, any test that exercised persistence would read and overwrite the developer's
+        /// REAL settings.txt — a test for "does zoom survive a restart" would silently change the zoom
+        /// of the running app. Production code keeps using <see cref="Default"/>.
+        /// </remarks>
+        internal SettingsService(string settingsDirectory)
+        {
+            string folder = settingsDirectory;
             try
             {
                 if (!Directory.Exists(folder))
@@ -162,6 +177,11 @@ namespace MultiTerminal.Services
         private const string TaskHudZoomKey = "TaskHudZoom";
         private const string AgentPanelSplitRatioKey = "AgentPanelSplitRatio";
         private const string HudSplitRatioKey = "HudSplitRatio";
+
+        // Per-HUD-tab zoom (task 0d72698a). Keyed off the tab ids HudTabContainer already uses for
+        // registration and ordering (__tasks__, __graph__, __git__, ...), so the persistence
+        // vocabulary and the registration vocabulary cannot drift apart.
+        private const string HudTabZoomKeyPrefix = "HudTabZoom:";
         private const double DefaultAgentPanelZoom = 1.0;
         private const double DefaultTaskHudZoom = 1.0;
         private const double DefaultAgentPanelSplitRatio = 0.75;
@@ -619,6 +639,70 @@ namespace MultiTerminal.Services
         {
             zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
             Set(TaskHudZoomKey, zoom.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the zoom level for a single HUD sub-tab, keyed by the container's tab id.
+        /// </summary>
+        /// <param name="tabId">The tab id used to register the tab (e.g. <c>__graph__</c>).</param>
+        /// <returns>The tab's own zoom, or the pre-per-tab global value when it has never been zoomed individually.</returns>
+        /// <remarks>
+        /// <para>A tab with no key of its own falls back to <see cref="GetTaskHudZoom"/> rather than to
+        /// 1.0, and that fallback IS the upgrade path. Before task 0d72698a a single global
+        /// <c>TaskHudZoom</c> was applied to every tab, so reading through to it makes the first launch
+        /// after the upgrade look exactly like the last launch before it.</para>
+        /// <para>Seeding instead by writing a key per tab was rejected: it needs a "has the migration
+        /// run" flag and performs writes from a read path, and read-through reaches the same visible
+        /// result with neither. The cost is that <c>TaskHudZoom</c> stays load-bearing as the default
+        /// for never-individually-zoomed tabs, which is a fair description of what it now means.</para>
+        /// </remarks>
+        public double GetHudTabZoom(string tabId)
+        {
+            string key = BuildHudTabZoomKey(tabId);
+            if (key != null)
+            {
+                string value = Get(key);
+                if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+                {
+                    return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+                }
+            }
+
+            return GetTaskHudZoom();
+        }
+
+        /// <summary>
+        /// Sets the zoom level for a single HUD sub-tab. Unstorable tab ids are ignored.
+        /// </summary>
+        /// <param name="tabId">The tab id used to register the tab (e.g. <c>__graph__</c>).</param>
+        /// <param name="zoom">The zoom factor; clamped to the panel zoom range.</param>
+        public void SetHudTabZoom(string tabId, double zoom)
+        {
+            string key = BuildHudTabZoomKey(tabId);
+            if (key == null) return;
+            zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
+            Set(key, zoom.ToString("F2", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Builds the settings key for a tab id, or returns null when the id cannot be stored safely.
+        /// </summary>
+        /// <remarks>
+        /// The settings file is line-oriented <c>key=value</c>, split on the FIRST '=' (see Load), so an
+        /// id carrying '=' or a line break would round-trip as a different key — or truncate a
+        /// neighbouring setting — on the next Save. Refusing such an id loses one tab's zoom; accepting
+        /// it can corrupt the whole file, so this fails closed.
+        /// </remarks>
+        private static string BuildHudTabZoomKey(string tabId)
+        {
+            if (string.IsNullOrWhiteSpace(tabId)) return null;
+            tabId = tabId.Trim();
+            if (tabId.IndexOf('=') >= 0 || tabId.IndexOf('\n') >= 0 || tabId.IndexOf('\r') >= 0)
+            {
+                return null;
+            }
+
+            return HudTabZoomKeyPrefix + tabId;
         }
 
         /// <summary>

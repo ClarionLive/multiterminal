@@ -31,7 +31,7 @@ namespace MultiTerminal.Controls
     ///   <item><description><c>NotARepo</c> — empty-state inviting <c>git init</c>.</description></item>
     /// </list>
     /// </summary>
-    public class HudGitRenderer : UserControl
+    public class HudGitRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;

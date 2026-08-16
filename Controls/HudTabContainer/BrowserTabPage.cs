@@ -16,7 +16,7 @@ namespace MultiTerminal.Controls
     /// WebView2 wrapper for browser tabs inside HudTabContainer.
     /// Supports URL navigation and raw HTML content with lazy WebView2 initialization.
     /// </summary>
-    public class BrowserTabPage : UserControl
+    public class BrowserTabPage : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;
@@ -42,6 +42,16 @@ namespace MultiTerminal.Controls
         /// Raised when Title changes from a page navigation.
         /// </summary>
         public event EventHandler TitleChanged;
+
+        /// <summary>
+        /// Raised when the user zooms this tab, so the container can persist the factor (task 0d72698a).
+        /// </summary>
+        /// <remarks>
+        /// Every other HUD tab already declared this; browser tabs did not, so their zoom could be
+        /// applied but never observed. Without it the shared <c>__browser__</c> zoom bucket would be a
+        /// setting nothing ever writes to.
+        /// </remarks>
+        public event EventHandler<double> ZoomChanged;
 
         public BrowserTabPage(string tabId, string title)
         {
@@ -104,6 +114,10 @@ namespace MultiTerminal.Controls
                 // Apply pending zoom
                 if (Math.Abs(_pendingZoom - 1.0) > 0.01)
                     _webView.ZoomFactor = _pendingZoom;
+
+                // Subscribe AFTER the restore above, so applying a saved zoom is not mistaken for the
+                // user zooming and echoed straight back to the container as a fresh change.
+                _webView.ZoomFactorChanged += (s, ev) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
 
                 // Flush queued navigation
                 if (!string.IsNullOrEmpty(_pendingUrl))

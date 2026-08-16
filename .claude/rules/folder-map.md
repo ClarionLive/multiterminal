@@ -24,7 +24,7 @@ paths:
 | `FilePreviewPanel/` | File preview UI | FilePreviewPanelDocument (WebView2) |
 | `StartScreen/` | Welcome/start screen | StartScreenControl (WebView2) |
 | `TaskLifecycleBoard/` | Task lifecycle view | TaskLifecycleBoardForm (WebView2) |
-| `Controls/` | Reusable controls | TerminalControl, TerminalStatusBarRenderer, EmbeddedAgentPanel, HudTabContainer, HudGraphPanel (🔗 Plan tab — checklist as a dependency graph, task 60665c6c) |
+| `Controls/` | Reusable controls | TerminalControl, TerminalStatusBarRenderer, EmbeddedAgentPanel, HudTabContainer, HudGraphPanel (🔗 Plan tab — checklist as a dependency graph, task 60665c6c), IZoomableTab (contract every HUD tab implements so per-tab zoom cannot be silently forgotten, task 0d72698a) + HudTabZoomTracker/HudTabZoomChangedEventArgs (per-tab zoom keys + echo suppression) |
 | `Terminal/` | Terminal hosting | ConPtyTerminal, WebViewTerminalRenderer |
 | `Docking/` | Window layout | GridLayoutManager, TerminalDocument, ProjectPanelDocument, LauncherPanelDocument |
 | `Dialogs/` | Modal dialogs (11) | ProjectManager, Settings, ChatHistory, NewProjectWpf, OwnerProfile, SavePrompt, RenameTab, SessionViewer, EditProject, IdentityPicker, About |

@@ -24,7 +24,7 @@ namespace MultiTerminal.Controls
     /// a null/empty project id preserves legacy unscoped behavior. Always visible
     /// as a tab in HudTabContainer.
     /// </summary>
-    public class TaskHudRenderer : UserControl
+    public class TaskHudRenderer : UserControl, IZoomableTab
     {
         private WebView2 _webView;
         private bool _isInitialized;
