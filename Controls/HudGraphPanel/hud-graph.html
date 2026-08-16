@@ -277,6 +277,18 @@
   .d-block.files p { font-family: var(--mono); font-size: 0.7rem; }
   .d-block.missing p { color: var(--ink-faint); font-style: italic; }
 
+  /* Machine-written provenance (task a455e295). Rendered ABOVE the prose it describes,
+     never below: a reader who meets the caveat after the explanation has already taken the
+     explanation as the planner's own. Uses the same token palette as everything else here,
+     so it themes with the panel rather than needing its own light/dark pair. */
+  .d-block.machine {
+    border-left: 2px solid var(--ink-faint);
+    padding-left: 0.5rem;
+    margin-bottom: 0.1rem;
+  }
+  .d-block.machine .d-label { color: var(--ink-soft); }
+  .d-block.machine p { color: var(--ink-faint); font-size: 0.75rem; }
+
   .empty {
     color: var(--ink-faint);
     font-size: 0.85rem;
@@ -507,6 +519,9 @@
     if (n.assignedTo) { metaBits.push(n.assignedTo); }
     if (n.cycleCount > 0) { metaBits.push('cycle ' + n.cycleCount); }
     if (n.kind !== 'task' && (!n.gloss)) { metaBits.push('no gloss'); }
+    // Machine provenance is visible on the node itself, not only on hover — otherwise the
+    // reader has to click every step to find out which explanations to trust (a455e295).
+    else if (n.gloss && n.gloss.source === 'generated') { metaBits.push('auto gloss'); }
     if (metaBits.length) {
       var meta = document.createElement('span');
       meta.className = 'n-meta';
@@ -660,6 +675,13 @@
 
     var g = n.gloss;
     if (g) {
+      // Provenance FIRST. A machine gloss reads exactly like a planner's reasoning, so the
+      // reader has to know whose words these are before they read them, not after.
+      if (g.source === 'generated') {
+        addBlock('Written by a machine',
+          'An agent wrote this from the plan, not the planner. It is a starting point for ' +
+          'understanding the step — not a statement of what anyone intended.', 'machine');
+      }
       if (g.what)    { addBlock('What it is', g.what); }
       if (g.why)     { addBlock('Why it sits here', g.why); }
       if (g.without) { addBlock('Without it', g.without); }
