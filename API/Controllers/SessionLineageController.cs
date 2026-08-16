@@ -372,15 +372,36 @@ namespace MultiTerminal.API.Controllers
             // (couldn't look ≠ nothing found, same tri-state as /stranded) and
             // the scan finishes in the background with its duration logged so
             // cost drift stays visible.
+            // Task 36b0b9d5: the enrichment is passed as a FACTORY, not as an
+            // already-invoked task. Invoking it here would run its synchronous
+            // prologue (project enumeration + the ListPrunedWorktreesForDoneTasks
+            // read, which now takes LockConn behind a5ac5f71's write gate) BEFORE
+            // the budget clock starts — the budget would bound only the awaited
+            // tail while the response still blew the client's 15s timeout.
             var findingsStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            var findingsTask = BuildJanitorFindingsAsync(request.ProjectPath);
-            var (janitorFindings, findingsTimedOut) = await RaceJanitorFindingsAsync(findingsTask, JanitorFindingsBudgetMs).ConfigureAwait(false);
+            var (janitorFindings, findingsTimedOut, findingsTask) = await RaceJanitorFindingsAsync(
+                () => BuildJanitorFindingsAsync(request.ProjectPath), JanitorFindingsBudgetMs).ConfigureAwait(false);
             if (findingsTimedOut)
             {
                 _ = findingsTask.ContinueWith(
                     t =>
                     {
                         findingsStopwatch.Stop();
+
+                        // The faulted arm is DEAD TODAY and deliberately kept (task
+                        // 36b0b9d5 item ⑤, 1ce9ddaf code-reviewer NIT). BuildJanitorFindingsAsync
+                        // wraps its entire body in try/catch and returns the unavailable
+                        // marker, so this task cannot fault as currently written.
+                        //
+                        // Kept rather than dropped because the shape around it changed:
+                        // the enrichment is now invoked through a factory dispatched on
+                        // Task.Run (item ①) and reaches the janitor through a coalescer
+                        // (item ②), so a later edit that moves any work outside that
+                        // try/catch makes this arm live. If it were dropped, that edit
+                        // would silently log "completed" for a fault — a wrong log line
+                        // is worse than an unused branch. SessionLineageRegisterRaceTests
+                        // .FactoryThrowingSynchronously_PropagatesRatherThanBeingSwallowed
+                        // pins the surrounding behaviour.
                         string outcome = t.IsFaulted ? $"faulted: {t.Exception?.GetBaseException().Message}" : "completed";
                         _broker?.DebugLogService?.Warning(
                             "SessionLineageController",
@@ -402,24 +423,54 @@ namespace MultiTerminal.API.Controllers
         /// Race the janitor-findings enrichment against its budget (task 1ce9ddaf).
         /// Returns the findings when they arrive in time; on overrun returns the
         /// <c>status="unavailable"</c> tri-state marker ("couldn't look", never a
-        /// clean-looking null) with <c>TimedOut=true</c> so the caller can observe
-        /// the stray task. No CancellationTokenSource — the abandoned
-        /// <see cref="System.Threading.Tasks.Task.Delay(int)"/> on the success path
-        /// rides the shared timer queue (ratified Option A pattern, task b840ddee).
-        /// Internal + static for direct test coverage without a broker.
+        /// clean-looking null) with <c>TimedOut=true</c>, plus the still-running
+        /// task so the caller can observe it. No CancellationTokenSource — the
+        /// abandoned <see cref="System.Threading.Tasks.Task.Delay(int)"/> on the
+        /// success path rides the shared timer queue (ratified Option A pattern,
+        /// task b840ddee). Internal + static for direct test coverage without a broker.
         /// </summary>
-        internal static async System.Threading.Tasks.Task<(object Findings, bool TimedOut)> RaceJanitorFindingsAsync(
-            System.Threading.Tasks.Task<object> findingsTask, int budgetMs)
+        /// <remarks>
+        /// TAKES A FACTORY, NOT A TASK (task 36b0b9d5 item ①, from 1ce9ddaf's Run-1
+        /// adversary MEDIUM). A C# async method runs SYNCHRONOUSLY until its first
+        /// incomplete await, so the previous <c>Task&lt;object&gt;</c> parameter forced
+        /// the caller to execute the enrichment's whole synchronous prologue —
+        /// <c>GetAllRegisteredProjects</c>, <c>ResolveByContainment</c>, and
+        /// <c>ScanPendingMergesAsync</c>'s synchronous <c>ListPrunedWorktreesForDoneTasks</c>
+        /// read — BEFORE the budget clock even started. The response could blow the MCP
+        /// client's 15s timeout while this helper cheerfully reported TimedOut=true, i.e.
+        /// the guard asserted a bound it never enforced.
+        ///
+        /// That exposure GREW with task a5ac5f71: the synchronous DB read takes
+        /// <c>LockConn</c>, and the global <c>SqliteWriteGate</c> means it can now queue
+        /// behind a write admission.
+        ///
+        /// The parameter is a factory rather than a task ON PURPOSE — it makes the broken
+        /// call shape unrepresentable instead of merely documented. Order matters below:
+        /// the timeout starts BEFORE the work is scheduled, and <c>Task.Run</c> moves the
+        /// synchronous prologue off the request thread so it lands INSIDE the budget.
+        /// </remarks>
+        internal static async System.Threading.Tasks.Task<(object Findings, bool TimedOut, System.Threading.Tasks.Task<object> FindingsTask)> RaceJanitorFindingsAsync(
+            Func<System.Threading.Tasks.Task<object>> findingsFactory, int budgetMs)
         {
+            // Clock first, work second — the whole point of the factory.
             var timeoutTask = System.Threading.Tasks.Task.Delay(budgetMs);
+            var findingsTask = System.Threading.Tasks.Task.Run(findingsFactory);
+
             var winner = await System.Threading.Tasks.Task.WhenAny(findingsTask, timeoutTask).ConfigureAwait(false);
             if (winner == findingsTask)
             {
-                return (await findingsTask.ConfigureAwait(false), false);
+                return (await findingsTask.ConfigureAwait(false), false, findingsTask);
             }
 
-            return (new { status = "unavailable" }, true);
+            return (UnavailableMarker(), true, findingsTask);
         }
+
+        /// <summary>
+        /// The tri-state "couldn't look" marker (task 36b0b9d5 item ⑤). One
+        /// construction site so the register overrun path and the /stranded path
+        /// cannot drift into two different shapes — clients match on this literal.
+        /// </summary>
+        private static object UnavailableMarker() => new { status = "unavailable" };
 
         /// <summary>
         /// Build the session-start janitor-findings block for the project containing
@@ -449,7 +500,13 @@ namespace MultiTerminal.API.Controllers
                 if (string.IsNullOrWhiteSpace(entry.Path)) return null;
 
                 // Pending merges scoped to this project via each finding's task.ProjectId.
-                var mergeScan = await janitor.ScanPendingMergesAsync(id => _broker.TryGetProjectPathForTask(id)).ConfigureAwait(false);
+                // Coalesced with a short staleness allowance (task 36b0b9d5 item ②):
+                // session start is a burst — several agents registering within seconds
+                // share ONE scan instead of each spawning their own git fan-out. The
+                // explicit /api/worktrees/* refresh endpoints pass 0 and always scan.
+                var mergeScan = await janitor.ScanPendingMergesAsync(
+                    id => _broker.TryGetProjectPathForTask(id),
+                    MultiTerminal.Services.WorktreeJanitorService.SessionStartScanStalenessMs).ConfigureAwait(false);
                 var pendingMerges = new System.Collections.Generic.List<object>();
                 foreach (var pm in mergeScan.Items)
                 {
@@ -471,7 +528,8 @@ namespace MultiTerminal.API.Controllers
                 // slashes ("H:/Repo") otherwise yields a prefix no backslash
                 // scan path can ever start with — silently dropping the
                 // project's own strands from a clean-looking response.
-                var strandedScan = await janitor.ScanStrandedDirsAsync().ConfigureAwait(false);
+                var strandedScan = await janitor.ScanStrandedDirsAsync(
+                    MultiTerminal.Services.WorktreeJanitorService.SessionStartScanStalenessMs).ConfigureAwait(false);
                 string rootPrefix = entry.Path.TrimEnd('\\', '/').Replace('/', System.IO.Path.DirectorySeparatorChar)
                     + System.IO.Path.DirectorySeparatorChar;
                 var strandedDirs = new System.Collections.Generic.List<string>();
@@ -554,7 +612,7 @@ namespace MultiTerminal.API.Controllers
             catch (Exception ex)
             {
                 _broker?.DebugLogService?.Warning("SessionLineageController", $"janitor findings enrichment failed: {ex.Message}");
-                return new { status = "unavailable" };
+                return UnavailableMarker();
             }
         }
 

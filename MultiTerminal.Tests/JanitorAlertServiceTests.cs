@@ -362,7 +362,311 @@ namespace MultiTerminal.Tests
             Assert.Empty(WorktreeJanitorService.ParseBranchNames("\r\n\n"));
         }
 
+        /// <summary>
+        /// Task 36b0b9d5 item ③ (1ce9ddaf Run-1 debugger LOW). The listing now formats
+        /// with <c>%(refname)</c>, which is unambiguous, and strips the literal
+        /// <c>refs/heads/</c> prefix here.
+        ///
+        /// WHY THE FORMAT CHANGED: <c>%(refname:short)</c> shortens
+        /// <c>refs/heads/task/foo</c> to <c>task/foo</c> ONLY while that name is
+        /// unambiguous. Let a tag <c>refs/tags/task/foo</c> exist and git disambiguates
+        /// by emitting <c>heads/task/foo</c> instead — the set lookup then misses and a
+        /// LIVE branch reads as GONE, silently dropping its pending-merge finding. The
+        /// failure direction is the dangerous one: absence of evidence rendered as
+        /// evidence of absence, which is the exact conflation this scan's
+        /// skip-attribution contract exists to prevent.
+        /// </summary>
+        [Fact]
+        public void ParseBranchNames_StripsRefsHeadsPrefix_SoTagAmbiguityCannotHideALiveBranch()
+        {
+            var set = WorktreeJanitorService.ParseBranchNames(
+                "refs/heads/task/aaaa1111\nrefs/heads/task/bbbb2222\n");
+
+            Assert.Equal(2, set.Count);
+            Assert.Contains("task/aaaa1111", set);
+            Assert.Contains("task/bbbb2222", set);
+
+            // Only the leading refs/heads/ is stripped — a branch whose own name
+            // embeds the string must survive intact.
+            var nested = WorktreeJanitorService.ParseBranchNames("refs/heads/task/refs/heads/odd\n");
+            Assert.Contains("task/refs/heads/odd", nested);
+        }
+
+        // ---- half 3: Pass 2 batching (task 36b0b9d5 item ④) ----------------
+
+        /// <summary>
+        /// THE REGRESSION THIS ITEM COULD HAVE INTRODUCED. Pass 2 merges and DELETES
+        /// branches as it walks, so a branch list cached at the top of the pass goes
+        /// stale behind the pass's own mutations. A task with per-agent worktree rows
+        /// yields several records naming the SAME branch; per-record probing used to
+        /// see the branch already gone on the second one and skip, but a cached set
+        /// still says "exists" and would drive a SECOND merge attempt at an
+        /// already-handled branch. The taskId|branchName dedup is what prevents it.
+        ///
+        /// Without the dedup this fails with two merge attempts / two pending merges.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_DuplicateRowsForOneBranch_AttemptTheMergeOnlyOnce()
+        {
+            RunGit(_repoRoot, "branch", CanonicalBranch);
+            SavePrunedDoneRow();
+            SaveExtraPrunedAgentRow("Bob");   // same task, same branch, second agent
+            SaveExtraPrunedAgentRow("Carol");
+
+            int mergeAttempts = 0;
+            var janitor = new WorktreeJanitorService(_db);
+
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (_, _, _) => true,
+                tryMergeForTask: (_, _) =>
+                {
+                    mergeAttempts++;
+                    return Task.FromResult(new MergeResult { Merged = false, Success = false });
+                });
+
+            Assert.Equal(1, mergeAttempts);
+            Assert.Single(result.PendingMerges);
+        }
+
+        /// <summary>
+        /// Batch correctness: several DISTINCT branches in one repo are each classified
+        /// correctly off a single listing — a live one is flagged, a never-created one
+        /// is not.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_BatchedListing_ClassifiesLiveAndGoneBranchesIndependently()
+        {
+            RunGit(_repoRoot, "branch", "task/alive001");
+            SavePrunedDoneRow(taskId: "alive001", branchName: "task/alive001");
+            SavePrunedDoneRow(taskId: "gone0002", branchName: "task/gone0002"); // never created
+
+            var janitor = new WorktreeJanitorService(_db);
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (_, _, _) => true,
+                tryMergeForTask: (_, _) => Task.FromResult(new MergeResult { Merged = false, Success = false }));
+
+            Assert.Single(result.PendingMerges);
+            Assert.Contains("alive001", result.PendingMerges);
+            Assert.DoesNotContain("gone0002", result.PendingMerges);
+        }
+
+        /// <summary>
+        /// FALSIFIABILITY ON THE MUTATING PATH. When the branch listing fails (here: a
+        /// path that is not a git repo at all), the records must be left for the next
+        /// sweep — never merged, never flagged — and the failure must be VISIBLE.
+        ///
+        /// This is strictly better than the behaviour it replaces: the old per-record
+        /// BranchExistsAsync returned false on a git failure, so "couldn't look" was
+        /// silently indistinguishable from "branch gone" and left no trace at all.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_BranchListingFailure_SkipsRecordsVisibly_NeverActsOnThem()
+        {
+            string notARepo = Path.Combine(Path.GetTempPath(), $"mt_notarepo_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(notARepo);
+            try
+            {
+                SavePrunedDoneRow(taskId: "aaaa1111", branchName: "task/aaaa1111");
+                SavePrunedDoneRow(taskId: "bbbb2222", branchName: "task/bbbb2222");
+
+                int mergeAttempts = 0;
+                var janitor = new WorktreeJanitorService(_db);
+
+                var result = await janitor.SweepAsync(
+                    getProjectPathForTask: _ => notARepo,
+                    recordActivity: (_, _, _) => true,
+                    tryMergeForTask: (_, _) =>
+                    {
+                        mergeAttempts++;
+                        return Task.FromResult(new MergeResult { Merged = false, Success = false });
+                    });
+
+                Assert.Equal(0, mergeAttempts);
+                Assert.Empty(result.PendingMerges);
+                Assert.Contains(result.Errors, e => e.Contains("Pass 2 branch listing", StringComparison.Ordinal));
+
+                // One listing attempt per repo, not one per record — the whole point of
+                // batching. Both records share a repo, so exactly one error is recorded.
+                Assert.Single(result.Errors, e => e.Contains("Pass 2 branch listing", StringComparison.Ordinal));
+            }
+            finally
+            {
+                TryDeleteDir(notARepo);
+            }
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 1, debugger LOW — the stale-cache regression the eviction closes.
+        ///
+        /// The seen-dedup keys on (taskId, branchName), but the MUTATION keys on taskId
+        /// alone: WorktreeMergeService derives CanonicalBranch(taskId) whichever record
+        /// triggered it. So a helper row (task/&lt;id&gt;--&lt;agent&gt;) and the canonical row
+        /// (task/&lt;id&gt;) get DISTINCT dedup keys, both are visited, and the helper's merge
+        /// deletes the CANONICAL branch — which the cached set still lists. When the second
+        /// merge attempt then fails (detached HEAD, wrong trunk, …), Pass 2 emitted a false
+        /// "Branch X still alive for done task Y" for a branch THIS SWEEP had just deleted.
+        /// The pre-batching per-record probe returned false there and skipped, so this was a
+        /// regression introduced by the batching, not a pre-existing gap.
+        ///
+        /// Without the eviction this fails with a spurious PendingMerges entry.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_MergeDeletingTheCanonicalBranch_EvictsItSoNoFalsePendingMergeIsEmitted()
+        {
+            RunGit(_repoRoot, "branch", CanonicalBranch);
+            RunGit(_repoRoot, "branch", "task/feed1234--bob");
+
+            // ListPrunedWorktreesForDoneTasks is ORDER BY created_at DESC, so the row saved
+            // LAST is visited FIRST. The helper must be visited first — its merge is what
+            // deletes the CANONICAL branch — so the canonical row is saved first here.
+            // Getting this backwards makes the test pass vacuously (verified: with the rows
+            // the other way round it passed even with the eviction removed).
+            SavePrunedDoneRow();
+            System.Threading.Thread.Sleep(15); // distinct created_at — the ordering is the fixture
+            SaveExtraPrunedAgentRow("Bob", branchName: "task/feed1234--bob");
+
+            int mergeCalls = 0;
+            var janitor = new WorktreeJanitorService(_db);
+            var flagged = new List<string>();
+
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (action, content, relatedId) =>
+                {
+                    if (action == "janitor_pending_merge") flagged.Add(content);
+                    return true;
+                },
+                tryMergeForTask: (taskId, _) =>
+                {
+                    // First call succeeds and deletes the canonical branch (no Stderr, so
+                    // this is the clean "merged and deleted" path). Every later call fails
+                    // the way a wrong-trunk / detached-HEAD guard would.
+                    if (Interlocked.Increment(ref mergeCalls) == 1)
+                    {
+                        RunGit(_repoRoot, "branch", "-D", CanonicalBranch);
+                        return Task.FromResult(new MergeResult { Merged = true, Success = true, MergedInto = "master" });
+                    }
+
+                    return Task.FromResult(new MergeResult { Merged = false, Success = false, Stderr = "refusing: main checkout is on the wrong branch" });
+                });
+
+            // Assert on the BRANCH NAMED in the message, not on PendingMerges: both rows
+            // carry the same taskId, so a legitimate helper-branch pending merge and a
+            // false canonical one are indistinguishable by id. And a substring test would
+            // false-positive, because "task/feed1234--bob" contains "task/feed1234" — so
+            // match the exact rendered phrase.
+            Assert.DoesNotContain(
+                flagged,
+                c => c.Contains($"Branch {CanonicalBranch} still alive", StringComparison.Ordinal));
+
+            // ANTI-VACUITY GUARD (pipeline Run 2, debugger LOW). The assertion above is
+            // satisfied by the WRONG visit order as well as by the fix: if the two rows
+            // land on the same created_at tick, SQLite falls back to rowid order, the
+            // canonical row is visited first, the stale-cache path is never exercised, and
+            // the test passes while proving nothing. Only Thread.Sleep(15) separates the
+            // timestamps, so that tie is possible.
+            //
+            // In the intended order NOTHING is flagged at all (the canonical row is
+            // correctly skipped and the helper row's merge succeeded), whereas the vacuous
+            // order flags the helper branch. So asserting emptiness makes a collision fail
+            // LOUDLY instead of degrading into a green no-op.
+            Assert.Empty(flagged);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 2, debugger LOW — the SECOND delete path, which Run 1's eviction missed.
+        ///
+        /// WorktreeMergeService also deletes the canonical branch on the not-ahead-of-trunk
+        /// path, returning Success=true, Merged=false. Run 1 gated the eviction on
+        /// retry.Merged alone, so that route left the same stale cache entry and the same
+        /// false "still alive" was reachable by a different door. Identical shape to the
+        /// Merged-path test above, differing only in the first merge's result.
+        ///
+        /// Without the eviction on the Success branch this fails with the spurious flag.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_SuccessWithoutMergeDeletingTheBranch_AlsoEvictsIt()
+        {
+            RunGit(_repoRoot, "branch", CanonicalBranch);
+            RunGit(_repoRoot, "branch", "task/feed1234--bob");
+
+            // Canonical saved first so the helper (saved last) is VISITED first —
+            // ORDER BY created_at DESC. Same fixture contract as the test above.
+            SavePrunedDoneRow();
+            System.Threading.Thread.Sleep(15);
+            SaveExtraPrunedAgentRow("Bob", branchName: "task/feed1234--bob");
+
+            int mergeCalls = 0;
+            var janitor = new WorktreeJanitorService(_db);
+            var flagged = new List<string>();
+
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (action, content, relatedId) =>
+                {
+                    if (action == "janitor_pending_merge") flagged.Add(content);
+                    return true;
+                },
+                tryMergeForTask: (taskId, _) =>
+                {
+                    // Call 1: the "nothing to merge, branch deleted" path — Success WITHOUT
+                    // Merged. The branch really is gone afterwards.
+                    if (Interlocked.Increment(ref mergeCalls) == 1)
+                    {
+                        RunGit(_repoRoot, "branch", "-D", CanonicalBranch);
+                        return Task.FromResult(new MergeResult { Merged = false, Success = true });
+                    }
+
+                    // Call 2 fails for a NON-branch reason, which is what stops the merge
+                    // service's own fresh re-probe from masking the stale entry.
+                    return Task.FromResult(new MergeResult { Merged = false, Success = false, Stderr = "task no longer 'done'" });
+                });
+
+            Assert.DoesNotContain(
+                flagged,
+                c => c.Contains($"Branch {CanonicalBranch} still alive", StringComparison.Ordinal));
+            Assert.Empty(flagged);
+        }
+
+        /// <summary>
+        /// A branch outside the refs/heads/task/ namespace the batch listing covers
+        /// still gets its per-record probe, so batching cannot silently stop seeing it.
+        /// </summary>
+        [Fact]
+        public async Task Pass2_NonTaskBranchName_StillProbedPerRecord()
+        {
+            RunGit(_repoRoot, "branch", "hotfix/feed1234");
+            SavePrunedDoneRow(branchName: "hotfix/feed1234");
+
+            var janitor = new WorktreeJanitorService(_db);
+            var result = await janitor.SweepAsync(
+                getProjectPathForTask: _ => _repoRoot,
+                recordActivity: (_, _, _) => true,
+                tryMergeForTask: (_, _) => Task.FromResult(new MergeResult { Merged = false, Success = false }));
+
+            Assert.Single(result.PendingMerges);
+            Assert.Contains(TaskId, result.PendingMerges);
+        }
+
         // ---- helpers ------------------------------------------------------
+
+        /// <summary>
+        /// A second (or third) pruned worktree row for the SAME task and branch under a
+        /// different agent — the per-agent-isolation shape that makes duplicate records
+        /// real rather than hypothetical.
+        /// </summary>
+        private void SaveExtraPrunedAgentRow(string agentName, string taskId = TaskId, string branchName = CanonicalBranch)
+        {
+            _db.SaveWorktreeRecord(
+                taskId,
+                agentName: agentName,
+                worktreePath: Path.Combine(_repoRoot, ".claude", "worktrees", $"{taskId}-{agentName}"),
+                branchName: branchName,
+                isCanonical: false);
+            _db.MarkWorktreePruned(taskId, agentName);
+        }
 
         private void SavePrunedDoneRow(string taskId = TaskId, string branchName = CanonicalBranch)
         {

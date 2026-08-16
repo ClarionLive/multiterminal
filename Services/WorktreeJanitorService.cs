@@ -68,6 +68,24 @@ namespace MultiTerminal.Services
         private readonly object _sweepGate = new object();
         private bool _sweepRunning;
 
+        // Scan coalescing (task 36b0b9d5 item ②). Both read-only scans are SYSTEM-WIDE —
+        // neither takes a project argument; per-project scoping happens afterwards in the
+        // caller — so one coalescer per scan TYPE is the correct granularity, not one per
+        // project. Single-flight is unconditional (caps concurrent scans at one apiece);
+        // TTL reuse is opt-in per call. See ScanCoalescer for why coalescing rather than
+        // cancellation was chosen.
+        private readonly ScanCoalescer<StrandedScanResult> _strandedScans = new ScanCoalescer<StrandedScanResult>();
+        private readonly ScanCoalescer<PendingMergeScanResult> _pendingMergeScans = new ScanCoalescer<PendingMergeScanResult>();
+
+        /// <summary>
+        /// Staleness a session-start enrichment will accept from a coalesced scan
+        /// (task 36b0b9d5 item ②). Sized to cover a multi-agent boot burst — several
+        /// terminals registering within seconds share one scan instead of each paying
+        /// for their own. Janitor findings change when tasks complete, not per second,
+        /// so this is cheap staleness. Explicit refresh endpoints pass 0 instead.
+        /// </summary>
+        public const int SessionStartScanStalenessMs = 15000;
+
         public WorktreeJanitorService(TaskDatabase db)
         {
             _db = db ?? throw new ArgumentNullException(nameof(db));
@@ -248,6 +266,52 @@ namespace MultiTerminal.Services
             try
             {
                 var prunedDone = _db.ListPrunedWorktreesForDoneTasks();
+
+                // Batched branch existence (task 36b0b9d5 item ④, deferred by 1ce9ddaf's
+                // plan): one `git for-each-ref` per DISTINCT repo instead of one
+                // `git branch --list` per record — the same collapse Pass 1's read-only
+                // scan already got, which took it from 228 spawns (~40s) to ~7.
+                //
+                // THIS PASS MUTATES, so two things differ from the read-only scan:
+                //
+                // 1. `seen` DEDUP IS LOAD-BEARING HERE, not just an optimisation. Pass 2
+                //    MERGES AND DELETES branches as it goes, so a list cached at the top
+                //    goes stale behind this pass's own mutations. A task with per-agent
+                //    worktree rows can yield several records naming the SAME branch; with
+                //    per-record probing the second one saw the branch already deleted and
+                //    skipped, but a cached set would still say "exists" and drive a second
+                //    merge attempt at an already-merged branch. Deduping on
+                //    taskId|branchName means such a duplicate never reaches the cache.
+                //
+                //    BUT THE DEDUP IS NOT THE WHOLE DEFENCE — an earlier version of this
+                //    comment claimed it was, and that was wrong (pipeline Run 1, debugger).
+                //    The dedup key is (taskId, branchName); the MUTATION's key is taskId
+                //    ALONE, because WorktreeMergeService derives CanonicalBranch(taskId)
+                //    regardless of which record triggered it. So a canonical row
+                //    (task/<id>) and a helper row (task/<id>--<agent>) produce DISTINCT
+                //    dedup keys, both are visited, and the helper's merge deletes the
+                //    CANONICAL branch — which the cache still lists. The eviction below,
+                //    plus the merge service's own fresh re-probe, are what actually close
+                //    that; the dedup only covers the same-key case.
+                //
+                //    ScanPendingMergesCoreAsync's equivalent dedup uses OrdinalIgnoreCase.
+                //    This one uses Ordinal deliberately: git ref names ARE case-sensitive
+                //    (the same rationale ParseBranchNames states), so folding case here
+                //    could merge two genuinely distinct branches into one key. The sibling
+                //    is the one that should change; that is filed, not done here, because
+                //    it is 1ce9ddaf's code and its dedup semantics are not this ticket's
+                //    to alter silently.
+                //
+                // 2. A LISTING FAILURE MUST NOT LOOK LIKE "GONE". ListTaskBranchesAsync
+                //    THROWS on timeout/non-zero exit (unlike BranchExistsAsync, which
+                //    returns false), so the repo goes into failedRepos and its records are
+                //    left for the next sweep. Note this is strictly MORE visible than the
+                //    old behaviour: a git failure used to surface as a silent false — no
+                //    action, no record — and now leaves an Errors entry naming the repo.
+                var taskBranchesByRepo = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                var failedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+
                 foreach (var record in prunedDone)
                 {
                     try
@@ -255,7 +319,38 @@ namespace MultiTerminal.Services
                         string projectPath = getProjectPathForTask?.Invoke(record.TaskId);
                         if (string.IsNullOrEmpty(projectPath)) continue;
 
-                        var branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                        if (!seen.Add(record.TaskId + "|" + record.BranchName)) continue;
+
+                        string repoKey = NormalizePath(projectPath);
+                        if (failedRepos.Contains(repoKey)) continue; // retry-later, never "gone"
+
+                        bool branchExists;
+                        if (record.BranchName != null && record.BranchName.StartsWith("task/", StringComparison.Ordinal))
+                        {
+                            if (!taskBranchesByRepo.TryGetValue(repoKey, out var taskBranches))
+                            {
+                                try
+                                {
+                                    taskBranches = await ListTaskBranchesAsync(projectPath).ConfigureAwait(false);
+                                    taskBranchesByRepo[repoKey] = taskBranches;
+                                }
+                                catch (Exception ex)
+                                {
+                                    failedRepos.Add(repoKey);
+                                    result.Errors.Add($"Pass 2 branch listing {projectPath}: {ex.Message}");
+                                    continue;
+                                }
+                            }
+
+                            branchExists = taskBranches.Contains(record.BranchName);
+                        }
+                        else
+                        {
+                            // Non-canonical branch name — outside the refs/heads/task/
+                            // namespace the batch listing covers; keep the per-record probe.
+                            branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
+                        }
+
                         if (branchExists)
                         {
                             // Bounded one-shot recovery: attempt the auto-merge
@@ -290,6 +385,28 @@ namespace MultiTerminal.Services
                                     result.MergesRecovered++;
                                     bool cleanupPending = !string.IsNullOrWhiteSpace(retry.Stderr);
                                     string shortId = record.TaskId.Substring(0, Math.Min(8, record.TaskId.Length));
+
+                                    // Evict what this merge actually DELETED from the cached
+                                    // set (task 36b0b9d5 pipeline Run 1, debugger LOW). The
+                                    // merge is keyed on taskId and acts on
+                                    // CanonicalBranch(taskId) whichever record triggered it,
+                                    // so after a helper row's merge the canonical branch is
+                                    // gone while the cache still lists it — and a later
+                                    // record for that task would be judged "still alive" and
+                                    // emit a false pending-merge for a branch THIS SWEEP just
+                                    // deleted. The pre-batching per-record probe returned
+                                    // false there and skipped, so this is a regression the
+                                    // eviction closes, not a pre-existing gap.
+                                    //
+                                    // NOT evicted when cleanupPending: on that path the merge
+                                    // landed but `branch -d` failed, so the branch is STILL
+                                    // ALIVE and the cache is telling the truth. Evicting there
+                                    // would hide a leftover branch the next record should see.
+                                    if (!cleanupPending
+                                        && taskBranchesByRepo.TryGetValue(repoKey, out var mergedRepoBranches))
+                                    {
+                                        mergedRepoBranches.Remove(WorktreeNaming.CanonicalBranch(record.TaskId));
+                                    }
                                     recordActivity?.Invoke(
                                         "janitor_merge_recovered",
                                         cleanupPending
@@ -308,6 +425,40 @@ namespace MultiTerminal.Services
                                 // .Success, reporting "merged into trunk" for a no-op.
                                 if (retry != null && retry.Success)
                                 {
+                                    // Evict here TOO (task 36b0b9d5 pipeline Run 2, debugger
+                                    // LOW — the Run 1 eviction was incomplete). Gating the
+                                    // eviction on retry.Merged alone left this delete path
+                                    // stale, so a later record for the same task whose merge
+                                    // call fails for a NON-branch reason (task flipped out of
+                                    // 'done', rev-parse failure, null callback) could still be
+                                    // judged "still alive" off the stale set — the same false
+                                    // pending-merge, reached by a different route.
+                                    //
+                                    // WHY UNCONDITIONAL IS SAFE (Run 3: all three gates flagged
+                                    // the earlier "both sub-cases" wording as an undercount).
+                                    // MergeForTaskAsync has THREE Success-without-Merged returns,
+                                    // not two. The two REACHABLE FROM HERE both mean the branch
+                                    // is GONE: `branch -d <canonical>` succeeded (not ahead of
+                                    // trunk), or it was already deleted. The third — the
+                                    // record == null "no worktree record" early-out — does NOT
+                                    // delete the branch, so evicting on it WOULD hide a live
+                                    // branch. It cannot occur here: these records come from
+                                    // ListPrunedWorktreesForDoneTasks, so a task_worktrees row
+                                    // provably exists, GetWorktreeForTask reads that same table
+                                    // with no status filter, and task_worktrees has no DELETE
+                                    // anywhere in TaskDatabase — so the row cannot vanish even
+                                    // across a long async gap. That premise is what licenses the
+                                    // unconditional evict, and it is stated because
+                                    // tryMergeForTask is an INJECTED delegate: a future
+                                    // implementation that can return Success without having
+                                    // deleted the branch would invalidate this and must revisit
+                                    // it. (MessageBroker.TryAutoMergeForTaskAsync, the production
+                                    // callback, adds no such fourth case.)
+                                    if (taskBranchesByRepo.TryGetValue(repoKey, out var settledRepoBranches))
+                                    {
+                                        settledRepoBranches.Remove(WorktreeNaming.CanonicalBranch(record.TaskId));
+                                    }
+
                                     continue;
                                 }
                             }
@@ -508,7 +659,15 @@ namespace MultiTerminal.Services
         /// orphan dir. Best-effort: a group whose <c>git worktree list</c> fails
         /// is skipped (conservative — never reports a registered dir as stranded).
         /// </summary>
-        public async Task<StrandedScanResult> ScanStrandedDirsAsync()
+        /// <param name="maxStalenessMs">
+        /// Accept a coalesced result this recent (task 36b0b9d5 item ②). 0 — the default,
+        /// used by the explicit REST refresh endpoints — always scans, though it still
+        /// JOINS any scan already in flight rather than starting a second one.
+        /// </param>
+        public Task<StrandedScanResult> ScanStrandedDirsAsync(int maxStalenessMs = 0)
+            => _strandedScans.RunAsync(ScanStrandedDirsCoreAsync, maxStalenessMs);
+
+        private async Task<StrandedScanResult> ScanStrandedDirsCoreAsync()
         {
             var result = new StrandedScanResult();
             var allPaths = _db.ListAllWorktreePaths();
@@ -623,7 +782,26 @@ namespace MultiTerminal.Services
         /// </summary>
         /// <param name="getProjectPathForTask">Resolver: taskId → repo root, or null
         /// when the task's project can't be located (counted as a skipped record).</param>
-        public async Task<PendingMergeScanResult> ScanPendingMergesAsync(Func<string, string> getProjectPathForTask)
+        /// <param name="maxStalenessMs">
+        /// Accept a coalesced result this recent (task 36b0b9d5 item ②). 0 — the default,
+        /// used by the explicit REST refresh endpoints — always scans, though it still
+        /// JOINS any scan already in flight rather than starting a second one.
+        /// </param>
+        /// <remarks>
+        /// COALESCING CAVEAT (task 36b0b9d5 item ②): callers are coalesced on the scan
+        /// TYPE, not on <paramref name="getProjectPathForTask"/> — a joiner receives the
+        /// result produced with the FIRST caller's resolver. Safe today because both
+        /// production call sites (session-start enrichment and GET /api/worktrees/pending-merges)
+        /// pass the same <c>id =&gt; broker.TryGetProjectPathForTask(id)</c> lookup, so the
+        /// resolvers are behaviourally identical. A future caller passing a resolver with
+        /// DIFFERENT semantics must not rely on getting its own — key the coalescer or
+        /// bypass it.
+        /// </remarks>
+        public Task<PendingMergeScanResult> ScanPendingMergesAsync(
+            Func<string, string> getProjectPathForTask, int maxStalenessMs = 0)
+            => _pendingMergeScans.RunAsync(() => ScanPendingMergesCoreAsync(getProjectPathForTask), maxStalenessMs);
+
+        private async Task<PendingMergeScanResult> ScanPendingMergesCoreAsync(Func<string, string> getProjectPathForTask)
         {
             var result = new PendingMergeScanResult();
 
@@ -944,9 +1122,20 @@ namespace MultiTerminal.Services
         /// record. Same contract as <see cref="BranchExistsAsync"/>: a timeout
         /// throws — retry-later, never evidence that branches are gone.
         /// </summary>
+        /// <remarks>
+        /// Formats with <c>%(refname)</c> and strips <c>refs/heads/</c> in
+        /// <see cref="ParseBranchNames"/> (task 36b0b9d5 item ③, from 1ce9ddaf's Run-1
+        /// debugger LOW). <c>%(refname:short)</c> was ambiguous: it shortens
+        /// <c>refs/heads/task/foo</c> to <c>task/foo</c> only while nothing else claims
+        /// that name, and a tag <c>refs/tags/task/foo</c> makes git emit
+        /// <c>heads/task/foo</c> instead — whereupon the set lookup misses and a LIVE
+        /// branch reads as GONE, silently dropping its pending-merge finding.
+        /// <c>%(refname)</c> is unambiguous by construction, so the parse no longer
+        /// depends on what else happens to exist in the repo.
+        /// </remarks>
         private static async Task<HashSet<string>> ListTaskBranchesAsync(string repoRoot)
         {
-            var result = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads/task/").ConfigureAwait(false);
+            var result = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/task/").ConfigureAwait(false);
             if (result.TimedOut)
             {
                 throw new TimeoutException($"git for-each-ref timed out for {repoRoot} — retry next sweep");
@@ -959,17 +1148,32 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Parse <c>git for-each-ref --format=%(refname:short)</c> output into a
-        /// branch-name set. Ordinal comparison — git ref names are case-sensitive.
-        /// Internal for direct test coverage.
+        /// Parse <c>git for-each-ref --format=%(refname)</c> output into a branch-name
+        /// set, stripping the fully-qualified <c>refs/heads/</c> prefix so the entries
+        /// match the plain <c>task/{id}</c> names the worktree records carry. Ordinal
+        /// comparison — git ref names are case-sensitive. Internal for direct test coverage.
         /// </summary>
+        /// <remarks>
+        /// Only a LEADING <c>refs/heads/</c> is removed, and only once, so a branch whose
+        /// own name happens to embed that string keeps it. Lines without the prefix are
+        /// passed through unchanged — a defensive no-op that also keeps this tolerant of
+        /// already-short input. See <see cref="ListTaskBranchesAsync"/> for why the
+        /// format is <c>%(refname)</c> rather than <c>%(refname:short)</c> (task 36b0b9d5 ③).
+        /// </remarks>
         internal static HashSet<string> ParseBranchNames(string stdout)
         {
+            const string FullyQualifiedPrefix = "refs/heads/";
+
             var set = new HashSet<string>(StringComparer.Ordinal);
             if (string.IsNullOrEmpty(stdout)) return set;
             foreach (var line in stdout.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var name = line.Trim();
+                if (name.StartsWith(FullyQualifiedPrefix, StringComparison.Ordinal))
+                {
+                    name = name.Substring(FullyQualifiedPrefix.Length);
+                }
+
                 if (name.Length > 0) set.Add(name);
             }
             return set;
