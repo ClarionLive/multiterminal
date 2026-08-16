@@ -4108,6 +4108,15 @@ namespace MultiTerminal.MCPServer.Services
             => _taskService.AppendChecklistItems(taskId, itemsJson);
 
         /// <summary>
+        /// Write the plain-language gloss onto ONE checklist item and nothing else (task a455e295).
+        /// See <see cref="TaskService.SetChecklistItemGloss"/> — this is the write path a background
+        /// backfill agent must use, because a full-array replace from a stale snapshot silently
+        /// reverts any transition made while the agent was thinking.
+        /// </summary>
+        public SetChecklistItemGlossResult SetChecklistItemGloss(string taskId, int itemIndex, ChecklistItemGloss gloss)
+            => _taskService.SetChecklistItemGloss(taskId, itemIndex, gloss);
+
+        /// <summary>
         /// Update a task's implementation checklist JSON.
         /// </summary>
         public UpdateTaskResult UpdateTaskImplementationChecklist(string taskId, string implementationChecklistJson)

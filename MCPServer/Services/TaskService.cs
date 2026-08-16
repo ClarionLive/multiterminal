@@ -1800,6 +1800,153 @@ namespace MultiTerminal.MCPServer.Services
 
 
         /// <summary>
+        /// Write the plain-language gloss onto ONE checklist item, and nothing else (task a455e295).
+        /// <para><b>Why this exists rather than reusing <see cref="UpdateTaskChecklist"/>.</b> The
+        /// gloss backfill agent reads a checklist, thinks for minutes, then writes. A full-array
+        /// replace would carry that stale snapshot back over the live list, so any transition made
+        /// while the agent was thinking is silently reverted — a finished item drops back to
+        /// pending and its notes and cycle count are gone. <c>_checklistMutationLock</c> does NOT
+        /// prevent this: it serializes each individual call, not the agent's thinking time between
+        /// a read and a write. This is the same hazard <see cref="AppendChecklistItems"/> was built
+        /// to avoid ("risks dropping an existing item's status/notes when re-serializing a stale
+        /// snapshot"), and it is answered the same way — the caller passes an INDEX and a gloss,
+        /// never an array, so the only field a stale caller can write is the one nobody else
+        /// touches.</para>
+        /// <para>Server-authoritative: every other field on the item is re-read from the live
+        /// checklist inside the lock and left exactly as found. Status, notes, cycle count,
+        /// assignee, dependencies and the item text cannot be influenced by this call at all, so
+        /// it cannot forge audit history or bypass the transition state machine.</para>
+        /// <para>Refuses to overwrite a human-authored gloss. Generated prose fills a vacuum; it
+        /// never replaces a person's words. That refusal is reported as
+        /// <see cref="GlossWriteOutcome.SkippedAuthoredGlossPresent"/> with <c>Success = true</c>,
+        /// because it is a correct no-op rather than a failure — a caller that read it as failure
+        /// would retry forever against a task that is already right.</para>
+        /// </summary>
+        /// <param name="taskId">Task owning the checklist.</param>
+        /// <param name="itemIndex">Zero-based index, validated against the CURRENT checklist.</param>
+        /// <param name="gloss">The gloss to store. Stamped <c>generated</c> unless it explicitly says otherwise.</param>
+        public SetChecklistItemGlossResult SetChecklistItemGloss(string taskId, int itemIndex, ChecklistItemGloss gloss)
+        {
+            if (!_tasks.TryGetValue(taskId, out var task))
+            {
+                return new SetChecklistItemGlossResult { Success = false, Error = $"Task not found: {taskId}" };
+            }
+
+            if (task.IsQuickTask)
+            {
+                return new SetChecklistItemGlossResult { Success = false, Error = $"Cannot set gloss: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
+            }
+
+            if (gloss == null || !gloss.HasContent)
+            {
+                // An all-blank gloss is stored as absent everywhere else (see AppendChecklistItems),
+                // so accepting one here would let a caller "succeed" at erasing an explanation.
+                return new SetChecklistItemGlossResult { Success = false, Error = "Gloss must carry text in at least one of what/why/without." };
+            }
+
+            // Take a defensive copy BEFORE the lock: the caller keeps its own reference, and an
+            // object stored in the cache must not stay aliased to something they can mutate later.
+            var incoming = new ChecklistItemGloss
+            {
+                What = gloss.What,
+                Why = gloss.Why,
+                Without = gloss.Without,
+                Source = gloss.Source,
+            };
+
+            // Default to "generated": this method exists FOR the backfill agent, and the failure
+            // that matters is machine prose passing itself off as a person's. An unstamped write
+            // is therefore treated as machine-written rather than trusted as authored.
+            if (!string.Equals(incoming.Source, ChecklistItemGloss.SourceAuthored, StringComparison.OrdinalIgnoreCase))
+            {
+                incoming.Source = ChecklistItemGloss.SourceGenerated;
+            }
+
+            var outcome = GlossWriteOutcome.Written;
+            string itemName = null;
+            string rangeError = null;
+
+            // Range check and authored-gloss check both live INSIDE the mutate lambda, so they read
+            // the very clone that gets persisted. The cost is that a skipped or out-of-range call
+            // still performs one redundant SaveTask of unchanged content. That is deliberate:
+            // hoisting the checks out would mean validating a snapshot taken before
+            // MutateTaskInternal's per-task lock, which is only safe if every other checklist writer
+            // takes _checklistMutationLock — an assumption about code not in front of us. A wasted
+            // identical write is cheaper than a wrong one.
+
+            // Serialize against the other checklist mutators, then broadcast outside the lock.
+            // clone→persist→swap means a persist failure leaves the cached checklist untouched.
+            lock (_checklistMutationLock)
+            {
+                try
+                {
+                    if (MutateTaskInternal(taskId, t =>
+                    {
+                        var checklist = t.GetChecklist();
+
+                        // Validated against the CURRENT list, inside the lock. A checklist that
+                        // shrank while the agent was thinking must not silently redirect the write
+                        // onto whatever item slid into that index.
+                        if (itemIndex < 0 || itemIndex >= checklist.Count)
+                        {
+                            rangeError = $"Invalid item index: {itemIndex}. Checklist has {checklist.Count} items.";
+                            return;
+                        }
+
+                        var item = checklist[itemIndex];
+                        itemName = item.Item;
+
+                        // A human's words are never overwritten. A blank-but-present gloss counts
+                        // as absent, matching how HasContent is treated everywhere else.
+                        var existing = item.Gloss;
+                        if (existing != null && existing.HasContent && !existing.IsGenerated)
+                        {
+                            outcome = GlossWriteOutcome.SkippedAuthoredGlossPresent;
+                            return;
+                        }
+
+                        // The whole mutation. Everything else on this item — Status, Done, Notes,
+                        // CycleCount, AssignedTo, DependsOn, Item — is left exactly as read.
+                        item.Gloss = incoming;
+
+                        t.SetChecklist(checklist);
+
+                        // Deliberately NO RecalculateAutoStatus: a gloss is documentation, not
+                        // progress. Recalculating here would let writing an explanation move a
+                        // card on the lifecycle board.
+                    }) == null)
+                    {
+                        return new SetChecklistItemGlossResult { Success = false, Error = $"Task not found: {taskId}" };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _host.LogError($"SetChecklistItemGloss: persist failed for {taskId}[{itemIndex}]: {ex.Message}");
+                    return new SetChecklistItemGlossResult { Success = false, Error = $"Failed to persist gloss: {ex.Message}" };
+                }
+            }
+
+            if (rangeError != null)
+            {
+                return new SetChecklistItemGlossResult { Success = false, Error = rangeError };
+            }
+
+            // Only a real write is worth a board refresh; a skip changed nothing to broadcast.
+            if (outcome == GlossWriteOutcome.Written)
+            {
+                BroadcastTaskUpdate();
+            }
+
+            return new SetChecklistItemGlossResult
+            {
+                Success = true,
+                Outcome = outcome,
+                ItemName = itemName,
+            };
+        }
+
+
+        /// <summary>
         /// Update a task's implementation checklist JSON.
         /// </summary>
         public UpdateTaskResult UpdateTaskImplementationChecklist(string taskId, string implementationChecklistJson)

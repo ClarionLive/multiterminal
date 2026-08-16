@@ -1003,10 +1003,44 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             itemsJson: {
               type: "string",
-              description: 'JSON array of items to append. Each element may be a plain description string OR an object {"item":"...","status":"pending"}. Status defaults to "pending". e.g. ["Add validation","Write tests"] or [{"item":"Add validation","status":"pending"}]',
+              description: 'JSON array of items to append. Each element may be a plain description string OR an object {"item":"...","status":"pending"}. Status defaults to "pending". Two optional plan-authoring fields are also honored: "dependsOn" (array of zero-based sibling indices — omit it when a step has no prerequisite; it is NOT "the previous item") and "gloss" ({"what":"...","why":"...","without":"..."} — plain-language explanation shown in the 🔗 Plan tab). e.g. ["Add validation","Write tests"] or [{"item":"Add validation","status":"pending","dependsOn":[0],"gloss":{"what":"Rejects bad input at the edge.","why":"Gated on the schema existing.","without":"Malformed rows reach the database and fail far from the cause."}}]',
             },
           },
           required: ["taskId", "itemsJson"],
+        },
+      },
+      {
+        name: "set_checklist_gloss",
+        description: "Write the plain-language explanation (gloss) onto ONE existing checklist item, without touching anything else about it. Use this to explain a step that already exists — append_checklist_items covers gloss only at creation time, and the full-array update_checklist is deprecated AND unsafe here: writing a whole array back from a snapshot taken minutes ago silently reverts any status change made in the meantime. Refuses to overwrite a human-authored gloss (reported as a skip, not an error). Writes are stamped 'generated' unless you explicitly pass source:'authored'.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: {
+              type: "string",
+              description: "Task ID",
+            },
+            itemIndex: {
+              type: "number",
+              description: "Zero-based index of the checklist item to explain. Validated against the CURRENT checklist, so a stale index is refused rather than silently applied to whatever item now sits there.",
+            },
+            what: {
+              type: "string",
+              description: "What this step does, in one plain sentence. No jargon, no internal type names.",
+            },
+            why: {
+              type: "string",
+              description: "Why the step sits where it does — what it is gated on, or why it is free to run in parallel with its siblings.",
+            },
+            without: {
+              type: "string",
+              description: "What would go wrong if the step were skipped. This is the field that actually teaches, so it is the one worth the most care. If you genuinely cannot tell from the plan, say so plainly rather than inventing a rationale — an honest gap invites the planner to fill it, a confident guess hides it forever.",
+            },
+            source: {
+              type: "string",
+              description: "Optional provenance: 'generated' (default — a machine wrote it) or 'authored' (a person did). Only pass 'authored' when relaying a human's own words.",
+            },
+          },
+          required: ["taskId", "itemIndex"],
         },
       },
       // Inbox Tools
@@ -3695,15 +3729,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!Array.isArray(parsed)) throw new Error("itemsJson must be a JSON array of items.");
         if (parsed.length === 0) throw new Error("itemsJson contained no items to append.");
         const VALID_STATUSES = ["pending", "coding", "testing", "done"];
-        // Send only the whitelisted fields the server honors (item + validated status). Any
-        // notes/assignedTo/cycleCount are intentionally dropped — the server ignores them anyway.
+        // Send only the whitelisted fields the server honors. That whitelist is item + validated
+        // status + the PLAN-AUTHORING fields dependsOn/gloss (TaskService.AppendChecklistItems,
+        // task 60665c6c). Lifecycle fields (notes/assignedTo/cycleCount) are still dropped — those
+        // belong to the workflow, and the server ignores them anyway.
+        //
+        // dependsOn/gloss were previously stripped HERE, one layer in front of the server that had
+        // just been fixed to preserve them (task a455e295). The effect was 60665c6c's own bug
+        // surviving its fix: a planning agent writes a gloss through the RECOMMENDED tool, receives
+        // success, and the field never reaches the server at all. The server-side regression test
+        // stayed green throughout because it calls TaskService directly and never crosses this line.
         const normalized = parsed.map((el) => {
           if (typeof el === "string") return { item: el, status: "pending" };
           if (el && typeof el === "object") {
             if (!el.item || typeof el.item !== "string") throw new Error('Each item object must have a non-empty string "item" field.');
             const status = (el.status || "pending").toString().trim().toLowerCase();
             if (!VALID_STATUSES.includes(status)) throw new Error(`Invalid status "${el.status}" on item "${el.item}". Valid: ${VALID_STATUSES.join(", ")}.`);
-            return { item: el.item, status };
+            const out = { item: el.item, status };
+            if (Array.isArray(el.dependsOn)) out.dependsOn = el.dependsOn;
+            if (el.gloss && typeof el.gloss === "object") out.gloss = el.gloss;
+            return out;
           }
           throw new Error("Each element must be a description string or an {item,...} object.");
         });
@@ -3731,6 +3776,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: appendText }],
+        };
+      }
+
+      case "set_checklist_gloss": {
+        if (typeof args.itemIndex !== "number" || !Number.isInteger(args.itemIndex) || args.itemIndex < 0) {
+          throw new Error("itemIndex must be a non-negative integer (zero-based).");
+        }
+        if (!args.what && !args.why && !args.without) {
+          throw new Error("Provide at least one of what/why/without — an empty gloss would erase the explanation rather than write one.");
+        }
+
+        const glossResult = await apiCall(
+          `/api/tasks/${seg(args.taskId)}/checklist/${seg(args.itemIndex)}/gloss`,
+          "PUT",
+          {
+            what: args.what,
+            why: args.why,
+            without: args.without,
+            source: args.source,
+          },
+        );
+
+        // Report the SKIP honestly rather than as a bare success (405273fd's style): the caller
+        // asked for a write that deliberately did not happen, and a plain "✅ done" would leave a
+        // backfill agent believing it had explained a step it never touched.
+        const glossItem = glossResult && glossResult.itemName ? ` "${glossResult.itemName}"` : "";
+        if (glossResult && glossResult.written === false) {
+          return {
+            content: [{
+              type: "text",
+              text: `ℹ️ Gloss NOT written for item ${args.itemIndex}${glossItem} — a human-authored explanation is already there and is never overwritten. Nothing changed; nothing will retry.`,
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `✅ Gloss written for item ${args.itemIndex}${glossItem} on task ${args.taskId}${args.source === "authored" ? " (marked authored)" : " (marked machine-generated)"}.`,
+          }],
         };
       }
 

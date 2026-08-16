@@ -212,7 +212,11 @@ namespace MultiTerminal.MCPServer.Models
         /// If Notes is null, initializes to empty list.
         /// If DependsOn is null, initializes to empty list (no declared dependencies).
         /// <para><see cref="Gloss"/> is intentionally NOT defaulted — null means "nobody wrote
-        /// an explanation", which the graph view renders differently from a written-but-blank one.</para>
+        /// an explanation", which the graph view renders differently from a written-but-blank one.
+        /// It is also the detection signal the gloss backfill keys on (task a455e295): defaulting
+        /// it here would make every un-glossed item look already-handled and permanently suppress
+        /// the backfill. An EXISTING gloss does get its <c>Source</c> canonicalized, because that
+        /// normalizes a field on something already present rather than conjuring the object.</para>
         /// </summary>
         public void NormalizeFromLegacy()
         {
@@ -228,6 +232,9 @@ namespace MultiTerminal.MCPServer.Models
             {
                 DependsOn = new List<int>();
             }
+
+            // Note the null guard: normalize a gloss that exists, never create one.
+            Gloss?.NormalizeSource();
         }
     }
 
@@ -259,6 +266,49 @@ namespace MultiTerminal.MCPServer.Models
         public string Without { get; set; }
 
         /// <summary>
+        /// Who wrote this gloss: <see cref="SourceAuthored"/> (a person wrote it at plan time)
+        /// or <see cref="SourceGenerated"/> (a backfill agent wrote it from the item text,
+        /// task a455e295).
+        /// <para>This exists because the gloss's entire purpose is to let a reader LEARN what a
+        /// plan does rather than approve it on trust. A machine handed only the item text can
+        /// produce a fluent paraphrase that reads like explanation while carrying no new
+        /// information — and sometimes a confident, plausible, wrong rationale. Unmarked, that
+        /// reads as the planner's own reasoning and is more confident than the plan prose ever
+        /// was. Same failure the graph builder refuses for edges (see
+        /// <see cref="ChecklistItem.DependsOn"/>): a confidently wrong picture is worse than no
+        /// picture.</para>
+        /// <para>Absent or unrecognized normalizes to <see cref="SourceAuthored"/>, NOT to
+        /// generated. Every gloss written before this field existed was hand-written by a
+        /// planner, so defaulting the other way would retroactively brand human work as machine
+        /// output — the exact misattribution this field exists to prevent.</para>
+        /// </summary>
+        public string Source { get; set; }
+
+        /// <summary>
+        /// A person wrote this gloss. The default for anything absent or unrecognized.
+        /// </summary>
+        public const string SourceAuthored = "authored";
+
+        /// <summary>
+        /// A backfill agent wrote this gloss. Rendered visibly differently by the graph view.
+        /// </summary>
+        public const string SourceGenerated = "generated";
+
+        /// <summary>
+        /// Valid values for <see cref="Source"/>.
+        /// </summary>
+        public static readonly string[] ValidSources = { SourceAuthored, SourceGenerated };
+
+        /// <summary>
+        /// True when a machine wrote this gloss. Reads the NORMALIZED meaning: an absent or
+        /// unrecognized <see cref="Source"/> is authored, so this is false unless the value is
+        /// explicitly <see cref="SourceGenerated"/>. Callers therefore get the safe answer even
+        /// on an un-normalized instance straight off the wire.
+        /// </summary>
+        public bool IsGenerated =>
+            string.Equals(Source, SourceGenerated, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
         /// True when at least one field carries text. A gloss whose fields are all blank is
         /// treated as absent by the graph view rather than rendered as three empty rows.
         /// </summary>
@@ -266,6 +316,30 @@ namespace MultiTerminal.MCPServer.Models
             !string.IsNullOrWhiteSpace(What) ||
             !string.IsNullOrWhiteSpace(Why) ||
             !string.IsNullOrWhiteSpace(Without);
+
+        /// <summary>
+        /// Canonicalize <see cref="Source"/>: anything absent, blank, or unrecognized becomes
+        /// <see cref="SourceAuthored"/>; a recognized value is lower-cased to its canonical form
+        /// so downstream string comparisons and the rendered UI see one spelling.
+        /// <para>Deliberately fails toward "authored" rather than throwing — the checklist is
+        /// agent-authored JSON and, like <see cref="ChecklistItem.DependsOn"/>, a malformed
+        /// value must degrade rather than make a checklist unsaveable.</para>
+        /// </summary>
+        public void NormalizeSource()
+        {
+            // Manual scan rather than Linq's Contains: this file imports no System.Linq and one
+            // membership check over a two-element array does not justify adding it.
+            foreach (var valid in ValidSources)
+            {
+                if (string.Equals(Source, valid, StringComparison.OrdinalIgnoreCase))
+                {
+                    Source = valid;
+                    return;
+                }
+            }
+
+            Source = SourceAuthored;
+        }
     }
 
     /// <summary>

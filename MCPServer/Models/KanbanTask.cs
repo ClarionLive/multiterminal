@@ -508,6 +508,46 @@ namespace MultiTerminal.MCPServer.Models
     }
 
     /// <summary>
+    /// Why a gloss write did or did not land (task a455e295). A TYPED verdict rather than prose,
+    /// for the same reason <c>TrunkMismatchKind</c> is: the backfill agent has to branch on
+    /// "skipped, and that's fine" versus "failed, retry" without string-matching a message, and
+    /// prose drifts while a field does not.
+    /// </summary>
+    public enum GlossWriteOutcome
+    {
+        /// <summary>The gloss was written to the item.</summary>
+        Written = 0,
+
+        /// <summary>
+        /// A human-authored gloss was already present, so nothing was written. NOT an error:
+        /// generated gloss fills a vacuum and never overwrites a person. A caller that treated
+        /// this as failure would retry forever against a task that is already correct.
+        /// </summary>
+        SkippedAuthoredGlossPresent = 1,
+    }
+
+    /// <summary>
+    /// Result of a narrow single-item gloss write (task a455e295).
+    /// </summary>
+    public class SetChecklistItemGlossResult
+    {
+        /// <summary>
+        /// True when the call was VALID — which includes the deliberate skip. Check
+        /// <see cref="Outcome"/> to learn whether anything was actually written.
+        /// </summary>
+        public bool Success { get; set; }
+
+        /// <summary>Populated only when <see cref="Success"/> is false.</summary>
+        public string Error { get; set; }
+
+        /// <summary>What happened. Meaningful only when <see cref="Success"/> is true.</summary>
+        public GlossWriteOutcome Outcome { get; set; }
+
+        /// <summary>The item's description, echoed back so a caller can log what it touched.</summary>
+        public string ItemName { get; set; }
+    }
+
+    /// <summary>
     /// Result of setting a task active with auto-pause.
     /// </summary>
     public class SetTaskActiveResult

@@ -365,6 +365,41 @@ namespace MultiTerminal.API.Controllers
         }
 
         /// <summary>
+        /// Write the plain-language gloss onto ONE checklist item (task a455e295).
+        /// <para>Deliberately NOT part of the full-array PATCH above: this is the path a background
+        /// backfill agent uses, and it may write from a snapshot taken minutes earlier. Restricting
+        /// it to a single field is what stops a stale caller from reverting a transition made while
+        /// it was thinking.</para>
+        /// <para>A skip is a 200 with <c>written: false</c>, not an error — an already-authored
+        /// gloss means the task is correct, and answering 4xx would make a backfill agent retry
+        /// forever against work that needs nothing.</para>
+        /// </summary>
+        [HttpPut("{taskId}/checklist/{itemIndex}/gloss")]
+        public IActionResult SetChecklistItemGloss(string taskId, int itemIndex, [FromBody] SetChecklistGlossRequest request)
+        {
+            if (request == null)
+                return Problem(detail: "Request body is required.", statusCode: 400);
+
+            var result = _broker.SetChecklistItemGloss(taskId, itemIndex, new ChecklistItemGloss
+            {
+                What = request.What,
+                Why = request.Why,
+                Without = request.Without,
+                Source = request.Source,
+            });
+
+            if (!result.Success)
+                return Problem(detail: result.Error, statusCode: 400);
+
+            return Ok(new
+            {
+                written = result.Outcome == GlossWriteOutcome.Written,
+                outcome = result.Outcome.ToString(),
+                itemName = result.ItemName
+            });
+        }
+
+        /// <summary>
         /// Assign a checklist item to a specific agent.
         /// </summary>
         [HttpPost("{taskId}/checklist/{itemIndex}/assign")]
@@ -968,6 +1003,28 @@ namespace MultiTerminal.API.Controllers
     public class AssignChecklistRequest
     {
         public string Assignee { get; set; }
+    }
+
+    /// <summary>
+    /// Body for the narrow single-item gloss write (task a455e295). Flat rather than a nested
+    /// gloss object so the shape mirrors the other checklist request DTOs in this file.
+    /// </summary>
+    public class SetChecklistGlossRequest
+    {
+        /// <summary>What this step does, in one plain sentence.</summary>
+        public string What { get; set; }
+
+        /// <summary>Why it sits where it does — what gates it, or why it can run in parallel.</summary>
+        public string Why { get; set; }
+
+        /// <summary>What would go wrong if the step were skipped. The field that actually teaches.</summary>
+        public string Without { get; set; }
+
+        /// <summary>
+        /// Provenance. Omit it and the write is stamped <c>generated</c>: this endpoint exists for
+        /// the backfill agent, and the failure that matters is machine prose passing as a person's.
+        /// </summary>
+        public string Source { get; set; }
     }
 
     public class UpdateContinuationRequest
