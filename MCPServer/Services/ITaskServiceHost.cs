@@ -32,6 +32,19 @@ namespace MultiTerminal.MCPServer.Services
         void LogInfo(string message);
         void LogTrace(string message);
 
+        /// <summary>
+        /// Consider spawning a background agent to write the missing plain-language gloss on
+        /// <paramref name="taskId"/>'s checklist (task a455e295).
+        /// <para>Called AFTER a checklist write has committed and OUTSIDE its lock. Implementations
+        /// must return immediately and must never throw: the backfill is documentation, and a
+        /// failure to explain a step must not fail, delay, or roll back the write that triggered
+        /// it. Throttling and the on/off switch live behind this call, so callers just announce
+        /// that the checklist changed and let the implementation decide.</para>
+        /// </summary>
+        /// <param name="taskId">The task whose checklist just changed.</param>
+        /// <param name="reason">Short trigger description for the log, e.g. "checklist write".</param>
+        void RequestGlossBackfill(string taskId, string reason);
+
         // ── Event raisers — the Task* events STAY declared on the broker so subscribers (MainForm,
         //    panels, HUD) are untouched; TaskService raises them through these wrappers, which call the
         //    broker's private resilient RaiseSafe dispatch (1df2a534). ──────────────────────────────

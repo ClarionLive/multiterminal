@@ -626,6 +626,321 @@ namespace MultiTerminal.Tests
             Assert.Equal(id, _svc.GetMyActiveTask("diana", "PROJA").Id);
         }
 
+        // ---- SetChecklistItemGloss: the narrow gloss write (task a455e295) ----
+
+        /// <summary>
+        /// Seed a task with a two-item checklist, both un-glossed.
+        /// </summary>
+        private string MakeGlossTask()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            var r = _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}," +
+                "{\"item\":\"Wire the host interface\",\"status\":\"pending\"}]");
+            Assert.True(r.Success, r.Error);
+            return id;
+        }
+
+        private static ChecklistItemGloss SampleGloss(string what = "Moves the code into its own file.") =>
+            new ChecklistItemGloss
+            {
+                What = what,
+                Why = "Gated on the inventory.",
+                Without = "You find the coupling from compiler errors mid-move.",
+            };
+
+        /// <summary>
+        /// THE test for this feature. A backfill agent reads the checklist, thinks for minutes, and
+        /// writes. While it thinks, the coding agent moves item 0 forward and records notes.
+        /// <para>A full-array write (<c>UpdateTaskChecklist</c>) carries the agent's stale snapshot
+        /// back over the live list and silently reverts that transition — the item drops to pending
+        /// and its notes and cycle count vanish, with no error anywhere. The narrow primitive cannot
+        /// do this, because the only field it is able to write is the gloss.</para>
+        /// <para>Demonstrated to FAIL against the full-array implementation — see
+        /// <see cref="LostUpdate_IsExactlyWhatAFullArrayWriteDoes"/> directly below, which performs
+        /// the stale write the naive way and asserts the damage.</para>
+        /// </summary>
+        [Fact]
+        public void GlossWrite_FromAStaleSnapshot_DoesNotClobberAConcurrentTransition()
+        {
+            var id = MakeGlossTask();
+
+            // T0 — the backfill agent reads. (It holds this list while it "thinks".)
+            var staleSnapshot = _svc.GetTask(id).GetChecklist();
+            Assert.Equal("pending", staleSnapshot[0].Status);
+
+            // T1 — meanwhile, real work happens on item 0.
+            var t = _svc.TransitionChecklistItem(id, 0, "coding", "starting", "diana");
+            Assert.True(t.Success, t.Error);
+
+            // T2 — the agent finally writes, still holding its T0 view of the world.
+            var w = _svc.SetChecklistItemGloss(id, 0, SampleGloss());
+            Assert.True(w.Success, w.Error);
+            Assert.Equal(GlossWriteOutcome.Written, w.Outcome);
+
+            // The transition survived, notes and all.
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal("coding", after[0].Status);
+            Assert.NotEmpty(after[0].Notes);
+            Assert.Equal("Moves the code into its own file.", after[0].Gloss.What);
+            Assert.True(after[0].Gloss.IsGenerated);
+        }
+
+        /// <summary>
+        /// The negative half of the pair: the same sequence done the obvious way. This is what the
+        /// feature would have shipped if the gloss reused the full-array path, and it exists so the
+        /// test above is a demonstrated contrast rather than an assertion about code nobody ran.
+        /// </summary>
+        [Fact]
+        public void LostUpdate_IsExactlyWhatAFullArrayWriteDoes()
+        {
+            var id = MakeGlossTask();
+
+            var staleSnapshot = _svc.GetTask(id).GetChecklist();
+
+            var t = _svc.TransitionChecklistItem(id, 0, "coding", "starting", "diana");
+            Assert.True(t.Success, t.Error);
+
+            // The naive backfill: attach the gloss to the stale snapshot and write the whole array.
+            staleSnapshot[0].Gloss = SampleGloss();
+            var w = _svc.UpdateTaskChecklist(
+                id,
+                System.Text.Json.JsonSerializer.Serialize(staleSnapshot));
+
+            // It "succeeds" — which is the whole problem. Nothing anywhere reports a loss.
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal("pending", after[0].Status);   // the transition is GONE
+            Assert.Empty(after[0].Notes);               // and so are its notes
+        }
+
+        [Fact]
+        public void GlossWrite_DoesNotOverwriteAnAuthoredGloss()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"," +
+                "\"gloss\":{\"what\":\"A human wrote this.\",\"why\":\"Because they understood it.\"}}]");
+
+            var w = _svc.SetChecklistItemGloss(id, 0, SampleGloss("A machine wrote this."));
+
+            // A correct no-op, NOT a failure: a caller that read this as an error would retry
+            // forever against a task that is already right.
+            Assert.True(w.Success, w.Error);
+            Assert.Equal(GlossWriteOutcome.SkippedAuthoredGlossPresent, w.Outcome);
+            Assert.Equal("A human wrote this.", _svc.GetTask(id).GetChecklist()[0].Gloss.What);
+        }
+
+        [Fact]
+        public void GlossWrite_MayReplaceAPreviouslyGeneratedGloss()
+        {
+            var id = MakeGlossTask();
+            Assert.True(_svc.SetChecklistItemGloss(id, 0, SampleGloss("First pass.")).Success);
+
+            var w = _svc.SetChecklistItemGloss(id, 0, SampleGloss("Second pass, better."));
+
+            Assert.Equal(GlossWriteOutcome.Written, w.Outcome);
+            Assert.Equal("Second pass, better.", _svc.GetTask(id).GetChecklist()[0].Gloss.What);
+        }
+
+        [Fact]
+        public void GlossWrite_AgainstAShrunkChecklist_IsRefusedNotRedirected()
+        {
+            var id = MakeGlossTask();
+
+            // The agent planned to gloss item 1; the checklist shrank to one item while it thought.
+            _svc.UpdateTaskChecklist(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+            var w = _svc.SetChecklistItemGloss(id, 1, SampleGloss());
+
+            Assert.False(w.Success);
+            Assert.Contains("Invalid item index", w.Error);
+
+            // Item 0 must NOT have received item 1's explanation.
+            Assert.Null(_svc.GetTask(id).GetChecklist()[0].Gloss);
+        }
+
+        [Fact]
+        public void GlossWrite_WritesOnlyTheGloss_AndLeavesEveryOtherFieldAlone()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"status\":\"pending\",\"dependsOn\":[]}," +
+                "{\"item\":\"Wire the host\",\"status\":\"pending\",\"dependsOn\":[0]}]");
+            _svc.TransitionChecklistItem(id, 1, "coding", "starting", "diana");
+            _svc.AssignChecklistItem(id, 1, "bob");
+
+            var before = _svc.GetTask(id).GetChecklist()[1];
+
+            _svc.SetChecklistItemGloss(id, 1, SampleGloss());
+
+            var after = _svc.GetTask(id).GetChecklist()[1];
+            Assert.Equal(before.Item, after.Item);
+            Assert.Equal(before.Status, after.Status);
+            Assert.Equal(before.AssignedTo, after.AssignedTo);
+            Assert.Equal(before.CycleCount, after.CycleCount);
+            Assert.Equal(before.Notes.Count, after.Notes.Count);
+            Assert.Equal(before.DependsOn, after.DependsOn);
+            Assert.NotNull(after.Gloss);
+
+            // ...and the SIBLING item is untouched too.
+            Assert.Null(_svc.GetTask(id).GetChecklist()[0].Gloss);
+        }
+
+        [Fact]
+        public void GlossWrite_StampsGeneratedByDefault_ButHonoursAnExplicitAuthored()
+        {
+            var id = MakeGlossTask();
+
+            _svc.SetChecklistItemGloss(id, 0, SampleGloss());
+            Assert.True(_svc.GetTask(id).GetChecklist()[0].Gloss.IsGenerated);
+
+            var authored = SampleGloss();
+            authored.Source = ChecklistItemGloss.SourceAuthored;
+            _svc.SetChecklistItemGloss(id, 1, authored);
+            Assert.False(_svc.GetTask(id).GetChecklist()[1].Gloss.IsGenerated);
+        }
+
+        [Fact]
+        public void GlossWrite_RejectsABlankGloss()
+        {
+            var id = MakeGlossTask();
+
+            // Accepting this would let a caller "succeed" at erasing an explanation.
+            var w = _svc.SetChecklistItemGloss(id, 0, new ChecklistItemGloss());
+
+            Assert.False(w.Success);
+            Assert.Contains("must carry text", w.Error);
+        }
+
+        [Fact]
+        public void GlossWrite_DoesNotMoveTheCardOnTheLifecycleBoard()
+        {
+            var id = MakeGlossTask();
+            var statusBefore = _svc.GetTask(id).AutoStatus;
+
+            _svc.SetChecklistItemGloss(id, 0, SampleGloss());
+
+            // Writing documentation is not progress.
+            Assert.Equal(statusBefore, _svc.GetTask(id).AutoStatus);
+        }
+
+        // ---- Gloss backfill trigger (task a455e295) ----
+
+        /// <summary>
+        /// The trigger has to fire where the CONTENT is created. Hooking activation instead — the
+        /// intuitive choice — mostly no-ops, because the standard flow activates a task before its
+        /// checklist exists.
+        /// </summary>
+        [Fact]
+        public void ChecklistWrite_RequestsAGlossBackfill()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _host.GlossBackfillRequests.Clear();
+
+            _svc.AppendChecklistItems(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+            Assert.Contains(_host.GlossBackfillRequests, r => r.TaskId == id);
+        }
+
+        [Fact]
+        public void FullChecklistReplace_AlsoRequestsAGlossBackfill()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _host.GlossBackfillRequests.Clear();
+
+            _svc.UpdateTaskChecklist(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+            Assert.Contains(_host.GlossBackfillRequests, r => r.TaskId == id);
+        }
+
+        /// <summary>
+        /// The backfill is documentation. If its path is broken, the user's actual checklist edit
+        /// must still land — an explanation agent taking a checklist write down with it would be an
+        /// absurd trade. Same posture as the RecordActivity sink in 7c59c004.
+        /// </summary>
+        [Fact]
+        public void AThrowingGlossBackfill_CannotPoisonTheCommittedChecklistWrite()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _host.ThrowFromRequestGlossBackfill = true;
+
+            try
+            {
+                var r = _svc.AppendChecklistItems(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+                Assert.True(r.Success, r.Error);
+                Assert.Single(_svc.GetTask(id).GetChecklist());
+            }
+            finally
+            {
+                _host.ThrowFromRequestGlossBackfill = false;
+            }
+        }
+
+        [Fact]
+        public void GlossBackfillPlanner_SelectsOnlyItemsThatNeedAnExplanation()
+        {
+            var checklist = new List<ChecklistItem>
+            {
+                new ChecklistItem { Item = "No gloss at all" },
+                new ChecklistItem { Item = "Blank gloss", Gloss = new ChecklistItemGloss() },
+                new ChecklistItem { Item = "Already explained", Gloss = new ChecklistItemGloss { What = "It does a thing." } },
+                new ChecklistItem { Item = "   " },   // no real text — nothing to explain
+            };
+
+            var needed = MultiTerminal.MCPServer.Services.GlossBackfillPlanner.ItemsNeedingGloss(checklist);
+
+            // 0 and 1 need one (a blank gloss counts as absent); 2 is done; 3 has no text.
+            Assert.Equal(new[] { 0, 1 }, needed);
+        }
+
+        [Fact]
+        public void GlossBackfillPlanner_TreatsAGeneratedGlossAsAlreadyWritten()
+        {
+            // Re-running would spend tokens rewriting machine prose with more machine prose. The
+            // backfill fills a vacuum; it does not iterate.
+            var checklist = new List<ChecklistItem>
+            {
+                new ChecklistItem
+                {
+                    Item = "Explained by a machine",
+                    Gloss = new ChecklistItemGloss
+                    {
+                        What = "It does a thing.",
+                        Source = ChecklistItemGloss.SourceGenerated,
+                    },
+                },
+            };
+
+            Assert.Empty(MultiTerminal.MCPServer.Services.GlossBackfillPlanner.ItemsNeedingGloss(checklist));
+        }
+
+        [Fact]
+        public void GlossBackfillPrompt_NamesOnlyTheIndicesItShouldWrite_AndForbidsInvention()
+        {
+            var task = new KanbanTask { Id = "abc123", Title = "A task", Description = "Why it exists", Plan = "The plan" };
+            var checklist = new List<ChecklistItem>
+            {
+                new ChecklistItem { Item = "Already explained", Gloss = new ChecklistItemGloss { What = "Does a thing." } },
+                new ChecklistItem { Item = "Needs an explanation" },
+            };
+
+            var prompt = MultiTerminal.MCPServer.Services.GlossBackfillPlanner.BuildPrompt(task, checklist, new[] { 1 });
+
+            Assert.Contains("WRITE A GLOSS FOR THESE INDICES ONLY: 1", prompt);
+            Assert.Contains("abc123", prompt);
+            Assert.Contains("The plan", prompt);
+
+            // The two instructions that decide whether this feature helps or misleads.
+            Assert.Contains("DO NOT RESTATE THE STEP", prompt);
+            Assert.Contains("IF YOU CANNOT TELL, SAY SO", prompt);
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
@@ -642,6 +957,14 @@ namespace MultiTerminal.Tests
             // prove a throwing sink can't poison a committed claim (7c59c004 Codex security [medium]).
             public bool ThrowFromRecordActivity { get; set; }
 
+            // Captured gloss-backfill requests as (taskId, reason), so the trigger is assertable
+            // without spawning anything (task a455e295).
+            public List<(string TaskId, string Reason)> GlossBackfillRequests { get; } = new List<(string, string)>();
+
+            // When set, RequestGlossBackfill throws — models the backfill path failing, to prove it
+            // cannot poison the committed checklist write that triggered it.
+            public bool ThrowFromRequestGlossBackfill { get; set; }
+
             public void RaiseTasksUpdated(List<KanbanTask> tasks) => TasksUpdatedCount++;
             public void RaiseTaskClaimed(TaskClaimedEventArgs args) { }
             public void RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) { }
@@ -649,6 +972,16 @@ namespace MultiTerminal.Tests
             public void LogWarning(string message) { }
             public void LogInfo(string message) { }
             public void LogTrace(string message) { }
+
+            public void RequestGlossBackfill(string taskId, string reason)
+            {
+                if (ThrowFromRequestGlossBackfill)
+                {
+                    throw new InvalidOperationException("gloss backfill sink is down");
+                }
+
+                GlossBackfillRequests.Add((taskId, reason));
+            }
             public bool RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
             {
                 if (ThrowFromRecordActivity) throw new InvalidOperationException("test: activity sink down");

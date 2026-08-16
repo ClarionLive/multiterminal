@@ -16,7 +16,7 @@ namespace MultiTerminal.MCPServer.Services
     /// Routes messages between terminals and maintains message queues.
     /// Supports SQLite persistence for reliable delivery with retry.
     /// </summary>
-    public class MessageBroker : IDisposable, IRemoteModeSink, ITaskServiceHost, IProfileServiceHost
+    public class MessageBroker : IDisposable, IRemoteModeSink, ITaskServiceHost, IProfileServiceHost, IGlossBackfillHost
     {
         private bool _isDisposed;
 
@@ -4106,6 +4106,82 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public UpdateTaskResult AppendChecklistItems(string taskId, string itemsJson)
             => _taskService.AppendChecklistItems(taskId, itemsJson);
+
+        /// <summary>
+        /// Write the plain-language gloss onto ONE checklist item and nothing else (task a455e295).
+        /// See <see cref="TaskService.SetChecklistItemGloss"/> — this is the write path a background
+        /// backfill agent must use, because a full-array replace from a stale snapshot silently
+        /// reverts any transition made while the agent was thinking.
+        /// </summary>
+        public SetChecklistItemGlossResult SetChecklistItemGloss(string taskId, int itemIndex, ChecklistItemGloss gloss)
+            => _taskService.SetChecklistItemGloss(taskId, itemIndex, gloss);
+
+        // ---- Gloss backfill (task a455e295) ----
+
+        /// <summary>
+        /// Starts the background agent that writes missing checklist glosses. Set by MainForm, which
+        /// owns process spawning — the same DI-set-collaborator shape as
+        /// <c>SpawnService.OnSpawnAgentRequested</c>. Left null in headless/test hosts, where the
+        /// backfill simply reports that it cannot spawn instead of pretending it wrote anything.
+        /// </summary>
+        public Func<string, string, Task<(bool success, string error)>> GlossWriterSpawner { get; set; }
+
+        private GlossBackfillService _glossBackfill;
+        private readonly object _glossBackfillLock = new object();
+
+        private GlossBackfillService GlossBackfill
+        {
+            get
+            {
+                // Lazy: reading the env config at construction would run before MainForm has had a
+                // chance to set GlossWriterSpawner, and the ctor logs what it resolved.
+                if (_glossBackfill == null)
+                {
+                    lock (_glossBackfillLock)
+                    {
+                        _glossBackfill ??= new GlossBackfillService(this);
+                    }
+                }
+
+                return _glossBackfill;
+            }
+        }
+
+        void ITaskServiceHost.RequestGlossBackfill(string taskId, string reason)
+        {
+            try
+            {
+                var task = _taskService.GetTask(taskId);
+                if (task != null)
+                {
+                    GlossBackfill.RequestBackfill(task, reason);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Sits on a committed write path — it does not get to throw. See the interface docs.
+                DebugLogService?.Warning("GlossBackfill", $"RequestGlossBackfill({taskId}) failed: {ex.Message}");
+            }
+        }
+
+        DateTime IGlossBackfillHost.UtcNow => DateTime.UtcNow;
+
+        string IGlossBackfillHost.GetEnvironmentVariable(string name) => Environment.GetEnvironmentVariable(name);
+
+        void IGlossBackfillHost.LogInfo(string message) => DebugLogService?.Info("GlossBackfill", message);
+
+        void IGlossBackfillHost.LogWarning(string message) => DebugLogService?.Warning("GlossBackfill", message);
+
+        async Task<(bool success, string error)> IGlossBackfillHost.SpawnGlossWriterAsync(string taskId, string prompt)
+        {
+            var spawner = GlossWriterSpawner;
+            if (spawner == null)
+            {
+                return (false, "No gloss-writer spawner is registered (MainForm not initialized).");
+            }
+
+            return await spawner(taskId, prompt).ConfigureAwait(false);
+        }
 
         /// <summary>
         /// Update a task's implementation checklist JSON.
