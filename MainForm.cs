@@ -894,6 +894,10 @@ namespace MultiTerminal
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 18: Setting OnSpawnRequested");
                 _mcpServer.SpawnService.OnSpawnRequested = OnSpawnRequested;
                 _mcpServer.SpawnService.OnSpawnAgentRequested = OnSpawnAgentRequested;
+
+                // Gloss backfill writer (task a455e295). The broker decides WHETHER to run one and
+                // throttles them; MainForm owns process spawning, so it supplies the how.
+                _mcpServer.Broker.GlossWriterSpawner = SpawnGlossWriterAsync;
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 19: All wiring complete");
 
                 // Initialize HTTP webhook service for agent ready notifications
@@ -1958,6 +1962,68 @@ namespace MultiTerminal
         /// <summary>
         /// Spawn a headless AgentProcess with piped stdin/stdout.
         /// </summary>
+        /// <summary>
+        /// Spawn the headless agent that writes missing checklist glosses (task a455e295).
+        /// <para>Deliberately NOT routed through <see cref="OnSpawnAgentRequested"/>: that path
+        /// registers the agent with the broker so other terminals can message it, and overrides the
+        /// working directory to the spawner's active-task worktree. This writer talks to nobody, has
+        /// no task of its own, and only ever calls MCP tools, so it wants neither. It is a
+        /// short-lived tool user, not a teammate.</para>
+        /// <para>Its cwd is the app directory rather than any worktree — the agent edits no files,
+        /// so pointing it at a worktree would only give it the chance to be somewhere that gets
+        /// pruned mid-run.</para>
+        /// </summary>
+        private async Task<(bool success, string error)> SpawnGlossWriterAsync(string taskId, string prompt)
+        {
+            try
+            {
+                string mcpConfigPath = LaunchCommandBuilder.GetMcpConfigPath();
+                if (string.IsNullOrEmpty(mcpConfigPath))
+                {
+                    // Without MCP the agent cannot call set_checklist_gloss, so it could only burn
+                    // tokens and report success. Refuse rather than spawn something useless.
+                    return (false, "No MCP config path resolved; the writer would have no way to save a gloss.");
+                }
+
+                // Nobody holds this agent (unlike OnSpawnAgentRequested, which hands it back to its
+                // caller), so it has to dispose ITSELF when the process ends. `pending` exists only
+                // so a spawn that throws still cleans up: on success, ownership moves to the
+                // ProcessExited handler and pending is nulled to prevent a double dispose of a
+                // still-running process.
+                AgentProcess pending = null;
+                try
+                {
+                    var agent = new AgentProcess();
+                    pending = agent;
+
+                    agent.ProcessExited += (_, exitCode) =>
+                    {
+                        _debugLogService?.Info("GlossBackfill", $"Gloss writer for {taskId} exited ({exitCode}).");
+                        try { agent.Dispose(); } catch { /* teardown is best-effort */ }
+                    };
+
+                    await agent.SpawnAsync(
+                        prompt: prompt,
+                        workingDir: AppDomain.CurrentDomain.BaseDirectory,
+                        mcpConfigPath: mcpConfigPath);
+
+                    pending = null;   // the exit handler owns it from here
+                }
+                finally
+                {
+                    pending?.Dispose();
+                }
+
+                _debugLogService?.Info("GlossBackfill", $"Gloss writer spawned for task {taskId}.");
+                return (true, null);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Warning("GlossBackfill", $"Gloss writer spawn failed for {taskId}: {ex.Message}");
+                return (false, ex.Message);
+            }
+        }
+
         private async Task<(bool success, AgentProcess agent, string error)> OnSpawnAgentRequested(
             string agentName,
             string workingDir,

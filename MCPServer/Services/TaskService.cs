@@ -1676,6 +1676,11 @@ namespace MultiTerminal.MCPServer.Services
 
             BroadcastTaskUpdate();
 
+            // Post-commit, outside the lock, best-effort. The checklist write is already durable;
+            // whether anyone explains it is a separate question this call must not be able to
+            // affect. See ITaskServiceHost.RequestGlossBackfill.
+            SafeRequestGlossBackfill(taskId, "checklist write");
+
             return new UpdateTaskResult { Success = true };
         }
 
@@ -1795,9 +1800,34 @@ namespace MultiTerminal.MCPServer.Services
 
             BroadcastTaskUpdate();
 
+            // Post-commit, outside the lock, best-effort — see UpdateTaskChecklist above. Append is
+            // the RECOMMENDED way to build a checklist, so in practice this is the trigger that
+            // fires for most newly-planned work.
+            SafeRequestGlossBackfill(taskId, "checklist append");
+
             return new UpdateTaskResult { Success = true };
         }
 
+
+        /// <summary>
+        /// Ask the host to consider a gloss backfill, and absorb anything it throws (task a455e295).
+        /// <para>The host interface documents that implementations must not throw, but a doc comment
+        /// is a convention and this sits on already-committed write paths. Wrapping it here makes
+        /// the guarantee structural instead: no host implementation, present or future, can turn a
+        /// missing explanation into a failed checklist edit. Same treatment the post-commit
+        /// RecordActivity sink gets (7c59c004).</para>
+        /// </summary>
+        private void SafeRequestGlossBackfill(string taskId, string reason)
+        {
+            try
+            {
+                _host.RequestGlossBackfill(taskId, reason);
+            }
+            catch (Exception ex)
+            {
+                _host.LogWarning($"Gloss backfill request threw for {taskId} ({reason}): {ex.Message}");
+            }
+        }
 
         /// <summary>
         /// Write the plain-language gloss onto ONE checklist item, and nothing else (task a455e295).
@@ -2673,6 +2703,14 @@ namespace MultiTerminal.MCPServer.Services
             {
                 _host.LogError($"TaskActiveChanged subscribers threw: {ex.Message}");
             }
+
+            // SECONDARY sweep for the gloss backfill (task a455e295). Deliberately not the primary
+            // trigger: the usual order is claim → in_progress → set_active → THEN plan, so at this
+            // moment the checklist is typically still empty and this call finds nothing to do. It
+            // earns its place on the pre-feature backlog — a task planned before the feature existed
+            // gets picked up the next time someone activates it. The checklist-write triggers are
+            // what catch new work.
+            SafeRequestGlossBackfill(taskId, "activation sweep");
 
             return new SetTaskActiveResult
             {

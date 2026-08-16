@@ -829,6 +829,118 @@ namespace MultiTerminal.Tests
             Assert.Equal(statusBefore, _svc.GetTask(id).AutoStatus);
         }
 
+        // ---- Gloss backfill trigger (task a455e295) ----
+
+        /// <summary>
+        /// The trigger has to fire where the CONTENT is created. Hooking activation instead — the
+        /// intuitive choice — mostly no-ops, because the standard flow activates a task before its
+        /// checklist exists.
+        /// </summary>
+        [Fact]
+        public void ChecklistWrite_RequestsAGlossBackfill()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _host.GlossBackfillRequests.Clear();
+
+            _svc.AppendChecklistItems(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+            Assert.Contains(_host.GlossBackfillRequests, r => r.TaskId == id);
+        }
+
+        [Fact]
+        public void FullChecklistReplace_AlsoRequestsAGlossBackfill()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _host.GlossBackfillRequests.Clear();
+
+            _svc.UpdateTaskChecklist(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+            Assert.Contains(_host.GlossBackfillRequests, r => r.TaskId == id);
+        }
+
+        /// <summary>
+        /// The backfill is documentation. If its path is broken, the user's actual checklist edit
+        /// must still land — an explanation agent taking a checklist write down with it would be an
+        /// absurd trade. Same posture as the RecordActivity sink in 7c59c004.
+        /// </summary>
+        [Fact]
+        public void AThrowingGlossBackfill_CannotPoisonTheCommittedChecklistWrite()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _host.ThrowFromRequestGlossBackfill = true;
+
+            try
+            {
+                var r = _svc.AppendChecklistItems(id, "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}]");
+
+                Assert.True(r.Success, r.Error);
+                Assert.Single(_svc.GetTask(id).GetChecklist());
+            }
+            finally
+            {
+                _host.ThrowFromRequestGlossBackfill = false;
+            }
+        }
+
+        [Fact]
+        public void GlossBackfillPlanner_SelectsOnlyItemsThatNeedAnExplanation()
+        {
+            var checklist = new List<ChecklistItem>
+            {
+                new ChecklistItem { Item = "No gloss at all" },
+                new ChecklistItem { Item = "Blank gloss", Gloss = new ChecklistItemGloss() },
+                new ChecklistItem { Item = "Already explained", Gloss = new ChecklistItemGloss { What = "It does a thing." } },
+                new ChecklistItem { Item = "   " },   // no real text — nothing to explain
+            };
+
+            var needed = MultiTerminal.MCPServer.Services.GlossBackfillPlanner.ItemsNeedingGloss(checklist);
+
+            // 0 and 1 need one (a blank gloss counts as absent); 2 is done; 3 has no text.
+            Assert.Equal(new[] { 0, 1 }, needed);
+        }
+
+        [Fact]
+        public void GlossBackfillPlanner_TreatsAGeneratedGlossAsAlreadyWritten()
+        {
+            // Re-running would spend tokens rewriting machine prose with more machine prose. The
+            // backfill fills a vacuum; it does not iterate.
+            var checklist = new List<ChecklistItem>
+            {
+                new ChecklistItem
+                {
+                    Item = "Explained by a machine",
+                    Gloss = new ChecklistItemGloss
+                    {
+                        What = "It does a thing.",
+                        Source = ChecklistItemGloss.SourceGenerated,
+                    },
+                },
+            };
+
+            Assert.Empty(MultiTerminal.MCPServer.Services.GlossBackfillPlanner.ItemsNeedingGloss(checklist));
+        }
+
+        [Fact]
+        public void GlossBackfillPrompt_NamesOnlyTheIndicesItShouldWrite_AndForbidsInvention()
+        {
+            var task = new KanbanTask { Id = "abc123", Title = "A task", Description = "Why it exists", Plan = "The plan" };
+            var checklist = new List<ChecklistItem>
+            {
+                new ChecklistItem { Item = "Already explained", Gloss = new ChecklistItemGloss { What = "Does a thing." } },
+                new ChecklistItem { Item = "Needs an explanation" },
+            };
+
+            var prompt = MultiTerminal.MCPServer.Services.GlossBackfillPlanner.BuildPrompt(task, checklist, new[] { 1 });
+
+            Assert.Contains("WRITE A GLOSS FOR THESE INDICES ONLY: 1", prompt);
+            Assert.Contains("abc123", prompt);
+            Assert.Contains("The plan", prompt);
+
+            // The two instructions that decide whether this feature helps or misleads.
+            Assert.Contains("DO NOT RESTATE THE STEP", prompt);
+            Assert.Contains("IF YOU CANNOT TELL, SAY SO", prompt);
+        }
+
         /// <summary>
         /// Minimal <see cref="ITaskServiceHost"/> stub. Records the event raises (so the write path's
         /// broadcast is assertable); no-ops or returns benign defaults for the cross-region collaborators
@@ -845,6 +957,14 @@ namespace MultiTerminal.Tests
             // prove a throwing sink can't poison a committed claim (7c59c004 Codex security [medium]).
             public bool ThrowFromRecordActivity { get; set; }
 
+            // Captured gloss-backfill requests as (taskId, reason), so the trigger is assertable
+            // without spawning anything (task a455e295).
+            public List<(string TaskId, string Reason)> GlossBackfillRequests { get; } = new List<(string, string)>();
+
+            // When set, RequestGlossBackfill throws — models the backfill path failing, to prove it
+            // cannot poison the committed checklist write that triggered it.
+            public bool ThrowFromRequestGlossBackfill { get; set; }
+
             public void RaiseTasksUpdated(List<KanbanTask> tasks) => TasksUpdatedCount++;
             public void RaiseTaskClaimed(TaskClaimedEventArgs args) { }
             public void RaiseTaskActiveChanged(TaskActiveChangedEventArgs args) { }
@@ -852,6 +972,16 @@ namespace MultiTerminal.Tests
             public void LogWarning(string message) { }
             public void LogInfo(string message) { }
             public void LogTrace(string message) { }
+
+            public void RequestGlossBackfill(string taskId, string reason)
+            {
+                if (ThrowFromRequestGlossBackfill)
+                {
+                    throw new InvalidOperationException("gloss backfill sink is down");
+                }
+
+                GlossBackfillRequests.Add((taskId, reason));
+            }
             public bool RecordActivity(ActivityEvent activity, bool alreadyPersisted = false)
             {
                 if (ThrowFromRecordActivity) throw new InvalidOperationException("test: activity sink down");

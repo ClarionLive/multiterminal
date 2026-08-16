@@ -55,6 +55,43 @@ Bad declarations degrade rather than break: out-of-range indices, self-reference
 and cycles are each dropped with a warning shown in a banner above the graph. A malformed
 dependency can never make a checklist unsaveable or take down the tab.
 
+## Auto-backfilled gloss (task a455e295)
+
+In practice almost nobody wrote a gloss, so the tab degraded into a prettier flat list. A
+background agent now fills the gap: when a checklist is written and an item has text but no
+gloss, one agent is spawned for the whole checklist (never one per item — step 3's *why* refers
+to what step 2 produced, and an agent shown one item alone can only paraphrase it).
+
+Three rules hold this together, and each exists because the obvious alternative is wrong:
+
+- **`ChecklistItemGloss.Source` (`authored` | `generated`) is rendered.** A machine paraphrase
+  reads exactly like the planner's reasoning while carrying no information, and a machine
+  *invention* reads like it while being false. Unmarked, the reader approves a plan against a
+  rationale no human endorsed. Absent/unrecognized normalizes to **authored**, never generated —
+  every gloss predating the field was hand-written, and defaulting the other way would brand
+  human work as machine output.
+- **Backfill writes through `SetChecklistItemGloss`, never `update_checklist`.** The agent reads,
+  thinks for minutes, then writes; a full-array replace carries that stale snapshot back over the
+  live list and silently reverts any transition made meanwhile. `_checklistMutationLock` does not
+  help — it serializes each call, not the thinking time between read and write.
+  `TaskServiceTests.LostUpdate_IsExactlyWhatAFullArrayWriteDoes` performs the naive write and
+  asserts the damage, so the reason is executable rather than folklore.
+- **The trigger is the checklist WRITE, not task activation.** Activation looks like the natural
+  hook and mostly no-ops: the standard flow is claim → in_progress → set_active → *then* plan, so
+  at activation there is usually no checklist yet. Activation stays as a secondary sweep for the
+  pre-feature backlog only.
+
+Generated gloss is explicitly permitted to say *"the plan does not say what this is gated on."*
+An honest gap invites the planner to fill it; a confident guess hides it forever.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `MULTITERMINAL_GLOSS_BACKFILL` | on | Master switch (`0`/`false`/`off`/`no`/`disabled` disable). Each run spawns a real agent that spends tokens — this is the off switch. |
+| `MULTITERMINAL_GLOSS_BACKFILL_COOLDOWN_MS` | `600000` | Per-task cooldown, clamped to `[30000, 86400000]`. Stops the normal transition cadence from spawning a fleet. |
+
+An in-flight set gives one run per task at a time, and the cooldown is stamped even on failure so
+a broken spawn path retries on the cooldown rather than on every checklist edit.
+
 ## Where the pieces live
 
 | Piece | File |
