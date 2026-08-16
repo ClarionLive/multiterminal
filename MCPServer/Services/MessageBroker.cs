@@ -750,8 +750,15 @@ namespace MultiTerminal.MCPServer.Services
                         Content = $"{conflictTag} for '{task.Title}'.{(string.IsNullOrEmpty(mergeReason) ? "" : $" Reason: {mergeReason}")} Task branch task/{taskIdShort} preserved with auto-committed changes; worktree dir was removed (necessary for the merge attempt). To resolve: run `git merge task/{taskIdShort}` in the main checkout, or re-create a worktree from the branch and re-mark the task done to retry. Janitor will keep flagging this each sweep until resolved.",
                         RelatedId = taskId
                     });
-                    // THE CASE THIS TICKET EXISTS FOR. Carries the full reason, not the
-                    // truncated feed line — the caller is the one who can act on it.
+                    // THE CASE THIS TICKET EXISTS FOR.
+                    //
+                    // Sanitized, NOT raw (pipeline Run 2, Codex security MEDIUM). The
+                    // first cut passed mergeResult.Stderr verbatim on the theory that
+                    // "the caller is the one who can act on it" — but the caller here
+                    // is an HTTP response, including the phone gateway, and raw git
+                    // stderr routinely names absolute paths and remotes. Run 1 applied
+                    // TruncateReason to the THROW arm because that is where the finding
+                    // pointed, and left this one raw; same defect class, adjacent line.
                     outcome = new TaskDoneMergeOutcome
                     {
                         Merged = false,
@@ -766,7 +773,7 @@ namespace MultiTerminal.MCPServer.Services
                         TrunkMismatch = mergeResult.TrunkMismatch == MultiTerminal.Services.TrunkMismatchKind.None
                             ? null
                             : mergeResult.TrunkMismatch.ToString(),
-                        Message = $"{conflictTag}: {mergeResult.Stderr} "
+                        Message = $"{conflictTag}: {mergeReason} "
                             + $"Branch {MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId)} is preserved with its commits; the worktree directory was removed. "
                             + "Nothing was lost, but the branch has NOT landed in trunk."
                     };
@@ -977,16 +984,7 @@ namespace MultiTerminal.MCPServer.Services
         /// etc.). Returns empty when there's nothing to show.
         /// </summary>
         private static string TruncateReason(string reason)
-        {
-            if (string.IsNullOrWhiteSpace(reason)) return string.Empty;
-            string oneLine = reason.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            const int max = 240;
-            if (oneLine.Length > max)
-            {
-                oneLine = oneLine.Substring(0, max) + "…";
-            }
-            return oneLine;
-        }
+            => MultiTerminal.Services.WorktreeMergeService.SanitizeForCaller(reason);
 
         /// <summary>
         /// Fires BranchOutcomeUpdated. Called by BranchMetadataService after a successful

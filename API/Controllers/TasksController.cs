@@ -255,7 +255,12 @@ namespace MultiTerminal.API.Controllers
             if (!result.Success)
                 return Problem(detail: result.Error, statusCode: 400);
 
-            return Ok();
+            // Dragging a card into Done runs the auto-merge, so this route can refuse a
+            // merge exactly like PATCH /status (task b88e7017, pipeline Run 2 verifier).
+            // ReorderTask was taught to carry the outcome in Run 1, but both consumers
+            // still dropped it — so the desktop drag-to-done, the likeliest way a human
+            // completes a task, showed nothing. Null on every non-done reorder.
+            return Ok(new { mergeOutcome = result.MergeOutcome });
         }
 
         /// <summary>

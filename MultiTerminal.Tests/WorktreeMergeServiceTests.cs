@@ -458,6 +458,36 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The OTHER half of the inconclusive guard, and the one the Run-1 HIGH was
+        /// actually about (pipeline Run 2, verifier): GitExec's <c>-1</c> sentinel.
+        ///
+        /// <para>A NON-EXISTENT working directory makes Process.Start throw, which
+        /// GitExec catches and reports as <c>ExitCode -1, TimedOut false</c> — the
+        /// process-start-failure half of the sentinel, deterministic and fast. Against
+        /// the pre-fix <c>ExitCode != 0</c> shape this fact fails with
+        /// <c>Actual: ConfiguredTrunkMissing</c>, which is the defect reproduced.</para>
+        ///
+        /// <para>WHAT THIS PINS, precisely: the requirement that
+        /// ConfiguredTrunkMissing needs <c>ExitCode == 1</c>. It does NOT pin the
+        /// early-return conjuncts — deleting <c>TimedOut ||</c> and
+        /// <c>ExitCode &lt; 0 ||</c> leaves this green, because -1 then simply falls
+        /// through to the same conservative verdict. That is a property of the design
+        /// (inconclusive and default share an answer), not an oversight in the fixture;
+        /// see the comment at the guard for why it is unreachable without a seam.</para>
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task ProcessStartFailure_IsNotReadAsMissingTrunk()
+        {
+            string missingDir = Path.Combine(Path.GetTempPath(), $"mt_absent_{Guid.NewGuid():N}");
+            Assert.False(Directory.Exists(missingDir), "fixture requires a directory that does not exist");
+
+            var kind = await WorktreeMergeService.ClassifyTrunkMismatchAsync(
+                missingDir, trunk: "feature/parked", wantTrunk: "master");
+
+            Assert.Equal(TrunkMismatchKind.CheckoutOnWrongBranch, kind);
+        }
+
+        /// <summary>
         /// Pins the exit-code premise the guard rests on, so a future git version that
         /// changed it would fail HERE rather than silently reopening the HIGH above:
         /// a missing ref in a real repo is exit 1, and a non-repository is not.
@@ -481,6 +511,85 @@ namespace MultiTerminal.Tests
             {
                 TryDeleteDir(notARepo);
             }
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 2, DEBUGGER MEDIUM — and the Codex adversary's HIGH from the
+        /// other direction. A DETECTED trunk is not a CONFIGURED one, and the refusal
+        /// must not claim otherwise.
+        ///
+        /// <para>With no <c>git_default_branch</c>, wantTrunk comes from
+        /// DetectDefaultBranchAsync. If origin/HEAD publishes a branch that has no local
+        /// ref (a <c>clone --branch</c>, or the local trunk was deleted) while the
+        /// checkout sits on a feature branch, probe 1 exits 1 and the old code emitted
+        /// "your CONFIGURATION is stale — set git_default_branch to '{checkout}'",
+        /// promoting the parked feature branch to project trunk. Nothing was configured,
+        /// so that sentence was false in both halves, and its remedy was the exact harm
+        /// this whole ticket exists to remove.</para>
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task DetectedTrunk_NeverClaimsTheConfigIsStale()
+        {
+            // origin/HEAD publishes 'master', but no LOCAL master exists any more.
+            RunGit(_repoRoot, "checkout", "-b", "feature/parked");
+            PublishOriginHead("master");
+            RunGit(_repoRoot, "branch", "-D", "master");
+
+            CommitOnTaskBranchFromHead("work");
+            SaveCanonicalRow();
+
+            // expectedTrunk deliberately NULL — nothing configured.
+            var result = await new WorktreeMergeService(_db).MergeForTaskAsync(TaskId, _repoRoot);
+
+            Assert.False(result.Success, "a mismatch must still refuse");
+            Assert.True(BranchExists(CanonicalBranch), "task branch preserved on refusal");
+
+            Assert.DoesNotContain("CONFIGURATION is stale", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain("set git_default_branch to 'feature/parked'", result.Stderr, StringComparison.Ordinal);
+            Assert.DoesNotContain($"set the project's default branch (git_default_branch) to 'feature/parked'",
+                result.Stderr, StringComparison.Ordinal);
+            Assert.Contains("no default branch configured", result.Stderr, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 2, CODEX SECURITY MEDIUM. Caller-facing failure text is
+        /// sanitized before it leaves the process: raw git stderr routinely names
+        /// absolute paths, and this string is now returned by PATCH /status,
+        /// PATCH /order and the phone gateway shim rather than only reaching the
+        /// in-app activity feed.
+        /// </summary>
+        [Fact]
+        public void SanitizeForCaller_RedactsPathsFlattensAndCaps()
+        {
+            string raw = "fatal: could not read H:\\DevLaptop\\ClarionPowerShell\\MultiTerminal\\.git\\config\r\n"
+                       + "hint: check /home/johnh/.gitconfig too";
+
+            string clean = WorktreeMergeService.SanitizeForCaller(raw);
+
+            Assert.DoesNotContain("H:\\DevLaptop", clean, StringComparison.Ordinal);
+            Assert.DoesNotContain("/home/johnh", clean, StringComparison.Ordinal);
+            Assert.Contains("<path>", clean, StringComparison.Ordinal);
+            Assert.DoesNotContain("\n", clean, StringComparison.Ordinal);
+            Assert.DoesNotContain("\r", clean, StringComparison.Ordinal);
+
+            Assert.Equal(string.Empty, WorktreeMergeService.SanitizeForCaller(null));
+            Assert.Equal(string.Empty, WorktreeMergeService.SanitizeForCaller("   "));
+
+            string capped = WorktreeMergeService.SanitizeForCaller(new string('x', 5000));
+            Assert.True(capped.Length <= 241, $"expected a capped string, got {capped.Length} chars");
+        }
+
+        /// <summary>Branch off the CURRENT HEAD (not master) and commit, returning to it.</summary>
+        private string CommitOnTaskBranchFromHead(string message)
+        {
+            string origin = RunGit(_repoRoot, "rev-parse", "--abbrev-ref", "HEAD").Trim();
+            RunGit(_repoRoot, "checkout", "-b", CanonicalBranch);
+            File.WriteAllText(Path.Combine(_repoRoot, "work.txt"), message);
+            RunGit(_repoRoot, "add", "work.txt");
+            RunGit(_repoRoot, "commit", "-m", message);
+            string sha = RunGit(_repoRoot, "rev-parse", "HEAD").Trim();
+            RunGit(_repoRoot, "checkout", origin);
+            return sha;
         }
 
         /// <summary>

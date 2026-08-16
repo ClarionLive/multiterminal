@@ -593,6 +593,19 @@ namespace MultiTerminal.TasksPanel
                             {
                                 PostErrorMessage(reorderResult.Error ?? "Failed to reorder task");
                             }
+                            else if (reorderResult?.MergeOutcome?.NeedsAttention == true)
+                            {
+                                // Dragging a card into Done runs the auto-merge, and the
+                                // reorder itself SUCCEEDED — so this is not an error, but
+                                // the branch did not land and the person who dragged the
+                                // card is the only one positioned to act (task b88e7017,
+                                // pipeline Run 2 verifier). Without this the desktop
+                                // drag-to-done stays exactly as silent as the MCP tool
+                                // was before this ticket.
+                                PostErrorMessage(
+                                    "Task moved, but the auto-merge did not land: "
+                                    + reorderResult.MergeOutcome.Message);
+                            }
                         }
                         break;
 
