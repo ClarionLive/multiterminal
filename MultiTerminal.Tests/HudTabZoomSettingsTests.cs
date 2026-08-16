@@ -160,6 +160,40 @@ namespace MultiTerminal.Tests
             Assert.Equal(0.8, actual, 3);
         }
 
+        /// <summary>
+        /// The case the first version of the test above could not reach — and the one that actually
+        /// matters, because it is the COMMON path rather than an exotic one.
+        /// </summary>
+        /// <remarks>
+        /// <para>A pre-upgrade install has no per-tab key at all, so every tab reads through the legacy
+        /// global. The original NaN fix guarded the per-tab read and the write but NOT that fallback,
+        /// so a non-finite global still reached WebView2.ZoomFactor and latched the container's echo
+        /// guard permanently open.</para>
+        /// <para>The first regression test seeded a FINITE global as the fallback, so it could only ever
+        /// pass — the same "anchor drawn from a safe population" flaw that let the ApplyGridLayout bug
+        /// hide behind a green test. This one seeds the fallback itself hostile and asserts on it.
+        /// It fails against the half-fix.</para>
+        /// </remarks>
+        [Theory]
+        [InlineData("NaN")]
+        [InlineData("Infinity")]
+        [InlineData("-Infinity")]
+        public void A_non_finite_LEGACY_GLOBAL_never_reaches_a_tab_through_the_fallback(string storedGlobal)
+        {
+            var seed = NewService();
+            seed.Set("TaskHudZoom", storedGlobal);   // hostile fallback, and NO per-tab key at all
+
+            var read = NewService();
+            double viaFallback = read.GetHudTabZoom("__graph__");
+            double direct = read.GetTaskHudZoom();
+
+            Assert.False(double.IsNaN(viaFallback), "NaN reached a tab through the legacy fallback.");
+            Assert.False(double.IsInfinity(viaFallback), "Infinity reached a tab through the legacy fallback.");
+            Assert.False(double.IsNaN(direct));
+            Assert.False(double.IsInfinity(direct));
+            Assert.Equal(1.0, viaFallback, 3);   // falls back to the default, not to garbage
+        }
+
         /// <summary>Writing a non-finite zoom is refused rather than clamped into the file.</summary>
         [Theory]
         [InlineData(double.NaN)]

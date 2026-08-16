@@ -85,11 +85,34 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
+        /// Drops a closed tab's remembered zoom.
+        /// </summary>
+        /// <param name="tabId">The tab's own id.</param>
+        /// <remarks>
+        /// Re-keying this guard from persistence key to tab id turned a bounded key space (permanent
+        /// tabs + one browser bucket) into an unbounded one: every browser tab opened and closed left a
+        /// dead entry for the life of the process. That is the same unbounded-growth argument used to
+        /// justify the shared browser bucket in settings, so it would have been inconsistent to accept
+        /// it in memory. The tab's PERSISTENCE key is deliberately not forgotten — the bucket value has
+        /// to survive a moment with no browser tab open, which is what lets a later tab adopt it.
+        /// </remarks>
+        public void Forget(string tabId)
+        {
+            if (string.IsNullOrEmpty(tabId)) return;
+            _last.Remove(tabId);
+        }
+
+        /// <summary>
         /// Gets the zoom last applied to or reported for a tab, if any.
         /// </summary>
         /// <param name="tabId">The tab's own id — NOT its persistence key.</param>
         /// <param name="zoom">The remembered zoom.</param>
         /// <returns>True when a zoom is known for the tab.</returns>
+        /// <remarks>
+        /// No production caller: the container adopts a newly-opened tab's zoom from its own
+        /// <c>_lastZoomByKey</c> (a per-KEY question), not from this per-TAB guard. Retained as the
+        /// read seam the tracker's tests use to assert what the guard remembers.
+        /// </remarks>
         public bool TryGetKnown(string tabId, out double zoom)
         {
             zoom = 0;

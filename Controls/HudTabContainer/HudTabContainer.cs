@@ -323,6 +323,12 @@ namespace MultiTerminal.Controls
             entry.Control.Dispose();
             _tabs.Remove(entry);
 
+            // Drop the per-tab echo entry; a closed browser tab never returns under the same id, so
+            // keeping it would leak one entry per open/close for the life of the process. The tab's
+            // persistence KEY is deliberately kept — the browser bucket must survive a moment with no
+            // browser tab open so the next one can adopt it.
+            _zoomTracker.Forget(entry.Id);
+
             if (_activeTabIndex >= index)
             {
                 _activeTabIndex = Math.Max(0, _activeTabIndex - 1);

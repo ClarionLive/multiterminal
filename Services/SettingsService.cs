@@ -603,7 +603,9 @@ namespace MultiTerminal.Services
         public double GetAgentPanelZoom()
         {
             string value = Get(AgentPanelZoomKey);
-            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            if (!string.IsNullOrEmpty(value)
+                && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom)
+                && IsFiniteZoom(zoom))
             {
                 return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
             }
@@ -631,7 +633,9 @@ namespace MultiTerminal.Services
         public double GetTaskHudZoom()
         {
             string value = Get(TaskHudZoomKey);
-            if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+            if (!string.IsNullOrEmpty(value)
+                && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom)
+                && IsFiniteZoom(zoom))
             {
                 return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
             }

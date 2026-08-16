@@ -148,6 +148,26 @@ namespace MultiTerminal.Tests
             Assert.False(t.ShouldReport("browser-2", 1.5));
         }
 
+        /// <summary>
+        /// REGRESSION — pipeline Run 2, debugger delta gate, LOW. Re-keying the guard from persistence
+        /// key to tab id turned a bounded key space into an unbounded one, so a closed tab must be
+        /// forgotten or the guard leaks one entry per browser tab opened and closed.
+        /// </summary>
+        [Fact]
+        public void A_closed_tab_is_forgotten()
+        {
+            var t = new HudTabZoomTracker();
+            t.Record("browser-1", 1.5);
+            Assert.True(t.TryGetKnown("browser-1", out _));
+
+            t.Forget("browser-1");
+
+            Assert.False(t.TryGetKnown("browser-1", out _));
+
+            // And a NEW tab reusing that id is not silently pre-loaded with the dead tab's value.
+            Assert.True(t.ShouldReport("browser-1", 1.5));
+        }
+
         [Fact]
         public void An_unknown_key_reports_nothing_known()
         {
