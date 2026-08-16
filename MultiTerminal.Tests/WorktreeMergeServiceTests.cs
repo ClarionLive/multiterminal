@@ -360,16 +360,40 @@ namespace MultiTerminal.Tests
             foreach (TrunkMismatchKind kind in Enum.GetValues(typeof(TrunkMismatchKind)))
             {
                 string target = WorktreeMergeService.RemedyTargetBranch(kind, "stale");
+                string message = WorktreeMergeService.BuildTrunkMismatchMessage(
+                    kind, trunk: "main", wantTrunk: "stale", branchName: "task/abcd1234");
 
-                if (kind == TrunkMismatchKind.CheckoutOnWrongBranch)
-                {
-                    Assert.Equal("stale", target);
-                }
-                else
+                bool isConfigVerdict = kind == TrunkMismatchKind.ConfiguredTrunkMissing
+                                    || kind == TrunkMismatchKind.ConfiguredTrunkStale;
+
+                if (isConfigVerdict)
                 {
                     Assert.True(target == null,
                         $"verdict {kind} names a branch to check out ('{target}'), but this verdict means the "
                         + "CONFIG is wrong — sending the operator to that branch is the shipped defect this ticket fixes");
+                }
+                else
+                {
+                    // Everything else routes to the default arm, which DOES tell the
+                    // operator to move — so it must name a real branch. None is included
+                    // deliberately: it reaches that arm too, and returning null for it
+                    // produced the literal "check out ''".
+                    Assert.Equal("stale", target);
+                }
+
+                // The half that was missing in Run 1 (code-reviewer MAJOR): assert the
+                // SHIPPED STRING agrees with the helper. Without this the loop compared
+                // a ternary against itself while BuildTrunkMismatchMessage independently
+                // re-derived "check out '{wantTrunk}'" — a tautology dressed as a gate.
+                if (target == null)
+                {
+                    Assert.False(message.Contains("check out '", StringComparison.Ordinal),
+                        $"verdict {kind} names no remedy branch, but its message still tells the operator to "
+                        + $"check one out: {message}");
+                }
+                else
+                {
+                    Assert.Contains($"check out '{target}'", message, StringComparison.Ordinal);
                 }
             }
         }
@@ -395,6 +419,68 @@ namespace MultiTerminal.Tests
             Assert.False(result.Success);
             Assert.DoesNotContain("check out 'stale'", result.Stderr);
             Assert.Contains("origin/HEAD", result.Stderr);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 1, DEBUGGER HIGH. An INCONCLUSIVE probe must never be read as
+        /// "the configured trunk does not exist".
+        ///
+        /// <para>GitExec collapses a timeout AND a process-start failure onto
+        /// ExitCode -1, while a genuinely absent ref is exit 1 — and GitExec's own docs
+        /// require callers to treat TimedOut as retry-later, "NOT as evidence that a
+        /// worktree/branch is gone". The first cut tested `ExitCode != 0`, so a wedged
+        /// or missing git produced a confident ConfiguredTrunkMissing whose remedy tells
+        /// the operator to set git_default_branch to whatever branch the checkout is
+        /// parked on. When the checkout is the thing that is wrong — the case 90c2acc6
+        /// exists to catch — that promotes a feature branch to project trunk.</para>
+        ///
+        /// <para>Driven through a NON-REPOSITORY directory, where git exits 128 rather
+        /// than 1. Same guard branch as a timeout, but deterministic and fast — a real
+        /// wedged-git fixture cannot be made reliable in a unit test.</para>
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task InconclusiveProbe_IsNotReadAsMissingTrunk()
+        {
+            string notARepo = Path.Combine(Path.GetTempPath(), $"mt_not_a_repo_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(notARepo);
+            try
+            {
+                var kind = await WorktreeMergeService.ClassifyTrunkMismatchAsync(
+                    notARepo, trunk: "feature/parked", wantTrunk: "master");
+
+                Assert.Equal(TrunkMismatchKind.CheckoutOnWrongBranch, kind);
+                Assert.NotEqual(TrunkMismatchKind.ConfiguredTrunkMissing, kind);
+            }
+            finally
+            {
+                TryDeleteDir(notARepo);
+            }
+        }
+
+        /// <summary>
+        /// Pins the exit-code premise the guard rests on, so a future git version that
+        /// changed it would fail HERE rather than silently reopening the HIGH above:
+        /// a missing ref in a real repo is exit 1, and a non-repository is not.
+        /// </summary>
+        [Fact]
+        public void MissingRefAndBrokenRepo_HaveDifferentExitCodes()
+        {
+            int missingRef = RunGitExit(_repoRoot, out _, "rev-parse", "--verify", "--quiet", "refs/heads/nope");
+            Assert.Equal(1, missingRef);
+
+            string notARepo = Path.Combine(Path.GetTempPath(), $"mt_not_a_repo_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(notARepo);
+            try
+            {
+                int brokenRepo = RunGitExit(notARepo, out _, "rev-parse", "--verify", "--quiet", "refs/heads/nope");
+                Assert.True(brokenRepo > 1,
+                    $"expected a non-repository to exit >1 (got {brokenRepo}); the classifier distinguishes "
+                    + "'absent ref' (exit 1) from 'could not look' on exactly this boundary");
+            }
+            finally
+            {
+                TryDeleteDir(notARepo);
+            }
         }
 
         /// <summary>

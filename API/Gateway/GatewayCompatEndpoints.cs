@@ -27,10 +27,14 @@ namespace MultiTerminal.API.Gateway
                 var result = broker.UpdateTaskStatus(taskId, request.Status);
                 if (!result.Success)
                     return Results.Problem(detail: result.Error, statusCode: 400);
-                // Non-empty body matching TasksController.UpdateStatus's { status } shape
+                // Non-empty body matching TasksController.UpdateStatus's shape
                 // (7ce19175): the phone PWA's api() calls res.json() on 2xx, so an empty ack
-                // would throw and be read as failure. Shape stays identical to the native route.
-                return Results.Ok(new { status = request.Status });
+                // would throw and be read as failure. Shape stays identical to the native route
+                // — which is why mergeOutcome is here too (task b88e7017, pipeline Run 1
+                // debugger MEDIUM): adding it to the controller alone would have made the
+                // "identical shape" claim above quietly false, and left phone-initiated
+                // task completions unable to learn that the auto-merge was refused.
+                return Results.Ok(new { status = request.Status, mergeOutcome = result.MergeOutcome });
             });
         }
     }

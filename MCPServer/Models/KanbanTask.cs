@@ -409,6 +409,15 @@ namespace MultiTerminal.MCPServer.Models
         public string BranchName { get; set; }
 
         /// <summary>
+        /// When the merge was refused for a trunk mismatch, the
+        /// <c>TrunkMismatchKind</c> name — which SIDE was judged wrong. Null otherwise.
+        /// Serialized as the enum's name so a client can branch on the verdict instead
+        /// of pattern-matching <see cref="Message"/>, which is prose written for humans
+        /// and expected to be reworded.
+        /// </summary>
+        public string TrunkMismatch { get; set; }
+
+        /// <summary>
         /// Human-readable outcome. For a refusal this carries the reason AND the
         /// remedy, in the honest-rejection style of task 405273fd: say what did not
         /// happen and what still needs doing.

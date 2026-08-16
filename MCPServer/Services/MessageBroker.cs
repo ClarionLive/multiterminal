@@ -701,7 +701,7 @@ namespace MultiTerminal.MCPServer.Services
                         Merged = true,
                         NeedsAttention = false,
                         MergedInto = mergeResult.MergedInto,
-                        BranchName = $"task/{taskIdShort}",
+                        BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
                         Message = cleanupPending
                             ? $"Merged into {mergeResult.MergedInto}; branch cleanup pending (next janitor sweep)."
                             : $"Merged into {mergeResult.MergedInto}; task branch deleted."
@@ -731,7 +731,7 @@ namespace MultiTerminal.MCPServer.Services
                         Merged = false,
                         NeedsAttention = false,
                         MergedInto = mergeResult.MergedInto,
-                        BranchName = $"task/{taskIdShort}",
+                        BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
                         Message = $"No merge needed — {skipReason}."
                     };
                 }
@@ -757,10 +757,18 @@ namespace MultiTerminal.MCPServer.Services
                         Merged = false,
                         NeedsAttention = true,
                         MergedInto = mergeResult.MergedInto,
-                        BranchName = $"task/{taskIdShort}",
+                        BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                        // Carries the typed verdict, not just prose (pipeline Run 1,
+                        // code-reviewer MINOR): TrunkMismatchKind was introduced so
+                        // consumers could branch without string-matching, but it stopped
+                        // at the DTO boundary, leaving the MCP tool able to do exactly
+                        // the string-matching the enum exists to prevent.
+                        TrunkMismatch = mergeResult.TrunkMismatch == MultiTerminal.Services.TrunkMismatchKind.None
+                            ? null
+                            : mergeResult.TrunkMismatch.ToString(),
                         Message = $"{conflictTag}: {mergeResult.Stderr} "
-                            + $"Branch task/{taskIdShort} is preserved with its commits; the worktree directory was removed. "
-                            + $"Nothing was lost, but the branch has NOT landed in trunk."
+                            + $"Branch {MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId)} is preserved with its commits; the worktree directory was removed. "
+                            + "Nothing was lost, but the branch has NOT landed in trunk."
                     };
                 }
             }
@@ -779,9 +787,14 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     Merged = false,
                     NeedsAttention = true,
-                    BranchName = $"task/{taskIdShort}",
-                    Message = $"Auto-merge threw: {ex.Message} "
-                        + $"Branch task/{taskIdShort} is preserved with its commits; it has NOT landed in trunk."
+                    BranchName = MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId),
+                    // TruncateReason, matching the sibling activity-feed line above
+                    // (pipeline Run 1, code-reviewer MINOR): raw exception text is
+                    // unbounded and often carries absolute paths and git internals, and
+                    // this string now travels to an MCP tool response rather than only
+                    // to the server log.
+                    Message = $"Auto-merge threw: {TruncateReason(ex.Message)} "
+                        + $"Branch {MultiTerminal.Services.WorktreeNaming.CanonicalBranch(taskId)} is preserved with its commits; it has NOT landed in trunk."
                 };
             }
 

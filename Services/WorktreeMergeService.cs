@@ -656,14 +656,8 @@ namespace MultiTerminal.Services
         private static async Task<string> DetectDefaultBranchAsync(string repoRoot)
         {
             // (2) Remote's published default (origin/HEAD -> origin/<branch>).
-            var remote = await GitExec.RunAsync(repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
-            if (remote.ExitCode == 0)
-            {
-                string r = remote.Stdout.Trim();
-                const string prefix = "origin/";
-                if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
-                if (!string.IsNullOrEmpty(r)) return r;
-            }
+            string published = await ResolveOriginHeadAsync(repoRoot).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(published)) return published;
 
             // (3) The SOLE non-task local branch, if exactly one exists AND it bears a
             // conventional trunk name. Generalizing past hard-coded main/master to
@@ -707,6 +701,38 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
+        /// Budget for the trunk-classification ref lookups (task b88e7017, pipeline
+        /// Run 1 debugger LOW). These are cheap local ref reads, but they run
+        /// SYNCHRONOUSLY inside PATCH /api/tasks/{id}/status, whose MCP client gives
+        /// up at 15s and does not retry. On the default budget two wedged probes
+        /// alone could outlast that — meaning the newly-threaded outcome would fail
+        /// to reach the operator in precisely the wedged-git case it describes.
+        /// A short budget plus the inconclusive fallback keeps the refusal reportable.
+        /// </summary>
+        private const int ProbeTimeoutMs = 5000;
+
+        /// <summary>
+        /// The remote's published default branch (origin/HEAD -&gt; origin/&lt;branch&gt;),
+        /// or <c>null</c> when it can't be resolved. Single source for both
+        /// <see cref="DetectDefaultBranchAsync"/> (which uses it to CHOOSE a trunk)
+        /// and <see cref="ClassifyTrunkMismatchAsync"/> (which uses it to decide
+        /// whether the configured trunk is stale). They were separate verbatim
+        /// copies; if one had gained a fallback, the classifier's verdict could
+        /// contradict the resolver's choice about the same repository.
+        /// </summary>
+        private static async Task<string> ResolveOriginHeadAsync(string repoRoot)
+        {
+            var remote = await GitExec.RunAsync(
+                repoRoot, ProbeTimeoutMs, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
+            if (remote.TimedOut || remote.ExitCode != 0) return null;
+
+            string r = remote.Stdout.Trim();
+            const string prefix = "origin/";
+            if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
+            return string.IsNullOrEmpty(r) ? null : r;
+        }
+
+        /// <summary>
         /// Decide WHICH SIDE of a trunk mismatch is wrong (task b88e7017). Read-only:
         /// this never mutates the repo and never changes whether the merge is refused
         /// — it is refused in every case. It changes only what we tell the operator.
@@ -719,32 +745,44 @@ namespace MultiTerminal.Services
         /// <item>MultiTerminal — configured 'master' existed but was 320 commits behind
         /// 'main', which is where origin/HEAD pointed.</item>
         /// </list>
-        /// Ordered most-conclusive first. A missing branch is unambiguous; origin/HEAD
-        /// is the remote's published answer; ancestry is the weakest but still decisive
-        /// signal (a trunk BEHIND the checkout cannot be the branch we should be
-        /// merging into). Anything else keeps 90c2acc6's original verdict.
+        /// Two probes, most-conclusive first: a missing branch is unambiguous, and
+        /// origin/HEAD is the remote's published answer. Anything else — including an
+        /// INCONCLUSIVE probe (timeout / git unavailable) — keeps 90c2acc6's original
+        /// verdict, which is the conservative one. Ancestry is deliberately NOT
+        /// consulted; see the comment at the fallthrough for why it cannot work.
         /// </remarks>
         internal static async Task<TrunkMismatchKind> ClassifyTrunkMismatchAsync(
             string repoRoot, string trunk, string wantTrunk)
         {
             // (1) The configured trunk isn't a branch here at all. Nothing to check
             // out, so "go check it out" was never actionable advice.
+            //
+            // INCONCLUSIVE IS NOT ABSENT (pipeline Run 1, debugger HIGH). GitExec
+            // returns ExitCode -1 for BOTH a timeout and a process-start failure,
+            // while a genuinely missing ref is exit 1 — and GitExec's own docs say
+            // callers "MUST treat TimedOut as retry-later, NOT as evidence that a
+            // worktree/branch is gone". The first cut tested `ExitCode != 0`, so a
+            // wedged or missing git produced a confident ConfiguredTrunkMissing and
+            // told the operator to set git_default_branch to whatever branch the
+            // checkout happened to be parked on — which, when the checkout really was
+            // wrong, promotes a feature branch to project trunk. That is the exact
+            // confidently-wrong-advice failure this ticket exists to remove, so an
+            // inconclusive probe falls back to 90c2acc6's conservative verdict.
             var exists = await GitExec.RunAsync(
-                repoRoot, "rev-parse", "--verify", "--quiet", $"refs/heads/{wantTrunk}").ConfigureAwait(false);
-            if (exists.ExitCode != 0) return TrunkMismatchKind.ConfiguredTrunkMissing;
+                repoRoot, ProbeTimeoutMs, "rev-parse", "--verify", "--quiet", $"refs/heads/{wantTrunk}").ConfigureAwait(false);
+            if (exists.TimedOut || exists.ExitCode < 0 || exists.ExitCode > 1)
+                return TrunkMismatchKind.CheckoutOnWrongBranch;
+            if (exists.ExitCode == 1) return TrunkMismatchKind.ConfiguredTrunkMissing;
 
             // (2) The remote's published default agrees with the CHECKOUT, not with
-            // the config. Same source DetectDefaultBranchAsync trusts first, so
-            // deferring to it here keeps the two paths from contradicting each other.
-            var remote = await GitExec.RunAsync(
-                repoRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
-            if (remote.ExitCode == 0)
-            {
-                string r = remote.Stdout.Trim();
-                const string prefix = "origin/";
-                if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
-                if (string.Equals(r, trunk, StringComparison.Ordinal)) return TrunkMismatchKind.ConfiguredTrunkStale;
-            }
+            // the config. Shares ResolveOriginHeadAsync with DetectDefaultBranchAsync
+            // so the verdict can never disagree with the resolver about what
+            // origin/HEAD says (pipeline Run 1, code-reviewer MAJOR: this was a
+            // verbatim copy sitting 20 lines below a comment justifying sharing the
+            // branch parser for exactly that reason).
+            string publishedDefault = await ResolveOriginHeadAsync(repoRoot).ConfigureAwait(false);
+            if (string.Equals(publishedDefault, trunk, StringComparison.Ordinal))
+                return TrunkMismatchKind.ConfiguredTrunkStale;
 
             // DELIBERATELY NO ANCESTRY PROBE. The first cut of this method also asked
             // "is wantTrunk an ancestor of trunk?" and called that staleness. It is
@@ -775,8 +813,19 @@ namespace MultiTerminal.Services
         /// invariant testable: a remedy must never point at a branch behind HEAD.
         /// <see cref="WorktreeMergeServiceTests"/> asserts that over every verdict.
         /// </remarks>
+        /// <remarks>
+        /// Phrased as "the CONFIG verdicts suppress the branch-hop" rather than
+        /// "CheckoutOnWrongBranch enables it", so the fallthrough matches
+        /// <see cref="BuildTrunkMismatchMessage"/>'s <c>default:</c> arm exactly. The
+        /// narrower form returned null for <see cref="TrunkMismatchKind.None"/>, which
+        /// still routes to that arm, producing the literal text "check out ''" —
+        /// caught by ConfigProblemsNeverSendTheOperatorBranchHopping once it began
+        /// asserting the shipped string instead of this helper alone.
+        /// </remarks>
         internal static string RemedyTargetBranch(TrunkMismatchKind kind, string wantTrunk)
-            => kind == TrunkMismatchKind.CheckoutOnWrongBranch ? wantTrunk : null;
+            => kind == TrunkMismatchKind.ConfiguredTrunkMissing || kind == TrunkMismatchKind.ConfiguredTrunkStale
+                ? null
+                : wantTrunk;
 
         /// <summary>
         /// Build the refusal text for a trunk mismatch. Every branch refuses; only the
@@ -801,10 +850,19 @@ namespace MultiTerminal.Services
 
                 default:
                     // 90c2acc6's original case and message: the configured trunk is
-                    // live and not behind, so the checkout really has wandered.
+                    // live and not contradicted, so the checkout really has wandered.
+                    //
+                    // The target is taken from RemedyTargetBranch rather than
+                    // re-derived here (pipeline Run 1, code-reviewer MAJOR). The first
+                    // cut interpolated wantTrunk directly, which left the helper with
+                    // no production caller and reduced its invariant test to a ternary
+                    // asserted against itself. Routing the only "go check out X"
+                    // sentence through the helper is what makes that test bind to
+                    // shipped text.
+                    string target = RemedyTargetBranch(kind, wantTrunk);
                     return $"Main checkout is on '{trunk}', but the expected trunk is '{wantTrunk}'. "
-                        + $"Refusing to merge '{branchName}' into the wrong branch — check out '{wantTrunk}' in the main checkout "
-                        + $"and re-mark the task done to retry.";
+                        + $"Refusing to merge '{branchName}' into the wrong branch — check out '{target}' in the main checkout "
+                        + "and re-mark the task done to retry.";
             }
         }
 
@@ -830,20 +888,6 @@ namespace MultiTerminal.Services
     }
 
     /// <summary>
-    /// Outcome of a Phase 3 auto-merge attempt. <see cref="Success"/> is true
-    /// when either the merge committed cleanly OR the operation was skipped
-    /// for a benign reason (e.g. no commits to merge, branch already gone).
-    /// Failure populates <see cref="Stderr"/> and (for merge conflicts)
-    /// <see cref="HadConflicts"/>.
-    ///
-    /// <para><see cref="Success"/> alone does NOT mean a merge happened — a benign
-    /// skip is also a success. Callers that need to know whether the task branch
-    /// actually landed in trunk (the activity feed, the janitor's recovery
-    /// accounting) MUST check <see cref="Merged"/>, not <see cref="Success"/>.
-    /// Conflating the two (task 90c2acc6, Suspect A) let a no-op be reported as
-    /// "merged into trunk", masking the very failure this class describes.</para>
-    /// </summary>
-    /// <summary>
     /// Which side of a trunk mismatch is wrong (task b88e7017). Typed rather than
     /// prose so the activity feed, the janitor and the tests can branch on it without
     /// matching on message text — the text is for humans and will be reworded.
@@ -857,8 +901,10 @@ namespace MultiTerminal.Services
         ConfiguredTrunkMissing,
 
         /// <summary>
-        /// The configured default branch exists but is behind the checkout and/or
-        /// contradicted by origin/HEAD — the config is stale, not the checkout.
+        /// The configured default branch exists, but origin/HEAD publishes the
+        /// CHECKOUT's branch as the real default — the config is stale, not the
+        /// checkout. (Ancestry is not part of this test; see
+        /// <see cref="WorktreeMergeService.ClassifyTrunkMismatchAsync"/>.)
         /// </summary>
         ConfiguredTrunkStale,
 
@@ -869,6 +915,20 @@ namespace MultiTerminal.Services
         CheckoutOnWrongBranch,
     }
 
+    /// <summary>
+    /// Outcome of a Phase 3 auto-merge attempt. <see cref="Success"/> is true
+    /// when either the merge committed cleanly OR the operation was skipped
+    /// for a benign reason (e.g. no commits to merge, branch already gone).
+    /// Failure populates <see cref="Stderr"/> and (for merge conflicts)
+    /// <see cref="HadConflicts"/>.
+    ///
+    /// <para><see cref="Success"/> alone does NOT mean a merge happened — a benign
+    /// skip is also a success. Callers that need to know whether the task branch
+    /// actually landed in trunk (the activity feed, the janitor's recovery
+    /// accounting) MUST check <see cref="Merged"/>, not <see cref="Success"/>.
+    /// Conflating the two (task 90c2acc6, Suspect A) let a no-op be reported as
+    /// "merged into trunk", masking the very failure this class describes.</para>
+    /// </summary>
     public class MergeResult
     {
         public bool Success { get; set; }
