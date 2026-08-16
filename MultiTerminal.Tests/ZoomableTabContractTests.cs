@@ -86,6 +86,36 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// REGRESSION — pipeline Run 1, cross-model adversary gate, MEDIUM. The container must not
+        /// accept a permanent tab that cannot be zoomed.
+        /// </summary>
+        /// <remarks>
+        /// The finding: the interface was DOCUMENTED as making the omission a compile error — in the
+        /// plan's acceptance criteria, in IZoomableTab's own XML docs, in the rules file and in the
+        /// commit message — but `AddPermanentTab` took a plain `Control`, and `HookTabZoom` returned
+        /// early for a non-zoomable one. A new permanent tab could compile in, render normally, and
+        /// silently never persist or report zoom. The interface closed the copy-paste hole (a renderer
+        /// with both members that forgets the declaration, covered above) and left the omission hole
+        /// wide open, while the documentation claimed both were shut.
+        /// The generic constraint is what makes the documented claim true.
+        /// </remarks>
+        [Fact]
+        public void A_permanent_tab_cannot_be_registered_unless_it_is_zoomable()
+        {
+            var add = typeof(HudTabContainer)
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .Single(m => m.Name == "AddPermanentTab");
+
+            Assert.True(add.IsGenericMethodDefinition,
+                "AddPermanentTab is not generic, so it cannot constrain its control type — a non-zoomable " +
+                "tab would compile in and silently skip zoom persistence.");
+
+            var constraints = add.GetGenericArguments().Single().GetGenericParameterConstraints();
+
+            Assert.Contains(typeof(IZoomableTab), constraints);
+        }
+
+        /// <summary>
         /// The interface must carry BOTH halves. An interface with only SetZoomFactor would re-create the
         /// original asymmetry — restore reaching every tab while save reached only one — with the
         /// appearance of having been fixed.

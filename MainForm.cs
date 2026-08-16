@@ -4324,19 +4324,6 @@ namespace MultiTerminal
         private bool _suppressAgentPanelZoomSync;
 
         /// <summary>
-        /// Persists one HUD tab's zoom and mirrors it to the SAME tab in every other open terminal.
-        /// </summary>
-        /// <remarks>
-        /// <para>Re-entrancy is guarded PER KEY, not by a single flag. Propagating a zoom applies it to
-        /// other documents, and an apply can come back as a change; a process-wide bool would also drop
-        /// a legitimate change to a DIFFERENT tab that arrived during that loop, which is a silent lost
-        /// write of exactly the kind this ticket exists to fix.</para>
-        /// <para>This replaces OnTaskHudZoomChanged, which wrote the single global TaskHudZoom. Keeping
-        /// that write here would defeat the whole ticket: the global key is the fallback for tabs that
-        /// have never been zoomed individually, so writing it from the Tasks tab would move every other
-        /// untouched tab too — Option A behaviour leaking back in through the save path.</para>
-        /// </remarks>
-        /// <summary>
         /// Restores every HUD tab's own saved zoom into a terminal document.
         /// </summary>
         /// <remarks>
@@ -4362,6 +4349,19 @@ namespace MultiTerminal
             }
         }
 
+        /// <summary>
+        /// Persists one HUD tab's zoom and mirrors it to the SAME tab in every other open terminal.
+        /// </summary>
+        /// <remarks>
+        /// <para>Re-entrancy is guarded PER KEY, not by a single flag. Propagating a zoom applies it to
+        /// other documents, and an apply can come back as a change; a process-wide bool would also drop
+        /// a legitimate change to a DIFFERENT tab that arrived during that loop, which is a silent lost
+        /// write of exactly the kind this ticket exists to fix.</para>
+        /// <para>This replaces OnTaskHudZoomChanged, which wrote the single global TaskHudZoom. Keeping
+        /// that write here would defeat the whole ticket: the global key is the fallback for tabs that
+        /// have never been zoomed individually, so writing it from the Tasks tab would move every other
+        /// untouched tab too — Option A behaviour leaking back in through the save path.</para>
+        /// </remarks>
         private void OnHudTabZoomChanged(object sender, HudTabZoomChangedEventArgs e)
         {
             if (e == null || string.IsNullOrEmpty(e.ZoomKey)) return;
@@ -4667,12 +4667,16 @@ namespace MultiTerminal
                 doc.SetMessageBroker(_mcpServer?.Broker); // Enable status bar updates
                 doc.TerminalExited += OnTerminalExited;
                 doc.Terminal.FontSizeChanged += OnTerminalFontSizeChanged;
+                doc.AgentSplitRatioChanged += OnAgentSplitRatioChanged;
+                doc.HudSplitRatioChanged += OnHudSplitRatioChanged;
+                doc.StatusBarHeightChanged += OnStatusBarHeightChanged;
+                doc.HudTabZoomChanged += OnHudTabZoomChanged;
                 doc.Terminal.TerminalClicked += OnTerminalClicked;
                 doc.SaveAsPromptRequested += OnSaveAsPromptRequested;
                 doc.DirectoryChanged += OnTerminalDirectoryChanged;
                 doc.ProjectFileChanged += OnProjectFileChanged;
                 doc.ClaudeCodeDetected += OnClaudeCodeDetected;
-            doc.TaskDropped += OnTaskDroppedOnTerminal;
+                doc.TaskDropped += OnTaskDroppedOnTerminal;
 
                 // Wire up "Launch as..." context menu support
                 doc.GetAvailableIdentities = () => GetAvailableIdentities().ToArray();
@@ -4685,6 +4689,20 @@ namespace MultiTerminal
                 var terminalName = PreRegisterTerminal(doc.DocId, doc.LaunchNonce);
                 doc.StartTerminal(_settings?.GetLastDirectory(), terminalName);
                 doc.SetFontSize(_settings?.GetTerminalFontSize() ?? 10f);
+
+                // Grid-preset terminals get the same saved layout as every other creation path.
+                // This block was absent here (task 0d72698a, debugger gate): a terminal spawned by a
+                // layout preset opened every HUD tab at 1.0 no matter what was saved, and Ctrl+wheel
+                // in it went nowhere because nothing was subscribed — the ticket's own defect, one
+                // layer up. Split ratios and status-bar height were missing for the same reason.
+                if (_settings != null)
+                {
+                    doc.ApplyAgentSplitRatio(_settings.GetAgentPanelSplitRatio());
+                    doc.ApplyHudSplitRatio(_settings.GetHudSplitRatio());
+                    ApplySavedHudTabZooms(doc);
+                    doc.ApplyStatusBarHeight(_settings.GetStatusBarHeight());
+                }
+
                 docs.Add(doc);
             }
 

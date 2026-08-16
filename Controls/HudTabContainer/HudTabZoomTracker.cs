@@ -12,6 +12,12 @@ namespace MultiTerminal.Controls
     /// easy to get quietly wrong — the browser-tab bucket and the echo guard — can be tested without
     /// constructing a WinForms control tree and a WebView2. Follows the same shape as the codebase's
     /// other pure helpers (ChecklistGraphBuilder, GlossBackfillPlanner, StartupPortContentionClassifier).</para>
+    /// <para>TWO DIFFERENT IDENTITIES, deliberately. The echo guard is keyed by TAB
+    /// (<c>tabId</c>) because "has this control already been given this value" is a per-control
+    /// question. Persistence is keyed by <see cref="KeyFor"/>, which collapses every browser tab onto
+    /// one bucket. Conflating them was a real lost-write bug: with the guard keyed by the shared
+    /// bucket, zooming browser tab B to the value tab A last reported was mistaken for A's echo and
+    /// silently dropped — the screen showed the new size while settings kept the old one.</para>
     /// </remarks>
     internal sealed class HudTabZoomTracker
     {
@@ -39,47 +45,55 @@ namespace MultiTerminal.Controls
             isPermanent ? tabId : BrowserZoomKey;
 
         /// <summary>
-        /// Records a zoom the app itself applied, so the resulting echo is not mistaken for user intent.
+        /// Records a zoom the app itself applied to ONE tab, so the resulting echo is not mistaken for
+        /// user intent.
         /// </summary>
-        /// <param name="key">The persistence key.</param>
+        /// <param name="tabId">The tab's own id — NOT its persistence key.</param>
         /// <param name="zoom">The zoom factor being applied.</param>
-        public void Record(string key, double zoom)
+        public void Record(string tabId, double zoom)
         {
-            if (string.IsNullOrEmpty(key)) return;
-            _last[key] = zoom;
+            if (string.IsNullOrEmpty(tabId)) return;
+            _last[tabId] = zoom;
         }
 
         /// <summary>
         /// Decides whether a zoom reported by a tab is a real change worth persisting.
         /// </summary>
-        /// <param name="key">The persistence key.</param>
+        /// <param name="tabId">The tab's own id — NOT its persistence key.</param>
         /// <param name="zoom">The reported zoom factor.</param>
         /// <returns>True when this is a genuine change; false when it merely repeats the last value.</returns>
         /// <remarks>
-        /// Comparing VALUES rather than setting a "currently applying" flag is deliberate. The renderers
-        /// disagree about whether they subscribe to WebView2's ZoomFactorChanged before or after applying
-        /// a pending zoom, and a zoom applied before initialisation is replayed later — so the echo can
-        /// arrive long after the call that caused it, when any synchronous flag would already be clear.
-        /// A value check does not care about ordering or timing.
+        /// <para>Comparing VALUES rather than setting a "currently applying" flag is deliberate. The
+        /// renderers disagree about whether they subscribe to WebView2's ZoomFactorChanged before or
+        /// after applying a pending zoom, and a zoom applied before initialisation is replayed later —
+        /// so the echo can arrive long after the call that caused it, when any synchronous flag would
+        /// already be clear. A value check does not care about ordering or timing.</para>
+        /// <para>Keyed by TAB, never by persistence key. Several browser tabs share one persistence
+        /// bucket, so a bucket-keyed guard compares one tab's new value against a DIFFERENT tab's last
+        /// value and drops a genuine user zoom as though it were an echo.</para>
         /// </remarks>
-        public bool ShouldReport(string key, double zoom)
+        public bool ShouldReport(string tabId, double zoom)
         {
-            if (string.IsNullOrEmpty(key)) return false;
-            if (_last.TryGetValue(key, out var last) && Math.Abs(last - zoom) < ZoomEpsilon)
+            if (string.IsNullOrEmpty(tabId)) return false;
+            if (_last.TryGetValue(tabId, out var last) && Math.Abs(last - zoom) < ZoomEpsilon)
             {
                 return false;
             }
 
-            _last[key] = zoom;
+            _last[tabId] = zoom;
             return true;
         }
 
         /// <summary>
-        /// Gets the zoom last applied to or reported for a key, if any.
+        /// Gets the zoom last applied to or reported for a tab, if any.
         /// </summary>
-        /// <param name="key">The persistence key.</param>
+        /// <param name="tabId">The tab's own id — NOT its persistence key.</param>
         /// <param name="zoom">The remembered zoom.</param>
-        /// <returns>True when a zoom is known for the key.</returns>
-        public bool TryGetKnown(string key, out double zoom) => _last.TryGetValue(key ?? "", out zoom);
+        /// <returns>True when a zoom is known for the tab.</returns>
+        public bool TryGetKnown(string tabId, out double zoom)
+        {
+            zoom = 0;
+            return !string.IsNullOrEmpty(tabId) && _last.TryGetValue(tabId, out zoom);
+        }
     }
 }

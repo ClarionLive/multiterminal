@@ -40,29 +40,29 @@ namespace MultiTerminal.Tests
             Regex.Matches(haystack, pattern).Count;
 
         /// <summary>
-        /// Every site that restores the other persisted UI preferences must also restore zoom. A site
-        /// that restores the splitters but not zoom leaves that terminal opening at the default size —
-        /// the original complaint, surviving in one code path.
+        /// Every TerminalDocument that gets constructed must have its saved zoom restored, or that
+        /// terminal opens at the default size regardless of what the user stored.
         /// </summary>
+        /// <remarks>
+        /// ANCHORED ON CONSTRUCTION SITES, not on sibling preferences — see the long note on
+        /// <c>HudTabZoomSavePathTests.Zoom_is_wired_at_every_terminal_document_construction_site</c>.
+        /// The sibling anchor was green while `ApplyGridLayout`'s document had neither zoom NOR the
+        /// siblings, because the anchor and the subject shared the same blind spot.
+        /// </remarks>
         [Fact]
-        public void Zoom_is_restored_at_every_site_its_sibling_preferences_are_restored()
+        public void Zoom_is_restored_at_every_terminal_document_construction_site()
         {
             string mainForm = ReadStripped("MainForm.cs");
 
-            // Restore sites only — matched by the "_settings.Get..." argument. The same Apply* methods
-            // are ALSO called from the cross-terminal propagation handlers with a value passed in, and
-            // counting those would compare restore against propagation. Zoom's propagation counterpart
-            // lives in OnHudTabZoomChanged and is covered by HudTabZoomSavePathTests.
-            int zoom = CountMatches(mainForm, @"ApplySavedHudTabZooms\(doc\)");
-            int hudSplit = CountMatches(mainForm, @"doc\.ApplyHudSplitRatio\(_settings\.");
-            int statusBar = CountMatches(mainForm, @"doc\.ApplyStatusBarHeight\(_settings\.");
+            int constructions = CountMatches(mainForm, @"new TerminalDocument\(\)");
+            int restored = CountMatches(mainForm, @"ApplySavedHudTabZooms\(doc\)");
 
-            Assert.True(zoom > 0, "MainForm never restores saved HUD tab zoom.");
+            Assert.True(constructions > 0, "Found no `new TerminalDocument()` sites — the anchor is broken, not the code.");
             Assert.True(
-                zoom == hudSplit && zoom == statusBar,
-                $"HUD zoom is restored at {zoom} site(s) but sibling preferences at " +
-                $"HudSplitRatio={hudSplit}, StatusBarHeight={statusBar}. A restore site that applies the " +
-                "splitters but not zoom means that terminal opens at the default size — the original bug.");
+                restored == constructions,
+                $"MainForm constructs {constructions} TerminalDocument(s) but restores saved zoom at only " +
+                $"{restored} site(s). That terminal opens every HUD tab at the default size no matter what " +
+                "was saved — the original complaint, surviving in one code path.");
         }
 
         /// <summary>

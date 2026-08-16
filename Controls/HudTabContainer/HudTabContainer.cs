@@ -164,7 +164,20 @@ namespace MultiTerminal.Controls
         /// Permanent tabs stay in the tab strip and cannot be removed by the user.
         /// Insert position is after existing permanent tabs but before dynamic tabs.
         /// </summary>
-        public void AddPermanentTab(string tabId, string title, Control control)
+        /// <typeparam name="TControl">
+        /// The tab's control type. It MUST implement <see cref="IZoomableTab"/> — that constraint is
+        /// the whole guarantee, and it is checked by the compiler rather than hoped for.
+        /// </typeparam>
+        /// <remarks>
+        /// Generic solely to carry the <c>IZoomableTab</c> constraint (task 0d72698a, cross-model
+        /// adversary gate). Taking a plain <c>Control</c> let a new permanent tab compile in, render
+        /// normally, and silently never persist or report zoom — because <see cref="HookTabZoom"/>
+        /// returns early for a non-zoomable control. The interface alone did NOT make the omission a
+        /// compile error, despite being documented as if it did; this signature is what makes that
+        /// claim true.
+        /// </remarks>
+        public void AddPermanentTab<TControl>(string tabId, string title, TControl control)
+            where TControl : Control, IZoomableTab
         {
             // Check if tab already exists
             var existing = _tabs.FirstOrDefault(t => t.Id == tabId);
@@ -457,6 +470,17 @@ namespace MultiTerminal.Controls
         private readonly HudTabZoomTracker _zoomTracker = new HudTabZoomTracker();
 
         /// <summary>
+        /// Last zoom applied for each PERSISTENCE key, so a tab added after a restore adopts it.
+        /// </summary>
+        /// <remarks>
+        /// Distinct from <see cref="_zoomTracker"/>, which is keyed per TAB and answers "was this an
+        /// echo". This one answers "what should a newly-opened tab in this bucket start at", which is
+        /// a per-key question and must survive a moment when no tab carries the key at all.
+        /// </remarks>
+        private readonly Dictionary<string, double> _lastZoomByKey =
+            new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
         /// Raised when the user zooms a tab, carrying WHICH tab so the value can be stored per tab.
         /// </summary>
         public event EventHandler<HudTabZoomChangedEventArgs> TabZoomChanged;
@@ -480,19 +504,25 @@ namespace MultiTerminal.Controls
         {
             if (string.IsNullOrEmpty(zoomKey)) return;
 
+            // The guard is seeded PER TAB, for each tab actually touched — not once against the key.
+            // Several browser tabs share one key, so a key-seeded guard would compare one tab's next
+            // change against a different tab's value and drop a genuine user zoom as an echo.
             // Record BEFORE applying: the renderers differ in whether they subscribe to WebView2's
             // ZoomFactorChanged before or after applying a pending zoom, so applying here can echo
-            // straight back as a "change". Seeding the guard first makes that echo a no-op.
-            _zoomTracker.Record(zoomKey, zoom);
-
+            // straight back as a "change". Seeding first makes that echo a no-op.
             foreach (var tab in _tabs)
             {
                 if (string.Equals(ZoomKeyFor(tab), zoomKey, StringComparison.OrdinalIgnoreCase)
                     && tab.Control is IZoomableTab zoomable)
                 {
+                    _zoomTracker.Record(tab.Id, zoom);
                     zoomable.SetZoomFactor(zoom);
                 }
             }
+
+            // Remember the key's value even when no tab currently carries it, so a tab opened later
+            // (any browser tab, in practice) still adopts it via HookTabZoom.
+            _lastZoomByKey[zoomKey] = zoom;
         }
 
         /// <summary>
@@ -505,8 +535,11 @@ namespace MultiTerminal.Controls
         /// Subscribes a newly added tab so its zoom is observed, and applies the key's current zoom.
         /// </summary>
         /// <remarks>
-        /// Called from every site that adds to <c>_tabs</c>. Centralised on purpose: a per-site
-        /// subscription is the same hand-maintained-list shape that caused this ticket, one layer up.
+        /// Called from every site that adds a NEW entry to <c>_tabs</c>. Note that
+        /// <see cref="ReorderPermanentTabs"/> clears and re-adds the SAME TabEntry instances and must
+        /// NOT call this — doing so would subscribe every permanent tab a second time. Centralised on
+        /// purpose: a per-site subscription is the same hand-maintained-list shape that caused this
+        /// ticket, one layer up.
         /// </remarks>
         private void HookTabZoom(TabEntry entry)
         {
@@ -516,8 +549,9 @@ namespace MultiTerminal.Controls
 
             // A tab opened after a restore (any browser tab, in practice) still adopts the remembered
             // zoom rather than opening at 1.0 and looking like the bug this ticket fixes.
-            if (_zoomTracker.TryGetKnown(ZoomKeyFor(entry), out var known))
+            if (_lastZoomByKey.TryGetValue(ZoomKeyFor(entry), out var known))
             {
+                _zoomTracker.Record(entry.Id, known);
                 zoomable.SetZoomFactor(known);
             }
         }
@@ -533,12 +567,15 @@ namespace MultiTerminal.Controls
         /// </remarks>
         private void OnTabZoomChanged(TabEntry entry, double zoom)
         {
-            string key = ZoomKeyFor(entry);
-            if (!_zoomTracker.ShouldReport(key, zoom))
+            // Echo check is per TAB; persistence is per KEY. Conflating them dropped a genuine zoom on
+            // a sibling browser tab that happened to match what another tab last reported.
+            if (!_zoomTracker.ShouldReport(entry.Id, zoom))
             {
                 return;
             }
 
+            string key = ZoomKeyFor(entry);
+            _lastZoomByKey[key] = zoom;
             TabZoomChanged?.Invoke(this, new HudTabZoomChangedEventArgs(key, zoom));
         }
 

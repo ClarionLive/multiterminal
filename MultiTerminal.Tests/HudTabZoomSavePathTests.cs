@@ -43,28 +43,34 @@ namespace MultiTerminal.Tests
             Regex.Matches(haystack, pattern).Count;
 
         /// <summary>
-        /// THE ONE THAT MATTERS. Every place MainForm wires up a TerminalDocument's persisted UI
-        /// preferences must also wire zoom. A new terminal-creation site that hooks the splitters and
-        /// forgets zoom is EXACTLY the defect this ticket fixes, recurring — silent, with that terminal
-        /// simply never remembering its zoom.
+        /// THE ONE THAT MATTERS. Every TerminalDocument that gets constructed must have zoom wired.
         /// </summary>
+        /// <remarks>
+        /// <para>ANCHORED ON `new TerminalDocument()`, DELIBERATELY — and this is the second attempt.
+        /// The first version compared the zoom-wiring count against sibling persisted preferences
+        /// (StatusBarHeightChanged / HudSplitRatioChanged / AgentSplitRatioChanged). It was GREEN while
+        /// a real bug existed: `ApplyGridLayout` constructs a sixth TerminalDocument and wired NONE of
+        /// them — so the very siblings being measured against were also absent at the one broken site,
+        /// and all four counts agreed at 5. The pipeline's debugger gate found it; the test could not.</para>
+        /// <para>The lesson is general: an anchor drawn from the same population as the thing being
+        /// measured cannot detect the failure the test exists for. Construction sites are independent
+        /// of what any site remembered to do, so they are the honest invariant.</para>
+        /// </remarks>
         [Fact]
-        public void Zoom_is_wired_at_every_site_its_sibling_preferences_are_wired()
+        public void Zoom_is_wired_at_every_terminal_document_construction_site()
         {
             string mainForm = ReadStripped("MainForm.cs");
 
-            int zoom = CountMatches(mainForm, @"doc\.HudTabZoomChanged \+=");
-            int statusBar = CountMatches(mainForm, @"doc\.StatusBarHeightChanged \+=");
-            int hudSplit = CountMatches(mainForm, @"doc\.HudSplitRatioChanged \+=");
-            int agentSplit = CountMatches(mainForm, @"doc\.AgentSplitRatioChanged \+=");
+            int constructions = CountMatches(mainForm, @"new TerminalDocument\(\)");
+            int wired = CountMatches(mainForm, @"doc\.HudTabZoomChanged \+=");
 
-            Assert.True(zoom > 0, "MainForm never subscribes doc.HudTabZoomChanged — the save path is unwired.");
+            Assert.True(constructions > 0, "Found no `new TerminalDocument()` sites — the anchor is broken, not the code.");
             Assert.True(
-                zoom == statusBar && zoom == hudSplit && zoom == agentSplit,
-                $"HUD zoom is wired at {zoom} site(s) but its sibling persisted preferences are wired at " +
-                $"StatusBarHeight={statusBar}, HudSplitRatio={hudSplit}, AgentSplitRatio={agentSplit}. " +
-                "A TerminalDocument wiring site that hooks the splitters but not zoom means that terminal " +
-                "silently never remembers its tab zoom — the defect task 0d72698a fixed.");
+                wired == constructions,
+                $"MainForm constructs {constructions} TerminalDocument(s) but wires doc.HudTabZoomChanged at " +
+                $"only {wired} site(s). A construction site that does not subscribe means that terminal " +
+                "silently never persists tab zoom — the defect task 0d72698a fixed, recurring. This is " +
+                "exactly how ApplyGridLayout was missed until the pipeline's debugger gate caught it.");
         }
 
         /// <summary>

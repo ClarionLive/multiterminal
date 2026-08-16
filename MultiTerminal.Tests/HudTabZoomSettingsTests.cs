@@ -133,6 +133,48 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// REGRESSION — pipeline Run 1, debugger gate, LOW. A non-finite value must never reach a tab.
+        /// </summary>
+        /// <remarks>
+        /// `double.TryParse` accepts "NaN" and "Infinity", and `Math.Max`/`Math.Min` PROPAGATE NaN
+        /// instead of clamping — so the [0.25, 5.0] guard was a no-op for those inputs and NaN would be
+        /// handed to WebView2.ZoomFactor. Worse, NaN defeats every downstream equality check
+        /// (Math.Abs(NaN - x) &lt; eps is never true), latching the container's echo guard permanently
+        /// open. Only reachable by hand-editing settings.txt, but the fix is one comparison.
+        /// </remarks>
+        [Theory]
+        [InlineData("NaN")]
+        [InlineData("Infinity")]
+        [InlineData("-Infinity")]
+        [InlineData("not-a-number")]
+        public void A_non_finite_or_unparseable_stored_value_falls_back_instead_of_reaching_a_tab(string stored)
+        {
+            var seed = NewService();
+            seed.SetTaskHudZoom(0.8);
+            seed.Set("HudTabZoom:__graph__", stored);
+
+            double actual = NewService().GetHudTabZoom("__graph__");
+
+            Assert.False(double.IsNaN(actual));
+            Assert.False(double.IsInfinity(actual));
+            Assert.Equal(0.8, actual, 3);
+        }
+
+        /// <summary>Writing a non-finite zoom is refused rather than clamped into the file.</summary>
+        [Theory]
+        [InlineData(double.NaN)]
+        [InlineData(double.PositiveInfinity)]
+        public void A_non_finite_zoom_is_never_written(double bad)
+        {
+            var s = NewService();
+            s.SetHudTabZoom("__graph__", 1.2);
+
+            s.SetHudTabZoom("__graph__", bad);
+
+            Assert.Equal(1.2, NewService().GetHudTabZoom("__graph__"), 3);
+        }
+
+        /// <summary>
         /// Dynamic browser tabs deliberately share ONE bucket rather than getting a key each: they are
         /// created with arbitrary runtime ids and closed for good, so per-tab keys would grow the
         /// settings file without bound for tabs that will never reopen.

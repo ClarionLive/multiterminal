@@ -106,6 +106,48 @@ namespace MultiTerminal.Tests
             Assert.Equal(0.6, git, 3);
         }
 
+        /// <summary>
+        /// REGRESSION — pipeline Run 1, debugger gate, MEDIUM. The echo guard is keyed by TAB, never by
+        /// persistence key, because several browser tabs deliberately share one key.
+        /// </summary>
+        /// <remarks>
+        /// The bug: with the guard keyed by the shared bucket, browser tabs B1 and B2 both start at 1.0.
+        /// The user zooms B1 to 1.5, which is reported and recorded. B2 is still on screen at 1.0. The
+        /// user then wheels B2 up through 1.1 and 1.25 — both reported — and stops at 1.5, the size they
+        /// already chose once. That last step matched the bucket's remembered value and was dropped as an
+        /// echo: B2 displayed 1.5 while settings held 1.25, and no other terminal ever saw 1.5.
+        /// A lost write that leaves the screen disagreeing with what was saved.
+        /// </remarks>
+        [Fact]
+        public void One_tabs_zoom_is_never_mistaken_for_a_siblings_echo()
+        {
+            var t = new HudTabZoomTracker();
+
+            // Both browser tabs share the __browser__ PERSISTENCE key, but are distinct tabs.
+            t.Record("browser-1", 1.0);
+            t.Record("browser-2", 1.0);
+
+            Assert.True(t.ShouldReport("browser-1", 1.5));   // user zooms the first tab
+
+            // The user now zooms the SECOND tab to the same value. It is a genuine change for that tab.
+            Assert.True(t.ShouldReport("browser-2", 1.5));
+        }
+
+        /// <summary>
+        /// The same guarantee stated the other way round: a tab's own repeat is still an echo. Fixing
+        /// the sibling bug must not disable echo suppression altogether.
+        /// </summary>
+        [Fact]
+        public void A_tabs_own_repeat_is_still_suppressed_after_the_sibling_fix()
+        {
+            var t = new HudTabZoomTracker();
+
+            t.Record("browser-1", 1.5);
+            Assert.False(t.ShouldReport("browser-1", 1.5));
+            Assert.True(t.ShouldReport("browser-2", 1.5));
+            Assert.False(t.ShouldReport("browser-2", 1.5));
+        }
+
         [Fact]
         public void An_unknown_key_reports_nothing_known()
         {

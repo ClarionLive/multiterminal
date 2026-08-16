@@ -620,8 +620,14 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Gets the global task HUD WebView2 zoom level (shared across all terminals).
+        /// Gets the legacy global HUD zoom level.
         /// </summary>
+        /// <remarks>
+        /// DO NOT RETIRE THIS KEY. Since task 0d72698a each HUD tab stores its own zoom, and this value
+        /// is the fallback <see cref="GetHudTabZoom"/> returns for any tab never zoomed individually.
+        /// Removing it would silently reset every such tab to 1.0 on the next launch — reproducing the
+        /// exact bug 0d72698a fixed, on every existing install, as the cleanup's own rollout.
+        /// </remarks>
         public double GetTaskHudZoom()
         {
             string value = Get(TaskHudZoomKey);
@@ -633,8 +639,14 @@ namespace MultiTerminal.Services
         }
 
         /// <summary>
-        /// Sets the global task HUD WebView2 zoom level.
+        /// Sets the legacy global HUD zoom level.
         /// </summary>
+        /// <remarks>
+        /// NO PRODUCTION CALLER BY DESIGN. Since task 0d72698a the global key is read-only in the app
+        /// — writes go through <see cref="SetHudTabZoom"/> under a per-tab key. This setter is retained
+        /// as the seam tests use to simulate a pre-0d72698a install; deleting it as "dead code" breaks
+        /// the upgrade-path test that proves existing users keep their zoom.
+        /// </remarks>
         public void SetTaskHudZoom(double zoom)
         {
             zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
@@ -662,7 +674,9 @@ namespace MultiTerminal.Services
             if (key != null)
             {
                 string value = Get(key);
-                if (!string.IsNullOrEmpty(value) && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom))
+                if (!string.IsNullOrEmpty(value)
+                    && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double zoom)
+                    && IsFiniteZoom(zoom))
                 {
                     return Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
                 }
@@ -679,10 +693,23 @@ namespace MultiTerminal.Services
         public void SetHudTabZoom(string tabId, double zoom)
         {
             string key = BuildHudTabZoomKey(tabId);
-            if (key == null) return;
+            if (key == null || !IsFiniteZoom(zoom)) return;
             zoom = Math.Max(MinPanelZoom, Math.Min(MaxPanelZoom, zoom));
             Set(key, zoom.ToString("F2", CultureInfo.InvariantCulture));
         }
+
+        /// <summary>
+        /// True when a zoom value can be meaningfully clamped and applied.
+        /// </summary>
+        /// <remarks>
+        /// <c>double.TryParse</c> accepts "NaN" and "Infinity", and <c>Math.Max</c>/<c>Math.Min</c>
+        /// PROPAGATE NaN rather than clamping it — so a hand-edited settings file could slip NaN
+        /// straight through the [Min,Max] guard and into WebView2.ZoomFactor. NaN also defeats every
+        /// downstream equality check (<c>Math.Abs(NaN - x) &lt; eps</c> is never true), which would
+        /// latch the container's echo guard permanently open. Reject rather than clamp.
+        /// </remarks>
+        private static bool IsFiniteZoom(double zoom) =>
+            !double.IsNaN(zoom) && !double.IsInfinity(zoom);
 
         /// <summary>
         /// Builds the settings key for a tab id, or returns null when the id cannot be stored safely.
