@@ -34,6 +34,7 @@ namespace MultiTerminal.TasksPanel
         private HudGraphRenderer _boardGraph;
         private double _hudSplitRatio = 0.60;
         private bool _suppressSplitterEvents;
+        private bool _initialSplitApplied;
         private bool _isDisposing;
 
         /// <summary>
@@ -135,7 +136,24 @@ namespace MultiTerminal.TasksPanel
             };
             _boardSplit.Panel1.Controls.Add(_control);
             _boardSplit.Panel2.Controls.Add(_boardHud);
-            _boardSplit.SplitterMoved += OnHudSplitterMoved;
+
+            // Re-apply the saved ratio once the splitter has a REAL height. Initialize() runs before
+            // the document is docked, so the restore there is measured against the un-docked
+            // DockContent height. Mirrors TerminalDocument's SizeChanged replay; without it a valid
+            // saved ratio is silently dropped and the board opens at a default-looking position.
+            //
+            // SplitterMoved is deliberately NOT hooked here. It is hooked by the first successful
+            // apply (see ApplyHudSplitRatio) so that layout-driven splitter moves fired before the
+            // restore lands cannot persist a bogus, height-derived ratio over the user's own.
+            _boardSplit.SizeChanged += OnBoardSplitSizeChanged;
+        }
+
+        private void OnBoardSplitSizeChanged(object sender, EventArgs e)
+        {
+            if (_initialSplitApplied || _isDisposing) return;
+            if (_boardSplit == null || _boardSplit.Height <= 0) return;
+
+            ApplyHudSplitRatio(_hudSplitRatio);
         }
 
         /// <summary>
@@ -182,9 +200,23 @@ namespace MultiTerminal.TasksPanel
                 int distance = (int)(_boardSplit.Height * ratio);
                 int maxDistance = _boardSplit.Height - _boardSplit.Panel2MinSize;
                 if (distance > maxDistance) distance = maxDistance;
-                if (distance > _boardSplit.Panel1MinSize && distance < maxDistance)
+
+                // Test `> Panel1MinSize` ONLY. An earlier `&& distance < maxDistance` here was dead
+                // code by construction: the clamp above makes distance == maxDistance, so the
+                // second test could never pass and every ratio at or above the clamp restored
+                // nothing. Ratios are stored over [0.20, 0.90], so that silently discarded a wide
+                // band of perfectly valid saved values.
+                if (distance > _boardSplit.Panel1MinSize)
                 {
                     _boardSplit.SplitterDistance = distance;
+
+                    // Hook SplitterMoved only AFTER the restore has landed, so the persistence path
+                    // opens for genuine user drags and not for the layout passes that precede them.
+                    if (!_initialSplitApplied)
+                    {
+                        _initialSplitApplied = true;
+                        _boardSplit.SplitterMoved += OnHudSplitterMoved;
+                    }
                 }
             }
             catch (InvalidOperationException)
@@ -293,6 +325,7 @@ namespace MultiTerminal.TasksPanel
                 if (_boardSplit != null)
                 {
                     _boardSplit.SplitterMoved -= OnHudSplitterMoved;
+                    _boardSplit.SizeChanged -= OnBoardSplitSizeChanged;
                 }
 
                 _control?.Dispose();

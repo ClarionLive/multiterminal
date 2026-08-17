@@ -421,5 +421,96 @@ namespace MultiTerminal.Tests
             Assert.Contains("private object NoTask()", renderer, StringComparison.Ordinal);
             Assert.Contains("context = ContextName", renderer, StringComparison.Ordinal);
         }
+
+        /// <summary>
+        /// The saved split ratio must survive the clamp that precedes it.
+        /// </summary>
+        /// <remarks>
+        /// Found by the review pipeline, not by a user. The original guard read
+        /// <c>distance &gt; Panel1MinSize &amp;&amp; distance &lt; maxDistance</c> and sat directly
+        /// after <c>if (distance &gt; maxDistance) distance = maxDistance;</c> — so for every ratio
+        /// at or above the clamp the second test compared maxDistance against itself and the restore
+        /// was skipped. Settings persist ratios over [0.20, 0.90]; a wide band of entirely valid
+        /// saved values silently restored nothing. This is the 0d72698a shape again: saved, not
+        /// restored, nothing failing. Asserting the ABSENCE of the second comparison is what makes
+        /// the fix un-revertible by a later copy-paste from the sibling that still has it.
+        /// </remarks>
+        [Fact]
+        public void The_split_restore_is_not_gated_on_a_comparison_the_clamp_makes_impossible()
+        {
+            string src = ReadStripped("TasksPanel", "TasksPanelDocument.cs");
+            string body = BalancedBodyAfter(src, "public void ApplyHudSplitRatio", "ApplyHudSplitRatio");
+
+            Assert.True(
+                body.Contains("distance = maxDistance", StringComparison.Ordinal),
+                "ApplyHudSplitRatio no longer clamps to maxDistance; the restore can now exceed " +
+                "Panel2MinSize and throw.");
+
+            // Matches BOTH spellings of the dead test: the local `maxDistance`, and the inlined
+            // `Height - Panel2MinSize` form the sibling in TerminalDocument actually uses. The
+            // narrow pattern would have let a copy-paste from that sibling walk the defect straight
+            // back in — which is the single most likely way it returns.
+            Assert.False(
+                Regex.IsMatch(body, @"distance\s*<\s*(maxDistance|[^;)]*Panel2MinSize)") ||
+                Regex.IsMatch(body, @"(maxDistance|[^;(]*Panel2MinSize)\s*>\s*distance"),
+                "ApplyHudSplitRatio gates the restore on 'distance < maxDistance' (in either " +
+                "spelling) AFTER clamping distance to maxDistance. That comparison can never be " +
+                "true, so every saved ratio at or above the clamp restores nothing. Test " +
+                "'> Panel1MinSize' only.");
+        }
+
+        /// <summary>
+        /// The split ratio must be re-applied once the splitter has a real height, and the
+        /// persistence path must not open before that.
+        /// </summary>
+        /// <remarks>
+        /// Two halves of one defect. Initialize() runs before the document is docked, so the only
+        /// restore was measured against an un-docked height; and SplitterMoved was subscribed at
+        /// construction, so the layout passes that follow persisted a height-derived ratio over the
+        /// user's own. Together those turn "ignored on startup" into "destroyed on startup".
+        /// TerminalDocument already solved both — this asserts the board did not re-solve only half.
+        /// </remarks>
+        [Fact]
+        public void The_split_ratio_is_replayed_at_real_height_before_persistence_opens()
+        {
+            string src = ReadStripped("TasksPanel", "TasksPanelDocument.cs");
+
+            Assert.True(
+                src.Contains("SizeChanged += OnBoardSplitSizeChanged", StringComparison.Ordinal),
+                "No SizeChanged replay is wired for the board splitter, so the saved ratio is only " +
+                "ever applied against the pre-dock height and a valid setting is silently dropped.");
+
+            string build = BalancedBodyAfter(src, "private void BuildBoardHud", "BuildBoardHud");
+            Assert.False(
+                build.Contains("SplitterMoved +=", StringComparison.Ordinal),
+                "SplitterMoved is subscribed in BuildBoardHud, i.e. at construction. It must be " +
+                "hooked only after the first successful restore, or the layout-driven moves that " +
+                "precede the restore overwrite the user's saved ratio in settings.");
+
+            string apply = BalancedBodyAfter(src, "public void ApplyHudSplitRatio", "ApplyHudSplitRatio");
+            int assigned = apply.IndexOf("SplitterDistance = distance", StringComparison.Ordinal);
+            int latched = apply.IndexOf("_initialSplitApplied = true", StringComparison.Ordinal);
+            int hooked = apply.IndexOf("SplitterMoved += OnHudSplitterMoved", StringComparison.Ordinal);
+
+            // Position, not mere presence. Asserting only that these three strings EXIST somewhere
+            // in the method is satisfied by hoisting all of them to the top — which is finding #3
+            // restated, not fixed. The ordering is the whole property: persistence may not open
+            // until the restore has actually landed.
+            Assert.True(
+                assigned >= 0 && latched > assigned && hooked > assigned,
+                "The _initialSplitApplied latch and the SplitterMoved subscription must both come " +
+                "AFTER 'SplitterDistance = distance' inside ApplyHudSplitRatio. Found at " +
+                $"assign={assigned}, latch={latched}, hook={hooked}. Opening persistence before the " +
+                "restore lands is exactly the defect this guards.");
+
+            // An empty replay handler satisfies the wiring assertion above while doing nothing.
+            string sized = BalancedBodyAfter(src, "private void OnBoardSplitSizeChanged", "OnBoardSplitSizeChanged");
+            Assert.True(
+                sized.Contains("_initialSplitApplied", StringComparison.Ordinal) &&
+                sized.Contains("ApplyHudSplitRatio(", StringComparison.Ordinal),
+                "OnBoardSplitSizeChanged must actually re-apply the ratio behind the latch. A " +
+                "handler that is wired but empty passes every other assertion here and restores " +
+                "nothing.");
+        }
     }
 }
