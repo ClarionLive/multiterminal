@@ -59,9 +59,36 @@ namespace MultiTerminal.Controls
         /// </summary>
         public int PermanentTabCount => _tabs.Count(t => t.IsPermanent);
 
-        public HudTabContainer(TaskHudRenderer taskHudRenderer)
+        /// <summary>
+        /// The default id of the built-in Tasks tab — the one every terminal HUD uses.
+        /// </summary>
+        public const string DefaultTaskTabId = "__tasks__";
+
+        /// <summary>
+        /// This container's id for the built-in Tasks tab. Also its zoom persistence key.
+        /// </summary>
+        private readonly string _taskTabId;
+
+        /// <summary>
+        /// Initializes the container.
+        /// </summary>
+        /// <param name="taskHudRenderer">The always-present Tasks tab renderer.</param>
+        /// <param name="taskTabId">
+        /// Id for the built-in Tasks tab. Defaults to <see cref="DefaultTaskTabId"/>; the Tasks pane's
+        /// board HUD passes its own so it does not share zoom with every terminal (task f5744489).
+        /// </param>
+        /// <remarks>
+        /// The id is a parameter rather than a constant because it doubles as the ZOOM PERSISTENCE
+        /// key (see <c>ZoomKeyFor</c>), and per-tab zoom is stored in one flat, app-wide settings
+        /// file. Two containers sharing an id therefore share a stored zoom — and since MainForm fans
+        /// a changed key out to every TerminalDocument, a board zoom would silently resize the same
+        /// tab in every open terminal. Distinct ids make the two independent with no change to that
+        /// propagation path.
+        /// </remarks>
+        public HudTabContainer(TaskHudRenderer taskHudRenderer, string taskTabId = DefaultTaskTabId)
         {
             _taskHud = taskHudRenderer ?? throw new ArgumentNullException(nameof(taskHudRenderer));
+            _taskTabId = string.IsNullOrWhiteSpace(taskTabId) ? DefaultTaskTabId : taskTabId;
 
             SuspendLayout();
 
@@ -122,7 +149,7 @@ namespace MultiTerminal.Controls
             _taskHud.Dock = DockStyle.Fill;
             var hudEntry = new TabEntry
             {
-                Id = "__tasks__",
+                Id = _taskTabId,
                 Title = "\ud83d\udccb Tasks",
                 Control = _taskHud,
                 IsPermanent = true
@@ -139,7 +166,7 @@ namespace MultiTerminal.Controls
             {
                 // Always keep the container visible regardless of task state.
                 // If another tab is active, just update TaskHud data silently.
-                if (_activeTabIndex != GetTabIndex("__tasks__"))
+                if (_activeTabIndex != GetTabIndex(_taskTabId))
                 {
                     _taskHud.Visible = false;
                     return;
@@ -152,7 +179,7 @@ namespace MultiTerminal.Controls
             // top of the other tab's content.
             _taskHud.VisibleChanged += (s, ev) =>
             {
-                if (_taskHud.Visible && _activeTabIndex != GetTabIndex("__tasks__"))
+                if (_taskHud.Visible && _activeTabIndex != GetTabIndex(_taskTabId))
                 {
                     _taskHud.Visible = false;
                 }

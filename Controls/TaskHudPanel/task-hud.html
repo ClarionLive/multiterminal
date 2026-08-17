@@ -840,6 +840,12 @@ function applyTheme(isDark) {
 //  flips back to Active.
 // ============================================================
 let currentTab = null;          // 'active' | 'notactive'
+
+// Read-only board mode (task f5744489). The host sets this from hud_data.readOnly. It suppresses
+// the Not Active tab and the Activate control — but it is NOT the security boundary: the host
+// refuses set_task_active in board mode before touching the broker, precisely because this flag
+// lives in a WebView the host cannot vouch for.
+let boardMode = false;
 let pendingActivateId = null;   // taskId we asked C# to activate
 
 // Not-Active tab view state (task 08dc9c1f): search + sort are pure client-side
@@ -924,9 +930,21 @@ function clearHud() {
 function renderNoActive(terminalName) {
     document.body.classList.add('empty');
     const greeting = document.getElementById('no-task-greeting');
+    const hint = document.querySelector('.no-task-hint');
+
+    // Board mode has no Not Active tab to point at, and "no active task" is the wrong sentence
+    // anyway — nothing is active or inactive, nothing is SELECTED. Saying it the terminal way would
+    // describe a state the board does not have.
+    if (boardMode) {
+        greeting.textContent = 'No card selected';
+        if (hint) hint.textContent = 'Click a card on the board to see it here';
+        return;
+    }
+
     greeting.textContent = terminalName
         ? `No active task — ${terminalName}`
         : 'No active task';
+    if (hint) hint.textContent = 'Pick one from the Not Active tab';
 }
 
 // ============================================================
@@ -1196,7 +1214,7 @@ function buildNaRow(t) {
         ${dateRow}
         <div class="na-meta">
             ${meterHtml}
-            <button type="button" class="activate-btn" data-activate-id="${id}" title="Make this the active task (parks the current one)">&#9654; Activate</button>
+            ${boardMode ? '' : `<button type="button" class="activate-btn" data-activate-id="${id}" title="Make this the active task (parks the current one)">&#9654; Activate</button>`}
         </div>
     </div>`;
 }
@@ -1207,6 +1225,10 @@ function buildNaRow(t) {
 function renderHud(data) {
     const active = data.activeTask || null;
 
+    // Latch board mode before ANY rendering below reads it.
+    boardMode = data.readOnly === true;
+    applyBoardModeChrome();
+
     if (active) {
         renderTask(active);
     } else {
@@ -1214,6 +1236,13 @@ function renderHud(data) {
     }
 
     renderNotActive(Array.isArray(data.notActiveTasks) ? data.notActiveTasks : []);
+
+    if (boardMode) {
+        // Only one tab exists here, so there is no tab logic to run — and the smart-default below
+        // would happily switch to a tab that is now hidden, leaving a blank pane.
+        switchTab('active');
+        return;
+    }
 
     // Tab logic: flip to Active when OUR activation request landed;
     // otherwise smart-default exactly once on first data.
@@ -1223,6 +1252,15 @@ function renderHud(data) {
     } else if (currentTab === null) {
         switchTab(active ? 'active' : 'notactive');
     }
+}
+
+// Hides the controls that only make sense when a terminal is behind the HUD. Idempotent, and
+// re-applied on every payload so a mode that somehow changes mid-session cannot strand the chrome
+// in the wrong state.
+function applyBoardModeChrome() {
+    document.body.classList.toggle('board-mode', boardMode);
+    const notActiveBtn = document.getElementById('tab-btn-notactive');
+    if (notActiveBtn) notActiveBtn.hidden = boardMode;
 }
 
 // ============================================================
@@ -1241,6 +1279,10 @@ function postOpenLifecycle(taskId) {
 
 function postSetTaskActive(taskId) {
     if (!taskId) return;
+    // Third guard, after the hidden button and the host's refusal. Cheap, and it keeps
+    // pendingActivateId from being set for a request that can never complete — which would leave
+    // the view waiting for an activation ack that is never coming.
+    if (boardMode) return;
     pendingActivateId = taskId;
     if (window.chrome && window.chrome.webview) {
         window.chrome.webview.postMessage({ type: 'set_task_active', taskId });

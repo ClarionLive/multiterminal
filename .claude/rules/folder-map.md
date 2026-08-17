@@ -13,7 +13,7 @@ paths:
 | `MCPServer/Models/` | Data models (19 files) | KanbanTask, Plan, Message, InboxMessage, TeamMemberProfile, TaskSummary, ActivityEvent, TaskHelper, ComplexityStats, CodeDigest, KnowledgeEntry, TaskAttachment, CodeSymbol, CodeRelationship |
 | `Models/` | App-level models (10 files) | TerminalSessionInfo, SpawnedTeammate, ProjectRegistryEntry, Project, ProjectAssociations, OwnerProfile, CompanionProcess, ClaudeCommand, DebugLogEntry, AgentMessage |
 | `API/Controllers/` | REST endpoints (24 controllers) | TasksController, MessagingController, ProjectContextController, TaskReportsController, BrowserTabsController, SessionLineageController, CompanionController, GatewayController, NotificationsController, OwnerProfileController, SpawnController, TeamController, DebugController, AgentStatsController, RipgrepController, XamlPreviewController, OfficeController, KnowledgeController, AgentPanelsController, ToolsController, SessionMemoryController, CodeGraphController, SettingsController, TerminalsController (merged stats/inject/stream under api/terminals; task 7ce19175), HealthController (GET /api/health — startup self-probe identity, task 4fec40e2) |
-| `TasksPanel/` | Kanban board UI | TasksPanelDocument + TasksPanelControl (WebView2) |
+| `TasksPanel/` | Kanban board UI | TasksPanelDocument (hosts the board + its OWN two-tab HUD — Tasks + Plan — bound to the selected card, tab ids `__board_tasks__`/`__board_graph__`, task f5744489) + TasksPanelControl (WebView2) |
 | `ChatPanel/` | Messaging UI | ChatPanelDocument + ChatPanelControl (WebView2) |
 | `ActivityPanel/` | Activity feed UI | ActivityPanelDocument (WebView2) |
 | `ProfilePanel/` | Team profiles UI | ProfilePanelDocument (WebView2) |
@@ -24,7 +24,7 @@ paths:
 | `FilePreviewPanel/` | File preview UI | FilePreviewPanelDocument (WebView2) |
 | `StartScreen/` | Welcome/start screen | StartScreenControl (WebView2) |
 | `TaskLifecycleBoard/` | Task lifecycle view | TaskLifecycleBoardForm (WebView2) |
-| `Controls/` | Reusable controls | TerminalControl, TerminalStatusBarRenderer, EmbeddedAgentPanel, HudTabContainer, HudGraphPanel (🔗 Plan tab — checklist as a dependency graph, task 60665c6c), IZoomableTab (contract every HUD tab implements so per-tab zoom cannot be silently forgotten, task 0d72698a) + HudTabZoomTracker/HudTabZoomChangedEventArgs (per-tab zoom keys + echo suppression) |
+| `Controls/` | Reusable controls | TerminalControl, TerminalStatusBarRenderer, EmbeddedAgentPanel, HudTabContainer (instantiated TWICE — once per terminal, once by the Tasks pane; ctor takes the tasks-tab id so the two don't share zoom keys), HudGraphPanel (🔗 Plan tab — checklist as a dependency graph, task 60665c6c; Terminal/Board mode since f5744489), TaskHudPanel (Terminal/Board mode; board mode is read-only and refuses activation), IZoomableTab (contract every HUD tab implements so per-tab zoom cannot be silently forgotten, task 0d72698a) + HudTabZoomTracker/HudTabZoomChangedEventArgs (per-tab zoom keys + echo suppression) |
 | `Terminal/` | Terminal hosting | ConPtyTerminal, WebViewTerminalRenderer |
 | `Docking/` | Window layout | GridLayoutManager, TerminalDocument, ProjectPanelDocument, LauncherPanelDocument |
 | `Dialogs/` | Modal dialogs (11) | ProjectManager, Settings, ChatHistory, NewProjectWpf, OwnerProfile, SavePrompt, RenameTab, SessionViewer, EditProject, IdentityPicker, About |

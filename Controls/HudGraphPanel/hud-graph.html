@@ -89,20 +89,8 @@
     flex: 0 0 auto;
   }
 
-  #pinBadge {
-    font-family: var(--mono);
-    font-size: 0.66rem;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    border-radius: 999px;
-    padding: 0.05rem 0.5rem;
-    cursor: pointer;
-    background: transparent;
-    flex: 0 0 auto;
-  }
-  #pinBadge[hidden] { display: none; }
+  /* #pinBadge removed with the pinning concept (task f5744489). A terminal's graph can no
+     longer be pointed at a foreign ticket, so there is nothing to announce or undo. */
 
   /* ---- warnings ---- */
 
@@ -331,7 +319,6 @@
   <header>
     <span id="taskTitle">No active task</span>
     <span id="taskMeta"></span>
-    <button id="pinBadge" type="button" hidden title="Showing a pinned task. Click to follow the active task instead.">pinned</button>
   </header>
 
   <div id="warnings" hidden>
@@ -375,7 +362,6 @@
   var detail   = document.getElementById('detail');
   var titleEl  = document.getElementById('taskTitle');
   var metaEl   = document.getElementById('taskMeta');
-  var pinBadge = document.getElementById('pinBadge');
   var warnBox  = document.getElementById('warnings');
   var warnList = document.getElementById('warnList');
 
@@ -402,10 +388,6 @@
     }
   });
 
-  pinBadge.addEventListener('click', function () {
-    post({ type: 'unpin' });
-  });
-
   function post(obj) {
     try { window.chrome.webview.postMessage(obj); } catch (e) { /* host gone */ }
   }
@@ -421,18 +403,27 @@
     els = {}; nodesById = {}; edges = []; lastId = null;
     tiersEl.innerHTML = '';
     warnBox.hidden = true;
-    // Keep the badge visible whenever the host says we are pinned. Hiding it unconditionally
-    // stranded the tab: _pinnedTaskId stays set host-side, so every later TasksUpdated re-enters
-    // this branch, and the badge is the ONLY unpin control — the tab could never resume following
-    // the terminal's active task. The two lines below already read msg.pinned; this one now agrees
-    // with them.
-    pinBadge.hidden = !(msg && msg.pinned);
-    titleEl.textContent = msg && msg.pinned ? 'Task not found' : 'No active task';
+
+    // Two genuinely different empty states, which is why the host sends `context` rather than the
+    // old `pinned` boolean. A terminal with nothing active and a board with nothing selected are
+    // not the same situation, and telling the user the wrong one is how the pre-f5744489 catch path
+    // came to announce "No active task" on a tab that was showing someone else's ticket.
+    var isBoard = !!(msg && msg.context === 'board');
+    // A selected-but-unresolvable card is NOT the same as no selection — the card was deleted or
+    // filtered away while it was being viewed, and reporting "nothing selected" would quietly hide
+    // that. Three states, three messages.
+    var lostCard = isBoard && !!(msg && msg.hasSelection);
+
+    titleEl.textContent = lostCard ? 'Task not found'
+                        : isBoard  ? 'No card selected'
+                        : 'No active task';
     metaEl.textContent = '';
     detail.innerHTML = '<div class="empty">' +
-      (msg && msg.pinned
+      (lostCard
         ? 'That ticket is no longer on the board.'
-        : 'Activate a task, or open this tab from a card, to see its plan as a graph.') +
+        : isBoard
+          ? 'Select a card on the board to see its plan as a graph.'
+          : 'Activate a task to see its plan as a graph.') +
       '</div>';
   }
 
@@ -448,7 +439,6 @@
     if (data.assignee) { bits.push(data.assignee); }
     if (data.taskStatus) { bits.push(data.taskStatus); }
     metaEl.textContent = bits.join('  ·  ');
-    pinBadge.hidden = !data.pinned;
 
     // Warnings are surfaced rather than swallowed: a bad dependency declaration should be
     // visible to the person reading the plan, not silently simplified away.

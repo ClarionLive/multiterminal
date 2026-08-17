@@ -1399,40 +1399,15 @@ namespace MultiTerminal.Docking
             catch { }
         }
 
-        /// <summary>
-        /// Opens this terminal's HUD Plan tab pinned to a specific task — the board doorway
-        /// (task 60665c6c, item 6). Mirrors <see cref="OnOpenGitTabRequested"/>, with two
-        /// additions the Git deep-link doesn't need.
-        /// </summary>
-        /// <remarks>
-        /// SetTask is called BEFORE the tab switch so the tab is never briefly showing the
-        /// previously-pinned task while the new one loads.
-        /// <para>
-        /// Activate() is deliberate here, unlike the inject paths that removed it to stop
-        /// focus stealing. Those are agent-initiated and arrive unbidden; this is a human
-        /// clicking "show me this plan" from a SEPARATE dock window, and a HUD tab that
-        /// changed behind a hidden document would look like the click did nothing.
-        /// </para>
-        /// </remarks>
-        /// <param name="taskId">The task to pin the graph to. Null resumes following the active task.</param>
-        public void OpenPlanGraph(string taskId)
-        {
-            if (_isDisposing) return;
-            if (InvokeRequired)
-            {
-                try { BeginInvoke(new Action(() => OpenPlanGraph(taskId))); }
-                catch { }
-                return;
-            }
-
-            try
-            {
-                _hudGraph?.SetTask(taskId);
-                _hudTabContainer?.SwitchToTabById("__graph__");
-                Activate();
-            }
-            catch { }
-        }
+        // OpenPlanGraph was DELETED here (task f5744489). It was the last hop of the board doorway:
+        // it called _hudGraph.SetTask(taskId), pinning THIS terminal's Plan tab to a card the
+        // terminal may have had nothing to do with, then switched to the tab and Activate()d the
+        // document so the borrow was at least visible.
+        //
+        // There is no replacement and no caller. A terminal's HUD now only ever describes that
+        // terminal's own work; the board reads its own tickets in its own HUD. HudGraphRenderer
+        // still HAS a SetTask, but it is inert unless the renderer was put in board mode, so this
+        // method could not be reinstated by accident even if someone called it.
 
         /// <summary>
         /// Handles a diff request from the dashboard activity feed.

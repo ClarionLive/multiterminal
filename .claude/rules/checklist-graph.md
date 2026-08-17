@@ -102,6 +102,8 @@ a broken spawn path retries on the cooldown rather than on every checklist edit.
 | REST | `GET /api/tasks/{taskId}/graph` in `API/Controllers/TasksController.cs` |
 | HUD tab | `Controls/HudGraphPanel/HudGraphRenderer.cs` + `hud-graph.html` |
 | Registration | `Docking/TerminalDocument.cs`, `Controls/HudTabContainer/HudTabContainer.cs` |
+| Board HUD host | `TasksPanel/TasksPanelDocument.cs` — the second `HudTabContainer`, two tabs, bound to the selected card (task f5744489) |
+| Board route tests | `MultiTerminal.Tests/BoardHudDoorwayTests.cs` |
 
 The graph is **derived on every read** — from the live checklist, never stored. That is what makes
 drift structurally impossible, and it is why the builder is pure: no broker, no DB, no UI.
@@ -136,6 +138,12 @@ Zoom needs no edit at all — implement `IZoomableTab` (both members: `SetZoomFa
 `ZoomChanged`) and per-tab persistence, restore, and cross-terminal propagation follow for free.
 Permanent tabs persist under their own tab id; dynamic browser tabs share one `__browser__` bucket.
 
+⚠️ **There are now TWO `HudTabContainer` instances** (task f5744489): every terminal has one, and the
+Tasks pane has its own two-tab board HUD. A tab added to the terminal container does NOT appear on
+the board, and vice versa — decide which one you mean. If a tab should exist in both, it needs a
+distinct id per container, because **the tab id is also the zoom persistence key** and a shared id
+makes the two instances fight over one stored value.
+
 **If you ever add a new per-tab obligation, prefer an interface over a chain.** The whole cost of
 `0d72698a` was one missing subscription that nothing could detect.
 
@@ -147,49 +155,85 @@ Also note `TerminalDocument`'s **late-terminal-name** path: the broker commonly 
 `UpdateTaskHudTerminalName()` as well as `SetMessageBroker()`, or it sits permanently on its
 empty state for most terminals.
 
-## The board doorway
+## The board reads its own tickets (task f5744489)
 
-A **Plan glyph on each kanban card** opens this tab pinned to that ticket. The route:
+**The Tasks pane has its own HUD** — two tabs, Tasks and Plan — bound to the **selected card**.
+Clicking a card selects it and fills that HUD. It opens no window and touches no terminal.
 
 ```
-tasks-panel.html  openPlanGraph(taskId)      -> postMessage {type:'open_plan_graph', taskId, assignee}
-TasksPanelControl case "open_plan_graph"     -> raises PlanGraphRequested
-TasksPanelDocument                            -> forwards it
-MainForm          OnPlanGraphRequested        -> picks a TerminalDocument
-TerminalDocument  OpenPlanGraph(taskId)       -> SetTask(taskId) then SwitchToTabById("__graph__")
+tasks-panel.html    selectTask(taskId)        -> postMessage {type:'card_selected', taskId}
+TasksPanelControl   case "card_selected"      -> raises TaskSelected(taskId)
+TasksPanelDocument  SetSelectedTask(taskId)   -> _boardTaskHud.SetTask + _boardGraph.SetTask
 ```
 
-It deliberately does NOT go through `MessageBroker`. Broker events (`BrowserTabRequested`) exist to
-carry requests in from **out of process** — MCP tools and REST. This one starts as a click in a
-sibling dock window, so it follows the panel-to-`MainForm` UI event precedent (`InjectRequested`)
-and leaves the ~5.5K-LOC broker alone.
+Three hops, all inside one panel. Nothing decides "whose HUD"; there is no such question.
 
-Three decisions worth keeping:
+### What this replaced, and why it is not coming back
 
-- **The card sends the assignee it is displaying**, rather than the host re-reading the task. What
-  the user clicked is what they saw; a task reassigned between render and click must not silently
-  open a different agent's HUD.
-- **Resolution is preference-ordered, not a lookup.** Assignee's terminal first; then
-  `_lastActiveTerminal`, so an **unassigned** card still opens somewhere. Falling back is safe only
-  because `SetTask` PINS the view behind a visible "pinned" badge that clicks back to following the
-  active task — borrowing your own HUD to read someone else's ticket is a read, and it is visibly
-  undoable. Prefer `_lastActiveTerminal` over `_dockPanel.ActiveDocument`: DockPanelSuite's
-  `ActiveDocument` is unreliable with WebView2, and here the click itself came from a WebView2 panel.
-- **The glyph is gated on the ticket having a checklist.** The tab's honest empty state is "This
-  ticket has no checklist yet", and a doorway into an empty room reads as a broken feature rather
-  than an absent one.
+There used to be a **Plan glyph** on each card that reached into a *terminal's* HUD and pinned it to
+that ticket, resolving assignee's-terminal-else-`_lastActiveTerminal`. So an **unassigned** card
+landed in whichever terminal the Owner last touched — chosen by accident, then displaying a ticket
+it had no relationship to. This file defended that as "a read, and it is visibly undoable."
 
-`SetTask` runs BEFORE the tab switch, or the tab appears still showing the previously-pinned ticket
-and then swaps under the reader. `OpenPlanGraph` calls `Activate()` — unlike the inject paths, which
-removed it to stop focus stealing: those are agent-initiated and unbidden, this is a human asking to
-be taken somewhere, and a HUD tab that changed behind a hidden document looks like a dead click.
+That defence conceded the point. Making a borrow reversible does not stop it being a borrow, and a
+HUD that sometimes describes its own terminal and sometimes an arbitrary card is a category error
+however good the undo is.
+
+**Pinning is gone as a concept, not merely unused.** Both renderers now carry an explicit two-value
+mode set at wiring time:
+
+| Renderer | Terminal mode | Board mode |
+|---|---|---|
+| `HudGraphRenderer` | follows its terminal's active task; `SetTask` is **inert** | shows only the selected card; never falls back to a terminal |
+| `TaskHudRenderer` | resolves its own active task; actions live | shows the selected card; **read-only** |
+
+A terminal-mode renderer has no code path that binds it to a foreign ticket. The invariant is
+structural, not conventional — which is the entire reason for preferring a mode over a nullable id.
+
+### The Tasks tab is read-only on the board, and that is enforced in C#
+
+`TaskHudRenderer` is **not a passive view**: `HandleSetTaskActive` claims tasks, re-assigns them
+across agents behind a confirm dialog, and calls `SetTaskActive` — all expressed as "make this MY
+active task". On the board there is no *my*.
+
+So `HandleSetTaskActive` **refuses in board mode as its first statement**, ahead of the broker
+null-check and every lookup. The view also hides the Activate button and the Not Active tab, but
+that half is not trusted: the message arrives from a WebView2 and a stale one can reach the handler
+regardless of the current DOM. `BoardHudDoorwayTests.Board_mode_refuses_activation_before_any_broker_call`
+asserts the **ordering**, not just the presence — a guard placed after the first broker call would
+already have acted for a terminal nobody chose.
+
+Activation *from* the board is deliberately unimplemented rather than guessed at. "Activate for
+whom?" needs an Owner decision, and answering it wrongly would reinstate the arbitrary-terminal
+behaviour this ticket removed.
+
+### Two traps worth knowing
+
+- **Tab ids are zoom persistence keys.** The board HUD uses `__board_tasks__` / `__board_graph__`,
+  NOT the terminal ids. This is mechanical, not stylistic: `MainForm` fans a changed zoom key out to
+  every `TerminalDocument`, so sharing ids would make zooming the board's Plan tab silently resize
+  the Plan tab in every open terminal. `HudTabContainer`'s constructor takes the tasks-tab id for
+  exactly this reason.
+- **Board mode must be set BEFORE `Initialize`.** `TaskHudRenderer.SetBoardMode` clears the queued
+  terminal name; a name queued first would be adopted later by `Initialize` and quietly re-arm the
+  action path. Both orderings are pinned by tests, because every visible symptom of getting this
+  wrong looks correct.
+
+### Empty states are three, not two
+
+`no_task` carries `context` (`terminal` | `board`) and `hasSelection`, because "nothing is active",
+"nothing is selected" and "the selected card was deleted" are three different truths. Collapsing the
+last two would report a deletion as an idle state. All three sends route through one `NoTask()`
+helper — the pre-f5744489 catch block hand-rolled its payload, omitted the flag, and announced "No
+active task" on a tab that was showing someone else's ticket.
+
+### Still a string contract
 
 Every hop above is a **string contract across files that no compiler checks** — the same shape as
 the Run-1 CRITICAL (PascalCase renderer vs camelCase view, clean build, 442 green tests).
-`MultiTerminal.Tests/PlanGraphDoorwayTests.cs` pins them, including a cross-file check that every
-field the host reads is a field the panel actually sends.
+`MultiTerminal.Tests/BoardHudDoorwayTests.cs` pins them, including a cross-file check that every
+field the host reads is a field the panel actually sends, plus removal proofs that the old route is
+absent rather than dormant. Two of its assertions were **demonstrated falsifiable** by reintroducing
+the defect and watching them go red; the rest were not individually proven.
 
-## Remaining gap
-
-The **lifecycle board** (`TaskLifecycleBoardForm`, a separate window) has no equivalent glyph. Same
-entry point, same event; only the publisher is missing.
+The lifecycle board is still reachable — from its own icon on the card, since the title now selects.

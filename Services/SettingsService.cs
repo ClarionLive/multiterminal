@@ -178,6 +178,11 @@ namespace MultiTerminal.Services
         private const string AgentPanelSplitRatioKey = "AgentPanelSplitRatio";
         private const string HudSplitRatioKey = "HudSplitRatio";
 
+        // The Tasks pane's own board-HUD split (task f5744489). Deliberately NOT shared with
+        // HudSplitRatioKey: the board is normally docked narrow-and-tall while the terminal HUD sits
+        // wide-and-short at the bottom of a document, so one ratio driving both leaves both wrong.
+        private const string TasksPanelHudSplitRatioKey = "TasksPanelHudSplitRatio";
+
         // Per-HUD-tab zoom (task 0d72698a). Keyed off the tab ids HudTabContainer already uses for
         // registration and ordering (__tasks__, __graph__, __git__, ...), so the persistence
         // vocabulary and the registration vocabulary cannot drift apart.
@@ -780,6 +785,39 @@ namespace MultiTerminal.Services
         {
             ratio = Math.Max(MinSplitRatio, Math.Min(MaxHudSplitRatio, ratio));
             Set(HudSplitRatioKey, ratio.ToString("F3", CultureInfo.InvariantCulture));
+        }
+
+        /// <summary>
+        /// Gets the Tasks pane's board-HUD split ratio (board height vs HUD height).
+        /// Default 0.60 means the kanban board gets 60% of the pane's height.
+        /// </summary>
+        /// <remarks>
+        /// Shares the clamp range with <see cref="GetHudSplitRatio"/> but NOT the key — see the
+        /// comment on <c>TasksPanelHudSplitRatioKey</c>. Reads that fail to parse fall back to the
+        /// default rather than to the terminal HUD's saved value: borrowing that number would make a
+        /// corrupted line silently adopt a ratio tuned for a differently-shaped container.
+        /// </remarks>
+        public double GetTasksPanelHudSplitRatio()
+        {
+            string value = Get(TasksPanelHudSplitRatioKey);
+            if (!string.IsNullOrEmpty(value)
+                && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double ratio)
+                && double.IsFinite(ratio))
+            {
+                return Math.Max(MinSplitRatio, Math.Min(MaxHudSplitRatio, ratio));
+            }
+
+            return DefaultHudSplitRatio;
+        }
+
+        /// <summary>
+        /// Sets the Tasks pane's board-HUD split ratio. Non-finite values are dropped, not stored.
+        /// </summary>
+        public void SetTasksPanelHudSplitRatio(double ratio)
+        {
+            if (!double.IsFinite(ratio)) return;
+            ratio = Math.Max(MinSplitRatio, Math.Min(MaxHudSplitRatio, ratio));
+            Set(TasksPanelHudSplitRatioKey, ratio.ToString("F3", CultureInfo.InvariantCulture));
         }
 
         /// <summary>

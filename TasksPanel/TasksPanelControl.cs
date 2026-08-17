@@ -76,12 +76,18 @@ namespace MultiTerminal.TasksPanel
         public event EventHandler<double> ZoomChanged;
 
         /// <summary>
-        /// Raised when the user clicks a card's Plan glyph — the board doorway into the HUD
-        /// Plan tab (task 60665c6c, item 6). The board is its own dock window and has no
-        /// reference to any TerminalDocument, so resolving which terminal's HUD to open is
-        /// MainForm's job; this event only reports what was clicked.
+        /// Raised when the user selects a card. The argument is the task id, or null when the
+        /// selection was cleared (task f5744489).
         /// </summary>
-        public event EventHandler<PlanGraphRequestEventArgs> PlanGraphRequested;
+        /// <remarks>
+        /// <para>This replaced <c>PlanGraphRequested</c>, and the difference is the point of the
+        /// ticket. That event carried a request to go and OPEN something elsewhere — it had to name
+        /// an assignee, because the host then had to decide whose terminal HUD to commandeer. This
+        /// one reports a fact about the board and nothing else; the only thing listening is the
+        /// board's own HUD, sitting in the same panel.</para>
+        /// <para>No assignee travels with it, because no other window is involved any more.</para>
+        /// </remarks>
+        public event EventHandler<string> TaskSelected;
 
         /// <summary>
         /// Set the zoom factor for this panel. Applies immediately if initialized, otherwise deferred.
@@ -392,22 +398,20 @@ namespace MultiTerminal.TasksPanel
                         DebugLog("Drag ended");
                         break;
 
-                    case "open_plan_graph":
-                        // Board doorway (item 6). The card sends the assignee it is displaying
-                        // rather than us re-reading the task: what the user clicked on is what
-                        // they saw, and a task reassigned between render and click should not
-                        // silently open a different agent's HUD.
-                        if (root.TryGetProperty("taskId", out var planTaskIdEl))
+                    case "card_selected":
+                        // Selection, not navigation (task f5744489). An absent or empty taskId is a
+                        // legitimate message meaning "selection cleared" — the card was deleted,
+                        // filtered out of view, or deselected — so it is forwarded as null rather
+                        // than dropped. Dropping it would leave the HUD describing a card the user
+                        // can no longer see.
                         {
-                            var planTaskId = planTaskIdEl.GetString();
-                            var planAssignee = root.TryGetProperty("assignee", out var planAssigneeEl)
-                                ? planAssigneeEl.GetString()
+                            string selectedId = root.TryGetProperty("taskId", out var selEl)
+                                ? selEl.GetString()
                                 : null;
-                            if (!string.IsNullOrWhiteSpace(planTaskId))
-                            {
-                                PlanGraphRequested?.Invoke(this, new PlanGraphRequestEventArgs(planTaskId, planAssignee));
-                            }
+                            if (string.IsNullOrWhiteSpace(selectedId)) selectedId = null;
+                            TaskSelected?.Invoke(this, selectedId);
                         }
+
                         break;
 
                     case "open_lifecycle_board":
@@ -1337,34 +1341,9 @@ namespace MultiTerminal.TasksPanel
         }
     }
 
-    /// <summary>
-    /// Event args for the board's Plan-graph doorway (task 60665c6c, item 6).
-    /// </summary>
-    /// <remarks>
-    /// Constructor-set and get-only, following the TaskActiveChanged hardening convention
-    /// (task dbbb8de2): these carry the identity a subscriber uses to pick which terminal
-    /// to open, so no subscriber can rewrite them for a later one.
-    /// </remarks>
-    public class PlanGraphRequestEventArgs : EventArgs
-    {
-        /// <summary>
-        /// Initializes a new instance of the <see cref="PlanGraphRequestEventArgs"/> class.
-        /// </summary>
-        /// <param name="taskId">The task whose plan should be shown.</param>
-        /// <param name="assignee">The assignee the card was displaying, or null if unassigned.</param>
-        public PlanGraphRequestEventArgs(string taskId, string assignee)
-        {
-            TaskId = taskId;
-            Assignee = assignee;
-        }
-
-        /// <summary>Gets the task whose plan graph should be shown.</summary>
-        public string TaskId { get; }
-
-        /// <summary>
-        /// Gets the assignee shown on the clicked card, or null when the task is unassigned.
-        /// This is the PREFERRED terminal to open, not a guarantee one exists.
-        /// </summary>
-        public string Assignee { get; }
-    }
+    // PlanGraphRequestEventArgs was deleted with the board doorway it existed for (task f5744489).
+    // Its whole job was to carry an ASSIGNEE alongside the task id, so the host could decide whose
+    // terminal HUD to commandeer — the borrowing this ticket removed. Selection is reported by
+    // TasksPanelControl.TaskSelected as a bare task id, because the only listener is the board's own
+    // HUD in the same panel and there is no longer another window to choose.
 }

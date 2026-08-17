@@ -32,7 +32,8 @@ namespace MultiTerminal.Controls
 
         private MessageBroker _broker;
         private string _terminalName;
-        private string _pinnedTaskId;
+        private GraphViewMode _mode = GraphViewMode.Terminal;
+        private string _boardTaskId;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="HudGraphRenderer"/> class.
@@ -77,23 +78,53 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
-        /// Sets the terminal name whose active task the graph follows when no task is pinned.
+        /// Sets the terminal whose active task the graph follows. TERMINAL MODE ONLY.
         /// </summary>
         /// <param name="terminalName">The agent/terminal name.</param>
         public void SetTerminalName(string terminalName)
         {
+            if (_mode != GraphViewMode.Terminal) return;
             _terminalName = terminalName;
             RefreshGraph();
         }
 
         /// <summary>
-        /// Pins the view to a specific task — used by the board's deep link, so opening the graph
-        /// from a card shows THAT card rather than whatever happens to be active.
+        /// Switches this renderer into BOARD mode: it stops following any terminal's active task and
+        /// shows only what <see cref="SetTask"/> gives it.
         /// </summary>
-        /// <param name="taskId">Task to show, or null to resume following the active task.</param>
+        /// <remarks>
+        /// <para>Task f5744489 replaced the old "pinning" design with this two-value mode, and the
+        /// difference is not cosmetic. Pinning was a nullable id on a renderer that otherwise followed
+        /// a terminal, which meant ANY instance could be pointed at ANY ticket — the board's Plan
+        /// glyph did exactly that, reaching into whichever terminal it could resolve (assignee's, else
+        /// merely the last active one) and pinning it to a card that terminal had nothing to do with.
+        /// The defence was that the borrow was reversible via a "pinned" badge; a reversible borrow is
+        /// still a borrow.</para>
+        /// <para>With a mode, a terminal-mode renderer has NO code path that can bind it to a foreign
+        /// task: <see cref="SetTask"/> is inert unless the host declared board mode. The invariant is
+        /// structural rather than conventional, which is the whole reason for the change.</para>
+        /// </remarks>
+        public void SetBoardMode()
+        {
+            _mode = GraphViewMode.Board;
+            _terminalName = null;
+            RefreshGraph();
+        }
+
+        /// <summary>
+        /// Shows a specific task. BOARD MODE ONLY — ignored in terminal mode.
+        /// </summary>
+        /// <param name="taskId">The selected card's task id, or null for "nothing selected".</param>
+        /// <remarks>
+        /// The early return is the enforcement point for the invariant described on
+        /// <see cref="SetBoardMode"/>. It is deliberately silent rather than throwing: this is driven
+        /// by UI selection, and a mis-wired host should degrade to "the terminal keeps showing its own
+        /// task" rather than take down the tab.
+        /// </remarks>
         public void SetTask(string taskId)
         {
-            _pinnedTaskId = string.IsNullOrWhiteSpace(taskId) ? null : taskId;
+            if (_mode != GraphViewMode.Board) return;
+            _boardTaskId = string.IsNullOrWhiteSpace(taskId) ? null : taskId;
             RefreshGraph();
         }
 
@@ -136,10 +167,10 @@ namespace MultiTerminal.Controls
 
             if (_broker == null)
             {
-                // Also carries `pinned` — SetTask can pin before the broker is wired (the board
-                // doorway calls it on a renderer that may never have been opened), so this path
-                // can legitimately be reached while pinned.
-                Send(new { type = "no_task", pinned = _pinnedTaskId != null });
+                // Carries `context` for the same reason the old code carried `pinned`: the host can
+                // select a card before the broker is wired, so this path is legitimately reachable
+                // in board mode and the view needs to know which empty-state copy to show.
+                Send(NoTask());
                 return;
             }
 
@@ -147,9 +178,15 @@ namespace MultiTerminal.Controls
             {
                 KanbanTask task = null;
 
-                if (!string.IsNullOrEmpty(_pinnedTaskId))
+                if (_mode == GraphViewMode.Board)
                 {
-                    task = _broker.GetTask(_pinnedTaskId);
+                    // Board mode NEVER falls back to a terminal's active task. Nothing selected means
+                    // nothing selected — showing some terminal's work instead would be the borrowing
+                    // behaviour this ticket removed, running in the opposite direction.
+                    if (!string.IsNullOrEmpty(_boardTaskId))
+                    {
+                        task = _broker.GetTask(_boardTaskId);
+                    }
                 }
                 else if (!string.IsNullOrEmpty(_terminalName))
                 {
@@ -158,10 +195,7 @@ namespace MultiTerminal.Controls
 
                 if (task == null)
                 {
-                    // bool, not the id — `pinned` is read as a flag on the view side (both in
-                    // renderEmpty and at `pinBadge.hidden = !data.pinned`), and the "graph"
-                    // message below already sends a bool. One key, one type, on one channel.
-                    Send(new { type = "no_task", pinned = _pinnedTaskId != null });
+                    Send(NoTask());
                     return;
                 }
 
@@ -180,7 +214,7 @@ namespace MultiTerminal.Controls
                     taskTitle = graph.TaskTitle,
                     taskStatus = task.Status,
                     assignee = task.Assignee,
-                    pinned = _pinnedTaskId != null,
+                    context = ContextName,
                     nodes = graph.Nodes,
                     edges = graph.Edges,
                     warnings = graph.Warnings,
@@ -192,12 +226,50 @@ namespace MultiTerminal.Controls
                 // degrades on bad dependency data; this catches anything further upstream
                 // (a broker call failing mid-refresh) and leaves the view in its empty state.
                 //
-                // MUST carry `pinned` like the other two sends. Omitting it made the empty state
-                // claim "No active task / Activate a task to see its plan" on a tab that WAS
-                // pinned — and, with the badge hidden, offered no way back. The failure told the
-                // user the opposite of the truth about the tab's state.
-                Send(new { type = "no_task", pinned = _pinnedTaskId != null });
+                // MUST go through NoTask() like the other two sends. The pre-f5744489 version of
+                // this catch hand-built its payload and omitted the context field, so a board-bound
+                // tab announced "No active task" — telling the user the opposite of the truth about
+                // what the tab was showing. Routing all three sends through one helper is what stops
+                // that recurring, rather than three sites remembering to agree.
+                Send(NoTask());
             }
+        }
+
+        /// <summary>
+        /// The single empty-state payload, so all three send sites cannot disagree about the fields
+        /// the view needs. See the note in the catch block above for why that matters.
+        /// </summary>
+        /// <remarks>
+        /// <c>hasSelection</c> is what separates "nothing is selected" from "the selected card is
+        /// gone" — two different truths that must not share one message. Without it a deleted card
+        /// would render as "No card selected", which is false: the user DID select something and it
+        /// vanished, and saying otherwise hides the deletion instead of reporting it.
+        /// </remarks>
+        private object NoTask() => new
+        {
+            type = "no_task",
+            context = ContextName,
+            hasSelection = _mode == GraphViewMode.Board && _boardTaskId != null,
+        };
+
+        /// <summary>
+        /// The wire name for the current mode. The view keys its empty-state copy off this: a
+        /// terminal with nothing active reads "No active task", a board with nothing selected reads
+        /// "No card selected" — two genuinely different situations that the old single `pinned`
+        /// boolean could not tell apart.
+        /// </summary>
+        private string ContextName => _mode == GraphViewMode.Board ? "board" : "terminal";
+
+        /// <summary>
+        /// What this renderer is bound to. Two values, chosen at wiring time and never changed after.
+        /// </summary>
+        private enum GraphViewMode
+        {
+            /// <summary>Follows its own terminal's active task. Cannot be pointed at another ticket.</summary>
+            Terminal,
+
+            /// <summary>Shows whatever card the board selected, and never falls back to a terminal.</summary>
+            Board,
         }
 
         /// <inheritdoc/>
@@ -315,10 +387,11 @@ namespace MultiTerminal.Controls
                 {
                     RefreshGraph();
                 }
-                else if (msgType == "unpin")
-                {
-                    SetTask(null);
-                }
+
+                // There is deliberately no "unpin" case any more (task f5744489). It existed to undo
+                // a borrow that can no longer happen: a terminal-mode graph cannot be pointed at
+                // another ticket, and a board-mode graph has nothing to fall back TO. Keeping a
+                // handler for a message the view no longer sends would just be a second way in.
             }
             catch (JsonException)
             {

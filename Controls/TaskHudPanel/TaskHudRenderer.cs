@@ -40,6 +40,9 @@ namespace MultiTerminal.Controls
         private string _projectId;
         private DebugLogService _debugLogService;
 
+        private TaskHudMode _mode = TaskHudMode.Terminal;
+        private string _boardTaskId;
+
         // Stores the terminal name if SetTerminalName is called before Initialize
         private string _pendingTerminalName;
 
@@ -298,6 +301,25 @@ namespace MultiTerminal.Controls
             if (!root.TryGetProperty("taskId", out var idEl)) return;
             string taskId = idEl.GetString();
             if (string.IsNullOrWhiteSpace(taskId)) return;
+
+            // BOARD MODE REFUSAL — task f5744489. Deliberately the FIRST thing checked, ahead of the
+            // broker null-check and every lookup below, so no state is read and nothing is mutated on
+            // behalf of a terminal that was never chosen.
+            //
+            // The view also stops rendering the Activate button in board mode, but that half is not
+            // trusted: this message arrives from a WebView2 and a stale or malformed one can reach
+            // here regardless of what the current DOM offers. The ticket named "silently reusing the
+            // renderer and hoping the action path is never hit" as the failure mode to avoid, so the
+            // path is hit and refused rather than assumed unreachable.
+            if (_mode == TaskHudMode.Board)
+            {
+                _debugLogService?.Warning(
+                    "TaskHud",
+                    $"set_task_active REFUSED: board-mode HUD has no terminal to activate for (taskId='{taskId}').");
+                NotifyActivateCancelled(taskId);
+                return;
+            }
+
             if (_broker == null || string.IsNullOrEmpty(_terminalName)) return;
 
             try
@@ -469,6 +491,53 @@ namespace MultiTerminal.Controls
         }
 
         /// <summary>
+        /// Switches this HUD into BOARD mode: it shows the card the board selected and becomes a
+        /// STRICTLY READ-ONLY view.
+        /// </summary>
+        /// <remarks>
+        /// <para>Task f5744489. This renderer is not a passive view — <see cref="HandleSetTaskActive"/>
+        /// claims tasks, re-assigns them across agents behind a confirm dialog, and calls
+        /// <c>SetTaskActive</c>. Every one of those verbs is expressed in terms of
+        /// <see cref="_terminalName"/>: "make this MY active task". On the board there is no "my" —
+        /// the panel belongs to no terminal, so <c>_terminalName</c> would be empty or, worse, a stale
+        /// value left over from some unrelated wiring.</para>
+        /// <para>Board mode therefore refuses the action outright rather than trying to answer
+        /// "activate for whom?". Activating from the board is a coherent feature someone could design
+        /// later; silently activating for an arbitrary terminal is not, and that is the failure the
+        /// ticket named explicitly.</para>
+        /// </remarks>
+        public void SetBoardMode()
+        {
+            _mode = TaskHudMode.Board;
+            _terminalName = null;
+            _pendingTerminalName = null;
+        }
+
+        /// <summary>
+        /// Shows a specific task. BOARD MODE ONLY — ignored in terminal mode, where the HUD resolves
+        /// its own terminal's active task and must not be pointed anywhere else.
+        /// </summary>
+        /// <param name="taskId">The selected card's task id, or null for "nothing selected".</param>
+        public void SetTask(string taskId)
+        {
+            if (_mode != TaskHudMode.Board) return;
+            _boardTaskId = string.IsNullOrWhiteSpace(taskId) ? null : taskId;
+            RefreshTask();
+        }
+
+        /// <summary>
+        /// What this HUD is bound to, and whether its actions are live.
+        /// </summary>
+        private enum TaskHudMode
+        {
+            /// <summary>Resolves its own terminal's active task. Actions live.</summary>
+            Terminal,
+
+            /// <summary>Shows the board's selected card. Read-only — no claim, re-assign or activate.</summary>
+            Board,
+        }
+
+        /// <summary>
         /// Sets the project scope for task lookup. When non-empty, the HUD only shows
         /// tasks whose ProjectId matches (strict filter, same semantics as
         /// MessageBroker.GetTasks(projectId)); null/empty preserves the legacy
@@ -542,9 +611,21 @@ namespace MultiTerminal.Controls
         /// </summary>
         private void RefreshTask()
         {
-            if (_broker == null || string.IsNullOrEmpty(_terminalName))
+            if (_broker == null)
             {
-                _debugLogService?.Trace("TaskHud", $"RefreshTask: SKIP broker={(_broker != null)} terminalName='{_terminalName}'");
+                _debugLogService?.Trace("TaskHud", "RefreshTask: SKIP broker=false");
+                return;
+            }
+
+            if (_mode == TaskHudMode.Board)
+            {
+                RefreshBoardTask();
+                return;
+            }
+
+            if (string.IsNullOrEmpty(_terminalName))
+            {
+                _debugLogService?.Trace("TaskHud", $"RefreshTask: SKIP terminalName='{_terminalName}'");
                 return;
             }
 
@@ -559,6 +640,32 @@ namespace MultiTerminal.Controls
 
             _debugLogService?.Info("TaskHud", $"RefreshTask: active='{task?.Title ?? "(none)"}' projectId='{_projectId ?? "null"}' totalScopedTasks={allTasks.Count} for terminal '{_terminalName}'");
             SendHudData(task, allTasks);
+        }
+
+        /// <summary>
+        /// Board-mode refresh: shows exactly the selected card, or the honest empty state.
+        /// </summary>
+        /// <remarks>
+        /// <para>Two deliberate differences from the terminal path, both load-bearing:</para>
+        /// <para>1. It never calls <see cref="FindActiveTask"/>. Falling back to some terminal's
+        /// active task when nothing is selected would re-introduce the borrowing this ticket removes,
+        /// pointing the other way.</para>
+        /// <para>2. A <c>done</c> task is still SHOWN here, where the terminal path blanks it. The
+        /// terminal HUD is a view of open work in progress; the board is a view of whatever card the
+        /// user clicked, and clicking a finished ticket must show that ticket rather than an empty
+        /// panel that reads as a bug.</para>
+        /// </remarks>
+        private void RefreshBoardTask()
+        {
+            KanbanTask task = string.IsNullOrEmpty(_boardTaskId) ? null : _broker.GetTask(_boardTaskId);
+
+            _debugLogService?.Trace(
+                "TaskHud",
+                $"RefreshBoardTask: selected='{_boardTaskId ?? "(none)"}' resolved='{task?.Title ?? "(none)"}'");
+
+            // Empty Not-Active list: on the board that list IS the surrounding view, so repeating it
+            // inside the HUD would be showing the user the thing they are already looking at.
+            SendHudData(task, new List<KanbanTask>());
         }
 
         /// <summary>
@@ -710,7 +817,14 @@ namespace MultiTerminal.Controls
                 type = "hud_data",
                 terminalName = _terminalName,
                 activeTask = activePayload,
-                notActiveTasks
+                notActiveTasks,
+
+                // Board mode is read-only: the view hides the Activate control and the Not Active
+                // tab. This flag is a PRESENTATION hint only — the authority is the refusal at the
+                // top of HandleSetTaskActive. If the two ever disagree, the C# wins and the click
+                // does nothing, which is the safe direction for them to disagree in.
+                context = _mode == TaskHudMode.Board ? "board" : "terminal",
+                readOnly = _mode == TaskHudMode.Board,
             };
 
             string json = JsonSerializer.Serialize(payload);
