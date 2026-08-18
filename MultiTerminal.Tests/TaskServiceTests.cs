@@ -720,10 +720,18 @@ namespace MultiTerminal.Tests
         public void GlossWrite_DoesNotOverwriteAnAuthoredGloss()
         {
             var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            // NOTE the explicit "source":"authored". Before task 5692f765 this fixture omitted it
+            // and the test still passed — because append stamped everything as authored, so a
+            // gloss labelled "A human wrote this." was believed despite no human being involved.
+            // The invariant below is real and worth keeping; the fixture was not. Appending
+            // without a source now yields a GENERATED gloss (see the sibling test), so a fixture
+            // that means "a person wrote this" has to say so.
             _svc.AppendChecklistItems(
                 id,
                 "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"," +
-                "\"gloss\":{\"what\":\"A human wrote this.\",\"why\":\"Because they understood it.\"}}]");
+                "\"gloss\":{\"what\":\"A human wrote this.\",\"why\":\"Because they understood it.\"," +
+                "\"source\":\"authored\"}}]");
 
             var w = _svc.SetChecklistItemGloss(id, 0, SampleGloss("A machine wrote this."));
 
@@ -732,6 +740,65 @@ namespace MultiTerminal.Tests
             Assert.True(w.Success, w.Error);
             Assert.Equal(GlossWriteOutcome.SkippedAuthoredGlossPresent, w.Outcome);
             Assert.Equal("A human wrote this.", _svc.GetTask(id).GetChecklist()[0].Gloss.What);
+        }
+
+        /// <summary>
+        /// The scenario that produced task 5692f765: an agent authors a checklist through append,
+        /// then cannot correct its own explanations.
+        /// </summary>
+        /// <remarks>
+        /// Reported by a real caller after writing a 12-step ticket and getting "a human-authored
+        /// explanation is already there and is never overwritten" on items nothing human had
+        /// touched. This is the runtime counterpart to the source-contract assertions in
+        /// GlossProvenanceContractTests — it exercises the actual append-then-correct round trip
+        /// rather than the shape of the code that implements it.
+        /// </remarks>
+        [Fact]
+        public void GlossAppendedWithoutASource_IsGenerated_AndCanStillBeCorrected()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"," +
+                "\"gloss\":{\"what\":\"An agent wrote this.\",\"why\":\"Restating importance, wrongly.\"}}]");
+
+            var stored = _svc.GetTask(id).GetChecklist()[0].Gloss;
+            Assert.True(
+                stored.IsGenerated,
+                "A gloss appended with no explicit source must be stamped generated. Stamping it " +
+                "authored brands an agent's own words as a person's — the exact misattribution " +
+                "ChecklistItemGloss.Source exists to prevent — and makes it permanently " +
+                "uncorrectable, because SetChecklistItemGloss never overwrites a human.");
+
+            var w = _svc.SetChecklistItemGloss(id, 0, SampleGloss("Corrected: gated on the inventory."));
+
+            Assert.True(w.Success, w.Error);
+            Assert.Equal(GlossWriteOutcome.Written, w.Outcome);
+            Assert.Equal("Corrected: gated on the inventory.", _svc.GetTask(id).GetChecklist()[0].Gloss.What);
+        }
+
+        /// <summary>
+        /// An agent relaying a person's words can still say so, and that claim is still honoured.
+        /// </summary>
+        /// <remarks>
+        /// The counterpart to the test above, and the reason the append stamp preserves an explicit
+        /// "authored" rather than branding every append generated. Stamping unconditionally would
+        /// be the same misattribution in the opposite direction.
+        /// </remarks>
+        [Fact]
+        public void GlossAppendedWithAnExplicitAuthoredSource_KeepsIt()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"," +
+                "\"gloss\":{\"what\":\"The owner's own words, relayed.\",\"source\":\"authored\"}}]");
+
+            var stored = _svc.GetTask(id).GetChecklist()[0].Gloss;
+            Assert.False(
+                stored.IsGenerated,
+                "An explicit 'authored' on an appended gloss must survive. An agent relaying a " +
+                "person's words has to be able to say whose words they are.");
         }
 
         [Fact]

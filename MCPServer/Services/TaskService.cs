@@ -1686,6 +1686,42 @@ namespace MultiTerminal.MCPServer.Services
 
 
         /// <summary>
+        /// Stamps provenance on a gloss arriving through <see cref="AppendChecklistItems"/>, and
+        /// returns null for an absent or all-blank one.
+        /// </summary>
+        /// <remarks>
+        /// <para>A gloss with no explicit source becomes <c>generated</c>. The caller reaching this
+        /// tool over MCP at plan time is almost always an agent, so treating an unstamped write as
+        /// a person's words mislabels the common case — and mislabelling machine gloss as human is
+        /// the precise failure <c>ChecklistItemGloss.Source</c> was added (task a455e295) to
+        /// prevent. An explicit <c>authored</c> is preserved, so an agent relaying a person's own
+        /// words can still say so.</para>
+        /// <para>This mirrors the rule <c>SetChecklistItemGloss</c> already applies, deliberately
+        /// rather than inventing a second convention: two sibling tools that write the same field
+        /// must not disagree about what an agent's write means.</para>
+        /// <para><b>Why here and not in <c>NormalizeSource</c>.</b> Normalizing absent to
+        /// <c>authored</c> is CORRECT for the population that method serves — every gloss written
+        /// before the field existed was hand-written, so defaulting stored legacy data the other
+        /// way would retroactively brand human work as machine output, the same misattribution in
+        /// the opposite direction and quieter, because nobody notices their own words being
+        /// relabelled. Only the write path knows "this is a fresh write happening now, through a
+        /// tool an agent is calling"; data at rest cannot be told apart from it downstream. So the
+        /// two entry points need opposite defaults, and the stamp belongs at each entry point
+        /// rather than in the shared normalizer.</para>
+        /// </remarks>
+        private static ChecklistItemGloss StampAppendedGlossProvenance(ChecklistItemGloss gloss)
+        {
+            if (gloss == null || !gloss.HasContent) return null;
+
+            if (!string.Equals(gloss.Source, ChecklistItemGloss.SourceAuthored, StringComparison.OrdinalIgnoreCase))
+            {
+                gloss.Source = ChecklistItemGloss.SourceGenerated;
+            }
+
+            return gloss;
+        }
+
+        /// <summary>
         /// Append items to a task's existing checklist without replacing it.
         /// Unlike <see cref="UpdateTaskChecklist"/> (a full replace), the caller does not have to
         /// round-trip and faithfully rebuild the whole list (which risks dropping an existing item's
@@ -1697,6 +1733,10 @@ namespace MultiTerminal.MCPServer.Services
         /// other checklist mutators) so it won't clobber a concurrent append/transition/assign, and it
         /// fails closed if persistence throws.
         /// </summary>
+        /// <remarks>
+        /// Gloss provenance is stamped by <see cref="StampAppendedGlossProvenance"/>, declared
+        /// immediately above.
+        /// </remarks>
         public UpdateTaskResult AppendChecklistItems(string taskId, string itemsJson)
         {
             if (!_tasks.TryGetValue(taskId, out var task))
@@ -1766,7 +1806,7 @@ namespace MultiTerminal.MCPServer.Services
                     // An all-blank gloss is stored as absent, matching ChecklistItemGloss.HasContent —
                     // "nobody wrote an explanation" and "someone wrote three empty strings" must not
                     // render differently in the graph view.
-                    Gloss = raw.Gloss != null && raw.Gloss.HasContent ? raw.Gloss : null
+                    Gloss = StampAppendedGlossProvenance(raw.Gloss)
                 });
             }
 
