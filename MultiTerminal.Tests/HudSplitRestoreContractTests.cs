@@ -178,23 +178,43 @@ namespace MultiTerminal.Tests
 
             string body = EnclosingBlockFrom(src, src.IndexOf('{', handler) + 1);
 
-            int captured = body.IndexOf("bool clamped", StringComparison.Ordinal);
+            // `>=`, not `>`. maxDistance sits SplitterWidth above the real WinForms ceiling, so a
+            // distance equal to it is clamped in practice. With `>` the latch condition became a
+            // strict superset of the original's and the extra at-the-ceiling case reproduced the
+            // bug. One character, and no other assertion here can see it.
+            Assert.True(
+                Regex.IsMatch(body, @"bool\s+clamped\s*=\s*distance\s*>=\s*maxDistance\s*;"),
+                "OnHudSplitterSizeChanged must capture `bool clamped = distance >= maxDistance;`. " +
+                "A strict `>` treats the at-the-ceiling case as a fit and latches there, which pins " +
+                "the HUD at Panel2MinSize for the session; dropping the capture entirely loses the " +
+                "retry-at-a-larger-height behaviour altogether.");
+
             int guard = body.IndexOf("if (!clamped)", StringComparison.Ordinal);
-            int latch = body.IndexOf("_initialHudSplitApplied = true", StringComparison.Ordinal);
-            int hook = body.IndexOf("SplitterMoved += OnHudSplitterMoved", StringComparison.Ordinal);
-
             Assert.True(
-                captured >= 0,
-                "OnHudSplitterSizeChanged no longer captures whether the distance was clamped. " +
-                "Without that, the latch cannot distinguish a real fit from a clamped one, and the " +
-                "retry-at-a-larger-height behaviour is lost.");
+                guard >= 0,
+                "OnHudSplitterSizeChanged no longer guards on `if (!clamped)`. Without it the latch " +
+                "closes on a restore measured at a transient docking height.");
 
-            Assert.True(
-                guard >= 0 && latch > guard && hook > guard,
-                "The latch and the SplitterMoved subscription must both sit inside an 'if (!clamped)' " +
-                $"guard. Found capture={captured}, guard={guard}, latch={latch}, hook={hook}. Latching " +
-                "on a clamped restore stops the retries at a transient height and pins the HUD at its " +
-                "minimum for the rest of the session.");
+            // Containment, NOT ordering. An earlier version of this test asserted only that the
+            // latch appeared AFTER the guard, which stays green if the latch is moved BELOW a
+            // surviving `if (!clamped) { }` block — i.e. the exact regression, unguarded again.
+            string guarded = EnclosingBlockFrom(body, body.IndexOf('{', guard) + 1);
+
+            foreach (string required in new[] { "_initialHudSplitApplied = true", "SplitterMoved += OnHudSplitterMoved" })
+            {
+                Assert.True(
+                    guarded.Contains(required, StringComparison.Ordinal),
+                    $"'{required}' is not INSIDE the 'if (!clamped)' block. Latching or subscribing " +
+                    "outside that guard means a clamped restore at a transient height ends the retry " +
+                    "loop, and FixedPanel.Panel2 then holds the HUD at its minimum for the session.");
+
+                int total = Regex.Matches(body, Regex.Escape(required)).Count;
+                Assert.True(
+                    total == 1,
+                    $"'{required}' appears {total} times in OnHudSplitterSizeChanged; expected exactly " +
+                    "one, inside the guard. A second unguarded occurrence re-introduces the defect " +
+                    "while the containment check above still passes on the guarded one.");
+            }
         }
 
         /// <summary>

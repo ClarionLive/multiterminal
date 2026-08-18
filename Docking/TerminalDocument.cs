@@ -952,7 +952,16 @@ namespace MultiTerminal.Docking
 
                 // Whether the saved ratio FITS at the current height. Load-bearing twice below, so
                 // it is named rather than re-derived.
-                bool clamped = distance > maxDistance;
+                //
+                // `>=`, NOT `>`. Equality is the at-the-ceiling case and must count as clamped:
+                // maxDistance is Height - Panel2MinSize, which is SplitterWidth (6px) ABOVE the
+                // real WinForms ceiling of Height - Panel2MinSize - SplitterWidth, so a distance
+                // equal to maxDistance is silently clamped down by WinForms and lands Panel2 on
+                // exactly its 80px minimum. Treating that as a fit would latch at the ceiling.
+                // With `>=` the latch condition is IDENTICAL to the original's `distance <
+                // maxDistance`; with `>` it was a strict superset, and the extra member was
+                // precisely the case that reproduced the bug this guard exists to prevent.
+                bool clamped = distance >= maxDistance;
                 if (clamped)
                     distance = maxDistance;
 
@@ -974,9 +983,13 @@ namespace MultiTerminal.Docking
                 // So: apply the clamped value (fixes (a)), but latch and subscribe only on a fit
                 // that needed no clamping (preserves (b)).
                 //
-                // Strictly better than the original at every height: where the ratio fits, this
-                // behaves as before; where it does not, the original applied NOTHING and did not
-                // latch, while this applies a sane clamped value and still does not latch.
+                // Relative to the original, precisely: this APPLIES in strictly more cases (it also
+                // applies the clamped value, which the original discarded) and LATCHES in exactly
+                // the same cases (`distance < maxDistance`). The earlier phrasing here claimed
+                // "strictly better at every height" while the predicate used `>`, which latched in
+                // one case more than the original — at the ceiling — and that extra case
+                // reproduced the very bug being fixed. Keep the two properties stated separately;
+                // collapsing them into one claim is how that slipped through.
                 // Setting distance == maxDistance is safe — WinForms silently clamps
                 // SplitterDistance to the true ceiling rather than throwing (measured).
                 if (distance > _terminalHudSplitter.Panel1MinSize)
