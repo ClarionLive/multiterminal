@@ -951,8 +951,17 @@ namespace MultiTerminal.Docking
                 int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
                 if (distance > maxDistance)
                     distance = maxDistance;
-                if (distance > _terminalHudSplitter.Panel1MinSize &&
-                    distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
+
+                // Test `> Panel1MinSize` ONLY. There used to be a second test,
+                // `distance < Height - Panel2MinSize`, which is the same expression as maxDistance
+                // written out — and it sat directly after the clamp that assigns
+                // distance = maxDistance, so it compared a value with itself and could never be
+                // true. Every saved ratio at or above the clamp therefore restored nothing AND,
+                // because the latch and the SplitterMoved hook live in this branch, never opened
+                // persistence either: forgotten on open, forgotten again on close.
+                // Setting distance == maxDistance is safe — WinForms silently clamps SplitterDistance
+                // down to Height - Panel2MinSize - SplitterWidth rather than throwing (measured).
+                if (distance > _terminalHudSplitter.Panel1MinSize)
                 {
                     _terminalHudSplitter.SplitterDistance = distance;
                     _initialHudSplitApplied = true;
@@ -1841,8 +1850,12 @@ namespace MultiTerminal.Docking
                 // Clamp to respect Panel2MinSize
                 if (distance > maxDistance)
                     distance = maxDistance;
-                if (distance > _terminalHudSplitter.Panel1MinSize &&
-                    distance < _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize)
+
+                // Test `> Panel1MinSize` ONLY — the removed `distance < Height - Panel2MinSize` was
+                // maxDistance spelled out, sitting after the clamp that assigns it, so it could
+                // never be true and this restore silently no-opped for every ratio at or above the
+                // clamp. See OnHudSplitterSizeChanged for the full note.
+                if (distance > _terminalHudSplitter.Panel1MinSize)
                 {
                     _terminalHudSplitter.SplitterDistance = distance;
                 }
