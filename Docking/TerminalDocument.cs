@@ -949,23 +949,45 @@ namespace MultiTerminal.Docking
                 _suppressSplitterEvents = true;
                 int maxDistance = _terminalHudSplitter.Height - _terminalHudSplitter.Panel2MinSize;
                 int distance = (int)(_terminalHudSplitter.Height * _hudSplitRatio);
-                if (distance > maxDistance)
+
+                // Whether the saved ratio FITS at the current height. Load-bearing twice below, so
+                // it is named rather than re-derived.
+                bool clamped = distance > maxDistance;
+                if (clamped)
                     distance = maxDistance;
 
-                // Test `> Panel1MinSize` ONLY. There used to be a second test,
-                // `distance < Height - Panel2MinSize`, which is the same expression as maxDistance
-                // written out — and it sat directly after the clamp that assigns
-                // distance = maxDistance, so it compared a value with itself and could never be
-                // true. Every saved ratio at or above the clamp therefore restored nothing AND,
-                // because the latch and the SplitterMoved hook live in this branch, never opened
-                // persistence either: forgotten on open, forgotten again on close.
-                // Setting distance == maxDistance is safe — WinForms silently clamps SplitterDistance
-                // down to Height - Panel2MinSize - SplitterWidth rather than throwing (measured).
+                // This used to read `> Panel1MinSize && distance < Height - Panel2MinSize`, the
+                // second half being maxDistance written out. That test is NOT dead in general — it
+                // is true whenever the ratio fits. It is guaranteed false only in the CLAMPED case,
+                // and there it was doing two jobs at once:
+                //   (a) discarding the restore, which was the bug: a ratio too large for the
+                //       current height restored nothing at all; and
+                //   (b) withholding the latch, which was CORRECT and load-bearing. This handler is
+                //       a retry loop — it runs on every SizeChanged until the latch closes it — so
+                //       leaving the latch open is how a restore attempted mid-dock eventually lands
+                //       at the real height.
+                // Deleting the comparison outright kept (a) and destroyed (b): the handler latched
+                // on a clamped restore taken at a transient docking height, the early return above
+                // then blocked the correct restore at the final height, and FixedPanel.Panel2 held
+                // the HUD at its 80px minimum from there on — after which the subscription below
+                // persisted that bogus ratio and MainForm broadcast it to every other terminal.
+                // So: apply the clamped value (fixes (a)), but latch and subscribe only on a fit
+                // that needed no clamping (preserves (b)).
+                //
+                // Strictly better than the original at every height: where the ratio fits, this
+                // behaves as before; where it does not, the original applied NOTHING and did not
+                // latch, while this applies a sane clamped value and still does not latch.
+                // Setting distance == maxDistance is safe — WinForms silently clamps
+                // SplitterDistance to the true ceiling rather than throwing (measured).
                 if (distance > _terminalHudSplitter.Panel1MinSize)
                 {
                     _terminalHudSplitter.SplitterDistance = distance;
-                    _initialHudSplitApplied = true;
-                    _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
+
+                    if (!clamped)
+                    {
+                        _initialHudSplitApplied = true;
+                        _terminalHudSplitter.SplitterMoved += OnHudSplitterMoved;
+                    }
                 }
             }
             catch { }
@@ -1851,10 +1873,12 @@ namespace MultiTerminal.Docking
                 if (distance > maxDistance)
                     distance = maxDistance;
 
-                // Test `> Panel1MinSize` ONLY — the removed `distance < Height - Panel2MinSize` was
-                // maxDistance spelled out, sitting after the clamp that assigns it, so it could
-                // never be true and this restore silently no-opped for every ratio at or above the
-                // clamp. See OnHudSplitterSizeChanged for the full note.
+                // Test `> Panel1MinSize` ONLY. The removed `distance < Height - Panel2MinSize` was
+                // maxDistance spelled out; it is guaranteed false in the CLAMPED case, so this
+                // restore silently no-opped for every ratio too large to fit at the current height.
+                // Unlike OnHudSplitterSizeChanged, this method sets no latch and subscribes
+                // nothing, so the comparison was doing only harm here and dropping it outright is
+                // correct. See that method for why the latching site needs more care.
                 if (distance > _terminalHudSplitter.Panel1MinSize)
                 {
                     _terminalHudSplitter.SplitterDistance = distance;
