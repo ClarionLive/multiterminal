@@ -504,9 +504,15 @@ namespace MultiTerminal.API.Controllers
                 // session start is a burst — several agents registering within seconds
                 // share ONE scan instead of each spawning their own git fan-out. The
                 // explicit /api/worktrees/* refresh endpoints pass 0 and always scan.
+                // Both resolvers must match the OTHER production call site
+                // (WorktreesController). Scans are coalesced on TYPE, so a joiner
+                // receives the result built with the FIRST caller's delegates — wiring
+                // these differently would hand a joiner a trunk answer it never asked
+                // for. See the coalescing caveat on ScanPendingMergesAsync.
                 var mergeScan = await janitor.ScanPendingMergesAsync(
                     id => _broker.TryGetProjectPathForTask(id),
-                    MultiTerminal.Services.WorktreeJanitorService.SessionStartScanStalenessMs).ConfigureAwait(false);
+                    MultiTerminal.Services.WorktreeJanitorService.SessionStartScanStalenessMs,
+                    id => _broker.TryGetConfiguredTrunkForTask(id)).ConfigureAwait(false);
                 var pendingMerges = new System.Collections.Generic.List<object>();
                 foreach (var pm in mergeScan.Items)
                 {
@@ -519,6 +525,22 @@ namespace MultiTerminal.API.Controllers
                         branchName = pm.BranchName,
                         repoRoot = pm.RepoRoot,
                     });
+                }
+
+                // Leftover branches: merged into trunk but never deleted (task 0d7c3446).
+                // COUNTED, not enumerated, and deliberately NOT part of the clean-bill-of-
+                // health test below. Listing one line per branch would reproduce the exact
+                // noise this ticket removed under a friendlier label — the project where the
+                // bug was found had FIVE such branches, so a per-branch render would put five
+                // lines in front of every agent at every session start, which is how the real
+                // alarm got tuned out in the first place. A project whose ONLY finding is
+                // leftovers still returns a clean bill of health and shows nothing.
+                int leftoverBranchCount = 0;
+                foreach (var lb in mergeScan.LeftoverBranches)
+                {
+                    var lbTask = _broker.GetTask(lb.TaskId);
+                    if (!string.Equals(lbTask?.ProjectId, entry.Id, StringComparison.OrdinalIgnoreCase)) continue;
+                    leftoverBranchCount++;
                 }
 
                 // Stranded dirs scoped by path containment under the project root
@@ -607,6 +629,7 @@ namespace MultiTerminal.API.Controllers
                     projectName = entry.Name,
                     pendingMerges,
                     strandedDirs,
+                    leftoverBranchCount,
                 };
             }
             catch (Exception ex)

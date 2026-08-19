@@ -1454,6 +1454,29 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// The project's configured <c>git_default_branch</c> for a task, or <c>null</c>
+        /// when none is configured. Public counterpart of <see cref="ResolveConfiguredTrunk"/>
+        /// for the janitor's read-only pending-merge scan (task 0d7c3446).
+        /// </summary>
+        /// <remarks>
+        /// <para>The janitor needs the SAME trunk the merge path would use. Detection alone
+        /// resolves nothing on a repo with an unconventional trunk name or more than one
+        /// non-task branch — precisely the repos this configuration exists to serve — and a
+        /// scan that cannot resolve trunk skips every record and reports permanently partial.</para>
+        /// <para><b>Exceptions propagate, deliberately.</b> <see cref="ResolveConfiguredTrunk"/>
+        /// fails closed rather than swallowing a DB error to null, because a swallowed error
+        /// on the authoritative trust boundary silently downgrades to a heuristic. In the scan
+        /// this delegate runs inside the per-record try, so a throw counts that record as
+        /// SKIPPED and degrades the scan to partial — which is the same honest outcome.</para>
+        /// </remarks>
+        public string TryGetConfiguredTrunkForTask(string taskId)
+        {
+            if (string.IsNullOrEmpty(taskId)) return null;
+            var task = _taskService.GetTask(taskId);
+            return task == null ? null : ResolveConfiguredTrunk(task);
+        }
+
+        /// <summary>
         /// Phase 2 attribution overlays for the HUD Git tab — file-level agent +
         /// active-task linkage + pipeline status. Backed by <see cref="TaskDb"/>.
         /// Set via DI after broker is created.

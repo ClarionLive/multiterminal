@@ -225,13 +225,26 @@ namespace MultiTerminal.Tests
         // ---- half 2: ScanPendingMergesAsync -------------------------------
 
         /// <summary>
-        /// A done task whose branch still exists in git is reported as a pending
-        /// merge, and a fully-checked scan is Complete (count authoritative).
+        /// TRUE-POSITIVE ARM (task 0d7c3446 item 1). A done task whose branch is alive
+        /// AND carries commits that never reached trunk is reported as a pending merge,
+        /// and a fully-checked scan is Complete.
         /// </summary>
+        /// <remarks>
+        /// <para><b>This test previously asserted the defect.</b> Its fixture was
+        /// <c>git branch task/feed1234</c> — a branch created at HEAD, therefore fully
+        /// merged by construction — and its docstring read "a done task whose branch still
+        /// exists in git is reported as a pending merge", stating branch EXISTENCE as the
+        /// rule. That is exactly the confusion 0d7c3446 fixes, written down as the
+        /// specification. The fixture now creates a genuinely unmerged branch; the
+        /// assertion is unchanged because the assertion was never the problem.</para>
+        /// <para>This arm must stay GREEN through every change to the scan. A fix that only
+        /// removes findings is indistinguishable from a scan that has stopped working, and
+        /// this is the half that tells them apart.</para>
+        /// </remarks>
         [Fact]
-        public async System.Threading.Tasks.Task DoneTaskWithLiveBranch_IsReportedComplete()
+        public async System.Threading.Tasks.Task DoneTaskWithUnmergedBranch_IsReportedComplete()
         {
-            RunGit(_repoRoot, "branch", CanonicalBranch);
+            CreateUnmergedBranch(CanonicalBranch);
             SavePrunedDoneRow();
 
             var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => _repoRoot);
@@ -241,6 +254,37 @@ namespace MultiTerminal.Tests
             Assert.Equal(TaskId, item.TaskId);
             Assert.Equal(CanonicalBranch, item.BranchName);
             Assert.Equal(_repoRoot, item.RepoRoot);
+            Assert.Empty(scan.LeftoverBranches);
+        }
+
+        /// <summary>
+        /// FALSE-POSITIVE ARM (task 0d7c3446 item 0) — the reported bug. A done task whose
+        /// branch is alive but ALREADY CONTAINED IN TRUNK must NOT be reported as "never
+        /// landed in trunk". It is a leftover branch, reported quietly and separately.
+        /// </summary>
+        /// <remarks>
+        /// The live symptom: a branch merged by a shape that leaves it alive (fast-forward
+        /// push, manual merge, failed <c>branch -d</c>) was re-reported at every session
+        /// start forever, because nothing in the system ever deletes such a branch. On the
+        /// project where this was found, ALL FIVE local task branches were fully merged and
+        /// the one finding that fired was a false positive — 0% precision. Reverting the
+        /// ancestry gate turns this test red.
+        /// </remarks>
+        [Fact]
+        public async System.Threading.Tasks.Task DoneTaskWithMergedButAliveBranch_IsNotReportedAsPending()
+        {
+            // Branch at HEAD: alive, and an ancestor of trunk by construction.
+            RunGit(_repoRoot, "branch", CanonicalBranch);
+            SavePrunedDoneRow();
+
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => _repoRoot);
+
+            Assert.True(scan.Complete, "the record WAS checked — this is a verdict, not a skip");
+            Assert.Empty(scan.Items);
+
+            // Not silently dropped either: it is still surfaced, just not as the alarm.
+            var leftover = Assert.Single(scan.LeftoverBranches);
+            Assert.Equal(CanonicalBranch, leftover.BranchName);
         }
 
         /// <summary>
@@ -288,7 +332,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public async System.Threading.Tasks.Task MultipleRecordsSameRepo_BatchListingStaysCorrect()
         {
-            RunGit(_repoRoot, "branch", "task/alive001");
+            CreateUnmergedBranch("task/alive001");
             SavePrunedDoneRow(taskId: "alive001", branchName: "task/alive001");
             SavePrunedDoneRow(taskId: "gone0002", branchName: "task/gone0002"); // branch never created
 
@@ -332,19 +376,129 @@ namespace MultiTerminal.Tests
 
         /// <summary>
         /// A record whose branch lies OUTSIDE refs/heads/task/ isn't covered by the
-        /// batch listing — the per-record fallback probe must still find it.
+        /// batch listing — the per-record fallback probe must still find it, and the
+        /// ancestry gate must still classify it.
         /// </summary>
+        /// <remarks>
+        /// The trunk is supplied rather than detected, and that is not test convenience.
+        /// A <c>hotfix/*</c> branch is a SECOND non-task branch, which makes
+        /// <c>DetectDefaultBranchAsync</c> ambiguous by design — so detection returns null
+        /// and the record would be skipped. That is the correct fail-closed behaviour and
+        /// the reason a real repo carrying any non-task branch beside trunk needs its
+        /// project <c>git_default_branch</c> set for this scan to produce findings.
+        /// </remarks>
         [Fact]
         public async System.Threading.Tasks.Task NonTaskNamespaceBranch_FallbackProbeStillReports()
         {
-            RunGit(_repoRoot, "branch", "hotfix/feed1234");
+            CreateUnmergedBranch("hotfix/feed1234");
             SavePrunedDoneRow(branchName: "hotfix/feed1234");
 
-            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => _repoRoot);
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(
+                _ => _repoRoot, 0, _ => "master");
 
             Assert.True(scan.Complete);
             var item = Assert.Single(scan.Items);
             Assert.Equal("hotfix/feed1234", item.BranchName);
+        }
+
+        /// <summary>
+        /// A non-task branch that IS merged is a leftover too — the ancestry gate applies to
+        /// the fallback-probe path, not only to the batched task/* one.
+        /// </summary>
+        /// <remarks>
+        /// This is why <c>ListMergedBranchesAsync</c> is scoped to <c>refs/heads/</c> rather
+        /// than <c>refs/heads/task/</c>. A task-scoped merged set could never contain
+        /// <c>hotfix/*</c>, so every non-task record would test as "not merged" and be
+        /// reported forever — this ticket's exact false positive, surviving for that class.
+        /// </remarks>
+        [Fact]
+        public async System.Threading.Tasks.Task NonTaskNamespaceBranch_MergedIsLeftoverNotPending()
+        {
+            RunGit(_repoRoot, "branch", "hotfix/merged01");
+            SavePrunedDoneRow(branchName: "hotfix/merged01");
+
+            // Trunk supplied: hotfix/* is a second non-task branch, so detection is
+            // ambiguous by design. See NonTaskNamespaceBranch_FallbackProbeStillReports.
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(
+                _ => _repoRoot, 0, _ => "master");
+
+            Assert.True(scan.Complete);
+            Assert.Empty(scan.Items);
+            Assert.Single(scan.LeftoverBranches);
+        }
+
+        /// <summary>
+        /// Item 5: an UNRESOLVABLE trunk is "could not look", never a verdict. The record is
+        /// skipped and the scan degrades to partial — it must not be reported as pending
+        /// (the old noise bug) and must not be silently treated as merged (a worse one).
+        /// </summary>
+        /// <remarks>
+        /// Two non-task branches make detection ambiguous, and no <c>git_default_branch</c>
+        /// is supplied, so nothing can resolve trunk. Suppressing the finding here would hide
+        /// a genuinely stranded branch whose worktree is already pruned.
+        /// </remarks>
+        [Fact]
+        public async System.Threading.Tasks.Task UnresolvableTrunk_SkipsRecordAndDegradesToPartial()
+        {
+            CreateUnmergedBranch(CanonicalBranch);
+            RunGit(_repoRoot, "branch", "release");   // 2nd non-task branch -> ambiguous
+            SavePrunedDoneRow();
+
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(_ => _repoRoot);
+
+            Assert.False(scan.Complete, "trunk could not be resolved — the scan is partial");
+            Assert.Equal(1, scan.SkippedRecords);
+            Assert.Equal(new[] { TaskId }, scan.SkippedTaskIds);
+            Assert.Empty(scan.Items);
+            Assert.Empty(scan.LeftoverBranches);
+        }
+
+        /// <summary>
+        /// The configured <c>git_default_branch</c> resolves trunk where detection cannot —
+        /// the payload of extracting config-then-detect into one shared resolver
+        /// (task 0d7c3446, correction to the ticket's item 2).
+        /// </summary>
+        /// <remarks>
+        /// Same ambiguous repo as the test above, which without configuration skips every
+        /// record. The ticket's plan credited <c>DetectDefaultBranchAsync</c> with reading
+        /// <c>git_default_branch</c>; it never did — that override lived at the merge path's
+        /// CALL SITE. A janitor wired to detection alone would report a permanently partial
+        /// scan on exactly the repos configuration exists to serve, with no findings and no
+        /// obvious symptom. This test is the difference between the two wirings.
+        /// </remarks>
+        [Fact]
+        public async System.Threading.Tasks.Task ConfiguredTrunk_ResolvesWhereDetectionCannot()
+        {
+            CreateUnmergedBranch(CanonicalBranch);
+            RunGit(_repoRoot, "branch", "release");   // detection is ambiguous here
+            SavePrunedDoneRow();
+
+            var scan = await new WorktreeJanitorService(_db).ScanPendingMergesAsync(
+                _ => _repoRoot, 0, _ => "master");
+
+            Assert.True(scan.Complete, "the configured trunk resolved — nothing to skip");
+            var item = Assert.Single(scan.Items);
+            Assert.Equal(CanonicalBranch, item.BranchName);
+        }
+
+        /// <summary>
+        /// Create a branch carrying a commit that is NOT in trunk — a genuinely unmerged
+        /// branch, which is what a pending-merge finding is supposed to mean.
+        /// </summary>
+        /// <remarks>
+        /// The obvious <c>git branch X</c> creates the branch AT HEAD, making it an ancestor
+        /// of trunk and therefore already merged. Three tests in this file used that fixture
+        /// while asserting the record was reported as pending, which is how the defect
+        /// 0d7c3446 fixed came to be pinned as expected behaviour. Use this helper for any
+        /// test that means "unmerged".
+        /// </remarks>
+        private void CreateUnmergedBranch(string branchName)
+        {
+            RunGit(_repoRoot, "checkout", "-b", branchName);
+            File.WriteAllText(Path.Combine(_repoRoot, branchName.Replace('/', '_') + ".txt"), "work");
+            RunGit(_repoRoot, "add", ".");
+            RunGit(_repoRoot, "commit", "-m", "work on " + branchName);
+            RunGit(_repoRoot, "checkout", "master");
         }
 
         /// <summary>ParseBranchNames: LF and CRLF output, whitespace, and empty input.</summary>

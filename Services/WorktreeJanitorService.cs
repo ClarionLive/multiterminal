@@ -798,10 +798,14 @@ namespace MultiTerminal.Services
         /// bypass it.
         /// </remarks>
         public Task<PendingMergeScanResult> ScanPendingMergesAsync(
-            Func<string, string> getProjectPathForTask, int maxStalenessMs = 0)
-            => _pendingMergeScans.RunAsync(() => ScanPendingMergesCoreAsync(getProjectPathForTask), maxStalenessMs);
+            Func<string, string> getProjectPathForTask, int maxStalenessMs = 0,
+            Func<string, string> getConfiguredTrunkForTask = null)
+            => _pendingMergeScans.RunAsync(
+                () => ScanPendingMergesCoreAsync(getProjectPathForTask, getConfiguredTrunkForTask), maxStalenessMs);
 
-        private async Task<PendingMergeScanResult> ScanPendingMergesCoreAsync(Func<string, string> getProjectPathForTask)
+        private async Task<PendingMergeScanResult> ScanPendingMergesCoreAsync(
+            Func<string, string> getProjectPathForTask,
+            Func<string, string> getConfiguredTrunkForTask)
         {
             var result = new PendingMergeScanResult();
 
@@ -833,6 +837,14 @@ namespace MultiTerminal.Services
             // timeout-is-retry-later-not-gone-evidence contract.
             var taskBranchesByRepo = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             var failedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Per-scan cache of the MERGED branch set per repo (task 0d7c3446). Same
+            // batching shape and the same reason as taskBranchesByRepo above: one
+            // `git for-each-ref --merged <trunk>` per DISTINCT repo, never one ancestry
+            // probe per record. A naive per-record `merge-base --is-ancestor` would
+            // reintroduce exactly the ~40s-at-228-records shape that batching removed,
+            // inside a scan that runs inline in a request abandoned at 15s.
+            var mergedBranchesByRepo = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var record in prunedDone)
             {
@@ -885,14 +897,71 @@ namespace MultiTerminal.Services
                         branchExists = await BranchExistsAsync(projectPath, record.BranchName).ConfigureAwait(false);
                     }
 
-                    if (branchExists)
+                    if (!branchExists) continue;
+
+                    // ANCESTRY GATE (task 0d7c3446). "The branch still exists" and "the
+                    // work never landed" are DIFFERENT FACTS, and until this gate the scan
+                    // reported the first as if it were the second. Every branch that was
+                    // merged without being deleted — a fast-forward push, a manual merge, a
+                    // failed `branch -d` — was reported as unmerged forever, because nothing
+                    // in the system ever deletes such a branch. Measured precision on the
+                    // reporting project when this was found: 1 finding, 1 false positive.
+                    if (!mergedBranchesByRepo.TryGetValue(repoKey, out var mergedBranches))
                     {
-                        result.Items.Add(new PendingMergeInfo
+                        // Configured git_default_branch first, detection second — the same
+                        // order the merge path uses. Detection ALONE resolves nothing on the
+                        // repos configuration exists to serve, which would skip every record
+                        // and leave the scan permanently partial.
+                        string trunk = await GitTrunkResolver.ResolveAsync(
+                            projectPath, getConfiguredTrunkForTask?.Invoke(record.TaskId)).ConfigureAwait(false);
+
+                        // Unresolvable trunk is NOT "merged" and NOT "pending" — it is
+                        // "could not look". Resolving it either way would trade this
+                        // ticket's noise bug for a silence bug: the genuinely stranded
+                        // branch would stop being reported at all, worktree already pruned.
+                        if (string.IsNullOrWhiteSpace(trunk))
                         {
-                            TaskId = record.TaskId,
-                            BranchName = record.BranchName,
-                            RepoRoot = projectPath,
-                        });
+                            failedRepos.Add(repoKey);
+                            result.SkippedRecords++;
+                            result.SkippedTaskIds.Add(record.TaskId);
+                            Debug.WriteLine($"[WorktreeJanitor] ScanPendingMergesAsync could not resolve trunk for {projectPath} — records skipped, scan partial");
+                            continue;
+                        }
+
+                        try
+                        {
+                            mergedBranches = await ListMergedBranchesAsync(projectPath, trunk).ConfigureAwait(false);
+                            mergedBranchesByRepo[repoKey] = mergedBranches;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Timeout or git failure — retry-later, never evidence either way.
+                            failedRepos.Add(repoKey);
+                            result.SkippedRecords++;
+                            result.SkippedTaskIds.Add(record.TaskId);
+                            Debug.WriteLine($"[WorktreeJanitor] ScanPendingMergesAsync merged listing failed for {projectPath}: {ex.Message}");
+                            continue;
+                        }
+                    }
+
+                    var info = new PendingMergeInfo
+                    {
+                        TaskId = record.TaskId,
+                        BranchName = record.BranchName,
+                        RepoRoot = projectPath,
+                    };
+
+                    // Alive AND already in trunk: the work landed and only the branch is
+                    // left over. Reported separately and quietly — it is a tidy-up, not the
+                    // "your commits are stranded" alarm, and conflating the two is what
+                    // discredited the alarm.
+                    if (mergedBranches.Contains(record.BranchName))
+                    {
+                        result.LeftoverBranches.Add(info);
+                    }
+                    else
+                    {
+                        result.Items.Add(info);
                     }
                 }
                 catch (Exception ex)
@@ -1179,6 +1248,41 @@ namespace MultiTerminal.Services
             return set;
         }
 
+        /// <summary>
+        /// Every local branch already contained in <paramref name="trunk"/>, in one
+        /// subprocess per repo (task 0d7c3446). Membership in this set is the scan's
+        /// ancestry oracle: a branch in it has landed, a branch absent from it has not.
+        /// </summary>
+        /// <remarks>
+        /// <para>Same contract as <see cref="ListTaskBranchesAsync"/>: a timeout or a
+        /// non-zero exit THROWS. Neither is evidence of anything, and returning an empty
+        /// set would silently report every branch in the repo as unmerged.</para>
+        /// <para><b>Scoped to <c>refs/heads/</c>, not <c>refs/heads/task/</c></b>, which is
+        /// deliberate and not a copy-paste slip from the sibling listing. Records whose
+        /// branch name is outside the task namespace take the per-record existence probe,
+        /// and a task-scoped merged set could never contain them — so every one of them
+        /// would test as "not merged" and be reported forever, recreating this ticket's
+        /// exact false positive for that class of record.</para>
+        /// <para>A trunk that is not a resolvable ref makes git exit non-zero, which throws
+        /// and skips the record. That is the intended fail-closed outcome: a configured
+        /// git_default_branch naming a branch that does not exist here is a configuration
+        /// error, and guessing past it is how the wrong-branch class of bug starts.</para>
+        /// </remarks>
+        private static async Task<HashSet<string>> ListMergedBranchesAsync(string repoRoot, string trunk)
+        {
+            var result = await GitExec.RunAsync(
+                repoRoot, "for-each-ref", "--format=%(refname)", "--merged", trunk, "refs/heads/").ConfigureAwait(false);
+            if (result.TimedOut)
+            {
+                throw new TimeoutException($"git for-each-ref --merged timed out for {repoRoot} — retry next sweep");
+            }
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"git for-each-ref --merged exit {result.ExitCode}: {result.Stderr.Trim()}");
+            }
+            return ParseBranchNames(result.Stdout);
+        }
+
         private static async Task<bool> BranchExistsAsync(string repoRoot, string branchName)
         {
             var result = await GitExec.RunAsync(repoRoot, "branch", "--list", branchName).ConfigureAwait(false);
@@ -1290,6 +1394,15 @@ namespace MultiTerminal.Services
         /// one and every project must treat the scan as partial.
         /// </summary>
         public List<string> SkippedTaskIds { get; } = new List<string>();
+
+        /// <summary>
+        /// Branches that are alive but ALREADY CONTAINED IN TRUNK (task 0d7c3446) —
+        /// the work landed and only the branch is left over. Kept separate from
+        /// <see cref="Items"/> on purpose: these are a tidy-up, not the "commits are
+        /// stranded behind a pruned worktree" alarm, and reporting them as that alarm
+        /// is what gave the check 0% precision and taught readers to ignore it.
+        /// </summary>
+        public List<PendingMergeInfo> LeftoverBranches { get; } = new List<PendingMergeInfo>();
 
         public bool Complete => SkippedRecords == 0;
     }
