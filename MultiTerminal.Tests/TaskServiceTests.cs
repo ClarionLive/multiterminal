@@ -1030,6 +1030,49 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The legacy <c>done</c> flag is the one field whose "true" is an assertion rather than a
+        /// default, so <c>done: true</c> with no <c>status</c> is the pre-Status format saying "done"
+        /// — and it SUPPRESSES the status carry-forward, making the item done whatever it was stored
+        /// as. That is the single destructive case in an otherwise carry-forward merge.
+        /// <para>Until this test, nothing defended it. Simplifying the merge site to
+        /// <c>raw.Status ?? prior?.Status</c> reads like an obvious tidy-up, silently stops honouring
+        /// <c>done: true</c>, and turns the documented tool description into a lie with no test going
+        /// red. The tool text in <c>mcp/index.js</c> promises this behaviour; this is what holds the
+        /// promise up.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_LegacyDoneTrueWithNoStatus_OverridesTheStoredStatus()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(id, "[{\"item\":\"A\",\"status\":\"coding\"}]").Success);
+
+            // The pre-Status format: a legacy done flag and no status at all.
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"A\",\"done\":true}]");
+            Assert.True(w.Success, w.Error);
+
+            // NOT "coding" — the legacy flag is an assertion and overrides what was stored.
+            Assert.Equal("done", _svc.GetTask(id).GetChecklist()[0].Status);
+        }
+
+        /// <summary>
+        /// The converse, which must NOT be destructive. <c>done: false</c> is indistinguishable from
+        /// omission — false is also the default — so it has to read as "said nothing" and leave the
+        /// stored status alone. A merge that treated it as an assertion would reset the status of
+        /// every item on any array a caller round-tripped, which is the defect this ticket closed.
+        /// </summary>
+        [Fact]
+        public void FullReplace_LegacyDoneFalseWithNoStatus_KeepsTheStoredStatus()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(id, "[{\"item\":\"A\",\"status\":\"coding\"}]").Success);
+
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"A\",\"done\":false}]");
+            Assert.True(w.Success, w.Error);
+
+            Assert.Equal("coding", _svc.GetTask(id).GetChecklist()[0].Status);
+        }
+
+        /// <summary>
         /// Two stored items share text and one is removed: index+text matches by coincidence, so the
         /// survivor would inherit the wrong item's explanation, notes and assignee. Identity is
         /// uncertain here, and this method's own rule for that is to carry nothing.
