@@ -975,7 +975,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_checklist",
-        description: "DEPRECATED — prefer append_checklist_items to add items (no fetch-and-resend, no risk of mangling existing items) and update_task_checklist to transition status. Retained for back-compat: full-array replace of ALL checklist items. Avoid in new code.",
+        description: "DEPRECATED — prefer append_checklist_items to add items, update_task_checklist to transition status, and set_checklist_gloss to write an explanation. Retained for back-compat: full-array replace of ALL checklist items. Avoid in new code.\n\nA field you OMIT on an item is kept from what is stored; a field you STATE wins, including an explicit empty one. So this tool no longer silently destroys the fields its examples do not show — but it still overwrites everything you DO send, so a stale array you fetched minutes ago will still revert any status change made in the meantime. That hazard is why the single-item tools above exist.",
         inputSchema: {
           type: "object",
           properties: {
@@ -985,7 +985,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             checklistJson: {
               type: "string",
-              description: 'JSON array of checklist items, e.g. [{"item":"Setup database","status":"pending","notes":[]},{"item":"Create API","status":"pending","notes":[]}]',
+              description: 'JSON array of checklist items. The FULL item shape is below — a checklist item has never been just {item,status,notes}, and an array built from only those three used to drop the rest permanently:\n\n  • "item" (string) — the step description. This is also the IDENTITY used to carry omitted fields forward: an item is matched to the stored one at the SAME INDEX with the SAME text. Change the text, or move the item, and it is treated as a NEW item — everything you did not state on it is gone. Renaming a step and preserving its explanation are two separate operations; do the rename here and re-write the gloss with set_checklist_gloss.\n  • "status" (string) — pending | coding | testing | done. Omit to keep the stored status. This tool does NOT enforce the transition state machine; use update_task_checklist to move an item, which validates the transition and records who did it and why.\n  • "notes" (array) — the transition history. Omit to keep it. Sending [] ERASES it.\n  • "assignedTo" (string) — helper assigned to this item. Omit to keep.\n  • "cycleCount" (number) — coding↔testing cycles. Omit to keep. Cannot be lowered through this tool.\n  • "dependsOn" (array of numbers) — zero-based SIBLING indices that must finish first. Omit to keep. Array order is presentation order, never dependency, so an item that declares nothing gets no incoming edge in the 🔗 Plan tab. Sending [] clears the edges.\n  • "gloss" (object) — the plain-language explanation shown in the 🔗 Plan tab: {what, why, without, source}. Omit to keep the stored one, provenance and all. If you DO send one it is a fresh write and is stamped "generated" unless you explicitly pass source:"authored" — and note that an "authored" gloss can never afterwards be corrected by set_checklist_gloss. See append_checklist_items for what each of the four fields should say.\n\ne.g. [{"item":"Setup database","status":"pending","notes":[]},{"item":"Create API","status":"pending","notes":[]}]',
             },
           },
           required: ["taskId", "checklistJson"],

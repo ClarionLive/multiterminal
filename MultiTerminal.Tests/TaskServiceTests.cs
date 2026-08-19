@@ -716,6 +716,209 @@ namespace MultiTerminal.Tests
             Assert.Empty(after[0].Notes);               // and so are its notes
         }
 
+        // ---- UpdateTaskChecklist merges instead of overwriting (task 2da6d8d9) ----
+
+        /// <summary>
+        /// A task whose second item carries BOTH plan-authoring fields: a machine-stamped gloss and
+        /// a declared edge. Both are things <c>update_checklist</c>'s schema never mentioned.
+        /// </summary>
+        private string MakeGlossedTaskWithEdges()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            var r = _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"status\":\"pending\"}," +
+                "{\"item\":\"Wire the host interface\",\"status\":\"pending\",\"dependsOn\":[0]," +
+                "\"gloss\":{\"what\":\"Lists the coupling.\",\"why\":\"Gated on the extraction.\"," +
+                "\"without\":\"You find it from compiler errors mid-move.\"}}]");
+            Assert.True(r.Success, r.Error);
+            return id;
+        }
+
+        /// <summary>
+        /// Exactly what an agent following the old schema wrote: item, status, notes. Nothing else,
+        /// because nothing else was documented.
+        /// </summary>
+        private const string SchemaShapedRebuild =
+            "[{\"item\":\"Extract TaskService\",\"status\":\"pending\",\"notes\":[]}," +
+            "{\"item\":\"Wire the host interface\",\"status\":\"pending\",\"notes\":[]}]";
+
+        /// <summary>
+        /// THE regression. An array rebuilt from the three fields the schema described used to
+        /// discard the gloss and every dependency edge, silently, with a success response.
+        /// </summary>
+        [Fact]
+        public void FullReplace_InTheShapeTheSchemaDocumented_NoLongerErasesGlossOrEdges()
+        {
+            var id = MakeGlossedTaskWithEdges();
+
+            var before = _svc.GetTask(id).GetChecklist();
+            Assert.True(before[1].Gloss.IsGenerated);
+            Assert.Equal(new[] { 0 }, before[1].DependsOn);
+
+            var w = _svc.UpdateTaskChecklist(id, SchemaShapedRebuild);
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal("Lists the coupling.", after[1].Gloss.What);
+            Assert.True(after[1].Gloss.IsGenerated);          // the provenance stamp survived too
+            Assert.Equal(new[] { 0 }, after[1].DependsOn);
+        }
+
+        /// <summary>
+        /// The same rebuild done by someone who DID carry the gloss across — its three documented
+        /// text fields, but not <c>source</c>, which the schema never mentioned. This is the exact
+        /// payload CA-demoleg-CC wrote while repairing twelve glosses.
+        /// </summary>
+        private const string GlossRepairRebuild =
+            "[{\"item\":\"Extract TaskService\",\"status\":\"pending\",\"notes\":[]}," +
+            "{\"item\":\"Wire the host interface\",\"status\":\"pending\",\"notes\":[]," +
+            "\"gloss\":{\"what\":\"Lists the coupling.\",\"why\":\"Gated on the extraction.\"," +
+            "\"without\":\"You find it from compiler errors mid-move.\"}}]";
+
+        /// <summary>
+        /// The consequence that made this worth a ticket rather than a shrug. Losing the gloss was
+        /// bad; losing its <c>source</c> was PERMANENT — the gloss normalized back to
+        /// <c>authored</c> on read and <c>SetChecklistItemGloss</c> then refused to correct it for
+        /// the rest of the task's life, reporting success each time it declined.
+        /// </summary>
+        /// <remarks>
+        /// Note this uses <see cref="GlossRepairRebuild"/>, NOT <see cref="SchemaShapedRebuild"/>.
+        /// The distinction is the whole test: a rebuild that drops the gloss ENTIRELY leaves nothing
+        /// for the refusal to trigger on, so the correction succeeds and the test passes against the
+        /// broken code for the wrong reason. The permanence bug bites only when the gloss TEXT
+        /// survives and its provenance does not — which is precisely what an agent repairing a gloss
+        /// through the documented schema produces. Written the first way, this assertion was green
+        /// on the pre-fix build and proved nothing.
+        /// </remarks>
+        [Fact]
+        public void FullReplace_DoesNotLeaveAGeneratedGlossPermanentlyUncorrectable()
+        {
+            var id = MakeGlossedTaskWithEdges();
+            Assert.True(_svc.UpdateTaskChecklist(id, GlossRepairRebuild).Success);
+
+            var w = _svc.SetChecklistItemGloss(id, 1, SampleGloss("Corrected afterwards."));
+
+            Assert.True(w.Success, w.Error);
+            Assert.Equal(GlossWriteOutcome.Written, w.Outcome);   // NOT SkippedAuthoredGlossPresent
+            Assert.Equal("Corrected afterwards.", _svc.GetTask(id).GetChecklist()[1].Gloss.What);
+        }
+
+        /// <summary>
+        /// Workflow state is carried forward on the same rule as the plan fields: an array that says
+        /// only what each step IS leaves the status and notes history where it found them.
+        /// </summary>
+        [Fact]
+        public void FullReplace_OmittingStatusAndNotes_KeepsTheWorkflowState()
+        {
+            var id = MakeGlossedTaskWithEdges();
+            Assert.True(_svc.TransitionChecklistItem(id, 0, "coding", "starting", "diana").Success);
+
+            var w = _svc.UpdateTaskChecklist(
+                id, "[{\"item\":\"Extract TaskService\"},{\"item\":\"Wire the host interface\"}]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal("coding", after[0].Status);
+            Assert.NotEmpty(after[0].Notes);
+        }
+
+        /// <summary>
+        /// The other half of the rule, and the one that keeps it honest: omission preserves, but a
+        /// STATED value still wins — including an explicitly empty one. Without this the tool would
+        /// have become unable to clear an edge at all, which is a different bug, not a fix.
+        /// </summary>
+        [Fact]
+        public void FullReplace_StatingAnEmptyDependsOn_StillClearsTheEdges()
+        {
+            var id = MakeGlossedTaskWithEdges();
+
+            var w = _svc.UpdateTaskChecklist(
+                id,
+                "[{\"item\":\"Extract TaskService\"}," +
+                "{\"item\":\"Wire the host interface\",\"dependsOn\":[]}]");
+            Assert.True(w.Success, w.Error);
+
+            Assert.Empty(_svc.GetTask(id).GetChecklist()[1].DependsOn);
+        }
+
+        /// <summary>
+        /// A gloss the caller DOES send is a fresh write, so it gets the same stamp the other two
+        /// write paths apply. Anything else would leave this the one tool through which an agent can
+        /// still brand its own words as a person's.
+        /// </summary>
+        [Fact]
+        public void FullReplace_AStatedGlossWithNoSource_IsStampedGeneratedNotAuthored()
+        {
+            var id = MakeGlossTask();
+
+            var w = _svc.UpdateTaskChecklist(
+                id,
+                "[{\"item\":\"Extract TaskService\",\"gloss\":{\"what\":\"a\",\"why\":\"b\",\"without\":\"c\"}}," +
+                "{\"item\":\"Wire the host interface\"}]");
+            Assert.True(w.Success, w.Error);
+
+            Assert.True(_svc.GetTask(id).GetChecklist()[0].Gloss.IsGenerated);
+            Assert.Equal(GlossWriteOutcome.Written, _svc.SetChecklistItemGloss(id, 0, SampleGloss()).Outcome);
+        }
+
+        /// <summary>
+        /// The identity gate. Carry-forward is keyed on index AND exact item text, so a renamed step
+        /// does NOT inherit the explanation and edges of whatever used to sit at its position.
+        /// <para>This is the failure mode a looser match would introduce, and it is worse than the
+        /// one being fixed: a lost gloss is visibly absent and can be rewritten, while a gloss
+        /// silently attached to the wrong step reads as the planner's reasoning about work it never
+        /// described. Misattribution is the thing this whole line of tickets exists to prevent.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_RenamingAnItem_DoesNotInheritThePreviousExplanation()
+        {
+            var id = MakeGlossedTaskWithEdges();
+
+            var w = _svc.UpdateTaskChecklist(
+                id,
+                "[{\"item\":\"Extract TaskService\"},{\"item\":\"Something else entirely\"}]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Null(after[1].Gloss);
+            Assert.Empty(after[1].DependsOn);
+        }
+
+        /// <summary>
+        /// Incidental to the merge, but a real latent crash: a null array element used to be stored
+        /// verbatim, and the next <c>GetChecklist</c> — in whatever unrelated code reached it first
+        /// — dereferenced it inside <c>NormalizeFromLegacy</c>. A checklist that cannot be READ is
+        /// worse than one missing an element that was never valid.
+        /// </summary>
+        [Fact]
+        public void FullReplace_WithANullArrayElement_NoLongerStoresAnUnreadableChecklist()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"Real\"},null]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Single(after);
+            Assert.Equal("Real", after[0].Item);
+        }
+
+        /// <summary>
+        /// Malformed JSON is refused up front rather than stored to explode later on someone else's
+        /// read, and the existing checklist survives the refusal.
+        /// </summary>
+        [Fact]
+        public void FullReplace_WithMalformedJson_IsRejectedAndLeavesTheChecklistIntact()
+        {
+            var id = MakeGlossTask();
+
+            var w = _svc.UpdateTaskChecklist(id, "{not an array");
+
+            Assert.False(w.Success);
+            Assert.Equal(2, _svc.GetTask(id).GetChecklist().Count);
+        }
+
         [Fact]
         public void GlossWrite_DoesNotOverwriteAnAuthoredGloss()
         {
