@@ -266,7 +266,7 @@
       <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
-        <tr><td><code>checklistJson</code></td><td>string</td><td>Yes</td><td>JSON array of checklist items. Item shape: <code>item</code>, <code>status</code>, <code>notes</code>, <code>assignedTo</code>, <code>cycleCount</code>, <code>sortOrder</code>, <code>dependsOn</code>, <code>gloss</code> -- see the live tool schema for what each does and what omitting it means. Note <code>cycleCount</code> and <code>sortOrder</code> are numbers whose default is 0, so a stated 0 reads as omission and neither can be lowered to 0 here.</td></tr>
+        <tr><td><code>checklistJson</code></td><td>string</td><td>Yes</td><td>JSON array of checklist items. Item shape: <code>item</code>, <code>status</code>, <code>done</code>, <code>notes</code>, <code>assignedTo</code>, <code>cycleCount</code>, <code>sortOrder</code>, <code>dependsOn</code>, <code>gloss</code> -- see the live tool schema for what each does and what omitting it means. Note <code>cycleCount</code> and <code>sortOrder</code> are numbers whose default is 0, so a stated 0 reads as omission and neither can be lowered to 0 here. <code>done</code> is the legacy mirror of <code>status</code> and is normally not sent; sending <code>done:true</code> with no <code>status</code> marks the item done regardless of what was stored.</td></tr>
       </tbody>
     </table>
     <h4>Returns</h4>
