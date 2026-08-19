@@ -4475,10 +4475,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const strandedDirs = findings.strandedDirs || [];
             regText += `\n\n⚠️ JANITOR FINDINGS for ${findings.projectName || "this project"}${findings.status === "partial" ? " (PARTIAL scan — more may exist)" : ""}:`;
             for (const pm of pendingMerges) {
-              regText += `\n  • PENDING MERGE: branch ${pm.branchName} of done task ${pm.taskId}${pm.taskTitle ? ` "${pm.taskTitle}"` : ""} never landed in trunk (repo: ${pm.repoRoot}). Merge it manually or re-mark the task done to retry auto-merge.`;
+              regText += `\n  • PENDING MERGE: branch ${pm.branchName} of done task ${pm.taskId}${pm.taskTitle ? ` "${pm.taskTitle}"` : ""} is NOT contained in trunk (repo: ${pm.repoRoot}) — its commits are not in the default branch and its worktree is already pruned. Merge it manually or re-mark the task done to retry auto-merge.`;
             }
             for (const dir of strandedDirs) {
               regText += `\n  • STRANDED WORKTREE DIR: ${dir} (empty, no longer registered with git — a process held it at prune time).`;
+            }
+            // Leftover branches are a tidy-up, not an alarm: one aggregated line, and only
+            // when this block is already being shown for a real finding. They never raise
+            // the block by themselves (task 0d7c3446) — the API omits findings entirely for
+            // a project whose only observation is leftovers.
+            if ((findings.leftoverBranchCount || 0) > 0) {
+              const n = findings.leftoverBranchCount;
+              regText += `\n  • ${n} leftover branch${n === 1 ? "" : "es"} already merged into trunk — safe to delete, not stranded work.`;
             }
             if (pendingMerges.length === 0 && strandedDirs.length === 0) {
               regText += `\n  • No findings confirmed, but some records could not be checked — this project's worktree health is NOT fully verified this session.`;

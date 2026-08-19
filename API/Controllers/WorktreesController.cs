@@ -212,7 +212,12 @@ namespace MultiTerminal.API.Controllers
 
             try
             {
-                var scan = await janitor.ScanPendingMergesAsync(id => _broker.TryGetProjectPathForTask(id)).ConfigureAwait(false);
+                // Delegates kept identical to SessionLineageController's — scans coalesce
+                // on type, so a joiner inherits the first caller's resolvers (task 0d7c3446).
+                var scan = await janitor.ScanPendingMergesAsync(
+                    id => _broker.TryGetProjectPathForTask(id),
+                    0,
+                    id => _broker.TryGetConfiguredTrunkForTask(id)).ConfigureAwait(false);
 
                 var items = new System.Collections.Generic.List<object>();
                 foreach (var pm in scan.Items)
