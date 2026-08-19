@@ -1000,6 +1000,36 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The equal-length case the cross-model gate found in Run 2, and the reason the duplicate
+        /// guard does not also require a length change.
+        /// <para>Stored <c>[Same(first), Same(second)]</c>. The caller deletes the FIRST logical item
+        /// and adds a new <c>Same</c> at the end, so the length is unchanged and both slots still
+        /// match by text — and slot 0, which is now the old second item, would inherit the first
+        /// item's explanation. A length-gated guard misses this entirely.</para>
+        /// <para>It is also NEW relative to the pre-merge blind overwrite, which erased those fields
+        /// rather than moving them. That is what makes it worth a fix and not a footnote: this
+        /// method's own doc argues that misattribution is worse than loss.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_DuplicateItemTextAtEqualLength_StillCarriesNothing()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Same\",\"gloss\":{\"what\":\"first\",\"why\":\"w\",\"without\":\"x\"}}," +
+                "{\"item\":\"Same\",\"gloss\":{\"what\":\"second\",\"why\":\"w\",\"without\":\"x\"}}]").Success);
+
+            // Delete the first, add another at the end: two in, two out.
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"Same\"},{\"item\":\"Same\"}]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal(2, after.Count);
+            Assert.Null(after[0].Gloss);   // NOT "first" — which item this is cannot be known
+            Assert.Null(after[1].Gloss);
+        }
+
+        /// <summary>
         /// Two stored items share text and one is removed: index+text matches by coincidence, so the
         /// survivor would inherit the wrong item's explanation, notes and assignee. Identity is
         /// uncertain here, and this method's own rule for that is to carry nothing.
@@ -1159,7 +1189,12 @@ namespace MultiTerminal.Tests
             var after = _svc.GetTask(id).GetChecklist();
             Assert.Equal("Renamed to something else", after[1].Item);
             Assert.Equal("Lists the coupling.", after[1].Gloss.What);   // restated, therefore kept
-            Assert.True(after[1].Gloss.IsGenerated);                    // and NOT re-stamped either way
+
+            // Still 'generated' — but NOT via MergeGloss's round-trip exemption. The rename nulls
+            // this slot's prior, so the exemption cannot apply and the gloss IS re-stamped; it lands
+            // on the same value only because the board's payload carries source:"generated" back.
+            // The exemption is covered by FullReplace_RestatingAnAuthoredGlossVerbatim_... instead.
+            Assert.True(after[1].Gloss.IsGenerated);
             Assert.Equal(new[] { 0 }, after[1].DependsOn);
         }
 

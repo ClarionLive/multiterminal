@@ -1827,11 +1827,21 @@ namespace MultiTerminal.MCPServer.Services
                 // on the wrong step.
                 if (!string.Equals(stored[p].Item, surviving[p].Item, StringComparison.Ordinal)) continue;
 
-                // A same-text match at the same slot is normally the same item — but if the list
-                // changed length AND that text occurs more than once in the stored list, the match
-                // may be a coincidence manufactured by a deletion (stored [A,A], caller sends [A]
-                // meaning the second). Identity uncertain: carry nothing, per this method's own rule.
-                if (surviving.Count != stored.Count && CountItemsWithText(stored, surviving[p].Item) > 1) continue;
+                // A same-text match at the same slot is normally the same item — unless that text
+                // occurs MORE THAN ONCE in the stored list, in which case matching by text proves
+                // nothing about WHICH of them this is. Stored [Same(a), Same(b)]: delete the first
+                // and add another at the end, and both slots still match while both now hold fields
+                // authored for different steps. Identity unprovable: carry nothing, per this
+                // method's own rule.
+                //
+                // This deliberately does NOT also require a length change. That conjunct was here
+                // first and was wrong: an equal-length delete-plus-add, or a reorder of two
+                // identically-texted items, manufactures the same coincidence, and the cross-model
+                // gate found it. The cost is that a duplicate-texted list stops carrying omitted
+                // fields even on a plain round trip — which loses data, in the direction that stays
+                // visible, rather than silently attributing one step's reasoning to another. A
+                // caller that needs those fields on a duplicate-texted list can state them.
+                if (CountItemsWithText(stored, surviving[p].Item) > 1) continue;
 
                 priors[p] = stored[p];
             }
