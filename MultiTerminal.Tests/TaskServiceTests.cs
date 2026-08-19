@@ -919,6 +919,210 @@ namespace MultiTerminal.Tests
             Assert.Equal(2, _svc.GetTask(id).GetChecklist().Count);
         }
 
+        // ---- dependsOn is a property of the LIST, not of the item holding it (pipeline Run 1) ----
+
+        /// <summary>
+        /// Three items where the first declares an edge onto the second.
+        /// </summary>
+        private string MakeTaskWithEdges()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            var r = _svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"A\",\"status\":\"pending\",\"dependsOn\":[1]}," +
+                "{\"item\":\"B\",\"status\":\"pending\"}," +
+                "{\"item\":\"C\",\"status\":\"pending\"}]");
+            Assert.True(r.Success, r.Error);
+            return id;
+        }
+
+        /// <summary>
+        /// THE regression the debugger gate caught in Run 1, and the sharpest test in this file.
+        /// <para>Stored <c>[A,B,C]</c> with <c>A.dependsOn=[1]</c> (meaning B). The caller deletes B
+        /// and sends <c>[A,C]</c>, omitting dependsOn. A still matches at index 0, so a naive
+        /// carry-forward hands it <c>[1]</c> — which now means <b>C</b>. The index is IN RANGE, so
+        /// <c>ChecklistGraphBuilder</c> cannot drop it and the Plan tab renders an edge nobody
+        /// declared.</para>
+        /// <para>The pre-merge blind overwrite DESTROYED the omitted field, which was fail-safe. The
+        /// first draft of this merge turned that into fail-wrong, in the one field
+        /// <c>.claude/rules/checklist-graph.md</c> says must never be guessed. A missing edge is
+        /// visible; a wrong one is not.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_DeletingASibling_DropsCarriedEdgesRatherThanRepointingThem()
+        {
+            var id = MakeTaskWithEdges();
+            Assert.Equal(new[] { 1 }, _svc.GetTask(id).GetChecklist()[0].DependsOn);
+
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"A\"},{\"item\":\"C\"}]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal(2, after.Count);
+            Assert.Empty(after[0].DependsOn);   // NOT [1], which would now point at C
+        }
+
+        /// <summary>
+        /// The other half: when nothing moved, the edges are still true and must survive. Without
+        /// this, "drop the carried list" could be implemented as "always drop" and still look right.
+        /// </summary>
+        [Fact]
+        public void FullReplace_WithTheListUnchanged_KeepsCarriedEdges()
+        {
+            var id = MakeTaskWithEdges();
+
+            var w = _svc.UpdateTaskChecklist(
+                id, "[{\"item\":\"A\"},{\"item\":\"B\"},{\"item\":\"C\"}]");
+            Assert.True(w.Success, w.Error);
+
+            Assert.Equal(new[] { 1 }, _svc.GetTask(id).GetChecklist()[0].DependsOn);
+        }
+
+        /// <summary>
+        /// A STATED dependency list is indexed against the array the caller sent. Dropping a null
+        /// element shifts every later position, so the stated indices are remapped onto where the
+        /// items actually landed — otherwise honouring the caller's own declaration would silently
+        /// re-point it.
+        /// </summary>
+        [Fact]
+        public void FullReplace_DroppingANullElement_RemapsStatedEdgesOntoRealPositions()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            // As sent, index 2 is "C". After the null at index 0 is dropped, C sits at position 1.
+            var w = _svc.UpdateTaskChecklist(
+                id, "[null,{\"item\":\"A\",\"dependsOn\":[2]},{\"item\":\"C\"}]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal(2, after.Count);
+            Assert.Equal(new[] { 1 }, after[0].DependsOn);
+        }
+
+        /// <summary>
+        /// Two stored items share text and one is removed: index+text matches by coincidence, so the
+        /// survivor would inherit the wrong item's explanation, notes and assignee. Identity is
+        /// uncertain here, and this method's own rule for that is to carry nothing.
+        /// </summary>
+        [Fact]
+        public void FullReplace_DuplicateItemTextPlusADeletion_CarriesNothing()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"Same\",\"gloss\":{\"what\":\"first\",\"why\":\"w\",\"without\":\"x\"}}," +
+                "{\"item\":\"Same\",\"gloss\":{\"what\":\"second\",\"why\":\"w\",\"without\":\"x\"}}]").Success);
+
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"Same\"}]");
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Single(after);
+            Assert.Null(after[0].Gloss);   // NOT "first" — which item the caller meant is unknowable
+        }
+
+        /// <summary>
+        /// Restating a gloss's text unchanged is a round-trip, not new prose. Stamping it as a fresh
+        /// write would demote a person's gloss to <c>generated</c> — this ticket's own misattribution
+        /// running in REVERSE, and precisely what <c>ChecklistItemGloss.Source</c>'s documentation
+        /// says must never happen, because nobody notices their own words being relabelled.
+        /// </summary>
+        [Fact]
+        public void FullReplace_RestatingAnAuthoredGlossVerbatim_DoesNotDemoteItToGenerated()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"A\",\"gloss\":{\"what\":\"A person wrote this.\",\"why\":\"w\"," +
+                "\"without\":\"x\",\"source\":\"authored\"}}]").Success);
+
+            // The whole array back, gloss text included, saying nothing about provenance.
+            var w = _svc.UpdateTaskChecklist(
+                id,
+                "[{\"item\":\"A\",\"gloss\":{\"what\":\"A person wrote this.\",\"why\":\"w\",\"without\":\"x\"}}]");
+            Assert.True(w.Success, w.Error);
+
+            Assert.False(_svc.GetTask(id).GetChecklist()[0].Gloss.IsGenerated);
+        }
+
+        /// <summary>
+        /// Changed text IS a fresh write and still gets stamped, so the round-trip exemption above
+        /// cannot be used to launder new machine prose under a stored authored mark.
+        /// </summary>
+        [Fact]
+        public void FullReplace_ChangingAnAuthoredGlossText_IsStampedAsTheFreshWriteItIs()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(
+                id,
+                "[{\"item\":\"A\",\"gloss\":{\"what\":\"A person wrote this.\",\"why\":\"w\"," +
+                "\"without\":\"x\",\"source\":\"authored\"}}]").Success);
+
+            var w = _svc.UpdateTaskChecklist(
+                id,
+                "[{\"item\":\"A\",\"gloss\":{\"what\":\"Different words entirely.\",\"why\":\"w\",\"without\":\"x\"}}]");
+            Assert.True(w.Success, w.Error);
+
+            Assert.True(_svc.GetTask(id).GetChecklist()[0].Gloss.IsGenerated);
+        }
+
+        /// <summary>
+        /// A stored checklist that cannot be READ must still be repairable through this tool.
+        /// <para>Rows like this exist BECAUSE the pre-merge blind overwrite stored them verbatim, and
+        /// overwriting was the only way to heal one. Letting the merge's own <c>GetChecklist</c> throw
+        /// would turn the one tool that could fix such a row into the one tool that cannot — and
+        /// report the cause as a persist failure.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_OverAnUnreadableStoredChecklist_RepairsItInsteadOfFailing()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+
+            // Corrupt the stored JSON the way the pre-merge overwrite could: not an array at all.
+            _svc.GetTask(id).ChecklistJson = "{\"not\":\"an array\"}";
+
+            var w = _svc.UpdateTaskChecklist(id, "[{\"item\":\"Repaired\",\"status\":\"pending\"}]");
+
+            Assert.True(w.Success, w.Error);
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Single(after);
+            Assert.Equal("Repaired", after[0].Item);
+        }
+
+        /// <summary>
+        /// What the lifecycle board actually sends when a card is renamed, and what it means.
+        /// <para>Raised as HIGH by the cross-model adversary gate in Run 1. It is REAL but
+        /// PRE-EXISTING: <c>TaskLifecycleBoardForm.HandleCardTextUpdate</c> does GetChecklist → mutate
+        /// <c>Item</c> → SetChecklist → sends the complete <c>ChecklistJson</c>, so the old blind
+        /// overwrite stored the very same bytes. Before and after this change the renamed step keeps
+        /// the gloss and edges.</para>
+        /// <para>What WAS wrong is the claim. "A rename makes the item new and carries nothing" holds
+        /// only for payloads that OMIT those fields; a payload that restates them is stating them, and
+        /// stated wins. This test pins the real behaviour so the imprecise version cannot be believed
+        /// again — and so that if a targeted rename path is ever added, its ticket starts from a
+        /// documented baseline rather than a rediscovery.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_UiShapedRename_KeepsTheRestatedGlossBecauseRestatingIsStating()
+        {
+            var id = MakeGlossedTaskWithEdges();
+
+            // Exactly the lifecycle board's move: read, change one Item, write the whole thing back.
+            var task = _svc.GetTask(id);
+            var checklist = task.GetChecklist();
+            checklist[1].Item = "Renamed to something else";
+            task.SetChecklist(checklist);
+
+            var w = _svc.UpdateTaskChecklist(id, task.ChecklistJson);
+            Assert.True(w.Success, w.Error);
+
+            var after = _svc.GetTask(id).GetChecklist();
+            Assert.Equal("Renamed to something else", after[1].Item);
+            Assert.Equal("Lists the coupling.", after[1].Gloss.What);   // restated, therefore kept
+            Assert.True(after[1].Gloss.IsGenerated);                    // and NOT re-stamped either way
+            Assert.Equal(new[] { 0 }, after[1].DependsOn);
+        }
+
         [Fact]
         public void GlossWrite_DoesNotOverwriteAnAuthoredGloss()
         {

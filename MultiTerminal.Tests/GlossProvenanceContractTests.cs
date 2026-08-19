@@ -213,12 +213,12 @@ namespace MultiTerminal.Tests
             string helper = service.Substring(service.IndexOf(
                 "private static ChecklistItemGloss StampAppendedGlossProvenance", StringComparison.Ordinal));
 
-            // The rule itself lives on ChecklistItemGloss.MarkFreshWriteProvenance (task 2da6d8d9)
-            // and is pinned by AllThreeFreshWriteSites... below. What this asserts is that append
-            // still DELEGATES to it — a stamp helper that quietly stopped calling the shared rule
-            // would leave every assertion about the rule green while append misattributed again.
+            // The rule itself lives on ChecklistItemGloss.WithFreshWriteProvenance (task 2da6d8d9)
+            // and is pinned by All_three_fresh_write_paths_... below. What this asserts is that
+            // append still DELEGATES to it — a stamp helper that quietly stopped calling the shared
+            // rule would leave every assertion about the rule green while append misattributed again.
             Assert.True(
-                Regex.IsMatch(helper, @"MarkFreshWriteProvenance\(\)"),
+                Regex.IsMatch(helper, @"WithFreshWriteProvenance\(\)"),
                 "The append stamp no longer routes through " +
                 "ChecklistItemGloss.MarkFreshWriteProvenance. Whatever it does instead is a second " +
                 "convention for the same field, which is the divergence the shared primitive exists " +
@@ -251,10 +251,10 @@ namespace MultiTerminal.Tests
 
             // 1. The rule exists in exactly one place, and says what it must say.
             int primitive = model.IndexOf(
-                "public ChecklistItemGloss MarkFreshWriteProvenance()", StringComparison.Ordinal);
+                "public ChecklistItemGloss WithFreshWriteProvenance()", StringComparison.Ordinal);
             Assert.True(
                 primitive >= 0,
-                "ChecklistItemGloss.MarkFreshWriteProvenance is gone. Three write paths now depend " +
+                "ChecklistItemGloss.WithFreshWriteProvenance is gone. Three write paths now depend " +
                 "on it; without it each grows its own copy of the provenance rule, and the first " +
                 "divergence is a silent misattribution.");
 
@@ -279,7 +279,7 @@ namespace MultiTerminal.Tests
             {
                 "StampAppendedGlossProvenance",   // append_checklist_items
                 "SetChecklistItemGloss",          // set_checklist_gloss
-                "UpdateTaskChecklist",            // update_checklist / PATCH .../checklist (2da6d8d9)
+                "MergeGloss",                     // update_checklist / PATCH .../checklist (2da6d8d9)
             })
             {
                 Assert.True(
@@ -287,7 +287,7 @@ namespace MultiTerminal.Tests
                     $"Fresh-write path '{site}' is gone from TaskService.");
             }
 
-            int calls = Regex.Matches(service, @"MarkFreshWriteProvenance\(\)").Count;
+            int calls = Regex.Matches(service, @"WithFreshWriteProvenance\(\)").Count;
             Assert.True(
                 calls == 3,
                 $"Expected exactly 3 calls to MarkFreshWriteProvenance in TaskService — one per " +

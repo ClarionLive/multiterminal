@@ -266,7 +266,7 @@
       <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>taskId</code></td><td>string</td><td>Yes</td><td>Task ID</td></tr>
-        <tr><td><code>checklistJson</code></td><td>string</td><td>Yes</td><td>JSON array of checklist items. Full item shape: <code>item</code>, <code>status</code>, <code>notes</code>, <code>assignedTo</code>, <code>cycleCount</code>, <code>dependsOn</code>, <code>gloss</code> -- see the live tool schema for what each does and what omitting it means.</td></tr>
+        <tr><td><code>checklistJson</code></td><td>string</td><td>Yes</td><td>JSON array of checklist items. Item shape: <code>item</code>, <code>status</code>, <code>notes</code>, <code>assignedTo</code>, <code>cycleCount</code>, <code>sortOrder</code>, <code>dependsOn</code>, <code>gloss</code> -- see the live tool schema for what each does and what omitting it means. Note <code>cycleCount</code> and <code>sortOrder</code> are numbers whose default is 0, so a stated 0 reads as omission and neither can be lowered to 0 here.</td></tr>
       </tbody>
     </table>
     <h4>Returns</h4>
@@ -274,8 +274,9 @@
     <h4>Example</h4>
     <pre><code>update_checklist(
   taskId="c0ce8037",
-  checklistJson='[{"item":"Setup database","status":"pending","notes":[]},{"item":"Create API","status":"pending","notes":[]}]'
+  checklistJson='[{"item":"Setup database","status":"pending"},{"item":"Create API","status":"pending"}]'
 )</code></pre>
+    <p>The example states no field beyond <code>item</code> and <code>status</code>, so everything else on those items is preserved. Adding <code>"notes":[]</code> would <em>erase</em> the transition history -- an explicitly empty value is a statement, not a placeholder.</p>
   </div>
 
   <!-- append_checklist_items -->

@@ -354,12 +354,15 @@ namespace MultiTerminal.MCPServer.Models
         /// <see cref="Source"/> was added (task a455e295) to prevent. Two byte-identical copies of that
         /// rule already existed in <c>TaskService</c> with only a comment saying they "must not
         /// disagree"; task 2da6d8d9 needed a third, at which point the comment had to become code.</para>
-        /// <para><b>Why it returns a copy.</b> The caller's deserialized object must not end up aliased
-        /// by cached state — the convention the surrounding checklist code already follows for
-        /// <see cref="ChecklistItem.DependsOn"/> and in <c>SetChecklistItemGloss</c>. Stamping in place
-        /// and handing back the same reference worked only because the cache happens to store
-        /// serialized JSON rather than the object; that is an implementation detail to rely on, not an
-        /// invariant.</para>
+        /// <para><b>Why it returns a copy, and why the name says so.</b> The caller's deserialized
+        /// object must not end up aliased by cached state — the convention the surrounding checklist
+        /// code already follows for <see cref="ChecklistItem.DependsOn"/> and in
+        /// <c>SetChecklistItemGloss</c>. Stamping in place and handing back the same reference worked
+        /// only because the cache happens to store serialized JSON rather than the object; that is an
+        /// implementation detail to rely on, not an invariant. The <c>With</c> prefix is load-bearing:
+        /// this method replaced one that mutated in place, so a <c>Mark</c>-style name would leave
+        /// <c>gloss.MarkFreshWriteProvenance();</c> compiling as a bare statement that silently
+        /// discards the stamp, with no analyzer to catch it.</para>
         /// <para><b>Why NOT here in <see cref="NormalizeSource"/>.</b> Normalizing absent to
         /// <see cref="SourceAuthored"/> is CORRECT for the population that method serves — every gloss
         /// written before the field existed was hand-written, so defaulting stored legacy data the
@@ -375,7 +378,7 @@ namespace MultiTerminal.MCPServer.Models
         /// marginally easier to land an <c>authored</c> stamp, which is permanent and uncorrectable
         /// by <c>set_checklist_gloss</c>.</para>
         /// </remarks>
-        public ChecklistItemGloss MarkFreshWriteProvenance()
+        public ChecklistItemGloss WithFreshWriteProvenance()
         {
             if (!HasContent) return null;
 
