@@ -1637,8 +1637,42 @@ namespace MultiTerminal.MCPServer.Services
 
 
         /// <summary>
-        /// Update a task's checklist JSON.
+        /// Replace a task's checklist from a caller-supplied array, MERGING each item over what is
+        /// already stored: a field the caller omits is kept, a field the caller states wins.
         /// </summary>
+        /// <remarks>
+        /// <para><b>What this used to be, and why it changed (task 2da6d8d9).</b> This was
+        /// <c>t.ChecklistJson = checklistJson ?? "[]"</c> — a raw blind overwrite with no
+        /// deserialize, no sanitize and no stamp. Its schema documents only <c>item</c>,
+        /// <c>status</c> and <c>notes</c>, so an agent that rebuilt the array from what the schema
+        /// describes silently destroyed every field the schema omits: the gloss, the
+        /// <c>dependsOn</c> edges that define the plan graph, the notes history, the cycle count.
+        /// Worse than lost — a gloss stripped of its <c>source</c> normalizes back to
+        /// <c>authored</c> on read (<c>ChecklistItemGloss.NormalizeSource</c>), and
+        /// <see cref="SetChecklistItemGloss"/> then refuses to correct it FOREVER. The provenance
+        /// stamp task 5692f765 added was erasable by a documented tool, silently, with a success
+        /// response.</para>
+        /// <para><b>The rule.</b> Omission means "I am not saying anything about this field" and
+        /// preserves it. An explicit value wins, INCLUDING an explicit empty one, so clearing is
+        /// still possible — the caller just has to say so. Ordinary PATCH semantics, and the exact
+        /// inverse of the defect, where omission destroyed.</para>
+        /// <para><b>Identity is index + exact item text.</b> If the text at that index differs —
+        /// rename, insert, reorder — the item is treated as NEW and nothing is carried forward.
+        /// Matching the text elsewhere in the list was considered and REJECTED: duplicate item text
+        /// makes it ambiguous, and a wrong match attaches one step's rationale to another. Losing a
+        /// gloss is recoverable through <c>set_checklist_gloss</c>; mis-attributing one is silent
+        /// and wrong, and misattribution is the exact failure tasks a455e295, 5692f765 and 2da6d8d9
+        /// all exist to prevent. When identity is uncertain, carry nothing.</para>
+        /// <para><b>This does NOT make full-array writes safe, and must not be described as if it
+        /// does.</b> A caller that sends a complete STALE array still reverts everything in it,
+        /// because every value in that array was stated. That is why
+        /// <see cref="SetChecklistItemGloss"/> still exists and why the gloss backfill must still
+        /// use it — see the "why this exists rather than reusing UpdateTaskChecklist" note there,
+        /// and <c>TaskServiceTests.LostUpdate_IsExactlyWhatAFullArrayWriteDoes</c>, which performs
+        /// that stale write and asserts the damage. It stays green through this change, deliberately:
+        /// if it ever goes green-by-not-losing, this merge has overreached into explicit-wins
+        /// territory. The hole closed here is only "lossy for fields the schema never mentioned".</para>
+        /// </remarks>
         public UpdateTaskResult UpdateTaskChecklist(string taskId, string checklistJson)
         {
             if (!_tasks.TryGetValue(taskId, out var task))
@@ -1649,6 +1683,22 @@ namespace MultiTerminal.MCPServer.Services
             if (task.IsQuickTask)
                 return new UpdateTaskResult { Success = false, Error = $"Cannot set checklist: task {taskId} is a quick-task (immutable; quick-tasks have no checklist)." };
 
+            // Parse OUTSIDE the lock and fail before touching anything. Previously malformed JSON was
+            // stored verbatim and only exploded later, on read, in whatever unrelated code happened to
+            // call GetChecklist first.
+            List<ChecklistItem> incoming;
+            try
+            {
+                incoming = System.Text.Json.JsonSerializer.Deserialize<List<ChecklistItem>>(
+                    string.IsNullOrWhiteSpace(checklistJson) ? "[]" : checklistJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                    ?? new List<ChecklistItem>();
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                return new UpdateTaskResult { Success = false, Error = $"Invalid checklistJson: {ex.Message}" };
+            }
+
             // Serialize the read-modify-write against the other checklist mutators, then broadcast
             // outside the lock. The write path (clone→persist→swap) fails closed: on a persist error the
             // cached task keeps its old checklist.
@@ -1658,7 +1708,33 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     if (MutateTaskInternal(taskId, t =>
                     {
-                        t.ChecklistJson = checklistJson ?? "[]";
+                        // Read the CURRENT stored list inside the lock — merging against a snapshot
+                        // taken before MutateTaskInternal's per-task lock would carry forward values
+                        // that a concurrent writer has already moved on from.
+                        //
+                        // An UNREADABLE stored list must not fail the write. GetChecklist throws on a
+                        // null element (NullReferenceException inside NormalizeFromLegacy) and on
+                        // non-array JSON, and rows in exactly that state exist BECAUSE the pre-merge
+                        // blind overwrite stored them verbatim. Overwriting was the only way to heal
+                        // such a row; letting the merge's own read propagate would turn the one tool
+                        // that could repair it into the one tool that cannot, and report the cause as
+                        // a persist failure. Unreadable means "carry nothing" — the same answer this
+                        // merge already gives whenever identity is uncertain.
+                        List<ChecklistItem> stored;
+                        try
+                        {
+                            stored = t.GetChecklist();
+                        }
+                        catch (Exception ex)
+                        {
+                            _host.LogError(
+                                $"UpdateTaskChecklist: stored checklist for {taskId} is unreadable ({ex.Message}). " +
+                                "Merging against an empty list so this write repairs the row; any fields the " +
+                                "caller omitted are lost, because there was nothing readable to carry forward.");
+                            stored = new List<ChecklistItem>();
+                        }
+
+                        t.SetChecklist(MergeChecklistWrite(stored, incoming));
 
                         // Auto-derive parent task status from checklist item positions
                         RecalculateAutoStatus(t);
@@ -1684,6 +1760,242 @@ namespace MultiTerminal.MCPServer.Services
             return new UpdateTaskResult { Success = true };
         }
 
+        /// <summary>
+        /// Merge a caller-supplied checklist array over the stored one: omitted fields are carried
+        /// forward from the item at the same index when its text matches, stated fields win.
+        /// See <see cref="UpdateTaskChecklist"/> for the rule and why identity is index-plus-text.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>The non-nullable fields need a different test.</b> <c>Done</c>, <c>CycleCount</c>
+        /// and <c>SortOrder</c> are value types, so "absent" and "the default" deserialize
+        /// identically and omission genuinely cannot be detected. Each is therefore treated as
+        /// omitted when it holds its default, which is the reading that loses nothing: a caller
+        /// restating <c>cycleCount: 0</c> on an item that has cycled three times meant "I did not
+        /// track this", not "reset the audit trail". The one consequence worth stating is that a
+        /// cycle count cannot be lowered through this tool.</para>
+        /// <para><b><c>Done</c> is deliberately not carried forward.</b> It is the legacy mirror of
+        /// <c>Status</c>, and <c>KanbanTask.SetChecklist</c> recomputes it from the final status on
+        /// the way out, so carrying it would be writing a value that is about to be overwritten. The
+        /// one thing it must still do is drive the legacy derivation: a caller sending
+        /// <c>done: true</c> with no <c>status</c> is using the pre-Status format and means "done",
+        /// so that combination suppresses the status carry-forward and lets
+        /// <c>NormalizeFromLegacy</c> resolve it.</para>
+        /// <para><b>Null array elements are dropped</b> rather than stored. Before this method they
+        /// were written verbatim, and the next <c>GetChecklist</c> — in whatever unrelated code
+        /// reached it first — dereferenced null inside <c>NormalizeFromLegacy</c>. A checklist that
+        /// cannot be read is worse than one missing the element that was never valid. Because a drop
+        /// shifts every later position, identity is resolved against the position an item will
+        /// actually OCCUPY, not against its index in the array as sent.</para>
+        /// <para><b>Why two passes.</b> <see cref="ChecklistItem.DependsOn"/> is the one field whose
+        /// value is a set of POSITIONS IN THE LIST rather than a property of the item holding it, so
+        /// it cannot be resolved until every sibling's final position is known. Carrying it forward
+        /// on the strength of one item's text match alone is unsound: stored <c>[A,B,C]</c> with
+        /// <c>A.dependsOn=[1]</c>, caller deletes <c>B</c> and sends <c>[A,C]</c> — <c>A</c> still
+        /// matches, so <c>[1]</c> is carried and now means <c>C</c>. It is IN RANGE, so
+        /// <c>ChecklistGraphBuilder</c> cannot drop it, and the graph asserts an edge nobody
+        /// declared. The pre-merge blind overwrite DESTROYED that field, which was fail-safe;
+        /// turning fail-safe into fail-wrong in the one field
+        /// <c>.claude/rules/checklist-graph.md</c> says must never be guessed would be a worse bug
+        /// than the one this method fixes.</para>
+        /// </remarks>
+        private static List<ChecklistItem> MergeChecklistWrite(List<ChecklistItem> stored, List<ChecklistItem> incoming)
+        {
+            // Drop nulls first and remember where each surviving element ENDED UP, so a stated
+            // dependsOn can be remapped off the caller's indexing onto the real one.
+            var surviving = new List<ChecklistItem>(incoming.Count);
+            var incomingToMerged = new int[incoming.Count];
+            for (int i = 0; i < incoming.Count; i++)
+            {
+                if (incoming[i] == null)
+                {
+                    incomingToMerged[i] = -1;
+                    continue;
+                }
+
+                incomingToMerged[i] = surviving.Count;
+                surviving.Add(incoming[i]);
+            }
+
+            // PASS 1 — identity for the WHOLE list, before any dependsOn is resolved.
+            // priors[p] != null means "merged position p is stored position p, unchanged", which is
+            // exactly the condition a carried edge pointing at p needs in order to still be true.
+            var priors = new ChecklistItem[surviving.Count];
+            for (int p = 0; p < surviving.Count && p < stored.Count; p++)
+            {
+                // Same slot AND same text, or it is not the same item. Ordinal: an item renamed only
+                // by case or culture is still a rename, and guessing otherwise is how a gloss ends up
+                // on the wrong step.
+                if (!string.Equals(stored[p].Item, surviving[p].Item, StringComparison.Ordinal)) continue;
+
+                // A same-text match at the same slot is normally the same item — unless that text
+                // occurs MORE THAN ONCE in the stored list, in which case matching by text proves
+                // nothing about WHICH of them this is. Stored [Same(a), Same(b)]: delete the first
+                // and add another at the end, and both slots still match while both now hold fields
+                // authored for different steps. Identity unprovable: carry nothing, per this
+                // method's own rule.
+                //
+                // This deliberately does NOT also require a length change. That conjunct was here
+                // first and was wrong: an equal-length delete-plus-add, or a reorder of two
+                // identically-texted items, manufactures the same coincidence, and the cross-model
+                // gate found it. The cost is that a duplicate-texted list stops carrying omitted
+                // fields even on a plain round trip — which loses data, in the direction that stays
+                // visible, rather than silently attributing one step's reasoning to another. A
+                // caller that needs those fields on a duplicate-texted list can state them.
+                if (CountItemsWithText(stored, surviving[p].Item) > 1) continue;
+
+                priors[p] = stored[p];
+            }
+
+            // PASS 2 — build.
+            var merged = new List<ChecklistItem>(surviving.Count);
+            for (int p = 0; p < surviving.Count; p++)
+            {
+                var raw = surviving[p];
+                var prior = priors[p];
+
+                merged.Add(new ChecklistItem
+                {
+                    Item = raw.Item,
+
+                    // Stated status wins. Carried forward only when the caller said nothing at all —
+                    // no status AND no legacy done flag. See the remarks on Done above.
+                    Status = raw.Status ?? (raw.Done ? null : prior?.Status),
+                    Done = raw.Done,
+
+                    // Defensive copies throughout, so neither the caller's deserialized list nor the
+                    // list read out of the task can alias what gets stored — the convention
+                    // AppendChecklistItems already follows.
+                    Notes = raw.Notes != null
+                        ? new List<ChecklistItemNote>(raw.Notes)
+                        : (prior?.Notes != null ? new List<ChecklistItemNote>(prior.Notes) : null),
+
+                    AssignedTo = raw.AssignedTo ?? prior?.AssignedTo,
+
+                    // Value types: absent and the default deserialize identically, so 0 IS the
+                    // omission signal here and cannot mean anything else. Consequences are stated in
+                    // the remarks — a cycle count cannot be lowered, and a sort order cannot be
+                    // explicitly set back to 0.
+                    CycleCount = raw.CycleCount != 0 ? raw.CycleCount : (prior?.CycleCount ?? 0),
+                    SortOrder = raw.SortOrder != 0 ? raw.SortOrder : (prior?.SortOrder ?? 0),
+
+                    DependsOn = raw.DependsOn != null
+                        ? RemapStatedDependsOn(raw.DependsOn, incomingToMerged)
+                        : CarryDependsOnIfStillTrue(prior?.DependsOn, priors),
+
+                    Gloss = MergeGloss(raw.Gloss, prior?.Gloss),
+                });
+            }
+
+            return merged;
+        }
+
+        /// <summary>How many items carry exactly this text. Used to detect a coincidental identity match.</summary>
+        private static int CountItemsWithText(List<ChecklistItem> items, string text)
+        {
+            int count = 0;
+            foreach (var item in items)
+            {
+                if (item != null && string.Equals(item.Item, text, StringComparison.Ordinal)) count++;
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Rewrite a caller-STATED dependency list from the indexing of the array they sent onto the
+        /// indexing of the list that will actually be stored.
+        /// </summary>
+        /// <remarks>
+        /// The two differ only when a null element was dropped. An index pointing AT a dropped
+        /// element is removed — there is no item there to depend on. An out-of-range index is passed
+        /// through untouched rather than rejected, matching <see cref="AppendChecklistItems"/>: a
+        /// mis-numbered dependency is dropped by <c>ChecklistGraphBuilder</c> with a visible warning,
+        /// which beats making a checklist unsaveable.
+        /// </remarks>
+        private static List<int> RemapStatedDependsOn(List<int> stated, int[] incomingToMerged)
+        {
+            var result = new List<int>(stated.Count);
+            foreach (var index in stated)
+            {
+                if (index < 0 || index >= incomingToMerged.Length)
+                {
+                    result.Add(index);
+                    continue;
+                }
+
+                int mapped = incomingToMerged[index];
+                if (mapped < 0) continue;
+
+                result.Add(mapped);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Carry a stored dependency list forward ONLY if every edge in it is still true, and drop
+        /// the whole list otherwise.
+        /// </summary>
+        /// <remarks>
+        /// <para>An edge pointing at position <c>d</c> survives only if merged position <c>d</c> is
+        /// still stored position <c>d</c> — which is precisely what a non-null <c>priors[d]</c>
+        /// records. Anything else and the edge would point at whatever item slid into that slot.</para>
+        /// <para><b>All-or-nothing is deliberate.</b> Keeping the surviving subset would assert
+        /// "this step depends on A" when the plan said "A and B" — a different and unearned claim,
+        /// stated with the same confidence. Dropping the list matches what the pre-merge overwrite
+        /// did to this field anyway, so it costs nothing that was not already being lost, and it
+        /// keeps the failure in the recoverable direction: a missing edge is visible in the graph,
+        /// a wrong one is not.</para>
+        /// </remarks>
+        private static List<int> CarryDependsOnIfStillTrue(List<int> carried, ChecklistItem[] priors)
+        {
+            if (carried == null) return null;
+
+            foreach (var index in carried)
+            {
+                if (index < 0 || index >= priors.Length || priors[index] == null) return null;
+            }
+
+            return new List<int>(carried);
+        }
+
+        /// <summary>
+        /// Resolve the gloss for a merged item: an omitted one keeps what is stored, a restated one
+        /// keeps its provenance, and a genuinely new one is stamped as the fresh write it is.
+        /// </summary>
+        /// <remarks>
+        /// <para>The middle case is the one worth explaining. Callers of the full-array path restate
+        /// the ENTIRE list, so a gloss arriving here is usually stored data coming back unchanged
+        /// rather than new prose. Stamping that as a fresh write would demote a person's gloss to
+        /// <c>generated</c> — this ticket's own misattribution running in reverse, and the exact
+        /// thing <see cref="ChecklistItemGloss.Source"/>'s documentation says must never happen,
+        /// because nobody notices their own words being relabelled until they go looking. So
+        /// identical text with no stated source preserves the stored provenance.</para>
+        /// <para>An explicitly stated <c>source</c> still wins even on identical text: that is the
+        /// caller saying something about provenance, and stated always beats stored here.</para>
+        /// </remarks>
+        private static ChecklistItemGloss MergeGloss(ChecklistItemGloss stated, ChecklistItemGloss prior)
+        {
+            if (stated == null) return prior;
+
+            if (prior != null
+                && prior.HasContent
+                && string.IsNullOrWhiteSpace(stated.Source)
+                && string.Equals(stated.What, prior.What, StringComparison.Ordinal)
+                && string.Equals(stated.Why, prior.Why, StringComparison.Ordinal)
+                && string.Equals(stated.Without, prior.Without, StringComparison.Ordinal))
+            {
+                return new ChecklistItemGloss
+                {
+                    What = prior.What,
+                    Why = prior.Why,
+                    Without = prior.Without,
+                    Source = prior.Source,
+                };
+            }
+
+            return stated.WithFreshWriteProvenance();
+        }
 
         /// <summary>
         /// Stamps provenance on a gloss arriving through <see cref="AppendChecklistItems"/>, and
@@ -1696,30 +2008,16 @@ namespace MultiTerminal.MCPServer.Services
         /// the precise failure <c>ChecklistItemGloss.Source</c> was added (task a455e295) to
         /// prevent. An explicit <c>authored</c> is preserved, so an agent relaying a person's own
         /// words can still say so.</para>
-        /// <para>This mirrors the rule <c>SetChecklistItemGloss</c> already applies, deliberately
-        /// rather than inventing a second convention: two sibling tools that write the same field
-        /// must not disagree about what an agent's write means.</para>
-        /// <para><b>Why here and not in <c>NormalizeSource</c>.</b> Normalizing absent to
-        /// <c>authored</c> is CORRECT for the population that method serves — every gloss written
-        /// before the field existed was hand-written, so defaulting stored legacy data the other
-        /// way would retroactively brand human work as machine output, the same misattribution in
-        /// the opposite direction and quieter, because nobody notices their own words being
-        /// relabelled. Only the write path knows "this is a fresh write happening now, through a
-        /// tool an agent is calling"; data at rest cannot be told apart from it downstream. So the
-        /// two entry points need opposite defaults, and the stamp belongs at each entry point
-        /// rather than in the shared normalizer.</para>
+        /// <para>This mirrors the rule <c>SetChecklistItemGloss</c> and <c>UpdateTaskChecklist</c>
+        /// apply, deliberately rather than inventing a second convention: sibling tools that write
+        /// the same field must not disagree about what an agent's write means. All three now share
+        /// one implementation — <see cref="ChecklistItemGloss.WithFreshWriteProvenance"/> — because
+        /// task 2da6d8d9 made this the third site and a comment saying the copies "must not
+        /// disagree" is not an enforcement mechanism. The full rationale, including why the rule
+        /// does NOT belong in <c>NormalizeSource</c>, lives on that method.</para>
         /// </remarks>
         private static ChecklistItemGloss StampAppendedGlossProvenance(ChecklistItemGloss gloss)
-        {
-            if (gloss == null || !gloss.HasContent) return null;
-
-            if (!string.Equals(gloss.Source, ChecklistItemGloss.SourceAuthored, StringComparison.OrdinalIgnoreCase))
-            {
-                gloss.Source = ChecklistItemGloss.SourceGenerated;
-            }
-
-            return gloss;
-        }
+            => gloss?.WithFreshWriteProvenance();
 
         /// <summary>
         /// Append items to a task's existing checklist without replacing it.
@@ -1914,23 +2212,15 @@ namespace MultiTerminal.MCPServer.Services
                 return new SetChecklistItemGlossResult { Success = false, Error = "Gloss must carry text in at least one of what/why/without." };
             }
 
-            // Take a defensive copy BEFORE the lock: the caller keeps its own reference, and an
-            // object stored in the cache must not stay aliased to something they can mutate later.
-            var incoming = new ChecklistItemGloss
-            {
-                What = gloss.What,
-                Why = gloss.Why,
-                Without = gloss.Without,
-                Source = gloss.Source,
-            };
-
-            // Default to "generated": this method exists FOR the backfill agent, and the failure
-            // that matters is machine prose passing itself off as a person's. An unstamped write
-            // is therefore treated as machine-written rather than trusted as authored.
-            if (!string.Equals(incoming.Source, ChecklistItemGloss.SourceAuthored, StringComparison.OrdinalIgnoreCase))
-            {
-                incoming.Source = ChecklistItemGloss.SourceGenerated;
-            }
+            // Stamp and copy in one step, BEFORE the lock. The copy matters independently of the
+            // stamp: the caller keeps its own reference, and an object stored in the cache must not
+            // stay aliased to something they can mutate later.
+            //
+            // Defaulting to "generated" is the shared fresh-write rule — this method exists FOR the
+            // backfill agent, and the failure that matters is machine prose passing itself off as a
+            // person's, so an unstamped write is treated as machine-written rather than trusted as
+            // authored. Identical rule at the append and full-replace sites, one implementation.
+            var incoming = gloss.WithFreshWriteProvenance();
 
             var outcome = GlossWriteOutcome.Written;
             string itemName = null;

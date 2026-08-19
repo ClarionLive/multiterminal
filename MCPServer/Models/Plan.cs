@@ -340,6 +340,58 @@ namespace MultiTerminal.MCPServer.Models
 
             Source = SourceAuthored;
         }
+
+        /// <summary>
+        /// Return a copy of this gloss stamped with the provenance a FRESH WRITE implies:
+        /// <see cref="SourceGenerated"/> unless the caller explicitly said
+        /// <see cref="SourceAuthored"/>. Returns null for an absent or all-blank gloss.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Why this is one method and not one per write path.</b> Every tool that accepts a
+        /// gloss over MCP must answer the same question the same way — the caller reaching it at plan
+        /// time is almost always an agent, so treating an unstamped write as a person's words
+        /// mislabels the common case, and mislabelling machine gloss as human is the precise failure
+        /// <see cref="Source"/> was added (task a455e295) to prevent. Two byte-identical copies of that
+        /// rule already existed in <c>TaskService</c> with only a comment saying they "must not
+        /// disagree"; task 2da6d8d9 needed a third, at which point the comment had to become code.</para>
+        /// <para><b>Why it returns a copy, and why the name says so.</b> The caller's deserialized
+        /// object must not end up aliased by cached state — the convention the surrounding checklist
+        /// code already follows for <see cref="ChecklistItem.DependsOn"/> and in
+        /// <c>SetChecklistItemGloss</c>. Stamping in place and handing back the same reference worked
+        /// only because the cache happens to store serialized JSON rather than the object; that is an
+        /// implementation detail to rely on, not an invariant. The <c>With</c> prefix is load-bearing:
+        /// this method replaced one that mutated in place, so a <c>Mark</c>-style name would leave
+        /// <c>gloss.MarkFreshWriteProvenance();</c> compiling as a bare statement that silently
+        /// discards the stamp, with no analyzer to catch it.</para>
+        /// <para><b>Why NOT here in <see cref="NormalizeSource"/>.</b> Normalizing absent to
+        /// <see cref="SourceAuthored"/> is CORRECT for the population that method serves — every gloss
+        /// written before the field existed was hand-written, so defaulting stored legacy data the
+        /// other way would retroactively brand human work as machine output, the same misattribution
+        /// in the opposite direction and quieter. Only a write path knows "this is happening now,
+        /// through a tool an agent is calling". The two need opposite defaults, so they stay two
+        /// methods.</para>
+        /// <para><b>An unrecognized source becomes generated</b> — <c>"human"</c>, <c>"planner"</c>,
+        /// <c>"authored "</c> with trailing whitespace. That is deliberate and is NOT the same as
+        /// <see cref="NormalizeSource"/>'s authored fallback: this direction is the safe one, because
+        /// it can only ever fail toward "a machine wrote this", never toward branding machine output
+        /// as a person's. Trimming before comparing was considered and rejected — it would make it
+        /// marginally easier to land an <c>authored</c> stamp, which is permanent and uncorrectable
+        /// by <c>set_checklist_gloss</c>.</para>
+        /// </remarks>
+        public ChecklistItemGloss WithFreshWriteProvenance()
+        {
+            if (!HasContent) return null;
+
+            return new ChecklistItemGloss
+            {
+                What = What,
+                Why = Why,
+                Without = Without,
+                Source = string.Equals(Source, SourceAuthored, StringComparison.OrdinalIgnoreCase)
+                    ? SourceAuthored
+                    : SourceGenerated,
+            };
+        }
     }
 
     /// <summary>
