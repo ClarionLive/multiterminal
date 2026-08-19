@@ -1067,6 +1067,46 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The value-type fields have no way to signal "absent" — `cycleCount` and `sortOrder` are
+        /// non-nullable, so absent and 0 deserialize identically and 0 IS the omission signal.
+        /// <para>Both halves are asserted because only together do they pin the rule: a stated
+        /// non-zero wins, and a stated zero is indistinguishable from silence and therefore carries
+        /// forward. The documented consequence — neither field can be lowered TO zero through this
+        /// tool — is the second assertion, stated as behaviour rather than left in a doc comment
+        /// where nobody would find it before being surprised by it.</para>
+        /// </summary>
+        [Fact]
+        public void FullReplace_ValueTypeFields_TreatZeroAsOmissionAndCannotBeLoweredToIt()
+        {
+            var id = _svc.CreateTask("t", "d", "diana").TaskId;
+            Assert.True(_svc.AppendChecklistItems(id, "[{\"item\":\"A\"}]").Success);
+
+            // Seed non-zero values the only way this tool can: state them.
+            Assert.True(_svc.UpdateTaskChecklist(
+                id, "[{\"item\":\"A\",\"cycleCount\":3,\"sortOrder\":7}]").Success);
+
+            // Omitted entirely -> carried forward.
+            Assert.True(_svc.UpdateTaskChecklist(id, "[{\"item\":\"A\"}]").Success);
+            var carried = _svc.GetTask(id).GetChecklist()[0];
+            Assert.Equal(3, carried.CycleCount);
+            Assert.Equal(7, carried.SortOrder);
+
+            // Stated as 0 -> indistinguishable from omitted, so ALSO carried forward.
+            Assert.True(_svc.UpdateTaskChecklist(
+                id, "[{\"item\":\"A\",\"cycleCount\":0,\"sortOrder\":0}]").Success);
+            var stillCarried = _svc.GetTask(id).GetChecklist()[0];
+            Assert.Equal(3, stillCarried.CycleCount);
+            Assert.Equal(7, stillCarried.SortOrder);
+
+            // Stated non-zero -> wins, so the carry-forward is not simply "always keep".
+            Assert.True(_svc.UpdateTaskChecklist(
+                id, "[{\"item\":\"A\",\"cycleCount\":5,\"sortOrder\":1}]").Success);
+            var stated = _svc.GetTask(id).GetChecklist()[0];
+            Assert.Equal(5, stated.CycleCount);
+            Assert.Equal(1, stated.SortOrder);
+        }
+
+        /// <summary>
         /// A stored checklist that cannot be READ must still be repairable through this tool.
         /// <para>Rows like this exist BECAUSE the pre-merge blind overwrite stored them verbatim, and
         /// overwriting was the only way to heal one. Letting the merge's own <c>GetChecklist</c> throw

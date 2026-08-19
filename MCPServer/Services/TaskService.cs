@@ -2001,7 +2001,7 @@ namespace MultiTerminal.MCPServer.Services
         /// <para>This mirrors the rule <c>SetChecklistItemGloss</c> and <c>UpdateTaskChecklist</c>
         /// apply, deliberately rather than inventing a second convention: sibling tools that write
         /// the same field must not disagree about what an agent's write means. All three now share
-        /// one implementation — <see cref="ChecklistItemGloss.MarkFreshWriteProvenance"/> — because
+        /// one implementation — <see cref="ChecklistItemGloss.WithFreshWriteProvenance"/> — because
         /// task 2da6d8d9 made this the third site and a comment saying the copies "must not
         /// disagree" is not an enforcement mechanism. The full rationale, including why the rule
         /// does NOT belong in <c>NormalizeSource</c>, lives on that method.</para>

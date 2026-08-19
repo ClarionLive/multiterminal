@@ -220,7 +220,7 @@ namespace MultiTerminal.Tests
             Assert.True(
                 Regex.IsMatch(helper, @"WithFreshWriteProvenance\(\)"),
                 "The append stamp no longer routes through " +
-                "ChecklistItemGloss.MarkFreshWriteProvenance. Whatever it does instead is a second " +
+                "ChecklistItemGloss.WithFreshWriteProvenance. Whatever it does instead is a second " +
                 "convention for the same field, which is the divergence the shared primitive exists " +
                 "to make impossible.");
         }
@@ -290,7 +290,7 @@ namespace MultiTerminal.Tests
             int calls = Regex.Matches(service, @"WithFreshWriteProvenance\(\)").Count;
             Assert.True(
                 calls == 3,
-                $"Expected exactly 3 calls to MarkFreshWriteProvenance in TaskService — one per " +
+                $"Expected exactly 3 calls to WithFreshWriteProvenance in TaskService — one per " +
                 $"fresh-write site (append, set, full-array replace) — but found {calls}. Fewer " +
                 $"means a path stopped stamping and its writes now normalize to 'authored', " +
                 $"permanently. More means a NEW write path exists: add it to the list above and to " +
