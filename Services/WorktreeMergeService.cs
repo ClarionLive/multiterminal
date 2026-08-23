@@ -136,7 +136,7 @@ namespace MultiTerminal.Services
             bool trunkFromConfig = !string.IsNullOrWhiteSpace(expectedTrunk);
             string wantTrunk = trunkFromConfig
                 ? expectedTrunk.Trim()
-                : await DetectDefaultBranchAsync(repoRoot).ConfigureAwait(false);
+                : await GitTrunkResolver.DetectDefaultBranchAsync(repoRoot).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(wantTrunk))
             {
                 return new MergeResult
@@ -660,62 +660,6 @@ namespace MultiTerminal.Services
             return false;
         }
 
-        /// <summary>
-        /// Best-effort resolution of the repository's default branch, used to guard
-        /// against merging a task branch into a non-trunk branch the main checkout
-        /// happens to be parked on (task 90c2acc6, Suspect B). Returns <c>null</c>
-        /// when the default cannot be determined UNAMBIGUOUSLY — callers treat null
-        /// as "skip the assertion" so a legitimate merge is never blocked by a guess.
-        /// </summary>
-        private static async Task<string> DetectDefaultBranchAsync(string repoRoot)
-        {
-            // (2) Remote's published default (origin/HEAD -> origin/<branch>).
-            // DefaultTimeoutMs, not the short probe budget: this is the fail-CLOSED
-            // choosing path, and giving up early here falls through to the
-            // sole-local-branch heuristic and can let a merge proceed.
-            string published = await ResolveOriginHeadAsync(repoRoot, GitExec.DefaultTimeoutMs).ConfigureAwait(false);
-            if (!string.IsNullOrEmpty(published)) return published;
-
-            // (3) The SOLE non-task local branch, if exactly one exists AND it bears a
-            // conventional trunk name. Generalizing past hard-coded main/master to
-            // custom trunk names was pipeline run 2 (Codex adversary HIGH: 'develop'
-            // repos were over-blocked). But accepting an ARBITRARY lone branch was
-            // itself unsafe — pipeline run 3 (Codex adversary HIGH): a lone
-            // 'feature/parked' would be promoted to trunk and the task branch merged
-            // into it, reopening the silent wrong-branch class. So we only trust the
-            // lone branch when its name is a recognized default-branch convention.
-            // Anything else (a lone 'feature/*', 'release', 'stable', ...) gives no
-            // trustworthy signal: return null and let the caller fail closed. A repo
-            // with MORE than one non-task branch is likewise ambiguous → null. Repos
-            // with a genuinely unconventional trunk name must set the project's
-            // git_default_branch (the authoritative source). Task branches
-            // (task/<id>[--<slug>]) are excluded — they're never trunk.
-            // %(refname), NOT %(refname:short) — task b88e7017, same defect class as
-            // 36b0b9d5 item ③ fixed in WorktreeJanitorService. :short emits
-            // 'heads/develop' rather than 'develop' when a TAG of the same name exists,
-            // so a repo carrying tag 'develop' alongside branch 'develop' would fail
-            // IsConventionalTrunkName, resolve no trunk, and fail closed forever — the
-            // same permanent-refusal shape this ticket is about. %(refname) is
-            // unambiguous by construction; ParseBranchNames strips the refs/heads/
-            // prefix and is shared rather than re-implemented so the two callers
-            // cannot drift.
-            var branches = await GitExec.RunAsync(repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/").ConfigureAwait(false);
-            if (branches.ExitCode == 0)
-            {
-                string sole = null;
-                int count = 0;
-                foreach (var b in WorktreeJanitorService.ParseBranchNames(branches.Stdout))
-                {
-                    if (b.StartsWith("task/", StringComparison.Ordinal)) continue;
-                    count++;
-                    sole = b;
-                    if (count > 1) break;
-                }
-                if (count == 1 && IsConventionalTrunkName(sole)) return sole;
-            }
-
-            return null;
-        }
 
         /// <summary>
         /// Flatten, redact and cap git/exception text that is about to travel to a
@@ -766,42 +710,6 @@ namespace MultiTerminal.Services
         /// </summary>
         private const int ProbeTimeoutMs = 5000;
 
-        /// <summary>
-        /// The remote's published default branch (origin/HEAD -&gt; origin/&lt;branch&gt;),
-        /// or <c>null</c> when it can't be resolved. Single source for both
-        /// <see cref="DetectDefaultBranchAsync"/> (which uses it to CHOOSE a trunk)
-        /// and <see cref="ClassifyTrunkMismatchAsync"/> (which uses it to decide
-        /// whether the configured trunk is stale). They were separate verbatim
-        /// copies; if one had gained a fallback, the classifier's verdict could
-        /// contradict the resolver's choice about the same repository.
-        /// </summary>
-        /// <param name="timeoutMs">
-        /// REQUIRED, and deliberately not defaulted (task b88e7017, pipeline Run 2
-        /// debugger — a FAIL-OPEN regression this extraction introduced). The two
-        /// callers must not share a budget:
-        /// <list type="bullet">
-        /// <item><b>Choosing</b> a trunk is a fail-CLOSED decision. If this probe
-        /// gives up early, DetectDefaultBranchAsync falls through to the
-        /// sole-local-branch heuristic, which can resolve a trunk origin/HEAD would
-        /// have contradicted — and then the merge PROCEEDS. Sharing the short probe
-        /// budget silently cut that path from 30s to 5s, turning a timeout into a
-        /// merge instead of a refusal. It passes GitExec.DefaultTimeoutMs.</item>
-        /// <item><b>Reporting</b> a refusal is already fail-closed — the merge is
-        /// refused either way, and the outcome has to reach the caller inside the
-        /// MCP client's 15s budget. It passes the short ProbeTimeoutMs.</item>
-        /// </list>
-        /// </param>
-        private static async Task<string> ResolveOriginHeadAsync(string repoRoot, int timeoutMs)
-        {
-            var remote = await GitExec.RunAsync(
-                repoRoot, timeoutMs, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").ConfigureAwait(false);
-            if (remote.TimedOut || remote.ExitCode != 0) return null;
-
-            string r = remote.Stdout.Trim();
-            const string prefix = "origin/";
-            if (r.StartsWith(prefix, StringComparison.Ordinal)) r = r.Substring(prefix.Length);
-            return string.IsNullOrEmpty(r) ? null : r;
-        }
 
         /// <summary>
         /// Decide WHICH SIDE of a trunk mismatch is wrong (task b88e7017). Read-only:
@@ -869,7 +777,7 @@ namespace MultiTerminal.Services
             // ProbeTimeoutMs, not the full budget: this path only decides WHAT TO SAY
             // about a refusal that has already been decided, and the message has to
             // reach the caller inside the MCP client's 15s window.
-            string publishedDefault = await ResolveOriginHeadAsync(repoRoot, ProbeTimeoutMs).ConfigureAwait(false);
+            string publishedDefault = await GitTrunkResolver.ResolveOriginHeadAsync(repoRoot, ProbeTimeoutMs).ConfigureAwait(false);
             if (string.Equals(publishedDefault, trunk, StringComparison.Ordinal))
                 return TrunkMismatchKind.ConfiguredTrunkStale;
 
@@ -973,24 +881,6 @@ namespace MultiTerminal.Services
             }
         }
 
-        /// <summary>
-        /// Recognized default-branch naming conventions. A lone local branch is only
-        /// trusted as the trunk when it matches one of these — an arbitrary branch
-        /// name carries no signal that it is actually the repository default (task
-        /// 90c2acc6, pipeline run 3). Repos whose trunk is named otherwise must set
-        /// the project's git_default_branch.
-        /// </summary>
-        private static readonly string[] ConventionalTrunkNames = { "main", "master", "develop", "trunk" };
-
-        private static bool IsConventionalTrunkName(string branch)
-        {
-            if (string.IsNullOrWhiteSpace(branch)) return false;
-            foreach (var name in ConventionalTrunkNames)
-            {
-                if (string.Equals(branch, name, StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            return false;
-        }
 
     }
 
