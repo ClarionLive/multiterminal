@@ -124,6 +124,7 @@ namespace MultiTerminal.Services
 
         // Terminal font size settings
         private const string TerminalFontSizeKey = "TerminalFontSize";
+        private const string AttentionPanelOrderKey = "AttentionPanelOrder";
         private const float DefaultTerminalFontSize = 10f;
         private const float MinTerminalFontSize = 6f;
         private const float MaxTerminalFontSize = 32f;
@@ -368,6 +369,34 @@ namespace MultiTerminal.Services
         {
             size = Math.Max(MinTerminalFontSize, Math.Min(MaxTerminalFontSize, size));
             Set(TerminalFontSizeKey, size.ToString("F1"));
+        }
+
+        /// <summary>
+        /// Gets how the attention panel orders its cards: <c>"attention"</c> or <c>"fixed"</c>
+        /// (task 2289bb8a item 8).
+        /// </summary>
+        /// <remarks>
+        /// Defaults to <c>"attention"</c> — urgent cards first — which is what most people want
+        /// most of the time. <c>"fixed"</c> exists because attention-first reorders the list at
+        /// exactly the moment several agents block at once, which is also the moment the owner is
+        /// clicking fastest. Making it a preference settles that as a choice rather than an
+        /// argument; the panel additionally defers a reshuffle while the pointer is over the list.
+        /// <para>An unrecognised stored value normalises to the default rather than being trusted.</para>
+        /// </remarks>
+        public string GetAttentionPanelOrder()
+        {
+            string value = Get(AttentionPanelOrderKey);
+            return string.Equals(value, "fixed", StringComparison.OrdinalIgnoreCase) ? "fixed" : "attention";
+        }
+
+        /// <summary>
+        /// Sets the attention panel card ordering. Anything other than <c>"fixed"</c> is stored as
+        /// <c>"attention"</c>, so a malformed value from the view cannot poison the setting.
+        /// </summary>
+        public void SetAttentionPanelOrder(string order)
+        {
+            Set(AttentionPanelOrderKey,
+                string.Equals(order, "fixed", StringComparison.OrdinalIgnoreCase) ? "fixed" : "attention");
         }
 
         /// <summary>

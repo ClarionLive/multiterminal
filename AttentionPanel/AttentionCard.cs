@@ -1,0 +1,91 @@
+using System;
+using System.Text.Json.Serialization;
+
+namespace MultiTerminal.AttentionPanel
+{
+    /// <summary>
+    /// One session card, as the panel's view consumes it (task 2289bb8a item 5).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠️ EVERY <see cref="JsonPropertyNameAttribute"/> HERE IS A CONTRACT NO COMPILER CHECKS.
+    /// The view reads these names as JavaScript property names; rename one side only and the field
+    /// silently arrives as <c>undefined</c>, which renders as an empty string rather than an error.
+    /// A PascalCase/camelCase mismatch of exactly this kind once produced a CRITICAL on a clean
+    /// build with 442 green tests. They are explicit rather than left to a serializer policy so
+    /// the contract is readable in one place, and pinned by the cross-file test in item 9.
+    /// </para>
+    /// <para>
+    /// The split between <see cref="ObservedVerb"/> and <see cref="TicketId"/> is the design rule
+    /// of the whole feature: observed state is what the hooks SAW, the ticket is what the agent
+    /// last CLAIMED, and they are rendered separately at different weights because the second goes
+    /// stale. <see cref="ClaimAgeSeconds"/> exists so the card can say how stale rather than
+    /// implying the claim is current.
+    /// </para>
+    /// </remarks>
+    public sealed class AttentionCard
+    {
+        /// <summary>Session key. Round-trips back on focus_session.</summary>
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        /// <summary>Agent/terminal name shown as the card title.</summary>
+        [JsonPropertyName("agent")]
+        public string Agent { get; set; }
+
+        /// <summary>Avatar colour, from the terminal registration.</summary>
+        [JsonPropertyName("color")]
+        public string Color { get; set; }
+
+        /// <summary>Project name, learned from the notification payload.</summary>
+        [JsonPropertyName("project")]
+        public string Project { get; set; }
+
+        /// <summary>
+        /// <see cref="MCPServer.Services.AttentionState"/> as a string. The view keys its stripe,
+        /// pip and pulse off this exact spelling, so the enum names ARE part of the contract.
+        /// </summary>
+        [JsonPropertyName("state")]
+        public string State { get; set; }
+
+        /// <summary>Observed headline, e.g. "Needs permission". High confidence: from hooks.</summary>
+        [JsonPropertyName("observedVerb")]
+        public string ObservedVerb { get; set; }
+
+        /// <summary>Observed detail, e.g. the permission or question text. May be null.</summary>
+        [JsonPropertyName("observedDetail")]
+        public string ObservedDetail { get; set; }
+
+        /// <summary>Seconds in the current state. The view ticks this locally between pushes.</summary>
+        [JsonPropertyName("sinceSeconds")]
+        public long SinceSeconds { get; set; }
+
+        /// <summary>Ticket the agent claims to be on, or null. Rendered quietly, as a claim.</summary>
+        [JsonPropertyName("ticketId")]
+        public string TicketId { get; set; }
+
+        /// <summary>Human label for the claimed checklist position, e.g. "item 2 of 7".</summary>
+        [JsonPropertyName("ticketItem")]
+        public string TicketItem { get; set; }
+
+        /// <summary>
+        /// Age of the ticket claim. The view turns this amber past a threshold — the point being
+        /// that a stale claim is visibly stale rather than quietly presented as fact.
+        /// </summary>
+        [JsonPropertyName("claimAgeSeconds")]
+        public long ClaimAgeSeconds { get; set; }
+    }
+
+    /// <summary>What the board says an agent is working on. A claim, not an observation.</summary>
+    public sealed class AttentionTicketClaim
+    {
+        /// <summary>Task id.</summary>
+        public string TaskId { get; set; }
+
+        /// <summary>Label for the checklist position, e.g. "item 2 of 7".</summary>
+        public string ItemLabel { get; set; }
+
+        /// <summary>When the board row was last updated (UTC).</summary>
+        public DateTime UpdatedAtUtc { get; set; }
+    }
+}

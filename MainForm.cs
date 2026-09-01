@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -94,6 +94,8 @@ namespace MultiTerminal
         private ToolStripButton _profilePanelButton;
         private InboxPanelDocument _inboxPanel;
         private ToolStripButton _inboxPanelButton;
+        private AttentionPanel.AttentionPanelDocument _attentionPanel;
+        private ToolStripButton _attentionPanelButton;
         private OfficePanel.OfficePanelDocument _officePanel;
         private ToolStripButton _officePanelButton;
         private ToolStripButton _agentPanelButton;
@@ -503,6 +505,8 @@ namespace MultiTerminal
             _tasksPanel = new TasksPanelDocument();
             _profilePanel = new ProfilePanel.ProfilePanelDocument();
             _inboxPanel = new InboxPanelDocument();
+            _attentionPanel = new AttentionPanel.AttentionPanelDocument();
+            WireAttentionPanel();
             _officePanel = new OfficePanel.OfficePanelDocument();
             _debugPanel = new DebugPanel();
             _debugPanel.Initialize(_debugLogService);
@@ -848,6 +852,8 @@ namespace MultiTerminal
 
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Initializing inbox panel");
                 _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
+                _mcpServer.Broker.AgentAttention.AttentionChanged += OnAgentAttentionChanged;
+                RefreshAttentionPanel();
 
                 // Initialize dashboard header alongside other panels (not deferred — deferring
                 // caused the header to never appear if RestoreSession hit any issue)
@@ -2726,6 +2732,16 @@ namespace MultiTerminal
             };
             _inboxPanelButton.Click += (s, e) => ToggleInboxPanel();
 
+            // Attention panel toggle button (which agents are blocked on you)
+            _attentionPanelButton = new ToolStripButton
+            {
+                Text = "Attention",
+                DisplayStyle = ToolStripItemDisplayStyle.Text,
+                ForeColor = Color.White,
+                ToolTipText = "Toggle Attention Panel (agents waiting on you)"
+            };
+            _attentionPanelButton.Click += (s, e) => ToggleAttentionPanel();
+
             // Office panel toggle button (Pixel Art Visualization)
             _officePanelButton = new ToolStripButton
             {
@@ -2843,6 +2859,7 @@ namespace MultiTerminal
             _toolStrip.Items.Add(_tasksPanelButton);
             _toolStrip.Items.Add(_profilePanelButton);
             _toolStrip.Items.Add(_inboxPanelButton);
+            _toolStrip.Items.Add(_attentionPanelButton);
             _toolStrip.Items.Add(_officePanelButton);
             _toolStrip.Items.Add(_debugPanelButton);
             _toolStrip.Items.Add(_filePreviewPanelButton);
@@ -3122,6 +3139,7 @@ namespace MultiTerminal
 
             // Update inbox panel theme
             _inboxPanel?.ApplyTheme(_currentTheme.IsDark);
+            _attentionPanel?.ApplyTheme(_currentTheme.IsDark);
 
             // Update office panel theme
             _officePanel?.ApplyTheme(_currentTheme.IsDark);
@@ -5022,6 +5040,7 @@ namespace MultiTerminal
             SavePanelState("ActivityPanel", _activityPanel);
             SavePanelState("ProfilePanel", _profilePanel);
             SavePanelState("InboxPanel", _inboxPanel);
+            SavePanelState("AttentionPanel", _attentionPanel);
             SavePanelState("OfficePanel", _officePanel);
             SavePanelState("DebugPanel", _debugPanel);
             SavePanelState("FilePreviewPanel", _filePreviewPanel);
@@ -5127,6 +5146,7 @@ namespace MultiTerminal
             DisposePanel(_activityPanel);
             DisposePanel(_profilePanel);
             DisposePanel(_inboxPanel);
+            DisposePanel(_attentionPanel);
             DisposePanel(_officePanel);
             DisposePanel(_debugPanel);
             DisposePanel(_filePreviewPanel);
@@ -5225,6 +5245,8 @@ namespace MultiTerminal
                 _profilePanel.SetTheme(isDark);
             if (RestoreSinglePanel("InboxPanel", _inboxPanel, DockState.DockRight))
                 _inboxPanel.ApplyTheme(isDark);
+            if (RestoreSinglePanel("AttentionPanel", _attentionPanel, DockState.DockRight))
+                _attentionPanel.ApplyTheme(isDark);
             if (RestoreSinglePanel("OfficePanel", _officePanel, DockState.DockRight))
                 _officePanel.ApplyTheme(isDark);
             RestoreSinglePanel("DebugPanel", _debugPanel, DockState.DockBottom);
@@ -5250,6 +5272,8 @@ namespace MultiTerminal
                 _profilePanel.SetTheme(isDark);
             if (_inboxPanel != null && !_inboxPanel.IsDisposed && _inboxPanel.Visible)
                 _inboxPanel.ApplyTheme(isDark);
+            if (_attentionPanel != null && !_attentionPanel.IsDisposed && _attentionPanel.Visible)
+                _attentionPanel.ApplyTheme(isDark);
             if (_officePanel != null && !_officePanel.IsDisposed && _officePanel.Visible)
                 _officePanel.ApplyTheme(isDark);
             if (_filePreviewPanel != null && !_filePreviewPanel.IsDisposed && _filePreviewPanel.Visible)
@@ -6530,6 +6554,214 @@ namespace MultiTerminal
             {
                 _inboxPanel.Show(_dockPanel, GetSavedDockState("InboxPanel", DockState.DockRight));
                 _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+            }
+        }
+
+        /// <summary>
+        /// Wires the attention panel's three outbound events (task 2289bb8a items 4, 6, 7).
+        /// </summary>
+        /// <remarks>
+        /// Called from every place the panel can come into existence — initial construction and
+        /// the toggle's recreate-after-close path — because a panel recreated by the toggle with
+        /// no wiring looks completely normal and silently does nothing when clicked.
+        /// </remarks>
+        /// <summary>
+        /// Attention state changed on a background thread; repaint on the UI thread
+        /// (task 2289bb8a item 5).
+        /// </summary>
+        private void OnAgentAttentionChanged(object sender, AgentAttentionEntry e)
+        {
+            try
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                BeginInvoke(new Action(RefreshAttentionPanel));
+            }
+            catch
+            {
+                // The form can be tearing down between the check and the post.
+            }
+        }
+
+        /// <summary>
+        /// Rebuilds the attention panel's cards from observed state plus board claims
+        /// (task 2289bb8a item 5).
+        /// </summary>
+        /// <remarks>
+        /// Known limitation, deliberately not hidden: this runs when ATTENTION changes, so a
+        /// ticket claim's rendered age only advances when something else about the session does.
+        /// The card still says how old the claim was when last read, which is the honest half —
+        /// what it will not do is silently refresh a stale claim into looking current.
+        /// </remarks>
+        private void RefreshAttentionPanel()
+        {
+            if (_attentionPanel == null || _attentionPanel.IsDisposed) return;
+
+            var broker = _mcpServer?.Broker;
+            if (broker == null) return;
+
+            try
+            {
+                var colors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var t in broker.GetTerminals())
+                {
+                    if (t?.Name != null && !colors.ContainsKey(t.Name)) colors[t.Name] = t.Color;
+                }
+
+                var claims = new Dictionary<string, AttentionPanel.AttentionTicketClaim>(StringComparer.OrdinalIgnoreCase);
+                foreach (var task in broker.GetTasks())
+                {
+                    if (task == null || string.IsNullOrWhiteSpace(task.Assignee)) continue;
+                    if (!string.Equals(task.Status, "in_progress", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (claims.TryGetValue(task.Assignee, out var existing) && existing.UpdatedAtUtc >= task.UpdatedAt)
+                    {
+                        continue;
+                    }
+
+                    claims[task.Assignee] = new AttentionPanel.AttentionTicketClaim
+                    {
+                        TaskId = task.Id,
+                        ItemLabel = DescribeChecklistPosition(task),
+                        UpdatedAtUtc = task.UpdatedAt,
+                    };
+                }
+
+                var cards = AttentionPanel.AttentionCardProjector.Project(
+                    broker.AgentAttention.Snapshot(), colors, claims, DateTime.UtcNow);
+
+                _attentionPanel.SetSessions(cards);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("AttentionPanel", $"RefreshAttentionPanel failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// "item 3 of 7" for the first checklist item that is not done, or a done summary.
+        /// Null when the ticket has no checklist — the card then shows the ticket id alone rather
+        /// than inventing a position within a plan that does not exist.
+        /// </summary>
+        private static string DescribeChecklistPosition(MultiTerminal.MCPServer.Models.KanbanTask task)
+        {
+            var items = task?.GetChecklist();
+            if (items == null || items.Count == 0) return null;
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (!string.Equals(items[i]?.Status, "done", StringComparison.OrdinalIgnoreCase))
+                {
+                    return $"item {i + 1} of {items.Count}";
+                }
+            }
+
+            return $"all {items.Count} done";
+        }
+
+        private void WireAttentionPanel()
+        {
+            if (_attentionPanel == null) return;
+
+            _attentionPanel.FocusSessionRequested += (s, sessionId) => FocusTerminalForSession(sessionId);
+            _attentionPanel.OpenTicketRequested += (s, taskId) => OpenTicketInTasksPanel(taskId);
+            _attentionPanel.SetOrder(_settings?.GetAttentionPanelOrder() ?? "attention");
+            _attentionPanel.OrderChanged += (s, order) => _settings?.SetAttentionPanelOrder(order);
+        }
+
+        /// <summary>
+        /// Brings the terminal for a session to the front, including from a hidden tab
+        /// (task 2289bb8a item 6).
+        /// </summary>
+        /// <remarks>
+        /// Pulling a document out from behind other tabs is exactly what <c>Activate()</c> already
+        /// does for docked content, so this reuses the established
+        /// <c>Activate(); FocusTerminal();</c> idiom rather than reaching into the tab strip.
+        /// <para>
+        /// The panel sends a session key. Terminals are matched by agent name, and the key IS the
+        /// agent name for any session MultiTerminal has not seen a notification from — so both are
+        /// tried, in that order.
+        /// </para>
+        /// </remarks>
+        private void FocusTerminalForSession(string sessionKey)
+        {
+            if (string.IsNullOrWhiteSpace(sessionKey)) return;
+
+            string agentName = _mcpServer?.Broker?.AgentAttention?.Get(sessionKey)?.AgentName;
+            if (string.IsNullOrWhiteSpace(agentName)) agentName = sessionKey;
+
+            var doc = _dockPanel.Documents.OfType<TerminalDocument>()
+                .FirstOrDefault(d => string.Equals(d.CustomTitle, agentName, StringComparison.OrdinalIgnoreCase));
+
+            if (doc == null)
+            {
+                _debugLogService?.Trace("AttentionPanel", $"No terminal found for session '{sessionKey}' (agent '{agentName}')");
+                return;
+            }
+
+            doc.Activate();
+            doc.FocusTerminal();
+            _lastActiveTerminal = doc;
+        }
+
+        /// <summary>
+        /// Reveals the Tasks panel and selects a ticket in it, read-only (task 2289bb8a item 7).
+        /// </summary>
+        /// <remarks>
+        /// Reuses the route ticket <c>f5744489</c> built: the board HUD binds to the SELECTED card,
+        /// and its board mode is read-only — <c>HandleSetTaskActive</c> refuses as its first
+        /// statement. So opening a colleague's ticket to read it cannot claim or re-activate it.
+        /// <para>
+        /// Deliberately does NOT touch the focused terminal. The owner clicked a ticket id to read
+        /// something, not to switch which agent they were watching.
+        /// </para>
+        /// </remarks>
+        private void OpenTicketInTasksPanel(string taskId)
+        {
+            if (string.IsNullOrWhiteSpace(taskId)) return;
+
+            if (_tasksPanel == null || _tasksPanel.IsDisposed)
+            {
+                _tasksPanel = new TasksPanelDocument();
+                _tasksPanel.SetDebugLogService(_debugLogService);
+                if (_mcpServer?.Broker != null)
+                {
+                    _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
+                    WireTasksPanelEvents(_tasksPanel);
+                }
+
+                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+            }
+
+            if (!_tasksPanel.Visible)
+            {
+                _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
+                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+            }
+
+            _tasksPanel.Activate();
+            _tasksPanel.SetSelectedTask(taskId);
+        }
+
+        private void ToggleAttentionPanel()
+        {
+            // Recreate panel if it was disposed (user closed it with the X button)
+            if (_attentionPanel == null || _attentionPanel.IsDisposed)
+            {
+                _attentionPanel = new AttentionPanel.AttentionPanelDocument();
+                WireAttentionPanel();
+                _attentionPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _attentionPanel.Show(_dockPanel, GetSavedDockState("AttentionPanel", DockState.DockRight));
+                return;
+            }
+
+            if (_attentionPanel.Visible)
+            {
+                _attentionPanel.Hide();
+            }
+            else
+            {
+                _attentionPanel.Show(_dockPanel, GetSavedDockState("AttentionPanel", DockState.DockRight));
+                _attentionPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
             }
         }
 

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Attention</title>
+<style>
+/* Palette is MultiTerminal's existing HUD token set (see hud-sessions.html) so this panel
+   looks native rather than like a bolt-on. Semantic colours for the attention states are
+   Catppuccin, matching the accents already in use. */
+body {
+    --bg-primary: #1a1a2e; --bg-card: #2d2d44; --bg-card-hover: #353550;
+    --bg-header: #12122a; --border: #3d3d5c;
+    --text-primary: #e0e0e0; --text-secondary: #a0a0b8; --text-muted: #707088;
+    --accent: #89b4fa; --green: #a6e3a1; --peach: #fab387; --mauve: #cba6f7;
+    --bg-tag: rgba(255,255,255,0.08);
+    --pulse-question: rgba(203,166,247,0.26);
+    --pulse-permission: rgba(250,179,135,0.24);
+
+    margin: 0; padding: 0;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+    background: var(--bg-primary); color: var(--text-primary);
+    overflow: hidden; height: 100vh; display: flex; flex-direction: column;
+}
+body.light {
+    --bg-primary: #f5f5f5; --bg-card: #fff; --bg-card-hover: #fafafa;
+    --bg-header: #e8e8e8; --border: #e0e0e0;
+    --text-primary: #333; --text-secondary: #666; --text-muted: #999;
+    --accent: #1e66f5; --green: #40a02b; --peach: #fe640b; --mauve: #8839ef;
+    --bg-tag: rgba(0,0,0,0.06);
+    --pulse-question: rgba(136,57,239,0.20);
+    --pulse-permission: rgba(254,100,11,0.20);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ---- header ---- */
+.head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; background: var(--bg-header);
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.head-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--text-secondary);
+}
+.needs {
+    font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 9px;
+    background: var(--mauve); color: var(--bg-primary);
+    font-variant-numeric: tabular-nums;
+}
+.needs[data-count="0"] { background: var(--bg-tag); color: var(--text-muted); }
+.spacer { flex: 1; }
+.order-wrap { display: flex; align-items: center; gap: 5px; }
+.order-wrap > span { font-size: 9.5px; color: var(--text-muted); }
+select.order {
+    font-family: inherit; font-size: 9.5px; color: var(--text-secondary);
+    background: var(--bg-tag); border: 1px solid transparent;
+    border-radius: 9px; padding: 2px 6px; cursor: pointer;
+}
+select.order:hover { border-color: var(--border); }
+select.order:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---- list ---- */
+.list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+
+.card {
+    position: relative; width: 100%; text-align: left;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 10px 9px 11px;
+    cursor: pointer; font-family: inherit; color: var(--text-primary);
+    display: flex; flex-direction: column; gap: 7px;
+    transition: background .15s, border-color .15s;
+}
+.card:hover { background: var(--bg-card-hover); }
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card.offline { opacity: .5; }
+
+/* state encoded as form (a stripe) as well as colour */
+.card::before {
+    content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px;
+    border-radius: 0 3px 3px 0; background: var(--border);
+}
+.card[data-state="BlockedQuestion"]::before { background: var(--mauve); }
+.card[data-state="BlockedPermission"]::before,
+.card[data-state="BlockedUnknown"]::before { background: var(--peach); }
+.card[data-state="Working"]::before { background: var(--accent); }
+.card[data-state="Idle"]::before { background: var(--green); }
+
+.top { display: flex; align-items: center; gap: 9px; }
+.avatar {
+    width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+    display: grid; place-items: center;
+    font-size: 11px; font-weight: 700; color: #12122a;
+}
+.who { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.who-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who-proj { font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.elapsed { font-size: 10px; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.card[data-blocking="true"] .elapsed { color: var(--text-secondary); font-weight: 600; }
+
+/* OBSERVED — the high-confidence line, from hooks */
+.observed { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; line-height: 1.45; }
+.pip { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; transform: translateY(-1px); background: var(--text-muted); }
+.card[data-state="BlockedQuestion"] .pip { background: var(--mauve); }
+.card[data-state="BlockedPermission"] .pip,
+.card[data-state="BlockedUnknown"] .pip { background: var(--peach); }
+.card[data-state="Working"] .pip { background: var(--accent); }
+.card[data-state="Idle"] .pip { background: var(--green); }
+.observed b { font-weight: 600; }
+.observed q { color: var(--text-secondary); font-style: italic; quotes: '"' '"'; display: block; }
+
+/* CLAIMED — the board's word. Quieter, and stamped with its age on purpose. */
+.claimed {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    font-size: 10px; color: var(--text-muted);
+    padding-top: 6px; border-top: 1px dashed var(--border);
+}
+button.tkt {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 9.5px; background: var(--bg-tag); color: var(--accent);
+    padding: 1px 5px; border-radius: 4px; border: 1px solid transparent; cursor: pointer;
+    transition: border-color .12s, background .12s;
+}
+button.tkt:hover { border-color: var(--accent); background: transparent; text-decoration: underline; }
+button.tkt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.claim-age { margin-left: auto; font-variant-numeric: tabular-nums; }
+.claim-age.stale { color: var(--peach); }
+
+/* pulse — only for cards that actually block the owner */
+@keyframes wait-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50%      { box-shadow: 0 0 0 3px var(--pulse-c); }
+}
+.card.pulsing { animation: wait-pulse 2.6s ease-in-out infinite; }
+.card[data-state="BlockedQuestion"] { --pulse-c: var(--pulse-question); }
+.card[data-state="BlockedPermission"],
+.card[data-state="BlockedUnknown"] { --pulse-c: var(--pulse-permission); }
+@media (prefers-reduced-motion: reduce) {
+    .card.pulsing { animation: none; box-shadow: 0 0 0 2px var(--pulse-c); }
+    .card { transition: none; }
+}
+
+.empty { margin: auto; padding: 26px 18px; text-align: center; color: var(--text-muted); font-size: 11.5px; line-height: 1.6; }
+.empty b { display: block; color: var(--text-secondary); margin-bottom: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="head">
+    <span class="head-title">Attention</span>
+    <span class="needs" id="needs" data-count="0">0</span>
+    <span class="spacer"></span>
+    <label class="order-wrap" for="order">
+        <span>order</span>
+        <select class="order" id="order">
+            <option value="attention">attention first</option>
+            <option value="fixed">fixed</option>
+        </select>
+    </label>
+</div>
+<div class="list" id="list"></div>
+
+<script>
+"use strict";
+
+var BLOCKING = { BlockedQuestion: 1, BlockedPermission: 1, BlockedUnknown: 1 };
+
+var sessions = [];
+var order = "attention";
+var pointerInList = false;
+var reshufflePending = false;
+/* "no sessions" and "nothing observed yet" are different truths and must not be collapsed.
+   Ambient notifications are not persisted while remote mode is off, so after an MT restart the
+   panel legitimately starts empty -- that means nothing has been OBSERVED, not that nobody needs
+   you. Reporting the second as the first would be a confident lie at exactly the wrong moment. */
+var haveReceivedData = false;
+
+var listEl = document.getElementById("list");
+var needsEl = document.getElementById("needs");
+var orderEl = document.getElementById("order");
+
+function post(msg) {
+    if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
+}
+
+function fmtAge(sec) {
+    if (sec == null) return "";
+    if (sec < 60) return Math.max(0, Math.floor(sec)) + "s";
+    if (sec < 3600) return Math.floor(sec / 60) + "m";
+    if (sec < 86400) return Math.floor(sec / 3600) + "h";
+    return Math.floor(sec / 86400) + "d";
+}
+
+function isBlocking(s) { return !!BLOCKING[s.state]; }
+
+function ordered() {
+    if (order === "fixed") return sessions.slice();
+    function rank(s) { return isBlocking(s) ? 0 : (s.state === "Offline" ? 2 : 1); }
+    var idx = {};
+    sessions.forEach(function (s, i) { idx[s.id] = i; });
+    return sessions.slice().sort(function (a, b) {
+        return rank(a) - rank(b) || (b.sinceSeconds - a.sinceSeconds) || (idx[a.id] - idx[b.id]);
+    });
+}
+
+function initials(name) {
+    if (!name) return "?";
+    return name.trim().slice(0, 2).toUpperCase();
+}
+
+function render() {
+    var first = {};
+    Array.prototype.forEach.call(listEl.children, function (el) {
+        first[el.getAttribute("data-id")] = el.getBoundingClientRect().top;
+    });
+
+    listEl.textContent = "";
+    var rows = ordered();
+
+    if (!rows.length) {
+        var e = document.createElement("div");
+        e.className = "empty";
+        var b = document.createElement("b");
+        b.textContent = haveReceivedData ? "No open sessions" : "Nothing observed yet";
+        var p = document.createElement("span");
+        p.textContent = haveReceivedData
+            ? "No agent terminals are running."
+            : "Agent activity appears here as it happens. This is not the same as nobody needing you.";
+        e.appendChild(b); e.appendChild(p);
+        listEl.appendChild(e);
+        needsEl.textContent = "0";
+        needsEl.setAttribute("data-count", "0");
+        return;
+    }
+
+    rows.forEach(function (s) {
+        /* NOT a <button>: the ticket chip is a nested control, and a button inside a button is
+           invalid markup that silently breaks keyboard focus. */
+        var card = document.createElement("div");
+        card.className = "card" + (s.state === "Offline" ? " offline" : "") + (isBlocking(s) ? " pulsing" : "");
+        card.setAttribute("role", "button");
+        card.tabIndex = 0;
+        card.setAttribute("data-id", s.id);
+        card.setAttribute("data-state", s.state);
+        card.setAttribute("data-blocking", isBlocking(s) ? "true" : "false");
+
+        var top = document.createElement("div");
+        top.className = "top";
+
+        var av = document.createElement("span");
+        av.className = "avatar";
+        av.style.background = s.color || "#89b4fa";
+        av.textContent = initials(s.agent);
+
+        var who = document.createElement("span");
+        who.className = "who";
+        var n = document.createElement("span");
+        n.className = "who-name"; n.textContent = s.agent || "(unnamed)";
+        var pr = document.createElement("span");
+        pr.className = "who-proj"; pr.textContent = s.project || "";
+        who.appendChild(n); who.appendChild(pr);
+
+        var el = document.createElement("span");
+        el.className = "elapsed"; el.textContent = fmtAge(s.sinceSeconds);
+
+        top.appendChild(av); top.appendChild(who); top.appendChild(el);
+
+        var obs = document.createElement("span");
+        obs.className = "observed";
+        var pip = document.createElement("i"); pip.className = "pip";
+        var wrap = document.createElement("span");
+        var verb = document.createElement("b"); verb.textContent = s.observedVerb || "";
+        wrap.appendChild(verb);
+        if (s.observedDetail) {
+            var q = document.createElement("q"); q.textContent = s.observedDetail;
+            wrap.appendChild(q);
+        }
+        obs.appendChild(pip); obs.appendChild(wrap);
+
+        card.appendChild(top); card.appendChild(obs);
+
+        if (s.ticketId) {
+            var cl = document.createElement("span");
+            cl.className = "claimed";
+            var tk = document.createElement("button");
+            tk.type = "button"; tk.className = "tkt"; tk.textContent = s.ticketId;
+            tk.title = "Open " + s.ticketId + " in the Tasks panel";
+            tk.addEventListener("click", function (ev) {
+                ev.stopPropagation();
+                post({ type: "open_ticket", taskId: s.ticketId });
+            });
+            var it = document.createElement("span");
+            it.textContent = s.ticketItem || "";
+            var age = document.createElement("span");
+            age.className = "claim-age" + (s.claimAgeSeconds >= 1200 ? " stale" : "");
+            age.textContent = "board · " + fmtAge(s.claimAgeSeconds) + " ago";
+            cl.appendChild(tk); cl.appendChild(it); cl.appendChild(age);
+            card.appendChild(cl);
+        }
+
+        card.addEventListener("click", function () { post({ type: "focus_session", sessionId: s.id }); });
+        card.addEventListener("keydown", function (ev) {
+            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); post({ type: "focus_session", sessionId: s.id }); }
+        });
+
+        listEl.appendChild(card);
+    });
+
+    /* FLIP: reordering slides rather than teleporting, so the eye can follow a card that moved. */
+    if (!window.matchMedia("(prefers-reduced-motion:reduce)").matches) {
+        Array.prototype.forEach.call(listEl.children, function (el) {
+            var was = first[el.getAttribute("data-id")];
+            if (was === undefined) return;
+            var d = was - el.getBoundingClientRect().top;
+            if (!d) return;
+            el.animate([{ transform: "translateY(" + d + "px)" }, { transform: "none" }],
+                       { duration: 320, easing: "cubic-bezier(.22,.7,.3,1)" });
+        });
+    }
+
+    var n = sessions.filter(isBlocking).length;
+    needsEl.textContent = String(n);
+    needsEl.setAttribute("data-count", String(n));
+}
+
+/* Attention-first would otherwise move a card out from under the cursor at exactly the moment
+   several agents block at once -- which is when the owner is clicking fastest. Defer instead. */
+listEl.addEventListener("pointerenter", function () { pointerInList = true; });
+listEl.addEventListener("pointerleave", function () {
+    pointerInList = false;
+    if (reshufflePending) { reshufflePending = false; render(); }
+});
+
+function applySessions(next) {
+    sessions = next || [];
+    haveReceivedData = true;
+    if (order === "attention" && pointerInList) {
+        reshufflePending = true;
+        var n = sessions.filter(isBlocking).length;
+        needsEl.textContent = String(n);
+        needsEl.setAttribute("data-count", String(n));
+        return;
+    }
+    render();
+}
+
+orderEl.addEventListener("change", function () {
+    order = orderEl.value;
+    post({ type: "set_order", order: order });
+    render();
+});
+
+window.chrome.webview.addEventListener("message", function (ev) {
+    var msg = ev.data;
+    if (!msg || !msg.type) return;
+
+    if (msg.type === "theme") {
+        document.body.classList.toggle("light", !msg.isDark);
+    } else if (msg.type === "sessions") {
+        applySessions(msg.sessions);
+    } else if (msg.type === "order") {
+        order = msg.order === "fixed" ? "fixed" : "attention";
+        orderEl.value = order;
+        render();
+    }
+});
+
+/* Ages tick locally so "waiting 4m" stays true between pushes from the host. */
+setInterval(function () {
+    sessions.forEach(function (s) { if (typeof s.sinceSeconds === "number") s.sinceSeconds += 1; });
+    Array.prototype.forEach.call(listEl.children, function (el) {
+        var id = el.getAttribute("data-id");
+        var s = null;
+        for (var i = 0; i < sessions.length; i++) { if (sessions[i].id === id) { s = sessions[i]; break; } }
+        var t = el.querySelector(".elapsed");
+        if (s && t) t.textContent = fmtAge(s.sinceSeconds);
+    });
+}, 1000);
+
+render();
+post({ type: "ready" });
+</script>
+</body>
+</html>

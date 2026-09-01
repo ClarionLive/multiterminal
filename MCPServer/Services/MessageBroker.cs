@@ -215,6 +215,12 @@ namespace MultiTerminal.MCPServer.Services
         public event EventHandler<Dictionary<string, object>> NotificationReceived;
 
         /// <summary>
+        /// Which agent sessions are blocked on the owner, and for how long (task 2289bb8a).
+        /// Fed from <see cref="RecordNotification"/>; read by the attention panel.
+        /// </summary>
+        public AgentAttentionService AgentAttention { get; } = new AgentAttentionService();
+
+        /// <summary>
         /// Record and broadcast a Claude Code runtime notification.
         /// Called from NotificationsController when the Notification hook POSTs.
         /// </summary>
@@ -269,6 +275,11 @@ namespace MultiTerminal.MCPServer.Services
                 ["cwd"] = cwd,
                 ["created_at"] = DateTime.UtcNow.ToString("o")
             };
+            // Update attention state BEFORE the event goes out, so any subscriber that reads
+            // AgentAttention in its handler sees the notification it was just told about rather
+            // than the state from one notification ago.
+            AgentAttention.ApplyNotification(payload);
+
             RaiseSafe(NotificationReceived, payload);
             return id;
         }

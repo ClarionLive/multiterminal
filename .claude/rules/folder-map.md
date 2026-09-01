@@ -18,6 +18,7 @@ paths:
 | `ActivityPanel/` | Activity feed UI | ActivityPanelDocument (WebView2) |
 | `ProfilePanel/` | Team profiles UI | ProfilePanelDocument (WebView2) |
 | `InboxPanel/` | Notifications UI | InboxPanelDocument |
+| `AttentionPanel/` | Which agents are blocked ON THE OWNER (task 2289bb8a) | AttentionPanelDocument + AttentionPanelControl (WebView2) + AttentionCard/AttentionCardProjector. A **standalone dockable panel, not a HUD tab** — it spans every session, so it cannot live inside one terminal's HUD; it therefore themes through its own `ApplyTheme` and is NOT in the `HudTabContainer.ApplyTheme` chain. Named "Attention", not "Sessions", because `HudSessionsPanel` is the historical session *timeline* |
 | `OfficePanel/` | Agent office UI | OfficePanelDocument + OfficePanelRenderer (WebView2) |
 | `AgentPanel/` | Live agent transcript | AgentPanelDocument + AgentPanelControl (WebView2) |
 | `Panels/` | Misc panels | DebugPanel |
