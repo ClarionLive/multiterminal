@@ -71,6 +71,10 @@ namespace MultiTerminal.API.Controllers
                 return Problem(detail: "cwd exceeds 1000 characters", statusCode: 400);
             if (request.ProjectName?.Length > 200)
                 return Problem(detail: "project_name exceeds 200 characters", statusCode: 400);
+            if (request.RawType?.Length > 100)
+                return Problem(detail: "raw_type exceeds 100 characters", statusCode: 400);
+            if (request.ToolUseId?.Length > 200)
+                return Problem(detail: "tool_use_id exceeds 200 characters", statusCode: 400);
 
             // Rate limiting: sliding window, 100 per minute (locked for atomic check-and-enqueue)
             var now = DateTime.UtcNow;
@@ -87,18 +91,36 @@ namespace MultiTerminal.API.Controllers
             // Persist gate (task 7da88ea0 item 4): explicit pushes (forcePush) and remote-mode
             // notifications are history the owner may need to review from the phone; the hook's
             // ambient at-desk notifications are noise (they're already visible in-app live) unless
-            // the caller opts in with persistLocal. NotificationReceived currently has no
-            // subscribers, so skipping RecordNotification entirely drops no live behavior.
+            // the caller opts in with persistLocal.
+            //
+            // The gate now governs the DB WRITE ONLY. RecordNotification is called every time and
+            // raises NotificationReceived unconditionally (task 2289bb8a item 1). Until then this
+            // branch skipped the call entirely when the gate was closed, which was justified by
+            // "NotificationReceived currently has no subscribers" — true when written, false now.
+            // The attention rail subscribes, and it needs the signal in precisely the case the gate
+            // excludes: remote mode OFF, i.e. the owner at the desk. Restoring the old shape would
+            // make the rail silent exactly when it is supposed to be useful, and it would fail
+            // silently — the rail would simply show every agent as calm.
             bool persist = _broker.IsRemoteMode || forcePush || persistLocal;
-            string id = persist
-                ? _broker.RecordNotification(
-                    request.NotificationType,
-                    request.Title ?? request.NotificationType,
-                    request.Message,
-                    request.SessionId,
-                    request.AgentName,
-                    request.Cwd)
-                : null;
+
+            // Presence-only, never content: enough to settle whether Claude Code supplies a
+            // tool_use_id on a permission_prompt (item 0's open question) without writing the
+            // notification body to the log.
+            _broker.DebugLogService?.Info(
+                "Notifications",
+                $"hook notification type={request.NotificationType} raw={request.RawType ?? "(absent)"} " +
+                $"toolUseId={(string.IsNullOrEmpty(request.ToolUseId) ? "(absent)" : "present")} persist={persist}");
+
+            string id = _broker.RecordNotification(
+                request.NotificationType,
+                request.Title ?? request.NotificationType,
+                request.Message,
+                request.SessionId,
+                request.AgentName,
+                request.Cwd,
+                request.RawType,
+                request.ToolUseId,
+                persist);
 
             // Explicit push: await the forward (bypassing the remote-mode gate) and return the
             // real delivery result so the caller can report accurate success, not a bare HTTP 200.
@@ -349,5 +371,40 @@ namespace MultiTerminal.API.Controllers
         // ("{agent} — {project}"). Carried through so the MCP tool's project_name isn't dropped.
         [JsonPropertyName("project_name")]
         public string ProjectName { get; set; }
+
+        /// <summary>
+        /// The UNMAPPED Claude Code notification type — idle_prompt, elicitation_dialog or
+        /// permission_prompt (task 2289bb8a item 1).
+        /// </summary>
+        /// <remarks>
+        /// The hook collapses all three into <c>permission_request</c> for <c>NotificationType</c>
+        /// because ClaudeRemote's push contract depends on that value. This field carries the
+        /// original alongside it, additively — the mapping is deliberately untouched.
+        /// <para>
+        /// The three are NOT interchangeable: permission_prompt wants a yes/no, elicitation_dialog
+        /// is a real question, and idle_prompt is not a block at all and must not pulse. Flattened,
+        /// they would be one indistinguishable alert for three different urgencies.
+        /// </para>
+        /// <para>Optional: an older hook omits it, and the broker falls back to the mapped type.</para>
+        /// </remarks>
+        [JsonPropertyName("raw_type")]
+        public string RawType { get; set; }
+
+        /// <summary>
+        /// Identifies the pending tool call this notification is about, when there is one
+        /// (task 2289bb8a item 1).
+        /// </summary>
+        /// <remarks>
+        /// Lets the attention state be cleared by IDENTITY — "this exact call resolved" — rather
+        /// than by "some later event happened, probably related". Item 0 established that
+        /// PostToolUse and PostToolUseFailure both carry a matching tool_use_id.
+        /// <para>
+        /// Optional and unproven: whether Claude Code populates it on a Notification payload is not
+        /// yet confirmed, which is what the presence-only debug line above exists to settle. The
+        /// consumer must degrade to timestamp matching when it is absent rather than assume it.
+        /// </para>
+        /// </remarks>
+        [JsonPropertyName("tool_use_id")]
+        public string ToolUseId { get; set; }
     }
 }

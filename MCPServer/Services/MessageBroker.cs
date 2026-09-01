@@ -205,7 +205,12 @@ namespace MultiTerminal.MCPServer.Services
 
         /// <summary>
         /// Raised when a Claude Code Notification hook delivers a runtime notification.
-        /// Payload is a dictionary with: id, notification_type, title, message, agent_name, session_id, cwd, created_at.
+        /// Payload is a dictionary with: id, notification_type, raw_type, tool_use_id, title,
+        /// message, agent_name, session_id, cwd, created_at.
+        /// <para>
+        /// Raised on EVERY notification, whether or not it was persisted. See the remarks on
+        /// <see cref="RecordNotification"/> — this event is a live signal, not a history feed.
+        /// </para>
         /// </summary>
         public event EventHandler<Dictionary<string, object>> NotificationReceived;
 
@@ -213,19 +218,50 @@ namespace MultiTerminal.MCPServer.Services
         /// Record and broadcast a Claude Code runtime notification.
         /// Called from NotificationsController when the Notification hook POSTs.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// PERSISTENCE AND THE EVENT ARE DELIBERATELY DECOUPLED (task 2289bb8a item 1).
+        /// The event fires unconditionally; only the DB write obeys <paramref name="persist"/>.
+        /// </para>
+        /// <para>
+        /// It used to be the other way round: the caller skipped this method entirely when the
+        /// persist gate was closed, so the event fired only when remote mode was ON or the push was
+        /// explicit. That was safe precisely because NotificationReceived had no subscribers — the
+        /// old comment at the call site said so. The attention rail is the first subscriber, and it
+        /// needs the signal in exactly the case the gate excluded: the owner sitting AT THE DESK
+        /// with remote mode off, which is the normal case. Left as it was, the rail would have been
+        /// silent whenever it mattered and correct only while the owner was away.
+        /// </para>
+        /// <para>
+        /// <paramref name="rawType"/> falls back to <paramref name="notificationType"/> when absent.
+        /// The Notification hook lives in a SEPARATE repository (ClarionLive/multiterminal-marketplace)
+        /// and is not upgraded in lockstep with this app, so an older hook that sends only the mapped
+        /// type still yields a usable value here instead of a null the subscriber has to special-case.
+        /// </para>
+        /// </remarks>
         public string RecordNotification(string notificationType, string title, string message,
-            string sessionId, string agentName, string cwd)
+            string sessionId, string agentName, string cwd,
+            string rawType = null, string toolUseId = null, bool persist = true)
         {
-            if (TaskDb == null)
+            string id = null;
+            if (persist)
             {
-                DebugLogService?.Warning("MessageBroker", "RecordNotification called before TaskDb initialized — notification not persisted");
-                return null;
+                if (TaskDb == null)
+                {
+                    DebugLogService?.Warning("MessageBroker", "RecordNotification called before TaskDb initialized — notification not persisted");
+                }
+                else
+                {
+                    id = TaskDb.SaveNotificationEvent(notificationType, title, message, sessionId, agentName, cwd);
+                }
             }
-            string id = TaskDb.SaveNotificationEvent(notificationType, title, message, sessionId, agentName, cwd);
+
             var payload = new Dictionary<string, object>
             {
                 ["id"] = id,
                 ["notification_type"] = notificationType,
+                ["raw_type"] = string.IsNullOrWhiteSpace(rawType) ? notificationType : rawType,
+                ["tool_use_id"] = toolUseId,
                 ["title"] = title,
                 ["message"] = message,
                 ["agent_name"] = agentName,
