@@ -282,6 +282,46 @@ namespace MultiTerminal.Tests
             Assert.Equal(0, svc.BlockingCount);
         }
 
+        // ─────────────────────────────────────────────────────────────────
+        // Project, learned from the notification (item 3)
+        // ─────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void Project_and_cwd_are_learned_from_the_notification()
+        {
+            var svc = new AgentAttentionService();
+            var payload = Notification("permission_prompt");
+            payload["project_name"] = "MultiTerminal";
+            payload["cwd"] = @"H:\DevLaptop\ClarionPowerShell\MultiTerminal";
+
+            svc.ApplyNotification(payload);
+
+            Assert.Equal("MultiTerminal", svc.Get(Session).Project);
+            Assert.Equal(@"H:\DevLaptop\ClarionPowerShell\MultiTerminal", svc.Get(Session).Cwd);
+        }
+
+        /// <summary>
+        /// The hook resolves the project by reading .claude/project.json from the session's cwd, and
+        /// legitimately comes back empty for a directory that has none. Letting a later empty value
+        /// overwrite a known one would make the card's project name flicker away mid-session, for a
+        /// reason no one watching could work out.
+        /// </summary>
+        [Fact]
+        public void A_later_payload_without_a_project_does_not_blank_the_known_one()
+        {
+            var svc = new AgentAttentionService();
+            var first = Notification("permission_prompt");
+            first["project_name"] = "MultiTerminal";
+            svc.ApplyNotification(first);
+
+            var second = Notification("elicitation_dialog");
+            second["project_name"] = "";
+            svc.ApplyNotification(second);
+
+            Assert.Equal("MultiTerminal", svc.Get(Session).Project);
+            Assert.Equal(AttentionState.BlockedQuestion, svc.Get(Session).State);
+        }
+
         [Fact]
         public void Snapshot_is_a_copy_and_cannot_mutate_the_service()
         {

@@ -284,6 +284,46 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Most recent activity for one actor, or null if that actor has none
+        /// (task 2289bb8a item 3).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The attention rail's "what is it doing" line. This is the OBSERVED half of a session
+        /// card and is rendered as the headline; the ticket the agent claims to be on is shown
+        /// separately and more quietly, because the board records what an agent last claimed rather
+        /// than what it is doing now.
+        /// </para>
+        /// <para>
+        /// ⚠️ The <c>actor</c> column CANNOT distinguish a subagent from its parent. The Node
+        /// activity hook writes <c>MULTITERMINAL_NAME</c>, which a subagent inherits, so a
+        /// background worker's tool calls are recorded under the parent's name. Callers must not
+        /// treat a row here as proof the MAIN thread is running — see
+        /// <see cref="AgentAttentionService.NoteObservedActivity"/>, where that distinction decides
+        /// whether a block is cleared.
+        /// </para>
+        /// </remarks>
+        public ActivityFeedEntry GetLastActivityByActor(string actor)
+        {
+            if (string.IsNullOrWhiteSpace(actor)) return null;
+
+            using var gate = _gate.Enter();
+
+            const string sql = @"
+                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
+                FROM activity_feed
+                WHERE actor = @actor
+                ORDER BY timestamp DESC
+                LIMIT 1";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@actor", actor);
+
+            using var reader = command.ExecuteReader();
+            return reader.Read() ? ReadEntry(reader) : null;
+        }
+
+        /// <summary>
         /// Get activities within a time window.
         /// </summary>
         public List<ActivityFeedEntry> GetActivitiesSince(DateTime since, int limit = 100)

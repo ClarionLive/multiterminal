@@ -58,6 +58,20 @@ namespace MultiTerminal.MCPServer.Services
         public string Detail { get; set; }
 
         /// <summary>
+        /// Project this session is working in, as the hook resolved it (task 2289bb8a item 3).
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Models.TerminalInfo"/> carries no project, so this is learned from the
+        /// notification payload — the hook already reads <c>.claude/project.json</c> from the
+        /// session's cwd and sends the name. Null until a notification has been seen for the
+        /// session; the caller falls back to resolving from <see cref="Cwd"/>.
+        /// </remarks>
+        public string Project { get; set; }
+
+        /// <summary>Working directory the session reported. Fallback source for <see cref="Project"/>.</summary>
+        public string Cwd { get; set; }
+
+        /// <summary>
         /// The pending call this block is about, when the notification supplied one. Null is
         /// normal and must be tolerated — see <see cref="AgentAttentionService"/> remarks.
         /// </summary>
@@ -189,6 +203,13 @@ namespace MultiTerminal.MCPServer.Services
                 e.State = state;
                 e.Detail = Str(payload, "message");
                 e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
+
+                // Learned, never unlearned: a later payload that omits these must not blank out a
+                // project we already know. The hook reads project.json from the cwd and can
+                // legitimately come back empty (a directory with no .claude/project.json), which
+                // would otherwise make the card's project name flicker away mid-session.
+                e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
+                e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
             });
         }
 
@@ -330,12 +351,14 @@ namespace MultiTerminal.MCPServer.Services
             var beforeState = entry.State;
             var beforeDetail = entry.Detail;
             var beforePending = entry.PendingToolUseId;
+            var beforeProject = entry.Project;
 
             mutate(entry);
 
             bool changed = entry.State != beforeState
                            || !string.Equals(entry.Detail, beforeDetail, StringComparison.Ordinal)
-                           || !string.Equals(entry.PendingToolUseId, beforePending, StringComparison.Ordinal);
+                           || !string.Equals(entry.PendingToolUseId, beforePending, StringComparison.Ordinal)
+                           || !string.Equals(entry.Project, beforeProject, StringComparison.Ordinal);
 
             if (!changed) return false;
 
@@ -357,6 +380,8 @@ namespace MultiTerminal.MCPServer.Services
             EnteredAtUtc = e.EnteredAtUtc,
             Detail = e.Detail,
             PendingToolUseId = e.PendingToolUseId,
+            Project = e.Project,
+            Cwd = e.Cwd,
         };
 
         private static string Str(IDictionary<string, object> d, string key) =>
