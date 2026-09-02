@@ -250,6 +250,36 @@
             background-color: #f5f5f5;
         }
 
+        /*
+          Task 3a29b367. These rules hardcode dark values and had no light counterpart, so they
+          stayed dark-styled on a light background — a defect entirely separate from the theme
+          message not arriving, and one that survives fixing it: the message lands correctly and
+          the CSS then has nothing to say.
+
+          Only the genuinely theme-dependent ones are overridden. .pause-btn.paused (red),
+          .status-dot.connected (green) and .inject-btn (link blue) are SEMANTIC colours that mean
+          the same thing and read acceptably on either ground, so they are deliberately left alone
+          rather than swept in for consistency's sake.
+        */
+        body.light .pause-btn {
+            background-color: #e4e4e4;
+            border: 1px solid #c4c4c4;
+            color: #333333;
+        }
+
+        body.light .pause-btn:hover {
+            background-color: #d6d6d6;
+        }
+
+        /* Near-invisible on white: the dark thumb is white at 20% opacity. */
+        body.light ::-webkit-scrollbar-thumb {
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        body.light ::-webkit-scrollbar-thumb:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+
         /* Scrollbar styling */
         ::-webkit-scrollbar {
             width: 8px;

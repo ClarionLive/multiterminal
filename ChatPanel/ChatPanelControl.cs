@@ -28,6 +28,25 @@ namespace MultiTerminal.ChatPanel
         private double _pendingZoom = 1.0;
 
         /// <summary>
+        /// The last theme asked for, replayed once the PAGE is ready rather than once the WebView2
+        /// is (task 3a29b367).
+        /// </summary>
+        /// <remarks>
+        /// <see cref="_isInitialized"/> is set in <c>OnWebViewInitialized</c>, which fires right
+        /// after <c>Navigate()</c> is CALLED — navigation is asynchronous, so there is a window in
+        /// which the WebView2 exists, the guard in <see cref="PostWebMessage"/> passes, and the
+        /// document has not yet registered its <c>message</c> listener. A theme posted in that
+        /// window is delivered to nobody and silently lost.
+        /// <para>
+        /// That window is not theoretical: <c>MainForm.ToggleChatPanel</c> calls
+        /// <see cref="ApplyTheme"/> immediately after <c>Show()</c>, so a freshly opened panel is
+        /// exactly the case that hits it — and the symptom (opens in the wrong theme, corrects
+        /// itself on the next toggle) is the same one commit 408b135 chased for the Attention panel.
+        /// </para>
+        /// </remarks>
+        private bool? _pendingIsDark;
+
+        /// <summary>
         /// Raised when the user clicks the inject button on a message.
         /// </summary>
         public event EventHandler<InjectMessageEventArgs> InjectRequested;
@@ -159,6 +178,11 @@ namespace MultiTerminal.ChatPanel
             }
 
             _isInitialized = true;
+
+            // Subscribed AFTER Navigate() above, which is fine — NavigationCompleted fires when that
+            // navigation finishes, and this handler is what makes a theme requested during load
+            // survive (task 3a29b367).
+            _webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
 
             _webView.ZoomFactorChanged += (s, e) => ZoomChanged?.Invoke(this, _webView.ZoomFactor);
             if (Math.Abs(_pendingZoom - 1.0) > 0.01)
@@ -393,10 +417,26 @@ namespace MultiTerminal.ChatPanel
         /// </summary>
         public void ApplyTheme(bool isDark)
         {
+            // Remembered even when we CAN post, because the post may still land before the document
+            // is listening — see _pendingIsDark. NavigationCompleted replays it either way, which is
+            // idempotent and costs one extra string message.
+            _pendingIsDark = isDark;
+
             if (!_isInitialized)
                 return;
 
             PostWebMessage($"theme:{(isDark ? "dark" : "light")}");
+        }
+
+        /// <summary>
+        /// Replays the last requested theme once the page has actually loaded (task 3a29b367).
+        /// </summary>
+        private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            if (_pendingIsDark is bool isDark)
+            {
+                PostWebMessage($"theme:{(isDark ? "dark" : "light")}");
+            }
         }
 
         /// <summary>
