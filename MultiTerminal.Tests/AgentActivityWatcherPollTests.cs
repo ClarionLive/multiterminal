@@ -284,6 +284,23 @@ namespace MultiTerminal.Tests
             Assert.Equal("Edit: After.cs", Entry().LastActivity);
         }
 
+        /// <summary>
+        /// "Unassigned" is the shared placeholder name a restored terminal carries until its agent
+        /// registers. A row under it names no terminal, so it must not mint a shared card that
+        /// nothing can remove. (Pipeline run 2, debugger finding.)
+        /// </summary>
+        [Fact]
+        public void Rows_under_the_unassigned_sentinel_are_dropped()
+        {
+            Assert.True(_watcher.Prime());
+
+            _feed.RecordGeneralActivity("TOOL_COMPLETE", "Unassigned", "Bash: echo", "info", MainThread("Bash"));
+            _feed.RecordGeneralActivity("TOOL_START", "unassigned", "Bash: echo", "info", MainThread("Bash"));
+            _watcher.Poll();
+
+            Assert.Empty(_attention.Snapshot());
+        }
+
         [Fact]
         public void Unrelated_row_types_are_ignored_entirely()
         {

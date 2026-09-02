@@ -220,6 +220,25 @@ namespace MultiTerminal.Tests
             Assert.Contains(announced, e => e.SessionId == "sess-1" && e.LastActivity == "Edit: A.cs");
         }
 
+        /// <summary>
+        /// The feed reader hands back DateTime.MinValue for a row whose timestamp it could not
+        /// parse. That row must not become the timestamped live line — it would read as "quiet for
+        /// 2000 years". (Pipeline run 2, debugger finding.)
+        /// </summary>
+        [Fact]
+        public void A_line_with_no_usable_timestamp_is_not_recorded()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+
+            Assert.False(svc.NoteActivityLineOnly(Agent, "Edit: Garbage.cs", DateTime.MinValue));
+            Assert.False(svc.NoteActivityLineOnly(Agent, "Edit: Garbage.cs", DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc)));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Null(card.LastActivity);
+            Assert.Null(card.LastActivityAtUtc);
+        }
+
         [Fact]
         public void Gone_for_an_unknown_agent_is_a_quiet_no_op()
         {

@@ -67,9 +67,20 @@ namespace MultiTerminal.MCPServer.Services
         private readonly int _pollMs;
         private readonly int _batchLimit;
 
+        /// <summary>
+        /// The shared placeholder name a terminal carries until its agent registers a real one.
+        /// A row under it is unattributable to one terminal, so it could only ever feed a shared
+        /// card that nothing can remove (MainForm skips the same name on registration).
+        /// </summary>
+        private const string UnassignedSentinel = "Unassigned";
+
+        private readonly DateTime _createdAtUtc = DateTime.UtcNow;
+
         private Timer _timer;
         private long _watermark;
         private volatile bool _primed;
+        private bool _primeEverFailed;
+        private DateTime? _replayNotBeforeUtc;
         private int _polling;
         private volatile bool _disposed;
 
@@ -131,13 +142,32 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
-                _watermark = _feed.GetMaxActivityId();
+                long max = _feed.GetMaxActivityId();
+
+                if (_primeEverFailed)
+                {
+                    // A LATE prime. Rows written while we were unprimed are not history — an agent
+                    // was working, and one of those rows may be the TOOL_COMPLETE that clears a
+                    // block. Back up one batch and let Apply() keep only rows stamped after this
+                    // watcher came to life; everything older really is history. (Pipeline run 2,
+                    // adversary finding: the first cut set the watermark to MAX and silently
+                    // dropped the whole window.)
+                    _watermark = Math.Max(0, max - _batchLimit);
+                    _replayNotBeforeUtc = _createdAtUtc;
+                    Log($"AgentActivityWatcher primed late at id {max}; replaying up to {_batchLimit} rows stamped after {_createdAtUtc:O}.");
+                }
+                else
+                {
+                    _watermark = max;
+                }
+
                 _primed = true;
                 return true;
             }
             catch (Exception ex)
             {
                 // Starting at 0 would replay the entire table on the first tick.
+                _primeEverFailed = true;
                 Log($"AgentActivityWatcher could not read the watermark, will retry next tick: {ex.Message}");
                 return false;
             }
@@ -239,6 +269,7 @@ namespace MultiTerminal.MCPServer.Services
         {
             string agent = row.Actor;
             if (string.IsNullOrWhiteSpace(agent)) return;
+            if (string.Equals(agent, UnassignedSentinel, StringComparison.OrdinalIgnoreCase)) return;
 
             string type = row.ActivityType ?? string.Empty;
             bool clears = ClearingTypes.Contains(type);
@@ -260,6 +291,10 @@ namespace MultiTerminal.MCPServer.Services
             DateTime observedAt = row.Timestamp.Kind == DateTimeKind.Utc
                 ? row.Timestamp
                 : row.Timestamp.ToUniversalTime();
+
+            // Only reached after a LATE prime backed the watermark up (see Prime). Rows older
+            // than this watcher are history and must not be re-applied.
+            if (_replayNotBeforeUtc is DateTime notBefore && observedAt < notBefore) return;
 
             if (turnEnded)
             {

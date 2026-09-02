@@ -52,10 +52,10 @@ namespace MultiTerminal.Tests
             }
         }
 
-        private static ActivityFeedEntry MainThreadRow(long id, string type, string summary) => new ActivityFeedEntry
+        private static ActivityFeedEntry MainThreadRow(long id, string type, string summary, DateTime? at = null) => new ActivityFeedEntry
         {
             Id = id,
-            Timestamp = DateTime.UtcNow,
+            Timestamp = at ?? DateTime.UtcNow,
             ActivityType = type,
             Actor = "Alice",
             Summary = summary,
@@ -83,27 +83,54 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
-        /// Priming late must still mean "from now on". Rows that existed when the watcher finally
-        /// managed to prime are history, exactly as they would have been had the first read worked.
+        /// A late prime must not throw away the window it was blind for. Rows written BEFORE the
+        /// watcher existed are history and stay unapplied; rows written while it was unprimed are
+        /// live work — one of them may be the TOOL_COMPLETE that clears a block — and are applied
+        /// once the prime finally succeeds. (Pipeline run 2, adversary finding.)
         /// </summary>
         [Fact]
-        public void A_late_prime_still_starts_at_the_current_maximum()
+        public void A_late_prime_replays_the_unprimed_window_but_not_history()
         {
             var feed = new FlakyFeed { MaxIdFailuresRemaining = 1 };
-            feed.Rows.Add(MainThreadRow(7, "TOOL_COMPLETE", "Edit: Old.cs"));
+            feed.Rows.Add(MainThreadRow(7, "TOOL_COMPLETE", "Edit: Old.cs", DateTime.UtcNow.AddMinutes(-10)));
             feed.MaxId = 7;
             var attention = new AgentAttentionService();
             using var watcher = new AgentActivityWatcher(feed, attention);
 
             Assert.False(watcher.Prime());
+
+            // Written while unprimed.
+            feed.Rows.Add(MainThreadRow(8, "TOOL_COMPLETE", "Edit: DuringOutage.cs", DateTime.UtcNow.AddSeconds(1)));
+            feed.MaxId = 8;
+
             watcher.Poll();
 
             Assert.True(watcher.IsPrimed);
-            Assert.Null(attention.GetByAgent("Alice"));
+            var e = attention.GetByAgent("Alice");
+            Assert.NotNull(e);
+            Assert.Equal("Edit: DuringOutage.cs", e.LastActivity);
+            Assert.DoesNotContain("Old.cs", e.LastActivity, StringComparison.Ordinal);
 
-            feed.Rows.Add(MainThreadRow(8, "TOOL_COMPLETE", "Edit: New.cs"));
+            feed.Rows.Add(MainThreadRow(9, "TOOL_COMPLETE", "Edit: New.cs", DateTime.UtcNow.AddSeconds(2)));
             watcher.Poll();
             Assert.Equal("Edit: New.cs", attention.GetByAgent("Alice")?.LastActivity);
+        }
+
+        /// <summary>
+        /// The normal path is untouched: a first-try prime starts at MAX and replays nothing.
+        /// </summary>
+        [Fact]
+        public void A_first_try_prime_still_starts_at_the_current_maximum()
+        {
+            var feed = new FlakyFeed { MaxId = 7 };
+            feed.Rows.Add(MainThreadRow(7, "TOOL_COMPLETE", "Edit: Old.cs", DateTime.UtcNow.AddSeconds(1)));
+            var attention = new AgentAttentionService();
+            using var watcher = new AgentActivityWatcher(feed, attention);
+
+            Assert.True(watcher.Prime());
+            watcher.Poll();
+
+            Assert.Null(attention.GetByAgent("Alice"));
         }
 
         [Fact]

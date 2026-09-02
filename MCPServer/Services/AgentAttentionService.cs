@@ -574,6 +574,12 @@ namespace MultiTerminal.MCPServer.Services
         private static void RecordActivityLine(AgentAttentionEntry entry, string summary, DateTime observedAtUtc)
         {
             if (string.IsNullOrWhiteSpace(summary)) return;
+
+            // A row that cannot say WHEN it happened (the feed reader's fallback for an unparseable
+            // timestamp) must not become the timestamped live line — it would render as "quiet for
+            // 2000 years" until the next row overwrote it. Its clear-path safety is handled by the
+            // caller; here it is simply not a line.
+            if (observedAtUtc == DateTime.MinValue) return;
             if (entry.LastActivityAtUtc is DateTime known && known > observedAtUtc) return;
 
             entry.LastActivity = summary;
