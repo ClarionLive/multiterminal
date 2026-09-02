@@ -103,6 +103,16 @@ namespace MultiTerminal
         private readonly Dictionary<string, (AgentPanelControl Control, Panel Slot, TerminalDocument Terminal)> _embeddedAgentMap = new();
         private TeamWatcherService _teamWatcher;
         private Services.CodeGraphWatcher _codeGraphWatcher;
+
+        /// <summary>
+        /// Feeds observed tool activity into the attention rail (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// Task 2289bb8a built the whole clear path and never called it, so blocks set and never
+        /// cleared and <c>Working</c> was unreachable. This field IS that missing caller — if it is
+        /// ever left unconstructed again, the rail silently reverts to showing frozen state.
+        /// </remarks>
+        private MCPServer.Services.AgentActivityWatcher _agentActivityWatcher;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
 #pragma warning restore CA2213
@@ -654,6 +664,25 @@ namespace MultiTerminal
                     DebugLogService = _debugLogService
                 };
                 _codeGraphWatcher.Start();
+
+                // Wire up AgentActivityWatcher — the caller AgentAttentionService.NoteObservedActivity
+                // never had (task edcdcdd5). Without it a block is set and stays set forever, and the
+                // rail shows a frozen notification message in the position of a live observation.
+                if (_mcpServer?.Broker?.ActivityFeedService != null && _mcpServer.Broker.AgentAttention != null)
+                {
+                    _agentActivityWatcher = new MCPServer.Services.AgentActivityWatcher(
+                        _mcpServer.Broker.ActivityFeedService,
+                        _mcpServer.Broker.AgentAttention,
+                        msg => _debugLogService?.Info("AgentActivityWatcher", msg));
+                    _agentActivityWatcher.Start();
+                }
+                else
+                {
+                    _debugLogService?.Warning(
+                        "AgentActivityWatcher",
+                        "Not started: ActivityFeedService or AgentAttention unavailable. The attention "
+                        + "rail will show blocks that never clear.");
+                }
 
                 // Wire up WikiGeneratorService — produces per-subsystem markdown articles
                 _mcpServer.Broker.WikiGenerator = new Services.WikiGeneratorService(
@@ -7290,6 +7319,8 @@ namespace MultiTerminal
                 _sessionSyncTimer?.Dispose();
                 _teamWatcher?.Dispose();
                 _codeGraphWatcher?.Dispose();
+                // Before the DB it reads (task edcdcdd5).
+                _agentActivityWatcher?.Dispose();
                 // Dispose the coordinator after the watcher that uses it, before the DB it indexes.
                 _mcpServer?.Broker?.CodeGraphIndexCoordinator?.Dispose();
                 _sessionIndexingService?.Dispose();

@@ -128,6 +128,19 @@ button.tkt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 .claim-age { margin-left: auto; font-variant-numeric: tabular-nums; }
 .claim-age.stale { color: var(--peach); }
 
+/* The detail line's own freshness (task edcdcdd5). Quieter than the line it annotates --
+   it is metadata about the observation, not the observation. */
+.detail-age {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+.detail-age.stale { color: var(--peach); opacity: 0.85; }
+/* Not an observation at all: the message the alert carried, never refreshed. */
+.detail-age.fossil { font-style: italic; opacity: 0.45; }
+
 /* pulse — only for cards that actually block the owner */
 @keyframes wait-pulse {
     0%, 100% { box-shadow: 0 0 0 0 transparent; }
@@ -275,6 +288,23 @@ function render() {
         if (s.observedDetail) {
             var q = document.createElement("q"); q.textContent = s.observedDetail;
             wrap.appendChild(q);
+
+            /* The detail line has its OWN age, separate from the state's (task edcdcdd5).
+               A live line that has quietly stopped updating is the same lie the frozen
+               notification text was, in a new position -- so say when it was last seen, and
+               go amber past two minutes so "gone quiet" is visible rather than inferred.
+               A NON-live detail is the notification message captured at block time and never
+               regenerated; it is marked so the reader is not left to guess which kind it is. */
+            var meta = document.createElement("span");
+            meta.className = "detail-age";
+            if (s.detailIsLive && typeof s.activityAgeSeconds === "number" && s.activityAgeSeconds >= 0) {
+                if (s.activityAgeSeconds >= 120) meta.className += " stale";
+                meta.textContent = "seen " + fmtAge(s.activityAgeSeconds) + " ago";
+            } else {
+                meta.className += " fossil";
+                meta.textContent = "from the alert, not observed since";
+            }
+            wrap.appendChild(meta);
         }
         obs.appendChild(pip); obs.appendChild(wrap);
 
