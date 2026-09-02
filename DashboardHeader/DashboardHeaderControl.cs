@@ -251,6 +251,7 @@ namespace MultiTerminal.DashboardHeader
                 case "toggle_office": TogglePanelRequested?.Invoke("office"); break;
                 case "toggle_profiles": TogglePanelRequested?.Invoke("profiles"); break;
                 case "toggle_inbox": TogglePanelRequested?.Invoke("inbox"); break;
+                case "toggle_attention": TogglePanelRequested?.Invoke("attention"); break;
                 case "toggle_debug": TogglePanelRequested?.Invoke("debug"); break;
                 case "toggle_preview": TogglePanelRequested?.Invoke("preview"); break;
                 case "toggle_projects": TogglePanelRequested?.Invoke("projects"); break;

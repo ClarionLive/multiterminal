@@ -95,7 +95,6 @@ namespace MultiTerminal
         private InboxPanelDocument _inboxPanel;
         private ToolStripButton _inboxPanelButton;
         private AttentionPanel.AttentionPanelDocument _attentionPanel;
-        private ToolStripButton _attentionPanelButton;
         private OfficePanel.OfficePanelDocument _officePanel;
         private ToolStripButton _officePanelButton;
         private ToolStripButton _agentPanelButton;
@@ -2547,6 +2546,7 @@ namespace MultiTerminal
                     case "office": ToggleOfficePanel(); break;
                     case "profiles": ToggleProfilePanel(); break;
                     case "inbox": ToggleInboxPanel(); break;
+                    case "attention": ToggleAttentionPanel(); break;
                     case "debug": ToggleDebugPanel(); break;
                     case "preview": ToggleFilePreviewPanel(); break;
                     case "projects": ToggleProjectPanel(); break;
@@ -2732,15 +2732,10 @@ namespace MultiTerminal
             };
             _inboxPanelButton.Click += (s, e) => ToggleInboxPanel();
 
-            // Attention panel toggle button (which agents are blocked on you)
-            _attentionPanelButton = new ToolStripButton
-            {
-                Text = "Attention",
-                DisplayStyle = ToolStripItemDisplayStyle.Text,
-                ForeColor = Color.White,
-                ToolTipText = "Toggle Attention Panel (agents waiting on you)"
-            };
-            _attentionPanelButton.Click += (s, e) => ToggleAttentionPanel();
+            // NOTE: the Attention panel is deliberately NOT given a button here. _toolStrip is the
+            // LEGACY toolbar (see the field decl) and is never shown; adding one here is what made
+            // the panel unreachable in the first place. Its entry point is the dashboard header:
+            // dashboard.html#btn-attention -> "toggle_attention" -> TogglePanelRequested("attention").
 
             // Office panel toggle button (Pixel Art Visualization)
             _officePanelButton = new ToolStripButton
@@ -2859,7 +2854,6 @@ namespace MultiTerminal
             _toolStrip.Items.Add(_tasksPanelButton);
             _toolStrip.Items.Add(_profilePanelButton);
             _toolStrip.Items.Add(_inboxPanelButton);
-            _toolStrip.Items.Add(_attentionPanelButton);
             _toolStrip.Items.Add(_officePanelButton);
             _toolStrip.Items.Add(_debugPanelButton);
             _toolStrip.Items.Add(_filePreviewPanelButton);
