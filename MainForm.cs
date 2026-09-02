@@ -6877,7 +6877,29 @@ namespace MultiTerminal
                     if (t?.Name != null && !colors.ContainsKey(t.Name)) colors[t.Name] = t.Color;
                 }
 
+                // Project id -> display name, so a claimed task can name the project it belongs to.
+                // Built once per refresh rather than per agent: the registry read is the expensive
+                // half and every agent would otherwise repeat it.
+                var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var p in broker.GetProjectsList())
+                    {
+                        if (p?.Id != null && !string.IsNullOrWhiteSpace(p.Name)) projectNames[p.Id] = p.Name;
+                    }
+                }
+                catch (Exception projEx)
+                {
+                    // A registry hiccup costs the project LINE, not the rail. Cards still render.
+                    _debugLogService?.Info("AttentionPanel", $"Project name lookup failed: {projEx.Message}");
+                }
+
                 var claims = new Dictionary<string, AttentionPanel.AttentionTicketClaim>(StringComparer.OrdinalIgnoreCase);
+
+                // Fallback project per agent, for the many terminals that never block and so never
+                // receive the notification that is the ONLY writer of entry.Project (task 42052f0c).
+                var agentProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
                 foreach (var task in broker.GetTasks())
                 {
                     if (task == null || string.IsNullOrWhiteSpace(task.Assignee)) continue;
@@ -6894,10 +6916,24 @@ namespace MultiTerminal
                         ItemLabel = DescribeChecklistPosition(task),
                         UpdatedAtUtc = task.UpdatedAt,
                     };
+
+                    // Same winner as the claim above (newest in-progress task), so the project line
+                    // and the ticket chip can never describe two different tickets.
+                    if (task.ProjectId != null && projectNames.TryGetValue(task.ProjectId, out var pname))
+                    {
+                        agentProjects[task.Assignee] = pname;
+                    }
+                    else
+                    {
+                        // The claim moved to a task whose project cannot be named. Drop any name
+                        // carried over from the PREVIOUS winner rather than leaving it attached to
+                        // a ticket it no longer describes.
+                        agentProjects.Remove(task.Assignee);
+                    }
                 }
 
                 var cards = AttentionPanel.AttentionCardProjector.Project(
-                    broker.AgentAttention.Snapshot(), colors, claims, DateTime.UtcNow);
+                    broker.AgentAttention.Snapshot(), colors, claims, DateTime.UtcNow, agentProjects);
 
                 _attentionPanel.SetSessions(cards);
             }
@@ -6932,10 +6968,25 @@ namespace MultiTerminal
         {
             if (_attentionPanel == null) return;
 
-            _attentionPanel.FocusSessionRequested += (s, sessionId) => FocusTerminalForSession(sessionId);
+            _attentionPanel.FocusSessionRequested += (s, sessionId) =>
+            {
+                FocusTerminalForSession(sessionId);
+
+                // Echo the authoritative focus back. The view already highlighted optimistically on
+                // click; this is what keeps the highlight honest when focus moves some OTHER way —
+                // a terminal tab, a toolbar button — which the view cannot observe (task 42052f0c).
+                _attentionPanel?.SetFocusedSession(sessionId);
+            };
             _attentionPanel.OpenTicketRequested += (s, taskId) => OpenTicketInTasksPanel(taskId);
+
             _attentionPanel.SetOrder(_settings?.GetAttentionPanelOrder() ?? "attention");
             _attentionPanel.OrderChanged += (s, order) => _settings?.SetAttentionPanelOrder(order);
+
+            _attentionPanel.SetAmbient(_settings?.GetAttentionPanelAmbient() ?? "stream");
+            _attentionPanel.AmbientChanged += (s, ambient) => _settings?.SetAttentionPanelAmbient(ambient);
+
+            _attentionPanel.SetAlarm(_settings?.GetAttentionPanelAlarm() ?? "redalert");
+            _attentionPanel.AlarmChanged += (s, alarm) => _settings?.SetAttentionPanelAlarm(alarm);
         }
 
         /// <summary>
