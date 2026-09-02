@@ -108,6 +108,27 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Sets the watermark to the table's current maximum so nothing already written is ever
+        /// applied. Public so a test can drive <see cref="Poll"/> without a timer and still get
+        /// the no-replay-at-startup behaviour; <see cref="Start"/> calls it.
+        /// </summary>
+        /// <returns>False if the watermark could not be read; the watcher then stays idle.</returns>
+        public bool Prime()
+        {
+            try
+            {
+                _watermark = _feed.GetMaxActivityId();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // Starting at 0 would replay the entire table on the first tick.
+                _log?.Invoke($"AgentActivityWatcher could not read the watermark, staying idle: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Begins polling. Safe to call once; subsequent calls are ignored.
         /// </summary>
         public void Start()
@@ -120,16 +141,7 @@ namespace MultiTerminal.MCPServer.Services
                 return;
             }
 
-            try
-            {
-                _watermark = _feed.GetMaxActivityId();
-            }
-            catch (Exception ex)
-            {
-                // Starting at 0 would replay the entire table on the first tick.
-                _log?.Invoke($"AgentActivityWatcher could not read the watermark, staying idle: {ex.Message}");
-                return;
-            }
+            if (!Prime()) return;
 
             _log?.Invoke($"AgentActivityWatcher started at id {_watermark}, polling every {_pollMs}ms.");
             _timer = new Timer(_ => Poll(), null, _pollMs, _pollMs);

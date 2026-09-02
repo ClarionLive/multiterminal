@@ -665,24 +665,10 @@ namespace MultiTerminal
                 };
                 _codeGraphWatcher.Start();
 
-                // Wire up AgentActivityWatcher — the caller AgentAttentionService.NoteObservedActivity
-                // never had (task edcdcdd5). Without it a block is set and stays set forever, and the
-                // rail shows a frozen notification message in the position of a live observation.
-                if (_mcpServer?.Broker?.ActivityFeedService != null && _mcpServer.Broker.AgentAttention != null)
-                {
-                    _agentActivityWatcher = new MCPServer.Services.AgentActivityWatcher(
-                        _mcpServer.Broker.ActivityFeedService,
-                        _mcpServer.Broker.AgentAttention,
-                        msg => _debugLogService?.Info("AgentActivityWatcher", msg));
-                    _agentActivityWatcher.Start();
-                }
-                else
-                {
-                    _debugLogService?.Warning(
-                        "AgentActivityWatcher",
-                        "Not started: ActivityFeedService or AgentAttention unavailable. The attention "
-                        + "rail will show blocks that never clear.");
-                }
+                // AgentActivityWatcher is NOT constructed here. It needs Broker.ActivityFeedService,
+                // which the REST host assigns inside StartAsync — later than this line. The first
+                // cut lived here behind a null-guard, so it logged "Not started" on every launch and
+                // the rail never moved (task edcdcdd5). See StartAgentActivityWatcher().
 
                 // Wire up WikiGeneratorService — produces per-subsystem markdown articles
                 _mcpServer.Broker.WikiGenerator = new Services.WikiGeneratorService(
@@ -899,6 +885,11 @@ namespace MultiTerminal
                 // Push notification support - map terminal IDs to documents
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 15: Wiring TerminalRegistered event");
                 _mcpServer.Broker.TerminalRegistered += OnMcpTerminalRegistered;
+
+                // A closed terminal takes its attention card with it (task edcdcdd5). Before this,
+                // Remove/MarkOffline had no caller at all, so the rail kept cards for terminals that
+                // no longer existed.
+                _mcpServer.Broker.TerminalDisconnected += OnMcpTerminalDisconnectedForAttention;
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 16: Setting OnMessageDelivery");
                 _mcpServer.Broker.OnMessageDelivery = OnMcpMessageDelivery;
 
@@ -1000,6 +991,10 @@ namespace MultiTerminal
                                 Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
                             }
                         }
+
+                        // The REST host has assigned Broker.ActivityFeedService by now, so the
+                        // attention rail's poller can actually be built (task edcdcdd5).
+                        StartAgentActivityWatcher();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -1634,6 +1629,11 @@ namespace MultiTerminal
                 _debugLogService?.Info("MainForm", $"Ignoring temporary agent registration: {e.Name}");
                 return;
             }
+
+            // The attention card exists from the moment the terminal does, not from its first
+            // notification 10-15s later (task edcdcdd5). Pre-registration raises this event before
+            // the shell even launches, which is the earliest point the agent has a name.
+            _mcpServer?.Broker?.AgentAttention?.NoteTerminalStarted(e.Name);
 
             // Map the MCP terminal ID to the TerminalDocument
             // Strategy: try DocId first, then name match, then last active as final fallback
@@ -5852,6 +5852,19 @@ namespace MultiTerminal
                 return _inboxPanel;
             }
 
+            // Missing until task edcdcdd5: the pane declared "AttentionPanel" as its persist string
+            // but nothing here answered to it, so LoadFromXml got null and silently dropped the pane
+            // on every restart. RestoreSinglePanel only runs on the no-layout-file path.
+            if (persistString == "AttentionPanel")
+            {
+                if (_attentionPanel == null || _attentionPanel.IsDisposed)
+                {
+                    _attentionPanel = new AttentionPanel.AttentionPanelDocument();
+                    WireAttentionPanel();
+                }
+                return _attentionPanel;
+            }
+
             if (persistString == "OfficePanel")
             {
                 if (_officePanel == null || _officePanel.IsDisposed)
@@ -6753,6 +6766,61 @@ namespace MultiTerminal
             catch
             {
                 // The form can be tearing down between the check and the post.
+            }
+        }
+
+        /// <summary>
+        /// Builds and starts the poller that feeds observed tool activity into the attention
+        /// rail (task edcdcdd5). Must run AFTER <c>_mcpServer.StartAsync()</c>: the REST host is
+        /// what assigns <c>Broker.ActivityFeedService</c>, and constructing this earlier is exactly
+        /// the bug that shipped first — a null-guard that logged "Not started" on every launch.
+        /// </summary>
+        private void StartAgentActivityWatcher()
+        {
+            try
+            {
+                var broker = _mcpServer?.Broker;
+                if (broker?.ActivityFeedService == null || broker.AgentAttention == null)
+                {
+                    _debugLogService?.Warning(
+                        "AgentActivityWatcher",
+                        "Not started: ActivityFeedService or AgentAttention unavailable AFTER StartAsync. "
+                        + "The attention rail will show blocks that never clear.");
+                    return;
+                }
+
+                if (_agentActivityWatcher != null) return;
+
+                _agentActivityWatcher = new MCPServer.Services.AgentActivityWatcher(
+                    broker.ActivityFeedService,
+                    broker.AgentAttention,
+                    msg => _debugLogService?.Info("AgentActivityWatcher", msg));
+                _agentActivityWatcher.Start();
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("AgentActivityWatcher", $"Failed to start: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// A terminal went away; its attention card goes with it (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// Keyed by agent name because that is what the broker knows about a terminal. The service
+        /// is thread-safe and the panel repaint is marshalled by <see cref="OnAgentAttentionChanged"/>,
+        /// so this can run on whatever thread the broker raises the event from.
+        /// </remarks>
+        private void OnMcpTerminalDisconnectedForAttention(object sender, TerminalInfo e)
+        {
+            try
+            {
+                if (e == null || IsTemporaryAgent(e.Name)) return;
+                _mcpServer?.Broker?.AgentAttention?.NoteTerminalGone(e.Name);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("AttentionPanel", $"Card removal on disconnect failed: {ex.Message}");
             }
         }
 

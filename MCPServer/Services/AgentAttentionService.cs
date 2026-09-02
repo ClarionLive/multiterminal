@@ -302,10 +302,24 @@ namespace MultiTerminal.MCPServer.Services
 
             if (stale == null) return false;
 
+            _entries.TryGetValue(keepKey, out var survivor);
+
             foreach (var key in stale)
             {
                 if (!_entries.TryGetValue(key, out var dead)) continue;
                 _entries.Remove(key);
+
+                // The predecessor's live line moves to the survivor (task edcdcdd5). The usual
+                // predecessor is the name-keyed placeholder created when the terminal opened, which
+                // has been collecting tool activity for the 10-15s before the first notification
+                // carried a session id; dropping that line would blank the card at the exact
+                // moment it becomes interesting. The line keeps its own timestamp, so its age
+                // stays honest.
+                if (survivor != null && dead.LastActivityAtUtc is DateTime seen)
+                {
+                    RecordActivityLine(survivor, dead.LastActivity, seen);
+                }
+
                 AttentionRemoved?.Invoke(this, Clone(dead));
             }
 
@@ -543,6 +557,93 @@ namespace MultiTerminal.MCPServer.Services
             lock (_lock)
             {
                 return _entries.Remove(sessionKey);
+            }
+        }
+
+        /// <summary>
+        /// A terminal has been created for <paramref name="agentName"/>: give it a card NOW, in
+        /// <see cref="AttentionState.Unknown"/>, keyed by name (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Before this, an entry came into being only on the first notification — in practice the
+        /// session-start menu prompt, 10-15 seconds after the terminal appeared. The owner asked
+        /// for the card to arrive with the terminal. MultiTerminal pre-registers the agent name
+        /// before the shell launches, so the name is the earliest identity there is.
+        /// </para>
+        /// <para>
+        /// Keyed by NAME because no session id exists yet. That is the same fallback key
+        /// <see cref="ApplyNotification"/> uses for a payload with no session id, and
+        /// <c>AgentActivityWatcher</c> resolves rows to it through <see cref="GetByAgent"/>, so tool
+        /// activity lands on this card from the first hook. When the first session-keyed
+        /// notification arrives, <see cref="SupersedeAgentLocked"/> retires this placeholder and
+        /// carries its live line across.
+        /// </para>
+        /// <para>
+        /// The state is <see cref="AttentionState.Unknown"/>, not Working: nothing has been observed,
+        /// and the projector renders that as "Nothing observed yet". Claiming Working here would
+        /// state as fact the one thing the panel does not know.
+        /// </para>
+        /// </remarks>
+        /// <returns>True if a card was created; false if the agent already has one.</returns>
+        public bool NoteTerminalStarted(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                foreach (var e in _entries.Values)
+                {
+                    // Already has a card under any key — a re-registration must not add a second.
+                    if (string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) return false;
+                }
+
+                var entry = new AgentAttentionEntry
+                {
+                    SessionId = agentName,
+                    AgentName = agentName,
+                    State = AttentionState.Unknown,
+                    EnteredAtUtc = DateTime.UtcNow,
+                };
+                _entries[agentName] = entry;
+                AttentionChanged?.Invoke(this, Clone(entry));
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The terminal for <paramref name="agentName"/> is gone: drop every card it owned, under
+        /// whatever key (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// By agent name rather than session key because the caller — the broker's
+        /// <c>TerminalDisconnected</c> — knows the terminal, not the Claude Code session inside
+        /// it. Until this had a caller, a closed terminal's card stayed on the rail forever.
+        /// </remarks>
+        /// <returns>True if anything was removed.</returns>
+        public bool NoteTerminalGone(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                List<string> gone = null;
+                foreach (var kvp in _entries)
+                {
+                    if (!string.Equals(kvp.Value?.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
+                    (gone ??= new List<string>()).Add(kvp.Key);
+                }
+
+                if (gone == null) return false;
+
+                foreach (var key in gone)
+                {
+                    if (!_entries.TryGetValue(key, out var dead)) continue;
+                    _entries.Remove(key);
+                    AttentionRemoved?.Invoke(this, Clone(dead));
+                }
+
+                return true;
             }
         }
 
