@@ -142,6 +142,19 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>Raised whenever a session's state changes. Never raised for a no-op.</summary>
         public event EventHandler<AgentAttentionEntry> AttentionChanged;
 
+        /// <summary>
+        /// Raised when a session is dropped from the cache entirely — it no longer exists, as
+        /// opposed to having changed state (task cafd47b9).
+        /// </summary>
+        /// <remarks>
+        /// Separate from <see cref="AttentionChanged"/> on purpose. Today's only subscriber rebuilds
+        /// from <see cref="Snapshot"/> and so cannot tell the two apart, but announcing a removal on
+        /// a "this entry changed" event hands a future incremental subscriber an entry that is not
+        /// there any more. The argument is the state the entry held when it was dropped, for
+        /// logging; it must not be treated as live.
+        /// </remarks>
+        public event EventHandler<AgentAttentionEntry> AttentionRemoved;
+
         /// <summary>Number of sessions currently blocking the owner.</summary>
         public int BlockingCount
         {
@@ -196,21 +209,82 @@ namespace MultiTerminal.MCPServer.Services
             // previous observed state intact, which beats overwriting a real block with a shrug.
             if (state == AttentionState.Unknown) return false;
 
-            return Upsert(key, e =>
+            lock (_lock)
             {
-                e.SessionId = sessionId;
-                e.AgentName = agentName;
-                e.State = state;
-                e.Detail = Str(payload, "message");
-                e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
+                bool changed = UpsertLocked(key, e =>
+                {
+                    e.SessionId = sessionId;
+                    e.AgentName = agentName;
+                    e.State = state;
+                    e.Detail = Str(payload, "message");
+                    e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
 
-                // Learned, never unlearned: a later payload that omits these must not blank out a
-                // project we already know. The hook reads project.json from the cwd and can
-                // legitimately come back empty (a directory with no .claude/project.json), which
-                // would otherwise make the card's project name flicker away mid-session.
-                e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
-                e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
-            });
+                    // Learned, never unlearned: a later payload that omits these must not blank out
+                    // a project we already know. The hook reads project.json from the cwd and can
+                    // legitimately come back empty (a directory with no .claude/project.json), which
+                    // would otherwise make the card's project name flicker away mid-session.
+                    e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
+                    e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
+                });
+
+                // A rotated session (/clear mints a new session id) must not leave its predecessor
+                // behind. Superseding is reported as a change even when the survivor itself did not
+                // move, because the card list DID.
+                bool superseded = SupersedeAgentLocked(agentName, key);
+                return changed || superseded;
+            }
+        }
+
+        /// <summary>
+        /// Drop every other entry belonging to <paramref name="agentName"/>, keeping only
+        /// <paramref name="keepKey"/> (task cafd47b9).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// One terminal is one agent name in MultiTerminal, and subagents inherit
+        /// <c>MULTITERMINAL_NAME</c> without registering sessions of their own — so the agent name
+        /// is a sound stand-in for "which terminal", and a terminal may only ever own one card.
+        /// </para>
+        /// <para>
+        /// This exists because <c>/clear</c> mints a NEW session id. The cache keys on session id,
+        /// so without this the pre-clear entry is orphaned: no living agent is left under that key
+        /// to ever move it, and it freezes in whatever state it was last observed in. The owner saw
+        /// three cards for two terminals, one of them pulsing "needs permission" 49 minutes after
+        /// that session had ceased to exist.
+        /// </para>
+        /// <para>
+        /// Eviction happens at the moment of the write rather than in a later sweep, so the ghost is
+        /// never renderable at all. A blank agent name evicts NOTHING — an entry that arrived
+        /// keyed only by session id has no established terminal identity, and letting it clear the
+        /// board would turn unattributable input into a delete-everything primitive.
+        /// </para>
+        /// </remarks>
+        /// <param name="agentName">The agent whose other sessions are stale. Blank is a no-op.</param>
+        /// <param name="keepKey">The cache key that survives.</param>
+        /// <returns>True if anything was evicted.</returns>
+        private bool SupersedeAgentLocked(string agentName, string keepKey)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            List<string> stale = null;
+            foreach (var kvp in _entries)
+            {
+                if (string.Equals(kvp.Key, keepKey, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.Equals(kvp.Value?.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                (stale ??= new List<string>()).Add(kvp.Key);
+            }
+
+            if (stale == null) return false;
+
+            foreach (var key in stale)
+            {
+                if (!_entries.TryGetValue(key, out var dead)) continue;
+                _entries.Remove(key);
+                AttentionRemoved?.Invoke(this, Clone(dead));
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -234,7 +308,8 @@ namespace MultiTerminal.MCPServer.Services
             string sessionKey,
             DateTime observedAtUtc,
             bool isSubagent,
-            string toolUseId = null)
+            string toolUseId = null,
+            string agentName = null)
         {
             if (string.IsNullOrWhiteSpace(sessionKey)) return false;
             if (isSubagent) return false;
@@ -244,12 +319,22 @@ namespace MultiTerminal.MCPServer.Services
                 if (!_entries.TryGetValue(sessionKey, out var existing))
                 {
                     // First thing ever seen for this session: it is working, not blocked.
-                    return UpsertLocked(sessionKey, e =>
+                    bool created = UpsertLocked(sessionKey, e =>
                     {
+                        e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                         e.State = AttentionState.Working;
                         e.Detail = null;
                         e.PendingToolUseId = null;
                     });
+
+                    // A rotated session can announce itself through activity rather than a
+                    // notification — a terminal that is /cleared and then simply gets back to work
+                    // never blocks, so ApplyNotification is never reached. Superseding on this path
+                    // too is what stops that terminal's predecessor lingering.
+                    bool supersededOnCreate = SupersedeAgentLocked(
+                        NullIfBlank(agentName) ?? _entries[sessionKey].AgentName, sessionKey);
+
+                    return created || supersededOnCreate;
                 }
 
                 if (existing.IsBlocking)
@@ -267,12 +352,18 @@ namespace MultiTerminal.MCPServer.Services
                     if (!resolves) return false;
                 }
 
-                return UpsertLocked(sessionKey, e =>
+                bool changed = UpsertLocked(sessionKey, e =>
                 {
+                    e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                     e.State = AttentionState.Working;
                     e.Detail = null;
                     e.PendingToolUseId = null;
                 });
+
+                bool superseded = SupersedeAgentLocked(
+                    NullIfBlank(agentName) ?? existing.AgentName, sessionKey);
+
+                return changed || superseded;
             }
         }
 

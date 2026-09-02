@@ -852,6 +852,11 @@ namespace MultiTerminal
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Initializing inbox panel");
                 _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
                 _mcpServer.Broker.AgentAttention.AttentionChanged += OnAgentAttentionChanged;
+
+                // A superseded session (task cafd47b9) removes a CARD without changing any surviving
+                // entry, so the change event alone would leave the ghost on screen until something
+                // unrelated happened to fire. Both events drive the same full rebuild.
+                _mcpServer.Broker.AgentAttention.AttentionRemoved += OnAgentAttentionChanged;
                 RefreshAttentionPanel();
 
                 // Initialize dashboard header alongside other panels (not deferred — deferring

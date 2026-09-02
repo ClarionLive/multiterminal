@@ -346,5 +346,154 @@ namespace MultiTerminal.Tests
             svc.ApplyNotification(Notification("permission_prompt", message: "same"));
             Assert.Equal(1, fired);
         }
+
+        // ─────────────────────────────────────────────────────────────────
+        // One live terminal, exactly one card (task cafd47b9)
+        // ─────────────────────────────────────────────────────────────────
+
+        private static Dictionary<string, object> NotificationFor(
+            string sessionId, string agent, string rawType = "permission_prompt")
+            => new Dictionary<string, object>
+            {
+                ["session_id"] = sessionId,
+                ["agent_name"] = agent,
+                ["notification_type"] = "permission_request",
+                ["raw_type"] = rawType,
+                ["message"] = "why",
+            };
+
+        /// <summary>
+        /// THE INVARIANT. The owner reasons in terminals, not sessions: two terminals must produce
+        /// two cards however many times either one has rotated its session.
+        /// <para>
+        /// This is the bug as reported — <c>/clear</c> in Diana's terminal mints a new session id,
+        /// and before the fix the pre-clear entry was orphaned under the old key with no living
+        /// agent to ever move it. The owner saw three cards for two terminals, one of them pulsing
+        /// "needs permission" 49 minutes after that session had ceased to exist.
+        /// </para>
+        /// If this goes red, the rail has started accumulating corpses again.
+        /// </summary>
+        [Fact]
+        public void Rotating_a_session_never_grows_the_card_count()
+        {
+            var svc = new AgentAttentionService();
+
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            Assert.Equal(2, svc.Snapshot().Count);
+
+            // Diana runs /clear repeatedly. Each rotation is a brand-new session id.
+            for (int i = 2; i <= 6; i++)
+            {
+                svc.ApplyNotification(NotificationFor("diana-" + i, "Diana"));
+                Assert.Equal(2, svc.Snapshot().Count);
+            }
+
+            var snapshot = svc.Snapshot();
+            Assert.Equal("diana-6", snapshot.Single(e => e.AgentName == "Diana").SessionId);
+            Assert.Equal("alice-1", snapshot.Single(e => e.AgentName == "Alice").SessionId);
+        }
+
+        /// <summary>
+        /// The clear path has to supersede too. A terminal that is /cleared and then simply gets
+        /// back to work never blocks, so <c>ApplyNotification</c> is never reached — if only that
+        /// path superseded, the most common rotation of all would still leave a ghost.
+        /// </summary>
+        [Fact]
+        public void Activity_on_a_rotated_session_also_supersedes_its_predecessor()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+
+            svc.NoteObservedActivity(
+                "diana-2", DateTime.UtcNow, isSubagent: false, toolUseId: null, agentName: "Diana");
+
+            var snapshot = svc.Snapshot();
+            Assert.Single(snapshot);
+            Assert.Equal("diana-2", snapshot[0].SessionId);
+            Assert.Equal(AttentionState.Working, snapshot[0].State);
+        }
+
+        /// <summary>
+        /// An entry that arrived with no agent name has no established terminal identity. Letting a
+        /// blank name match would turn unattributable input into a delete-everything primitive —
+        /// one malformed payload would clear the whole rail, silently, and the owner's evidence
+        /// that anyone needed them would be gone.
+        /// </summary>
+        [Fact]
+        public void A_blank_agent_name_evicts_nothing()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+
+            var anonymous = new Dictionary<string, object>
+            {
+                ["session_id"] = "ghost-1",
+                ["agent_name"] = "",
+                ["raw_type"] = "permission_prompt",
+                ["message"] = "who am I",
+            };
+            svc.ApplyNotification(anonymous);
+
+            Assert.Equal(3, svc.Snapshot().Count);
+        }
+
+        /// <summary>
+        /// Superseding must not become a back door around the age rule. <c>EnteredAtUtc</c> is the
+        /// one number telling the owner which agent has been stuck longest; re-stamping a survivor
+        /// because some OTHER terminal rotated would reset "waiting 40m" to "waiting 0s".
+        /// </summary>
+        [Fact]
+        public void Superseding_one_agent_does_not_restart_another_agents_clock()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            DateTime aliceEntered = svc.Get("alice-1").EnteredAtUtc;
+
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            svc.ApplyNotification(NotificationFor("diana-2", "Diana"));
+
+            Assert.Equal(aliceEntered, svc.Get("alice-1").EnteredAtUtc);
+        }
+
+        /// <summary>
+        /// The panel rebuilds from <see cref="AgentAttentionService.Snapshot"/>, so a silent
+        /// eviction leaves the ghost on screen until some unrelated event happens to fire. The
+        /// removal must announce itself.
+        /// </summary>
+        [Fact]
+        public void An_eviction_raises_AttentionRemoved_carrying_the_dropped_session()
+        {
+            var svc = new AgentAttentionService();
+            var removed = new List<AgentAttentionEntry>();
+            svc.AttentionRemoved += (s, e) => removed.Add(e);
+
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            Assert.Empty(removed);
+
+            svc.ApplyNotification(NotificationFor("diana-2", "Diana"));
+
+            Assert.Single(removed);
+            Assert.Equal("diana-1", removed[0].SessionId);
+            Assert.Equal("Diana", removed[0].AgentName);
+        }
+
+        /// <summary>
+        /// Two agents are two terminals. Superseding is scoped to one agent and must never reach
+        /// across — the whole point is that Alice keeps her card while Diana rotates hers.
+        /// </summary>
+        [Fact]
+        public void Superseding_is_scoped_to_one_agent()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            svc.ApplyNotification(NotificationFor("diana-2", "Diana"));
+
+            Assert.NotNull(svc.Get("alice-1"));
+            Assert.Null(svc.Get("diana-1"));
+            Assert.NotNull(svc.Get("diana-2"));
+        }
     }
 }
