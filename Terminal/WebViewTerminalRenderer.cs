@@ -584,7 +584,7 @@ namespace MultiTerminal.Terminal
 
             if (_isInitialized && _webView?.CoreWebView2 != null)
             {
-                string themeName = theme == TerminalTheme.Light ? "light" : "dark";
+                string themeName = theme.IsDark ? "dark" : "light";
                 _webView.CoreWebView2.PostWebMessageAsString("theme:" + themeName);
             }
         }

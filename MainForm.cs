@@ -5220,6 +5220,36 @@ namespace MultiTerminal
             return defaultDock;
         }
 
+        /// <summary>
+        /// Resolves where a hidden-but-alive panel should reappear when it is toggled back on.
+        /// </summary>
+        /// <param name="panel">The panel being reopened. May be null.</param>
+        /// <param name="panelKey">Settings key for the panel.</param>
+        /// <param name="defaultDock">Where to put it when nothing better is known.</param>
+        /// <returns>The dock state to reopen at.</returns>
+        /// <remarks>
+        /// <see cref="GetSavedDockState"/> reads settings, and settings are only written by
+        /// <see cref="SavePanelState"/> at shutdown. Mid-session that value is therefore stale — for
+        /// a panel that had never been shown when the app last closed it is literally
+        /// <c>Unknown</c>, which the whitelist rejects — so every reopen lands on the hardcoded
+        /// default instead of where the user last dragged the panel. <c>VisibleState</c> is the
+        /// value that actually tracks the drag AND survives hiding, which is precisely what
+        /// <see cref="SavePanelState"/> uses it for; consult it first and keep settings as the
+        /// cross-restart fallback.
+        /// </remarks>
+        private DockState GetReopenDockState(DockContent panel, string panelKey, DockState defaultDock)
+        {
+            DockState live = panel?.VisibleState ?? DockState.Unknown;
+            if (live == DockState.DockLeft || live == DockState.DockRight ||
+                live == DockState.DockTop || live == DockState.DockBottom ||
+                live == DockState.Document)
+            {
+                return live;
+            }
+
+            return GetSavedDockState(panelKey, defaultDock);
+        }
+
         private void RestorePanelStates()
         {
             bool isDark = _currentTheme.IsDark;
@@ -5667,7 +5697,7 @@ namespace MultiTerminal
                     {
                         _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
                     }
-                    _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                    _inboxPanel.ApplyTheme(_currentTheme.IsDark);
                 }
                 return _inboxPanel;
             }
@@ -5783,7 +5813,7 @@ namespace MultiTerminal
             {
                 _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
                 _filePreviewPanel.DebugLogService = _debugLogService;
-                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
                 _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
                 return;
             }
@@ -5795,7 +5825,7 @@ namespace MultiTerminal
             else
             {
                 _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
-                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -5806,13 +5836,13 @@ namespace MultiTerminal
             {
                 _filePreviewPanel = new FilePreviewPanel.FilePreviewPanelDocument();
                 _filePreviewPanel.DebugLogService = _debugLogService;
-                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
                 _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
             }
             else if (!_filePreviewPanel.Visible)
             {
                 _filePreviewPanel.Show(_dockPanel, GetSavedDockState("FilePreviewPanel", DockState.DockBottom));
-                _filePreviewPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _filePreviewPanel.ApplyTheme(_currentTheme.IsDark);
             }
 
             _debugLogService?.Info("FilePreview", $"OnFilePreviewRequested: {filePath}");
@@ -5832,7 +5862,7 @@ namespace MultiTerminal
                     _chatPanel.ReplyRequested += OnChatReplyRequested;
                     _chatPanel.UpdateConnectionStatus(true);
                 }
-                _chatPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _chatPanel.ApplyTheme(_currentTheme.IsDark);
                 _chatPanel.Show(_dockPanel, GetSavedDockState("ChatPanel", DockState.DockRight));
                 return;
             }
@@ -5844,7 +5874,7 @@ namespace MultiTerminal
             else
             {
                 _chatPanel.Show(_dockPanel, GetSavedDockState("ChatPanel", DockState.DockRight));
-                _chatPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _chatPanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -5858,7 +5888,7 @@ namespace MultiTerminal
                 {
                     _activityPanel.Initialize(_mcpServer.Broker.ActivityService, _mcpServer.PoolCoordinator, _mcpServer.Broker, _mcpServer.Broker.TaskDb);
                 }
-                _activityPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _activityPanel.ApplyTheme(_currentTheme.IsDark);
                 _activityPanel.Show(_dockPanel, GetSavedDockState("ActivityPanel", DockState.DockRight));
                 return;
             }
@@ -5870,7 +5900,7 @@ namespace MultiTerminal
             else
             {
                 _activityPanel.Show(_dockPanel, GetSavedDockState("ActivityPanel", DockState.DockRight));
-                _activityPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _activityPanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -5884,7 +5914,7 @@ namespace MultiTerminal
                 {
                     _officePanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService);
                 }
-                _officePanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _officePanel.ApplyTheme(_currentTheme.IsDark);
                 _officePanel.Show(_dockPanel, GetSavedDockState("OfficePanel", DockState.DockRight));
                 return;
             }
@@ -5896,7 +5926,7 @@ namespace MultiTerminal
             else
             {
                 _officePanel.Show(_dockPanel, GetSavedDockState("OfficePanel", DockState.DockRight));
-                _officePanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _officePanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -6035,7 +6065,7 @@ namespace MultiTerminal
             var control = new AgentPanelControl { Dock = DockStyle.Fill, DebugLogService = _debugLogService };
             slot.Controls.Add(control);
             control.AttachAgent(source, agentName, taskDescription, subagentType, isTeamAgent);
-            control.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+            control.ApplyTheme(_currentTheme.IsDark);
 
             // Apply global agent panel zoom and propagate changes to all panels
             double agentZoom = _settings?.GetAgentPanelZoom() ?? 1.0;
@@ -6510,7 +6540,7 @@ namespace MultiTerminal
                     _tasksPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.ActivityService, _settings);
                     WireTasksPanelEvents(_tasksPanel);
                 }
-                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _tasksPanel.ApplyTheme(_currentTheme.IsDark);
                 _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
                 return;
             }
@@ -6522,7 +6552,7 @@ namespace MultiTerminal
             else
             {
                 _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
-                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _tasksPanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -6535,7 +6565,7 @@ namespace MultiTerminal
                 {
                     _inboxPanel.Initialize(_mcpServer.Broker, _mcpServer.Broker.DefaultInboxRecipient);
                 }
-                _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _inboxPanel.ApplyTheme(_currentTheme.IsDark);
                 _inboxPanel.Show(_dockPanel, GetSavedDockState("InboxPanel", DockState.DockRight));
                 return;
             }
@@ -6547,7 +6577,7 @@ namespace MultiTerminal
             else
             {
                 _inboxPanel.Show(_dockPanel, GetSavedDockState("InboxPanel", DockState.DockRight));
-                _inboxPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _inboxPanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -6723,13 +6753,13 @@ namespace MultiTerminal
                     WireTasksPanelEvents(_tasksPanel);
                 }
 
-                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _tasksPanel.ApplyTheme(_currentTheme.IsDark);
             }
 
             if (!_tasksPanel.Visible)
             {
                 _tasksPanel.Show(_dockPanel, GetSavedDockState("TasksPanel", DockState.DockBottom));
-                _tasksPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _tasksPanel.ApplyTheme(_currentTheme.IsDark);
             }
 
             _tasksPanel.Activate();
@@ -6743,8 +6773,8 @@ namespace MultiTerminal
             {
                 _attentionPanel = new AttentionPanel.AttentionPanelDocument();
                 WireAttentionPanel();
-                _attentionPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
-                _attentionPanel.Show(_dockPanel, GetSavedDockState("AttentionPanel", DockState.DockRight));
+                _attentionPanel.ApplyTheme(_currentTheme.IsDark);
+                _attentionPanel.Show(_dockPanel, GetSavedDockState("AttentionPanel", DockState.DockLeft));
                 return;
             }
 
@@ -6754,8 +6784,8 @@ namespace MultiTerminal
             }
             else
             {
-                _attentionPanel.Show(_dockPanel, GetSavedDockState("AttentionPanel", DockState.DockRight));
-                _attentionPanel.ApplyTheme(_currentTheme == TerminalTheme.Dark);
+                _attentionPanel.Show(_dockPanel, GetReopenDockState(_attentionPanel, "AttentionPanel", DockState.DockLeft));
+                _attentionPanel.ApplyTheme(_currentTheme.IsDark);
             }
         }
 
@@ -6769,7 +6799,7 @@ namespace MultiTerminal
                 {
                     _profilePanel.SetMessageBroker(_mcpServer.Broker);
                 }
-                _profilePanel.SetTheme(_currentTheme == TerminalTheme.Dark);
+                _profilePanel.SetTheme(_currentTheme.IsDark);
                 _profilePanel.Show(_dockPanel, GetSavedDockState("ProfilePanel", DockState.DockRight));
                 return;
             }
@@ -6781,7 +6811,7 @@ namespace MultiTerminal
             else
             {
                 _profilePanel.Show(_dockPanel, GetSavedDockState("ProfilePanel", DockState.DockRight));
-                _profilePanel.SetTheme(_currentTheme == TerminalTheme.Dark);
+                _profilePanel.SetTheme(_currentTheme.IsDark);
             }
         }
 
