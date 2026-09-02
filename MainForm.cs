@@ -3147,6 +3147,14 @@ namespace MultiTerminal
             // Update office panel theme
             _officePanel?.ApplyTheme(_currentTheme.IsDark);
 
+            // Chat and File Preview were MISSING here (task 3a29b367). Both appear in
+            // ApplyThemesToPanels, which only the XML layout-restore path calls — so they themed
+            // correctly on restore and on open, and never when the user actually toggled the theme.
+            // The owner saw every panel go light except Chat. PanelThemingParityTests now asserts
+            // the two lists agree, so a panel can no longer be in one and not the other.
+            _chatPanel?.ApplyTheme(_currentTheme.IsDark);
+            _filePreviewPanel?.ApplyTheme(_currentTheme.IsDark);
+
             // Update embedded agent control themes
             foreach (var info in _embeddedAgentMap.Values.ToList())
             {
