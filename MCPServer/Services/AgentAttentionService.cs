@@ -239,7 +239,13 @@ namespace MultiTerminal.MCPServer.Services
                 bool changed = UpsertLocked(key, e =>
                 {
                     e.SessionId = sessionId;
-                    e.AgentName = agentName;
+
+                    // Learned, never unlearned (like Project/Cwd below). A payload that omits
+                    // agent_name must not blank a name we already know: with it blanked, the
+                    // supersede below finds nothing to retire, the name-keyed placeholder lives on,
+                    // and every later activity row routes to the placeholder while the real
+                    // session-keyed card pulses forever — two cards for one terminal.
+                    e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                     e.State = state;
                     e.Detail = Str(payload, "message");
                     e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
@@ -288,21 +294,48 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="keepKey">The cache key that survives.</param>
         /// <returns>True if anything was evicted.</returns>
         private bool SupersedeAgentLocked(string agentName, string keepKey)
+            => EvictByAgentLocked(agentName, keepKey);
+
+        /// <summary>
+        /// Whether an entry belongs to <paramref name="agentName"/>: by its recorded name, OR by
+        /// its cache key.
+        /// </summary>
+        /// <remarks>
+        /// The key half is not redundant. <see cref="NoteActivityLineOnly"/> and
+        /// <see cref="NoteTurnEnded"/> create entries through <see cref="UpsertLocked"/>, which
+        /// sets only the key — so an entry keyed by an agent's NAME can carry a null
+        /// <see cref="AgentAttentionEntry.AgentName"/>. Matching on the name alone made such an
+        /// entry invisible to eviction: a card that outlived its terminal, the exact bug
+        /// <see cref="NoteTerminalGone"/> exists to fix (pipeline run 1, code review).
+        /// </remarks>
+        private static bool OwnedBy(string key, AgentAttentionEntry entry, string agentName)
+            => string.Equals(key, agentName, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(entry?.AgentName, agentName, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Drop every entry owned by <paramref name="agentName"/> except <paramref name="keepKey"/>
+        /// (which may be null: drop them all). The one eviction loop, shared by supersede and by
+        /// terminal-gone so the ownership predicate lives in exactly one place.
+        /// </summary>
+        /// <returns>True if anything was evicted.</returns>
+        private bool EvictByAgentLocked(string agentName, string keepKey)
         {
             if (string.IsNullOrWhiteSpace(agentName)) return false;
 
             List<string> stale = null;
             foreach (var kvp in _entries)
             {
-                if (string.Equals(kvp.Key, keepKey, StringComparison.OrdinalIgnoreCase)) continue;
-                if (!string.Equals(kvp.Value?.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
+                if (keepKey != null && string.Equals(kvp.Key, keepKey, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!OwnedBy(kvp.Key, kvp.Value, agentName)) continue;
 
                 (stale ??= new List<string>()).Add(kvp.Key);
             }
 
             if (stale == null) return false;
 
-            _entries.TryGetValue(keepKey, out var survivor);
+            AgentAttentionEntry survivor = null;
+            if (keepKey != null) _entries.TryGetValue(keepKey, out survivor);
+            bool carried = false;
 
             foreach (var key in stale)
             {
@@ -317,11 +350,19 @@ namespace MultiTerminal.MCPServer.Services
                 // stays honest.
                 if (survivor != null && dead.LastActivityAtUtc is DateTime seen)
                 {
+                    string before = survivor.LastActivity;
                     RecordActivityLine(survivor, dead.LastActivity, seen);
+                    carried |= !string.Equals(before, survivor.LastActivity, StringComparison.Ordinal);
                 }
 
                 AttentionRemoved?.Invoke(this, Clone(dead));
             }
+
+            // The survivor changed after UpsertLocked already announced it. Today's subscriber
+            // rebuilds from Snapshot on any event, so the removal above would carry the news — but
+            // an incremental subscriber (the reason AttentionRemoved is a separate event) would
+            // render the survivor with the line it had BEFORE the carry-over. Say it explicitly.
+            if (carried) AttentionChanged?.Invoke(this, Clone(survivor));
 
             return true;
         }
@@ -512,10 +553,10 @@ namespace MultiTerminal.MCPServer.Services
             lock (_lock)
             {
                 AgentAttentionEntry best = null;
-                foreach (var e in _entries.Values)
+                foreach (var kvp in _entries)
                 {
-                    if (!string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (best == null || e.EnteredAtUtc > best.EnteredAtUtc) best = e;
+                    if (!OwnedBy(kvp.Key, kvp.Value, agentName)) continue;
+                    if (best == null || kvp.Value.EnteredAtUtc > best.EnteredAtUtc) best = kvp.Value;
                 }
 
                 return best == null ? null : Clone(best);
@@ -592,12 +633,17 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
-                foreach (var e in _entries.Values)
+                foreach (var kvp in _entries)
                 {
-                    // Already has a card under any key — a re-registration must not add a second.
-                    if (string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) return false;
+                    // Already has a card under any key — a re-registration must not add a second,
+                    // and must not clobber a name-keyed entry that has been collecting activity.
+                    if (OwnedBy(kvp.Key, kvp.Value, agentName)) return false;
                 }
 
+                // Deliberately NOT UpsertLocked: that path reports "changed" only when a field
+                // moved, and a fresh entry that starts Unknown and stays Unknown would raise nothing
+                // — the card would exist in the cache and never reach the panel until something
+                // else happened to fire. Creation IS the event here.
                 var entry = new AgentAttentionEntry
                 {
                     SessionId = agentName,
@@ -627,23 +673,7 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
-                List<string> gone = null;
-                foreach (var kvp in _entries)
-                {
-                    if (!string.Equals(kvp.Value?.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
-                    (gone ??= new List<string>()).Add(kvp.Key);
-                }
-
-                if (gone == null) return false;
-
-                foreach (var key in gone)
-                {
-                    if (!_entries.TryGetValue(key, out var dead)) continue;
-                    _entries.Remove(key);
-                    AttentionRemoved?.Invoke(this, Clone(dead));
-                }
-
-                return true;
+                return EvictByAgentLocked(agentName, keepKey: null);
             }
         }
 

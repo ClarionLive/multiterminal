@@ -153,6 +153,73 @@ namespace MultiTerminal.Tests
             Assert.All(removed, e => Assert.Equal(Agent, e.AgentName));
         }
 
+        /// <summary>
+        /// The activity path creates name-keyed entries through Upsert, which sets only the key —
+        /// AgentName stays null. Such a card must still be found by every by-agent operation, or
+        /// it outlives its terminal. (Pipeline run 1, code review MAJOR.)
+        /// </summary>
+        [Fact]
+        public void A_name_keyed_entry_with_no_agent_name_is_still_owned_by_the_agent()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteActivityLineOnly(Agent, "Bash: git status", DateTime.UtcNow);
+            Assert.Null(Assert.Single(svc.Snapshot()).AgentName);
+
+            Assert.NotNull(svc.GetByAgent(Agent));
+            Assert.False(svc.NoteTerminalStarted(Agent), "must not clobber the entry that is collecting activity");
+            Assert.Equal("Bash: git status", Assert.Single(svc.Snapshot()).LastActivity);
+
+            Assert.True(svc.NoteTerminalGone(Agent));
+            Assert.Empty(svc.Snapshot());
+        }
+
+        [Fact]
+        public void A_session_keyed_notification_retires_a_nameless_placeholder_too()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTurnEnded(Agent, DateTime.UtcNow.AddSeconds(-5), isSubagent: false);
+
+            svc.ApplyNotification(Notification("sess-1"));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal("sess-1", card.SessionId);
+            Assert.Equal("Turn ended", card.LastActivity);
+        }
+
+        /// <summary>
+        /// A payload without agent_name must not blank a name already learned; otherwise the
+        /// supersede finds nothing to retire and the terminal ends up with two cards, one of them
+        /// pulsing forever. (Pipeline run 1, debugger MEDIUM.)
+        /// </summary>
+        [Fact]
+        public void A_notification_without_an_agent_name_keeps_the_name_already_known()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(Notification("sess-1"));
+
+            var nameless = Notification("sess-1", rawType: "elicitation_dialog");
+            nameless.Remove("agent_name");
+            svc.ApplyNotification(nameless);
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal(Agent, card.AgentName);
+            Assert.Equal(AttentionState.BlockedQuestion, card.State);
+        }
+
+        [Fact]
+        public void A_carried_line_is_announced_for_the_survivor()
+        {
+            var svc = new AgentAttentionService();
+            svc.NoteTerminalStarted(Agent);
+            svc.NoteObservedActivity(Agent, DateTime.UtcNow.AddSeconds(-5), isSubagent: false, toolUseId: null, agentName: Agent, activitySummary: "Edit: A.cs");
+            var announced = new List<AgentAttentionEntry>();
+            svc.AttentionChanged += (s, e) => announced.Add(e);
+
+            svc.ApplyNotification(Notification("sess-1"));
+
+            Assert.Contains(announced, e => e.SessionId == "sess-1" && e.LastActivity == "Edit: A.cs");
+        }
+
         [Fact]
         public void Gone_for_an_unknown_agent_is_a_quiet_no_op()
         {

@@ -1633,7 +1633,24 @@ namespace MultiTerminal
             // The attention card exists from the moment the terminal does, not from its first
             // notification 10-15s later (task edcdcdd5). Pre-registration raises this event before
             // the shell even launches, which is the earliest point the agent has a name.
-            _mcpServer?.Broker?.AgentAttention?.NoteTerminalStarted(e.Name);
+            //
+            // EXCEPT the "Unassigned" sentinel. Session restore registers every terminal under that
+            // shared name and the broker later RENAMES the TerminalInfo in place (no disconnect is
+            // ever raised for "Unassigned"), so a card minted here would be a permanent phantom
+            // shared by N terminals. The broker skips profile creation for it for the same reason.
+            // The card appears on the real-name re-registration seconds later (pipeline run 1).
+            if (!IsUnassignedSentinel(e.Name))
+            {
+                try
+                {
+                    _mcpServer?.Broker?.AgentAttention?.NoteTerminalStarted(e.Name);
+                }
+                catch (Exception attnEx)
+                {
+                    // Must not abort the terminal-to-document mapping below.
+                    _debugLogService?.Error("AttentionPanel", $"Card creation on register failed: {attnEx.Message}");
+                }
+            }
 
             // Map the MCP terminal ID to the TerminalDocument
             // Strategy: try DocId first, then name match, then last active as final fallback
@@ -6779,6 +6796,8 @@ namespace MultiTerminal
         {
             try
             {
+                if (_agentActivityWatcher != null) return;
+
                 var broker = _mcpServer?.Broker;
                 if (broker?.ActivityFeedService == null || broker.AgentAttention == null)
                 {
@@ -6789,19 +6808,28 @@ namespace MultiTerminal
                     return;
                 }
 
-                if (_agentActivityWatcher != null) return;
-
-                _agentActivityWatcher = new MCPServer.Services.AgentActivityWatcher(
+                // Start() arms its timer even when the first watermark read fails and retries on
+                // every tick, so holding the instance here cannot strand a dead watcher behind the
+                // idempotence guard above (pipeline run 1, adversary finding).
+                var watcher = new MCPServer.Services.AgentActivityWatcher(
                     broker.ActivityFeedService,
                     broker.AgentAttention,
                     msg => _debugLogService?.Info("AgentActivityWatcher", msg));
-                _agentActivityWatcher.Start();
+                watcher.Start();
+                _agentActivityWatcher = watcher;
             }
             catch (Exception ex)
             {
                 _debugLogService?.Error("AgentActivityWatcher", $"Failed to start: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// The shared placeholder name every restored/anonymous terminal carries until its agent
+        /// registers a real one. Not an identity: the broker itself skips profile creation for it.
+        /// </summary>
+        private static bool IsUnassignedSentinel(string name)
+            => string.Equals(name, "Unassigned", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// A terminal went away; its attention card goes with it (task edcdcdd5).
@@ -6815,7 +6843,7 @@ namespace MultiTerminal
         {
             try
             {
-                if (e == null || IsTemporaryAgent(e.Name)) return;
+                if (e == null || IsTemporaryAgent(e.Name) || IsUnassignedSentinel(e.Name)) return;
                 _mcpServer?.Broker?.AgentAttention?.NoteTerminalGone(e.Name);
             }
             catch (Exception ex)

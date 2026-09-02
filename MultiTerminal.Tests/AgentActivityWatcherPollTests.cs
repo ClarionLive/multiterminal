@@ -252,6 +252,38 @@ namespace MultiTerminal.Tests
             Assert.Equal("Write: New.cs", e.LastActivity);
         }
 
+        /// <summary>
+        /// A row with garbage in its timestamp column must not become a permanent first-unread
+        /// row: the reader tolerates it, the watermark moves past it, and the row behind it is
+        /// applied. (Pipeline run 1, security finding.) The garbage row itself resolves to
+        /// DateTime.MinValue, which cannot clear a block — the safe direction.
+        /// </summary>
+        [Fact]
+        public void A_row_with_an_unparseable_timestamp_does_not_wedge_the_poller()
+        {
+            Assert.True(_watcher.Prime());
+            Block();
+
+            using (var conn = new SQLiteConnection($"Data Source={_dbPath};Version=3;"))
+            {
+                conn.Open();
+                using var cmd = new SQLiteCommand(
+                    "INSERT INTO activity_feed (timestamp, activity_type, actor, summary, severity, details_json) "
+                    + "VALUES ('not a date', 'TOOL_COMPLETE', @actor, 'Edit: Garbage.cs', 'info', @details)", conn);
+                cmd.Parameters.AddWithValue("@actor", Agent);
+                cmd.Parameters.AddWithValue("@details", MainThread("Edit"));
+                cmd.ExecuteNonQuery();
+            }
+
+            _watcher.Poll();
+            Assert.Equal(AttentionState.BlockedPermission, Entry().State); // garbage cannot clear
+
+            Row("TOOL_COMPLETE", "Edit: After.cs", MainThread("Edit"));
+            _watcher.Poll();
+            Assert.Equal(AttentionState.Working, Entry().State);
+            Assert.Equal("Edit: After.cs", Entry().LastActivity);
+        }
+
         [Fact]
         public void Unrelated_row_types_are_ignored_entirely()
         {

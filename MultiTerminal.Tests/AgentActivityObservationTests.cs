@@ -279,7 +279,9 @@ namespace MultiTerminal.Tests
             string src = ReadMainFormStripped();
 
             Assert.Contains("new MCPServer.Services.AgentActivityWatcher(", src, StringComparison.Ordinal);
-            Assert.Contains("_agentActivityWatcher.Start();", src, StringComparison.Ordinal);
+            Assert.Contains("StartAgentActivityWatcher();", src, StringComparison.Ordinal);
+            Assert.Contains("watcher.Start();", src, StringComparison.Ordinal);
+            Assert.Contains("_agentActivityWatcher = watcher;", src, StringComparison.Ordinal);
             Assert.Contains("_agentActivityWatcher?.Dispose();", src, StringComparison.Ordinal);
         }
 
