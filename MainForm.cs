@@ -2551,6 +2551,10 @@ namespace MultiTerminal
                     case "preview": ToggleFilePreviewPanel(); break;
                     case "projects": ToggleProjectPanel(); break;
                 }
+
+                // One call covers all ten icons (task f2e32f6c). Deliberately not per-case: a
+                // per-case call is ten places to forget, and forgetting is what this fixes.
+                SyncPanelIndicators();
             };
 
             _dashboardHeader.GridLayoutRequested += (layout) =>
@@ -5250,6 +5254,106 @@ namespace MultiTerminal
             return GetSavedDockState(panelKey, defaultDock);
         }
 
+        /// <summary>
+        /// Every dashboard-header panel icon, paired with a way to reach the panel it stands for
+        /// (task f2e32f6c).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The key is BOTH the <c>TogglePanelRequested</c> key and the <c>btn-{key}</c> element id in
+        /// <c>dashboard.html</c> — they are already the same string for all ten, and
+        /// <see cref="DashboardHeaderControl.UpdatePanelState"/> looks the button up by it.
+        /// </para>
+        /// <para>
+        /// The accessor is a delegate, not a captured reference, because every <c>Toggle*Panel</c>
+        /// method RECREATES its panel when the user has closed it (<c>if (_x == null || _x.IsDisposed)
+        /// { _x = new ... }</c>). A reference captured once would point at a disposed instance for the
+        /// rest of the session and report it as permanently hidden.
+        /// </para>
+        /// <para>
+        /// This table exists so that adding a panel is ONE row rather than a new call site. The two
+        /// worst bugs in this area were both hand-written per-type lists that someone forgot to
+        /// extend — the <c>HudTabContainer.ApplyTheme</c> chain, and the zoom chain where six of
+        /// seven renderers went unwired for months with nothing failing.
+        /// </para>
+        /// </remarks>
+        private static readonly (string Key, Func<MainForm, DockContent> Get)[] PanelIndicators =
+        {
+            ("projects",  f => f._projectPanel),
+            ("tasks",     f => f._tasksPanel),
+            ("chat",      f => f._chatPanel),
+            ("activity",  f => f._activityPanel),
+            ("office",    f => f._officePanel),
+            ("profiles",  f => f._profilePanel),
+            ("inbox",     f => f._inboxPanel),
+            ("attention", f => f._attentionPanel),
+            ("debug",     f => f._debugPanel),
+            ("preview",   f => f._filePreviewPanel),
+        };
+
+        /// <summary>
+        /// Panels whose <see cref="Control.VisibleChanged"/> this form has already subscribed to.
+        /// Identity comparison, because a recreated panel is a different instance that needs its own
+        /// hook and must not be mistaken for the old one.
+        /// </summary>
+        private readonly HashSet<DockContent> _panelIndicatorHooked =
+            new HashSet<DockContent>(ReferenceEqualityComparer.Instance);
+
+        /// <summary>
+        /// Pushes the true open/closed state of every panel to the dashboard header, so its icons
+        /// light up while their panel is open (task f2e32f6c).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Pushes ALL ten every time rather than just the one that changed. It costs ten queued JSON
+        /// messages, and in exchange a missed trigger self-heals on the next sync instead of leaving
+        /// one icon permanently wrong — which is the failure mode this whole ticket is about.
+        /// </para>
+        /// <para>
+        /// It also hooks <c>VisibleChanged</c> as it goes. That is the only way to catch the user
+        /// closing a panel with its own X button, which never reaches the toggle dispatch. Hooking
+        /// here rather than at construction means recreated panels are picked up automatically, and
+        /// means there is exactly one place that knows about the subscription.
+        /// </para>
+        /// <para>
+        /// An icon lit over a closed panel is worse than an unlit icon over an open one: the first
+        /// asserts something false, the second merely omits. That is why the X path is handled at all
+        /// rather than being left to the next ticket.
+        /// </para>
+        /// </remarks>
+        private void SyncPanelIndicators()
+        {
+            if (_dashboardHeader == null || _dashboardHeader.IsDisposed) return;
+
+            foreach (var (key, get) in PanelIndicators)
+            {
+                DockContent panel = null;
+                try
+                {
+                    panel = get(this);
+                }
+                catch
+                {
+                    // A field can be mid-teardown. An indicator is not worth an exception.
+                }
+
+                bool open = panel != null && !panel.IsDisposed && panel.Visible;
+                _dashboardHeader.UpdatePanelState(key, open);
+
+                if (panel != null && !panel.IsDisposed && _panelIndicatorHooked.Add(panel))
+                {
+                    panel.VisibleChanged += OnPanelVisibilityChanged;
+                    panel.Disposed += (s, e) => _panelIndicatorHooked.Remove(panel);
+                }
+            }
+        }
+
+        private void OnPanelVisibilityChanged(object sender, EventArgs e)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            SyncPanelIndicators();
+        }
+
         private void RestorePanelStates()
         {
             bool isDark = _currentTheme.IsDark;
@@ -5276,6 +5380,10 @@ namespace MultiTerminal
             RestoreSinglePanel("DebugPanel", _debugPanel, DockState.DockBottom);
             if (RestoreSinglePanel("FilePreviewPanel", _filePreviewPanel, DockState.DockBottom))
                 _filePreviewPanel.ApplyTheme(isDark);
+
+            // Panels restored at startup are OPEN, and without this their icons come up dark — the
+            // state most users see first, straight after launch (task f2e32f6c).
+            SyncPanelIndicators();
         }
 
         private void ApplyThemesToPanels()
