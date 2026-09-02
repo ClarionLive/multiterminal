@@ -77,6 +77,31 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public string PendingToolUseId { get; set; }
 
+        /// <summary>
+        /// The last thing this agent was OBSERVED doing, e.g. "Edit: MainForm.cs" (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// This is what the card's headline detail should show. It replaces the previous behaviour
+        /// of rendering <see cref="Detail"/> — the notification message, captured at block time and
+        /// never regenerated — in the position of a live observation. The owner saw
+        /// "Alice is waiting for your input" sitting there 27 minutes after it stopped being true.
+        /// <para>
+        /// Null until something has been observed. Null must render as "nothing observed", never as
+        /// idle or as fine.
+        /// </para>
+        /// </remarks>
+        public string LastActivity { get; set; }
+
+        /// <summary>
+        /// When <see cref="LastActivity"/> was observed (UTC), or null if nothing has been.
+        /// </summary>
+        /// <remarks>
+        /// Separate from <see cref="EnteredAtUtc"/>, which is the age of the STATE. A live line that
+        /// has silently stopped updating is the same lie the frozen notification text was, in a new
+        /// position — so the line carries its own age and can be shown to have gone quiet.
+        /// </remarks>
+        public DateTime? LastActivityAtUtc { get; set; }
+
         /// <summary>True when the state is one the owner is actually being waited on for.</summary>
         public bool IsBlocking =>
             State == AttentionState.BlockedQuestion ||
@@ -309,9 +334,15 @@ namespace MultiTerminal.MCPServer.Services
             DateTime observedAtUtc,
             bool isSubagent,
             string toolUseId = null,
-            string agentName = null)
+            string agentName = null,
+            string activitySummary = null)
         {
             if (string.IsNullOrWhiteSpace(sessionKey)) return false;
+
+            // Subagent activity proves nothing about the parent and must never clear (see remarks).
+            // It does not update the display line either: attributing a subagent's tool call to its
+            // parent would put a confident, wrong sentence where the live observation goes, which is
+            // the exact failure this ticket exists to remove.
             if (isSubagent) return false;
 
             lock (_lock)
@@ -325,6 +356,7 @@ namespace MultiTerminal.MCPServer.Services
                         e.State = AttentionState.Working;
                         e.Detail = null;
                         e.PendingToolUseId = null;
+                        RecordActivityLine(e, activitySummary, observedAtUtc);
                     });
 
                     // A rotated session can announce itself through activity rather than a
@@ -358,6 +390,7 @@ namespace MultiTerminal.MCPServer.Services
                     e.State = AttentionState.Working;
                     e.Detail = null;
                     e.PendingToolUseId = null;
+                    RecordActivityLine(e, activitySummary, observedAtUtc);
                 });
 
                 bool superseded = SupersedeAgentLocked(
@@ -365,6 +398,131 @@ namespace MultiTerminal.MCPServer.Services
 
                 return changed || superseded;
             }
+        }
+
+        /// <summary>
+        /// Update ONLY the live activity line, without touching the attention state (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is what a <c>TOOL_START</c> row gets. That row is written on <c>PreToolUse</c>, and
+        /// <c>safety-hook.js</c> is itself a PreToolUse hook returning
+        /// <c>permissionDecision: 'ask'</c> — so it runs BEFORE the prompt it causes. Routing it
+        /// through <see cref="NoteObservedActivity"/> would clear a block at the instant of its
+        /// creation, which is finding 1 of the 2289bb8a spike.
+        /// </para>
+        /// <para>
+        /// So the two concerns are split at the API rather than behind a flag: "what is this agent
+        /// doing" can be answered by an event that is NOT evidence the owner has been attended to.
+        /// A blocked card keeps pulsing while its activity line moves — which is correct, and is
+        /// what an agent draining a queue of already-approved calls actually looks like.
+        /// </para>
+        /// </remarks>
+        /// <param name="sessionKey">Session id, or agent name if that is how the entry was keyed.</param>
+        /// <param name="activitySummary">The observed line, e.g. "Edit: MainForm.cs".</param>
+        /// <param name="observedAtUtc">When it was observed.</param>
+        /// <returns>True if the line changed.</returns>
+        public bool NoteActivityLineOnly(string sessionKey, string activitySummary, DateTime observedAtUtc)
+        {
+            if (string.IsNullOrWhiteSpace(sessionKey)) return false;
+            if (string.IsNullOrWhiteSpace(activitySummary)) return false;
+
+            return Upsert(sessionKey, e => RecordActivityLine(e, activitySummary, observedAtUtc));
+        }
+
+        /// <summary>
+        /// Record that a session's TURN ENDED — the clear-edge for a block the owner DISMISSED
+        /// rather than answered (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The 2289bb8a spike named <c>UserPromptSubmit</c> as the unblock signal and that is not
+        /// sufficient: pressing <b>Escape</b> on a permission prompt submits no prompt, so nothing
+        /// fired and the alert stayed lit. The owner reported a card pulsing "needs permission" 49
+        /// minutes after they had dismissed it.
+        /// </para>
+        /// <para>
+        /// Escape ends the turn, so the <c>Stop</c> hook fires. Turn-ended is
+        /// <see cref="AttentionState.Idle"/>: finished, and explicitly NOT a block — the same state
+        /// an <c>idle_prompt</c> notification produces, and for the same reason. It must not pulse.
+        /// </para>
+        /// <para>
+        /// Subagents get their own <c>Stop</c>, so <paramref name="isSubagent"/> is honoured here for
+        /// the same reason it is on the activity path: a subagent finishing says nothing about
+        /// whether its parent is still waiting on the owner.
+        /// </para>
+        /// </remarks>
+        /// <param name="sessionKey">Session id, or agent name if that is how the entry was keyed.</param>
+        /// <param name="observedAtUtc">When the turn ended.</param>
+        /// <param name="isSubagent">True when a SUBAGENT's turn ended rather than the main thread's.</param>
+        /// <returns>True if the state changed.</returns>
+        public bool NoteTurnEnded(string sessionKey, DateTime observedAtUtc, bool isSubagent)
+        {
+            if (string.IsNullOrWhiteSpace(sessionKey)) return false;
+            if (isSubagent) return false;
+
+            lock (_lock)
+            {
+                if (_entries.TryGetValue(sessionKey, out var existing)
+                    && existing.IsBlocking
+                    && observedAtUtc <= existing.EnteredAtUtc)
+                {
+                    // A turn that ended BEFORE the block was raised proves nothing — it is an older
+                    // event arriving late, not the owner dismissing this prompt.
+                    return false;
+                }
+
+                return UpsertLocked(sessionKey, e =>
+                {
+                    e.State = AttentionState.Idle;
+                    e.Detail = null;
+                    e.PendingToolUseId = null;
+                    RecordActivityLine(e, "Turn ended", observedAtUtc);
+                });
+            }
+        }
+
+        /// <summary>
+        /// The tracked entry for an agent, or null (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <c>activity_feed.actor</c> is the agent NAME, while this cache is keyed by session id, so
+        /// a consumer of activity rows has to resolve one to the other. When more than one entry
+        /// carries the name — a rotated session whose predecessor has not been superseded — the most
+        /// recently entered wins, because that is the live terminal and the other is a corpse.
+        /// </remarks>
+        public AgentAttentionEntry GetByAgent(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return null;
+
+            lock (_lock)
+            {
+                AgentAttentionEntry best = null;
+                foreach (var e in _entries.Values)
+                {
+                    if (!string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (best == null || e.EnteredAtUtc > best.EnteredAtUtc) best = e;
+                }
+
+                return best == null ? null : Clone(best);
+            }
+        }
+
+        /// <summary>
+        /// Sets the live activity line, keeping the newest observation.
+        /// </summary>
+        /// <remarks>
+        /// Out-of-order rows are possible — the writer is a separate Node process with its own clock
+        /// — and letting an older one overwrite a newer would make the line go backwards, which
+        /// looks exactly like the agent repeating itself.
+        /// </remarks>
+        private static void RecordActivityLine(AgentAttentionEntry entry, string summary, DateTime observedAtUtc)
+        {
+            if (string.IsNullOrWhiteSpace(summary)) return;
+            if (entry.LastActivityAtUtc is DateTime known && known > observedAtUtc) return;
+
+            entry.LastActivity = summary;
+            entry.LastActivityAtUtc = observedAtUtc;
         }
 
         /// <summary>Mark a session offline (host process gone). Clears any pending block.</summary>
@@ -444,12 +602,18 @@ namespace MultiTerminal.MCPServer.Services
             var beforePending = entry.PendingToolUseId;
             var beforeProject = entry.Project;
 
+            // The live activity line counts as a change (task edcdcdd5). Without this, an agent that
+            // is already Working produces no event as it moves from tool to tool — which is the one
+            // thing the owner asked for: "each of those cards ALWAYS updating with what's happening".
+            var beforeActivity = entry.LastActivity;
+
             mutate(entry);
 
             bool changed = entry.State != beforeState
                            || !string.Equals(entry.Detail, beforeDetail, StringComparison.Ordinal)
                            || !string.Equals(entry.PendingToolUseId, beforePending, StringComparison.Ordinal)
-                           || !string.Equals(entry.Project, beforeProject, StringComparison.Ordinal);
+                           || !string.Equals(entry.Project, beforeProject, StringComparison.Ordinal)
+                           || !string.Equals(entry.LastActivity, beforeActivity, StringComparison.Ordinal);
 
             if (!changed) return false;
 
@@ -473,6 +637,8 @@ namespace MultiTerminal.MCPServer.Services
             PendingToolUseId = e.PendingToolUseId,
             Project = e.Project,
             Cwd = e.Cwd,
+            LastActivity = e.LastActivity,
+            LastActivityAtUtc = e.LastActivityAtUtc,
         };
 
         private static string Str(IDictionary<string, object> d, string key) =>

@@ -58,7 +58,11 @@ namespace MultiTerminal.AttentionPanel
                     Project = e.Project,
                     State = e.State.ToString(),
                     ObservedVerb = Verb(e.State),
-                    ObservedDetail = e.Detail,
+                    ObservedDetail = DetailFor(e),
+                    DetailIsLive = HasLiveActivity(e),
+                    ActivityAgeSeconds = e.LastActivityAtUtc is DateTime seen
+                        ? Seconds(nowUtc - seen)
+                        : -1,
                     SinceSeconds = Seconds(nowUtc - e.EnteredAtUtc),
                     TicketId = claim?.TaskId,
                     TicketItem = claim?.ItemLabel,
@@ -95,6 +99,30 @@ namespace MultiTerminal.AttentionPanel
                 default: return "Nothing observed yet";
             }
         }
+
+        /// <summary>Whether this entry has a live observation to show (task edcdcdd5).</summary>
+        private static bool HasLiveActivity(AgentAttentionEntry e)
+            => !string.IsNullOrWhiteSpace(e.LastActivity) && e.LastActivityAtUtc.HasValue;
+
+        /// <summary>
+        /// The detail line: the LIVE activity when there is one, else the notification message.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <see cref="AgentAttentionEntry.Detail"/> is the notification text captured at block time
+        /// and never regenerated — Claude Code's own "Alice is waiting for your input". Rendering it
+        /// in the position of a live observation is what let the owner read a 27-minute-old sentence
+        /// as a current one. Live activity wins whenever it exists.
+        /// </para>
+        /// <para>
+        /// The notification message is kept as the FALLBACK rather than dropped, because before any
+        /// tool has run it is the only thing observed about that session and is genuinely true at
+        /// that moment. <see cref="AttentionCard.DetailIsLive"/> is what tells the two apart, so the
+        /// view can mark the fossil rather than the reader having to guess.
+        /// </para>
+        /// </remarks>
+        private static string DetailFor(AgentAttentionEntry e)
+            => HasLiveActivity(e) ? e.LastActivity : e.Detail;
 
         private static long Seconds(TimeSpan span) =>
             span.Ticks <= 0 ? 0 : (long)span.TotalSeconds;

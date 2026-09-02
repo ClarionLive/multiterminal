@@ -60,6 +60,33 @@ namespace MultiTerminal.AttentionPanel
         [JsonPropertyName("sinceSeconds")]
         public long SinceSeconds { get; set; }
 
+        /// <summary>
+        /// How long ago <see cref="ObservedDetail"/> was observed, or -1 when nothing has been
+        /// (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// The live activity line needs its OWN age, separate from <see cref="SinceSeconds"/> which
+        /// is the age of the state. A "live" line that has silently stopped updating is the same lie
+        /// the frozen notification text was, just in a new position — so the view can show it going
+        /// quiet rather than presenting a stale string as current.
+        /// <para>-1 means "no observation", which must not render as "0 seconds ago".</para>
+        /// </remarks>
+        [JsonPropertyName("activityAgeSeconds")]
+        public long ActivityAgeSeconds { get; set; } = -1;
+
+        /// <summary>
+        /// True when <see cref="ObservedDetail"/> is a LIVE observation rather than the message a
+        /// notification carried when the block was raised (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// The two read identically and mean very different things. "Edit: MainForm.cs" observed
+        /// eight seconds ago is information; "Alice is waiting for your input", captured at block
+        /// time and never regenerated, is a fossil that looks like information. The owner spent 27
+        /// minutes looking at the second kind believing it was the first.
+        /// </remarks>
+        [JsonPropertyName("detailIsLive")]
+        public bool DetailIsLive { get; set; }
+
         /// <summary>Ticket the agent claims to be on, or null. Rendered quietly, as a claim.</summary>
         [JsonPropertyName("ticketId")]
         public string TicketId { get; set; }

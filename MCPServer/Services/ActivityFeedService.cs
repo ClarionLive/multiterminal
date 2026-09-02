@@ -353,6 +353,68 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Rows written after <paramref name="afterId"/>, oldest first (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Deliberately by ID rather than by timestamp, unlike
+        /// <see cref="GetActivitiesSince(DateTime, int)"/>. Rows are written by a Node hook process,
+        /// so their <c>timestamp</c> is that process's clock, not this one's — a poller that
+        /// remembered a timestamp would silently re-read or skip rows around the boundary whenever
+        /// the two disagreed, and `timestamp >= @since` re-reads the boundary row every poll even
+        /// when they agree. <c>id</c> is a monotonic AUTOINCREMENT and has neither problem.
+        /// </para>
+        /// <para>
+        /// Oldest first, because a consumer applying a state machine has to see the events in the
+        /// order they happened. Every other reader here is newest-first for display.
+        /// </para>
+        /// </remarks>
+        /// <param name="afterId">Exclusive lower bound. Pass 0 to start from the beginning.</param>
+        /// <param name="limit">Maximum rows to return.</param>
+        public List<ActivityFeedEntry> GetActivitiesAfterId(long afterId, int limit = 200)
+        {
+            using var gate = _gate.Enter();
+
+            var entries = new List<ActivityFeedEntry>();
+
+            const string sql = @"
+                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
+                FROM activity_feed
+                WHERE id > @afterId
+                ORDER BY id ASC
+                LIMIT @limit";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@afterId", afterId);
+            command.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                entries.Add(ReadEntry(reader));
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// The highest row id currently in the table, or 0 when it is empty (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// A poller starting up uses this as its watermark so it processes only rows written from
+        /// now on. Replaying history at startup would re-apply long-dead tool events to the live
+        /// attention state — clearing blocks that were raised after them.
+        /// </remarks>
+        public long GetMaxActivityId()
+        {
+            using var gate = _gate.Enter();
+
+            using var command = new SQLiteCommand("SELECT COALESCE(MAX(id), 0) FROM activity_feed", _connection);
+            object result = command.ExecuteScalar();
+            return result == null || result == DBNull.Value ? 0L : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
         /// Get activities by type (e.g., all BUILD_FAILED events).
         /// </summary>
         public List<ActivityFeedEntry> GetActivitiesByType(string activityType, int limit = 50)
