@@ -27,11 +27,32 @@ namespace MultiTerminal.AttentionPanel
         /// <param name="agentColors">Avatar colour by agent name. Missing is fine.</param>
         /// <param name="claims">Board claim by agent name. Missing means "claims nothing".</param>
         /// <param name="nowUtc">Clock, injected so ages are deterministic under test.</param>
+        /// <param name="agentProjects">
+        /// FALLBACK project name by agent name, derived from the agent's claimed task. Optional.
+        /// </param>
+        /// <remarks>
+        /// <para>
+        /// <b>Why a fallback exists at all (task 42052f0c).</b> <see cref="AgentAttentionEntry.Project"/>
+        /// is written in exactly one place — <c>ApplyNotification</c>, from the hook's
+        /// <c>project_name</c>. So a terminal that simply works and never blocks has no code path
+        /// that ever learns its project, and the card's project line was blank for most terminals
+        /// most of the time. That is the same defect shape edcdcdd5 fixed for <c>Working</c>: the
+        /// field existed, the view rendered it, and nothing called the writer.
+        /// </para>
+        /// <para>
+        /// The observed value WINS. This is a fallback, never an override: what the hook read off
+        /// disk is ground truth about where the agent is actually running, while the claimed task's
+        /// project is an inference about where it is working. When they disagree, the observation is
+        /// the one to trust — and an agent legitimately can hold a ticket in one project while
+        /// running in another.
+        /// </para>
+        /// </remarks>
         public static List<AttentionCard> Project(
             IEnumerable<AgentAttentionEntry> entries,
             IReadOnlyDictionary<string, string> agentColors,
             IReadOnlyDictionary<string, AttentionTicketClaim> claims,
-            DateTime nowUtc)
+            DateTime nowUtc,
+            IReadOnlyDictionary<string, string> agentProjects = null)
         {
             var cards = new List<AttentionCard>();
             if (entries == null) return cards;
@@ -43,19 +64,24 @@ namespace MultiTerminal.AttentionPanel
                 string agent = e.AgentName;
                 AttentionTicketClaim claim = null;
                 string color = null;
+                string fallbackProject = null;
 
                 if (!string.IsNullOrWhiteSpace(agent))
                 {
                     if (claims != null) claims.TryGetValue(agent, out claim);
                     if (agentColors != null) agentColors.TryGetValue(agent, out color);
+                    if (agentProjects != null) agentProjects.TryGetValue(agent, out fallbackProject);
                 }
+
+                // Observed beats inferred — see the remarks on Project().
+                string project = string.IsNullOrWhiteSpace(e.Project) ? fallbackProject : e.Project;
 
                 cards.Add(new AttentionCard
                 {
                     Id = e.SessionId,
                     Agent = agent,
                     Color = string.IsNullOrWhiteSpace(color) ? DefaultColor : color,
-                    Project = e.Project,
+                    Project = project,
                     State = e.State.ToString(),
                     ObservedVerb = Verb(e.State),
                     ObservedDetail = DetailFor(e),
@@ -64,6 +90,7 @@ namespace MultiTerminal.AttentionPanel
                         ? Seconds(nowUtc - seen)
                         : -1,
                     SinceSeconds = Seconds(nowUtc - e.EnteredAtUtc),
+                    BlockSeq = e.BlockSeq,
                     TicketId = claim?.TaskId,
                     TicketItem = claim?.ItemLabel,
                     ClaimAgeSeconds = claim == null ? 0 : Seconds(nowUtc - claim.UpdatedAtUtc),
@@ -126,5 +153,6 @@ namespace MultiTerminal.AttentionPanel
 
         private static long Seconds(TimeSpan span) =>
             span.Ticks <= 0 ? 0 : (long)span.TotalSeconds;
+
     }
 }

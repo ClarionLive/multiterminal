@@ -57,8 +57,42 @@ namespace MultiTerminal.AttentionPanel
         public string ObservedDetail { get; set; }
 
         /// <summary>Seconds in the current state. The view ticks this locally between pushes.</summary>
+        /// <remarks>
+        /// DISPLAY ONLY. Never infer block identity from this: it is whole seconds, and the view
+        /// increments its own copy between pushes, so it is neither precise nor authoritative. Use
+        /// <see cref="BlockSeq"/> to tell one block from the next.
+        /// </remarks>
         [JsonPropertyName("sinceSeconds")]
         public long SinceSeconds { get; set; }
+
+        /// <summary>
+        /// Which blocked episode this card is showing, counting from 0. The block's IDENTITY
+        /// (task 42052f0c, pipeline run 2).
+        /// </summary>
+        /// <remarks>
+        /// The view acknowledges a block to silence its alarm's motion, and that acknowledgement
+        /// must cover ONE block — a card that blocks again has to shout again, or one early click
+        /// mutes that terminal for good. A calm card is indistinguishable from nobody needing you,
+        /// which is the one failure this rail exists to prevent.
+        /// <para>
+        /// Identity is a counter rather than a clock, after two clocks in a row proved unable to
+        /// carry it. Expiring on a DROP in <see cref="SinceSeconds"/> failed at the second boundary
+        /// (ack at 0, re-block also samples 0, so `0 &lt; 0` is false). Replacing that with an
+        /// epoch-millisecond stamp failed too, in two ways: the producer only restamps on a state
+        /// CHANGE, so a second prompt on an already-blocked card reused the first one's stamp; and
+        /// two notifications genuinely can land inside the same millisecond. Every clock is a bet
+        /// on resolution. A counter has none to lose.
+        /// </para>
+        /// <para>
+        /// It is also a separate field from the age ON PURPOSE. <c>EnteredAtUtc</c> must NOT move
+        /// when a blocked card's detail is rewritten, or the number telling the owner who has been
+        /// stuck longest resets — an invariant this codebase already holds under test. Identity
+        /// must move on exactly that event. One field cannot satisfy both, which is what made the
+        /// timestamp attempt fail.
+        /// </para>
+        /// </remarks>
+        [JsonPropertyName("blockSeq")]
+        public long BlockSeq { get; set; }
 
         /// <summary>
         /// How long ago <see cref="ObservedDetail"/> was observed, or -1 when nothing has been

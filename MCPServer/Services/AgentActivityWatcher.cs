@@ -61,16 +61,28 @@ namespace MultiTerminal.MCPServer.Services
 
         private const string TurnEndType = "TURN_END";
 
-        private readonly ActivityFeedService _feed;
+        private readonly IActivityFeedReader _feed;
         private readonly AgentAttentionService _attention;
         private readonly Action<string> _log;
         private readonly int _pollMs;
         private readonly int _batchLimit;
 
+        /// <summary>
+        /// The shared placeholder name a terminal carries until its agent registers a real one.
+        /// A row under it is unattributable to one terminal, so it could only ever feed a shared
+        /// card that nothing can remove (MainForm skips the same name on registration).
+        /// </summary>
+        private const string UnassignedSentinel = "Unassigned";
+
+        private readonly DateTime _createdAtUtc = DateTime.UtcNow;
+
         private Timer _timer;
         private long _watermark;
+        private volatile bool _primed;
+        private bool _primeEverFailed;
+        private DateTime? _replayNotBeforeUtc;
         private int _polling;
-        private bool _disposed;
+        private volatile bool _disposed;
 
         /// <summary>
         /// Creates the watcher. Nothing is read until <see cref="Start"/> is called.
@@ -78,7 +90,7 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="feed">Source of activity rows.</param>
         /// <param name="attention">The state machine to feed. Sole owner of the attention cache.</param>
         /// <param name="log">Optional logger; failures are reported here rather than thrown.</param>
-        public AgentActivityWatcher(ActivityFeedService feed, AgentAttentionService attention, Action<string> log = null)
+        public AgentActivityWatcher(IActivityFeedReader feed, AgentAttentionService attention, Action<string> log = null)
         {
             _feed = feed ?? throw new ArgumentNullException(nameof(feed));
             _attention = attention ?? throw new ArgumentNullException(nameof(attention));
@@ -107,8 +119,63 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
+        /// <summary>True once the watermark has been read; until then no row is applied.</summary>
+        public bool IsPrimed => _primed;
+
         /// <summary>
-        /// Begins polling. Safe to call once; subsequent calls are ignored.
+        /// Sets the watermark to the table's current maximum so nothing already written is ever
+        /// applied. Public so a test can drive <see cref="Poll"/> without a timer and still get
+        /// the no-replay-at-startup behaviour. Idempotent once it has succeeded.
+        /// </summary>
+        /// <remarks>
+        /// A failure here is NOT fatal. The first cut returned from <see cref="Start"/> without
+        /// arming the timer when this threw, and the caller had already stored the instance — so
+        /// one transient "database is locked" at startup (this app has a whole WriteContention
+        /// diagnostics stream for exactly that window) left the rail silently dead for the life of
+        /// the process, which is the owner's original complaint. Now every tick re-tries until it
+        /// works, and only then are rows applied.
+        /// </remarks>
+        /// <returns>False if the watermark could not be read this time.</returns>
+        public bool Prime()
+        {
+            if (_primed) return true;
+
+            try
+            {
+                long max = _feed.GetMaxActivityId();
+
+                if (_primeEverFailed)
+                {
+                    // A LATE prime. Rows written while we were unprimed are not history — an agent
+                    // was working, and one of those rows may be the TOOL_COMPLETE that clears a
+                    // block. Back up one batch and let Apply() keep only rows stamped after this
+                    // watcher came to life; everything older really is history. (Pipeline run 2,
+                    // adversary finding: the first cut set the watermark to MAX and silently
+                    // dropped the whole window.)
+                    _watermark = Math.Max(0, max - _batchLimit);
+                    _replayNotBeforeUtc = _createdAtUtc;
+                    Log($"AgentActivityWatcher primed late at id {max}; replaying up to {_batchLimit} rows stamped after {_createdAtUtc:O}.");
+                }
+                else
+                {
+                    _watermark = max;
+                }
+
+                _primed = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // Starting at 0 would replay the entire table on the first tick.
+                _primeEverFailed = true;
+                Log($"AgentActivityWatcher could not read the watermark, will retry next tick: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Begins polling. Safe to call once; subsequent calls are ignored. The timer is armed
+        /// even if the first watermark read fails — see <see cref="Prime"/>.
         /// </summary>
         public void Start()
         {
@@ -116,22 +183,19 @@ namespace MultiTerminal.MCPServer.Services
 
             if (IsDisabled())
             {
-                _log?.Invoke("AgentActivityWatcher disabled by MULTITERMINAL_ATTENTION_WATCH.");
+                Log("AgentActivityWatcher disabled by MULTITERMINAL_ATTENTION_WATCH.");
                 return;
             }
 
-            try
+            if (Prime())
             {
-                _watermark = _feed.GetMaxActivityId();
+                Log($"AgentActivityWatcher started at id {_watermark}, polling every {_pollMs}ms.");
             }
-            catch (Exception ex)
+            else
             {
-                // Starting at 0 would replay the entire table on the first tick.
-                _log?.Invoke($"AgentActivityWatcher could not read the watermark, staying idle: {ex.Message}");
-                return;
+                Log($"AgentActivityWatcher started UNPRIMED, polling every {_pollMs}ms until the watermark can be read.");
             }
 
-            _log?.Invoke($"AgentActivityWatcher started at id {_watermark}, polling every {_pollMs}ms.");
             _timer = new Timer(_ => Poll(), null, _pollMs, _pollMs);
         }
 
@@ -145,6 +209,12 @@ namespace MultiTerminal.MCPServer.Services
 
             try
             {
+                // Timer.Dispose does not join a callback already in flight; without this an
+                // in-progress tick would keep reading a database that MainForm is tearing down.
+                if (_disposed) return;
+
+                if (!Prime()) return;
+
                 List<ActivityFeedEntry> rows = _feed.GetActivitiesAfterId(_watermark, _batchLimit);
                 if (rows == null || rows.Count == 0) return;
 
@@ -161,13 +231,17 @@ namespace MultiTerminal.MCPServer.Services
                     {
                         // One malformed row must not stop the pump, and must not stop the watermark
                         // advancing past it — otherwise it is retried forever.
-                        _log?.Invoke($"AgentActivityWatcher skipped row {row.Id}: {ex.Message}");
+                        Log($"AgentActivityWatcher skipped row {row.Id}: {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                _log?.Invoke($"AgentActivityWatcher poll failed: {ex.Message}");
+                // The watermark has not moved, so the same batch is re-read next tick. That is
+                // only safe because ActivityFeedService.ReadEntry never throws on a row's
+                // CONTENT (a bad timestamp or NULL text is tolerated there) — a read that throws
+                // here is a connection-level failure, which retrying is the right answer to.
+                Log($"AgentActivityWatcher poll failed: {ex.Message}");
             }
             finally
             {
@@ -175,10 +249,27 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
+        /// <summary>
+        /// Logs without ever throwing. The logger can be a disposed DebugLogService during shutdown,
+        /// and this runs on a timer thread where an exception is unhandled.
+        /// </summary>
+        private void Log(string message)
+        {
+            try
+            {
+                _log?.Invoke(message);
+            }
+            catch
+            {
+                // Nowhere left to report to.
+            }
+        }
+
         private void Apply(ActivityFeedEntry row)
         {
             string agent = row.Actor;
             if (string.IsNullOrWhiteSpace(agent)) return;
+            if (string.Equals(agent, UnassignedSentinel, StringComparison.OrdinalIgnoreCase)) return;
 
             string type = row.ActivityType ?? string.Empty;
             bool clears = ClearingTypes.Contains(type);
@@ -200,6 +291,10 @@ namespace MultiTerminal.MCPServer.Services
             DateTime observedAt = row.Timestamp.Kind == DateTimeKind.Utc
                 ? row.Timestamp
                 : row.Timestamp.ToUniversalTime();
+
+            // Only reached after a LATE prime backed the watermark up (see Prime). Rows older
+            // than this watcher are history and must not be re-applied.
+            if (_replayNotBeforeUtc is DateTime notBefore && observedAt < notBefore) return;
 
             if (turnEnded)
             {

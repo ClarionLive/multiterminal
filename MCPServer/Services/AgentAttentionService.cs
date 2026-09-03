@@ -102,11 +102,40 @@ namespace MultiTerminal.MCPServer.Services
         /// </remarks>
         public DateTime? LastActivityAtUtc { get; set; }
 
+        /// <summary>
+        /// Which blocked episode this is, counting from 0. Bumped once per blocking notification.
+        /// </summary>
+        /// <remarks>
+        /// The block's IDENTITY, and deliberately not a timestamp (task 42052f0c, pipeline run 2).
+        /// The panel silences an acknowledged alarm's motion and must expire that acknowledgement
+        /// when a NEW block starts, or one early click mutes a terminal for good. It cannot use
+        /// <see cref="State"/> (a second permission prompt leaves it unchanged) and it cannot use
+        /// <see cref="EnteredAtUtc"/>, which deliberately does NOT move on a detail rewrite so the
+        /// age keeps ranking who has been stuck longest. Every clock is also a resolution bet: an
+        /// earlier attempt keyed identity to epoch milliseconds and two notifications still landed
+        /// in the same one. A counter cannot collide.
+        /// </remarks>
+        public long BlockSeq { get; set; }
+
         /// <summary>True when the state is one the owner is actually being waited on for.</summary>
         public bool IsBlocking =>
             State == AttentionState.BlockedQuestion ||
             State == AttentionState.BlockedPermission ||
             State == AttentionState.BlockedUnknown;
+    }
+
+    /// <summary>Whether a state is one of the blocked-on-the-owner states.</summary>
+    /// <remarks>
+    /// The static twin of <see cref="AgentAttentionEntry.IsBlocking"/>, for deciding about a state
+    /// BEFORE it has been written to an entry (task 42052f0c, pipeline run 2). Kept beside it so
+    /// the two lists cannot drift apart unnoticed.
+    /// </remarks>
+    internal static class AttentionStates
+    {
+        internal static bool IsBlocking(AttentionState state) =>
+            state == AttentionState.BlockedQuestion ||
+            state == AttentionState.BlockedPermission ||
+            state == AttentionState.BlockedUnknown;
     }
 
     /// <summary>
@@ -239,7 +268,13 @@ namespace MultiTerminal.MCPServer.Services
                 bool changed = UpsertLocked(key, e =>
                 {
                     e.SessionId = sessionId;
-                    e.AgentName = agentName;
+
+                    // Learned, never unlearned (like Project/Cwd below). A payload that omits
+                    // agent_name must not blank a name we already know: with it blanked, the
+                    // supersede below finds nothing to retire, the name-keyed placeholder lives on,
+                    // and every later activity row routes to the placeholder while the real
+                    // session-keyed card pulses forever — two cards for one terminal.
+                    e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                     e.State = state;
                     e.Detail = Str(payload, "message");
                     e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
@@ -250,7 +285,19 @@ namespace MultiTerminal.MCPServer.Services
                     // would otherwise make the card's project name flicker away mid-session.
                     e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
                     e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
-                });
+                },
+                // EVERY blocking notification is a new block, including one that arrives while the
+                // card already reads blocked. Claude Code does not supply a tool_use_id on a
+                // Notification payload — settled empirically, not assumed: the presence-only
+                // diagnostic added for task 2289bb8a item 0 logged toolUseId=(absent) on every
+                // permission_prompt and idle_prompt observed live. So there is no id to tell a
+                // second prompt from a repeat of the first, and the two failures are not
+                // symmetrical. Restamping a repeat costs a reset age and an alarm that shouts
+                // again, which the owner sees and can dismiss. NOT restamping a genuinely new
+                // prompt lets an earlier acknowledgement silence it, rendering a calm card while an
+                // agent waits — indistinguishable from nobody needing you. This file already states
+                // that asymmetry as its governing rule, so the tie breaks toward shouting.
+                startsNewBlock: AttentionStates.IsBlocking(state));
 
                 // A rotated session (/clear mints a new session id) must not leave its predecessor
                 // behind. Superseding is reported as a change even when the survivor itself did not
@@ -288,26 +335,75 @@ namespace MultiTerminal.MCPServer.Services
         /// <param name="keepKey">The cache key that survives.</param>
         /// <returns>True if anything was evicted.</returns>
         private bool SupersedeAgentLocked(string agentName, string keepKey)
+            => EvictByAgentLocked(agentName, keepKey);
+
+        /// <summary>
+        /// Whether an entry belongs to <paramref name="agentName"/>: by its recorded name, OR by
+        /// its cache key.
+        /// </summary>
+        /// <remarks>
+        /// The key half is not redundant. <see cref="NoteActivityLineOnly"/> and
+        /// <see cref="NoteTurnEnded"/> create entries through <see cref="UpsertLocked"/>, which
+        /// sets only the key — so an entry keyed by an agent's NAME can carry a null
+        /// <see cref="AgentAttentionEntry.AgentName"/>. Matching on the name alone made such an
+        /// entry invisible to eviction: a card that outlived its terminal, the exact bug
+        /// <see cref="NoteTerminalGone"/> exists to fix (pipeline run 1, code review).
+        /// </remarks>
+        private static bool OwnedBy(string key, AgentAttentionEntry entry, string agentName)
+            => string.Equals(key, agentName, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(entry?.AgentName, agentName, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Drop every entry owned by <paramref name="agentName"/> except <paramref name="keepKey"/>
+        /// (which may be null: drop them all). The one eviction loop, shared by supersede and by
+        /// terminal-gone so the ownership predicate lives in exactly one place.
+        /// </summary>
+        /// <returns>True if anything was evicted.</returns>
+        private bool EvictByAgentLocked(string agentName, string keepKey)
         {
             if (string.IsNullOrWhiteSpace(agentName)) return false;
 
             List<string> stale = null;
             foreach (var kvp in _entries)
             {
-                if (string.Equals(kvp.Key, keepKey, StringComparison.OrdinalIgnoreCase)) continue;
-                if (!string.Equals(kvp.Value?.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
+                if (keepKey != null && string.Equals(kvp.Key, keepKey, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!OwnedBy(kvp.Key, kvp.Value, agentName)) continue;
 
                 (stale ??= new List<string>()).Add(kvp.Key);
             }
 
             if (stale == null) return false;
 
+            AgentAttentionEntry survivor = null;
+            if (keepKey != null) _entries.TryGetValue(keepKey, out survivor);
+            bool carried = false;
+
             foreach (var key in stale)
             {
                 if (!_entries.TryGetValue(key, out var dead)) continue;
                 _entries.Remove(key);
+
+                // The predecessor's live line moves to the survivor (task edcdcdd5). The usual
+                // predecessor is the name-keyed placeholder created when the terminal opened, which
+                // has been collecting tool activity for the 10-15s before the first notification
+                // carried a session id; dropping that line would blank the card at the exact
+                // moment it becomes interesting. The line keeps its own timestamp, so its age
+                // stays honest.
+                if (survivor != null && dead.LastActivityAtUtc is DateTime seen)
+                {
+                    string before = survivor.LastActivity;
+                    RecordActivityLine(survivor, dead.LastActivity, seen);
+                    carried |= !string.Equals(before, survivor.LastActivity, StringComparison.Ordinal);
+                }
+
                 AttentionRemoved?.Invoke(this, Clone(dead));
             }
+
+            // The survivor changed after UpsertLocked already announced it. Today's subscriber
+            // rebuilds from Snapshot on any event, so the removal above would carry the news — but
+            // an incremental subscriber (the reason AttentionRemoved is a separate event) would
+            // render the survivor with the line it had BEFORE the carry-over. Say it explicitly.
+            if (carried) AttentionChanged?.Invoke(this, Clone(survivor));
 
             return true;
         }
@@ -498,10 +594,10 @@ namespace MultiTerminal.MCPServer.Services
             lock (_lock)
             {
                 AgentAttentionEntry best = null;
-                foreach (var e in _entries.Values)
+                foreach (var kvp in _entries)
                 {
-                    if (!string.Equals(e.AgentName, agentName, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (best == null || e.EnteredAtUtc > best.EnteredAtUtc) best = e;
+                    if (!OwnedBy(kvp.Key, kvp.Value, agentName)) continue;
+                    if (best == null || kvp.Value.EnteredAtUtc > best.EnteredAtUtc) best = kvp.Value;
                 }
 
                 return best == null ? null : Clone(best);
@@ -519,6 +615,12 @@ namespace MultiTerminal.MCPServer.Services
         private static void RecordActivityLine(AgentAttentionEntry entry, string summary, DateTime observedAtUtc)
         {
             if (string.IsNullOrWhiteSpace(summary)) return;
+
+            // A row that cannot say WHEN it happened (the feed reader's fallback for an unparseable
+            // timestamp) must not become the timestamped live line — it would render as "quiet for
+            // 2000 years" until the next row overwrote it. Its clear-path safety is handled by the
+            // caller; here it is simply not a line.
+            if (observedAtUtc == DateTime.MinValue) return;
             if (entry.LastActivityAtUtc is DateTime known && known > observedAtUtc) return;
 
             entry.LastActivity = summary;
@@ -543,6 +645,82 @@ namespace MultiTerminal.MCPServer.Services
             lock (_lock)
             {
                 return _entries.Remove(sessionKey);
+            }
+        }
+
+        /// <summary>
+        /// A terminal has been created for <paramref name="agentName"/>: give it a card NOW, in
+        /// <see cref="AttentionState.Unknown"/>, keyed by name (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Before this, an entry came into being only on the first notification — in practice the
+        /// session-start menu prompt, 10-15 seconds after the terminal appeared. The owner asked
+        /// for the card to arrive with the terminal. MultiTerminal pre-registers the agent name
+        /// before the shell launches, so the name is the earliest identity there is.
+        /// </para>
+        /// <para>
+        /// Keyed by NAME because no session id exists yet. That is the same fallback key
+        /// <see cref="ApplyNotification"/> uses for a payload with no session id, and
+        /// <c>AgentActivityWatcher</c> resolves rows to it through <see cref="GetByAgent"/>, so tool
+        /// activity lands on this card from the first hook. When the first session-keyed
+        /// notification arrives, <see cref="SupersedeAgentLocked"/> retires this placeholder and
+        /// carries its live line across.
+        /// </para>
+        /// <para>
+        /// The state is <see cref="AttentionState.Unknown"/>, not Working: nothing has been observed,
+        /// and the projector renders that as "Nothing observed yet". Claiming Working here would
+        /// state as fact the one thing the panel does not know.
+        /// </para>
+        /// </remarks>
+        /// <returns>True if a card was created; false if the agent already has one.</returns>
+        public bool NoteTerminalStarted(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                foreach (var kvp in _entries)
+                {
+                    // Already has a card under any key — a re-registration must not add a second,
+                    // and must not clobber a name-keyed entry that has been collecting activity.
+                    if (OwnedBy(kvp.Key, kvp.Value, agentName)) return false;
+                }
+
+                // Deliberately NOT UpsertLocked: that path reports "changed" only when a field
+                // moved, and a fresh entry that starts Unknown and stays Unknown would raise nothing
+                // — the card would exist in the cache and never reach the panel until something
+                // else happened to fire. Creation IS the event here.
+                var entry = new AgentAttentionEntry
+                {
+                    SessionId = agentName,
+                    AgentName = agentName,
+                    State = AttentionState.Unknown,
+                    EnteredAtUtc = DateTime.UtcNow,
+                };
+                _entries[agentName] = entry;
+                AttentionChanged?.Invoke(this, Clone(entry));
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The terminal for <paramref name="agentName"/> is gone: drop every card it owned, under
+        /// whatever key (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// By agent name rather than session key because the caller — the broker's
+        /// <c>TerminalDisconnected</c> — knows the terminal, not the Claude Code session inside
+        /// it. Until this had a caller, a closed terminal's card stayed on the rail forever.
+        /// </remarks>
+        /// <returns>True if anything was removed.</returns>
+        public bool NoteTerminalGone(string agentName)
+        {
+            if (string.IsNullOrWhiteSpace(agentName)) return false;
+
+            lock (_lock)
+            {
+                return EvictByAgentLocked(agentName, keepKey: null);
             }
         }
 
@@ -584,7 +762,11 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate)
+        /// <param name="startsNewBlock">
+        /// Forces the state clock to restart even when the state string did not change, because
+        /// this mutation is known to be a NEW blocking episode (task 42052f0c, pipeline run 2).
+        /// </param>
+        private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate, bool startsNewBlock = false)
         {
             if (!_entries.TryGetValue(key, out var entry))
             {
@@ -609,7 +791,26 @@ namespace MultiTerminal.MCPServer.Services
 
             mutate(entry);
 
-            bool changed = entry.State != beforeState
+            // Block IDENTITY is a counter, deliberately NOT the clock below (task 42052f0c,
+            // pipeline run 2). The panel needs to tell one blocked episode from the next so an
+            // acknowledgement cannot carry over; the age needs to survive a detail rewrite so the
+            // owner can still see who has been stuck longest. Those two requirements conflict
+            // whenever a second prompt arrives on an already-blocked card — which is the common
+            // case, because the SET edge is synchronous while the CLEAR edge is polled. Deriving
+            // identity from any clock also inherits that clock's resolution: an earlier attempt
+            // used epoch MILLISECONDS and still collided, because two notifications really can land
+            // in the same millisecond. A counter has no resolution to run out of.
+            //
+            // This MUST run before the `changed` gate below, and a new block MUST itself count as a
+            // change (run 3). Two prompts for the same tool are byte-identical — same message, both
+            // tool_use_ids null, same project, and while the polled clear edge is still outstanding
+            // the same state and activity line too. Every field the diff inspects compares equal, so
+            // an increment placed after the early return is simply never reached for the exact
+            // repeat this counter exists to catch.
+            if (startsNewBlock) entry.BlockSeq++;
+
+            bool changed = startsNewBlock
+                           || entry.State != beforeState
                            || !string.Equals(entry.Detail, beforeDetail, StringComparison.Ordinal)
                            || !string.Equals(entry.PendingToolUseId, beforePending, StringComparison.Ordinal)
                            || !string.Equals(entry.Project, beforeProject, StringComparison.Ordinal)
@@ -639,6 +840,7 @@ namespace MultiTerminal.MCPServer.Services
             Cwd = e.Cwd,
             LastActivity = e.LastActivity,
             LastActivityAtUtc = e.LastActivityAtUtc,
+            BlockSeq = e.BlockSeq,
         };
 
         private static string Str(IDictionary<string, object> d, string key) =>

@@ -12,6 +12,7 @@ body {
     --bg-header: #12122a; --border: #3d3d5c;
     --text-primary: #e0e0e0; --text-secondary: #a0a0b8; --text-muted: #707088;
     --accent: #89b4fa; --green: #a6e3a1; --peach: #fab387; --mauve: #cba6f7;
+    --red: #f38ba8; --red-wash: rgba(243,139,168,0.16); --red-edge: rgba(243,139,168,0.55);
     --bg-tag: rgba(255,255,255,0.08);
     --pulse-question: rgba(203,166,247,0.26);
     --pulse-permission: rgba(250,179,135,0.24);
@@ -26,6 +27,7 @@ body.light {
     --bg-header: #e8e8e8; --border: #e0e0e0;
     --text-primary: #333; --text-secondary: #666; --text-muted: #999;
     --accent: #1e66f5; --green: #40a02b; --peach: #fe640b; --mauve: #8839ef;
+    --red: #d20f39; --red-wash: rgba(210,15,57,0.12); --red-edge: rgba(210,15,57,0.45);
     --bg-tag: rgba(0,0,0,0.06);
     --pulse-question: rgba(136,57,239,0.20);
     --pulse-permission: rgba(254,100,11,0.20);
@@ -52,15 +54,50 @@ body.light {
 }
 .needs[data-count="0"] { background: var(--bg-tag); color: var(--text-muted); }
 .spacer { flex: 1; }
-.order-wrap { display: flex; align-items: center; gap: 5px; }
-.order-wrap > span { font-size: 9.5px; color: var(--text-muted); }
-select.order {
-    font-family: inherit; font-size: 9.5px; color: var(--text-secondary);
+
+/* ---- gear + settings popover (task 42052f0c) ----
+   The order dropdown used to sit in the header. With three preferences the header cannot
+   hold them at this width, so they all live behind one control and the header goes back to
+   saying what the panel is. */
+button.gear {
+    font-family: inherit; font-size: 12px; line-height: 1; color: var(--text-secondary);
     background: var(--bg-tag); border: 1px solid transparent;
-    border-radius: 9px; padding: 2px 6px; cursor: pointer;
+    border-radius: 8px; padding: 3px 6px; cursor: pointer;
+    transition: border-color .12s, color .12s;
 }
-select.order:hover { border-color: var(--border); }
-select.order:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.gear:hover { border-color: var(--border); color: var(--text-primary); }
+button.gear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.gear[aria-expanded="true"] { border-color: var(--accent); color: var(--text-primary); }
+
+.pop {
+    position: absolute; top: 30px; right: 8px; z-index: 20;
+    width: 208px; max-height: calc(100vh - 44px); overflow-y: auto;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px;
+    box-shadow: 0 10px 26px -10px rgba(0,0,0,.7);
+    display: flex; flex-direction: column; gap: 10px;
+}
+.pop[hidden] { display: none; }
+.pop-group > h4 {
+    font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--text-muted); margin-bottom: 4px;
+}
+.pop-group > p {
+    font-size: 9.5px; color: var(--text-muted); margin: -2px 0 5px; line-height: 1.4;
+}
+.opt {
+    display: block; width: 100%; text-align: left;
+    font-family: inherit; font-size: 11px; color: var(--text-secondary);
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 4px 7px; cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+}
+.opt:hover { background: var(--bg-tag); color: var(--text-primary); }
+.opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.opt[aria-pressed="true"] {
+    background: var(--bg-tag); color: var(--text-primary); border-color: var(--accent);
+}
+.opt small { display: block; font-size: 9px; color: var(--text-muted); margin-top: 1px; }
 
 /* ---- list ---- */
 .list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
@@ -96,7 +133,21 @@ select.order:focus-visible { outline: 2px solid var(--accent); outline-offset: 1
 }
 .who { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .who-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.who-proj { font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who-proj {
+    font-size: 10px; color: var(--text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: flex; align-items: center; gap: 4px;
+}
+/* The project's colour tick (task 42052f0c). It sits WITH the project name rather than on
+   the avatar, because the avatar already carries the agent's own terminal colour and
+   overwriting that would trade one identity for another.
+
+   Small, but in a fixed position on every card — which is what makes it groupable at a
+   glance. Text is not glanceable; a repeated mark in a repeated place is. */
+.proj-tick {
+    width: 6px; height: 6px; border-radius: 2px; flex-shrink: 0;
+    background: var(--proj-c, var(--border));
+}
 .elapsed { font-size: 10px; color: var(--text-muted); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .card[data-blocking="true"] .elapsed { color: var(--text-secondary); font-weight: 600; }
 
@@ -141,17 +192,122 @@ button.tkt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
 /* Not an observation at all: the message the alert carried, never refreshed. */
 .detail-age.fossil { font-style: italic; opacity: 0.45; }
 
-/* pulse — only for cards that actually block the owner */
-@keyframes wait-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 transparent; }
-    50%      { box-shadow: 0 0 0 3px var(--pulse-c); }
+/* ============================================================================
+   TWO CHANNELS (task 42052f0c)
+
+   AMBIENT answers "is it working?". It runs on every card at once, so it must be
+   nearly silent. ALARM answers "does it need me?". It is rare, and must dominate.
+
+   These are independent on purpose. If the ambient channel is loud, the alarm has
+   nothing left to escalate TO — the quietness of one is what buys the other its
+   contrast. Any change here that makes an ambient treatment more eye-catching is
+   spending the alarm's budget.
+
+   Peripheral vision reads motion, then colour, then shape. It does not read text,
+   which is why none of this is a label.
+   ============================================================================ */
+
+/* The stage: one strip per card, shared by every canvas-drawn ambient treatment.
+   Costs no height at all under the CSS-only treatments and under "off" — the quiet
+   options are quiet in layout too. */
+.stage { height: 18px; margin: -1px 0 -2px; }
+.stage canvas { display: block; width: 100%; height: 100%; }
+
+/* ---- AMBIENT: the two CSS-only treatments ---- */
+
+/* rail — the 3px state stripe the card already has becomes a travelling light.
+   Zero new chrome, and the cheapest thing on the list. */
+body[data-ambient="rail"] .card[data-state="Working"]::before {
+    background: linear-gradient(180deg,
+        transparent 0%, var(--accent) 22%, #cfe4ff 50%, var(--accent) 78%, transparent 100%);
+    background-size: 100% 220%;
+    animation: rail-run 1.5s linear infinite;
 }
-.card.pulsing { animation: wait-pulse 2.6s ease-in-out infinite; }
-.card[data-state="BlockedQuestion"] { --pulse-c: var(--pulse-question); }
-.card[data-state="BlockedPermission"],
-.card[data-state="BlockedUnknown"] { --pulse-c: var(--pulse-permission); }
+@keyframes rail-run { from { background-position: 0 -120%; } to { background-position: 0 120%; } }
+
+/* breath — the avatar respires. The quietest option that is still motion. */
+body[data-ambient="breath"] .card[data-state="Working"] .avatar {
+    animation: breathe 2.1s ease-in-out infinite;
+}
+@keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.10); }
+}
+
+/* ---- ALARM ---- */
+
+/* redalert (default) — the only treatment that repaints the card's WHOLE silhouette,
+   which is why it is the one that survives being seen out of the corner of an eye.
+   Beacon and klaxon decorate an edge, and an edge is the first thing peripheral
+   vision loses. */
+@keyframes red-alert {
+    0%, 100% { background: var(--bg-card);  box-shadow: 0 0 0 0 transparent; }
+    50%      { background: var(--red-wash); box-shadow: 0 0 0 3px var(--red-edge); }
+}
+body[data-alarm="redalert"] .card.pulsing { animation: red-alert 1.15s ease-in-out infinite; }
+body[data-alarm="redalert"] .card.pulsing::before { background: var(--red); }
+
+/* beacon — an amber cone sweeps the card like a warehouse light. Urgent without shouting. */
+.beacon, .klax { display: none; }
+body[data-alarm="beacon"] .card.pulsing { overflow: hidden; }
+body[data-alarm="beacon"] .card.pulsing .beacon {
+    display: block; position: absolute; inset: -60% -10%; pointer-events: none;
+    background: conic-gradient(from 0deg,
+        var(--pulse-permission) 0deg, transparent 26deg,
+        transparent 180deg, transparent 334deg, var(--pulse-permission) 360deg);
+    animation: sweep 2.4s linear infinite;
+}
+@keyframes sweep { to { transform: rotate(360deg); } }
+
+/* klaxon — hazard stripes across the top edge. */
+body[data-alarm="klaxon"] .card.pulsing .klax {
+    display: block; position: absolute; left: 0; right: 0; top: 0; height: 4px;
+    background: repeating-linear-gradient(115deg, var(--peach) 0 10px, transparent 10px 20px);
+    background-size: 200% 100%;
+    animation: hazard .7s linear infinite;
+}
+@keyframes hazard { to { background-position: -20px 0; } }
+body[data-alarm="klaxon"] .card.pulsing { border-color: var(--peach); }
+
+/* hand — the walker stands up and waves (drawn on the stage); the card lifts. */
+body[data-alarm="hand"] .card.pulsing {
+    border-color: var(--peach);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 18px -10px rgba(0,0,0,.75);
+}
+
+/* ---- ACKNOWLEDGED: silence the alarm, do NOT change the state ----
+   Clicking a card stops the MOTION. It does not mark the agent unblocked: the stripe,
+   the state text and the climbing age all stay, and an "acknowledged" marker appears.
+   The agent IS still waiting — the owner has seen it, not answered it.
+
+   The asymmetry is the same one LooksLikeSubagent's remarks state for the clear path:
+   a stale pulse is visible and dismissible, while a falsely calm card is silent and
+   indistinguishable from nobody needing you. Silencing a true alarm is safe. Repainting
+   a true state as calm is the failure this rail exists to prevent. */
+.card.acked, .card.acked * { animation: none !important; }
+.card.acked { transform: none; box-shadow: none; background: var(--bg-card); }
+.card.acked .beacon, .card.acked .klax { display: none !important; }
+.ack-mark {
+    font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-muted); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 4px; margin-left: 6px; white-space: nowrap;
+}
+
+/* ---- FOCUS: which terminal am I looking at? ----
+   Luminance and a ring, never a new hue. Every colour on this card already carries
+   meaning — accent is Working, green Idle, peach/mauve the blocked states, red the
+   alarm — so a sixth colour for "selected" would collide with at least two of them.
+   Deliberately not animated: this is orientation, not a signal. */
+.card.focused { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
+.card.focused .who-name { color: var(--text-primary); }
+
 @media (prefers-reduced-motion: reduce) {
-    .card.pulsing { animation: none; box-shadow: 0 0 0 2px var(--pulse-c); }
+    /* Reduced motion still gets the ALARM, as a static state rather than a pulse — the one
+       thing that must never be silently dropped for a preference about animation. */
+    .card.pulsing { animation: none !important; box-shadow: 0 0 0 2px var(--red-edge); }
+    .card.pulsing::before { background: var(--red); }
+    .card[data-state="Working"]::before, .card[data-state="Working"] .avatar { animation: none !important; }
     .card { transition: none; }
 }
 
@@ -164,13 +320,25 @@ button.tkt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px
     <span class="head-title">Attention</span>
     <span class="needs" id="needs" data-count="0">0</span>
     <span class="spacer"></span>
-    <label class="order-wrap" for="order">
-        <span>order</span>
-        <select class="order" id="order">
-            <option value="attention">attention first</option>
-            <option value="fixed">fixed</option>
-        </select>
-    </label>
+    <button class="gear" id="gear" type="button" aria-haspopup="true" aria-expanded="false"
+            aria-controls="pop" title="Rail settings">&#9881;</button>
+</div>
+<div class="pop" id="pop" hidden role="dialog" aria-label="Rail settings">
+    <div class="pop-group">
+        <h4>Activity</h4>
+        <p>Runs on every card. Kept quiet so the alarm can be loud.</p>
+        <div id="grp-ambient"></div>
+    </div>
+    <div class="pop-group">
+        <h4>Needs you</h4>
+        <p>Rare, and meant to be impossible to miss.</p>
+        <div id="grp-alarm"></div>
+    </div>
+    <div class="pop-group">
+        <h4>Order</h4>
+        <p>Agents needing you always sort first, in every mode.</p>
+        <div id="grp-order"></div>
+    </div>
 </div>
 <div class="list" id="list"></div>
 
@@ -181,8 +349,50 @@ var BLOCKING = { BlockedQuestion: 1, BlockedPermission: 1, BlockedUnknown: 1 };
 
 var sessions = [];
 var order = "attention";
+var ambient = "stream";
+var alarm = "redalert";
+var focusedId = null;
 var pointerInList = false;
 var reshufflePending = false;
+
+/* Acknowledged blocks (task 42052f0c). Keyed by session id, storing the state and the BLOCK
+   IDENTITY at the moment of the click, because acknowledgement belongs to ONE block and not
+   to the card. A card that blocks again must shout again — otherwise a single early click
+   mutes that terminal for the rest of the session, which is the annoyance arriving by the
+   other door. The identity is the host's blockSeq; see reconcileAcks() for why no clock
+   can serve as one. */
+var acked = Object.create(null);
+
+/* Ambient animation state, deliberately OUTSIDE the DOM. render() rebuilds the entire list
+   on every push (listEl.textContent = ""), so a canvas element only ever lives a few
+   seconds. Holding phase/particles here is what keeps the motion continuous across a
+   rebuild instead of restarting from nothing every time data arrives. Keyed by session id;
+   pruned when a session goes away so a long-running panel cannot leak. */
+var anim = Object.create(null);
+
+var AMBIENTS = [
+    ["stream", "Token stream", "particles drifting through the card"],
+    ["vitals", "Vitals",       "a live trace; flatlines when idle"],
+    ["walker", "The walker",   "walks while working, sits when idle"],
+    ["rail",   "Rail pulse",   "a light travelling down the edge"],
+    ["breath", "Breath",       "the avatar respires, nothing else"],
+    ["off",    "Off",          "no motion at all"]
+];
+var ALARMS = [
+    ["redalert", "Red alert",   "the whole card pulses red"],
+    ["beacon",   "Beacon",      "an amber cone sweeps the card"],
+    ["klaxon",   "Klaxon bar",  "hazard stripes along the top edge"],
+    ["hand",     "Raised hand", "the walker stands up and waves"]
+];
+var ORDERS = [
+    ["attention", "Attention first", "blocked agents on top"],
+    ["fixed",     "Fixed",           "never reorders under the cursor"],
+    ["project",   "By project",      "grouped, blocked still on top"]
+];
+
+/* Canvas-drawn ambients. The others are CSS, and "off" is nothing at all — the loop skips
+   every frame for those rather than burning a rAF to draw a blank strip. */
+var CANVAS_AMBIENTS = { stream: 1, vitals: 1, walker: 1 };
 /* "no sessions" and "nothing observed yet" are different truths and must not be collapsed.
    Ambient notifications are not persisted while remote mode is off, so after an MT restart the
    panel legitimately starts empty -- that means nothing has been OBSERVED, not that nobody needs
@@ -191,7 +401,8 @@ var haveReceivedData = false;
 
 var listEl = document.getElementById("list");
 var needsEl = document.getElementById("needs");
-var orderEl = document.getElementById("order");
+var gearEl = document.getElementById("gear");
+var popEl = document.getElementById("pop");
 
 function post(msg) {
     if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(msg);
@@ -209,12 +420,81 @@ function isBlocking(s) { return !!BLOCKING[s.state]; }
 
 function ordered() {
     if (order === "fixed") return sessions.slice();
+
     function rank(s) { return isBlocking(s) ? 0 : (s.state === "Offline" ? 2 : 1); }
     var idx = {};
     sessions.forEach(function (s, i) { idx[s.id] = i; });
+
+    /* Blocking is ranked FIRST in every mode, project grouping included. Grouping rearranges
+       the calm cards beneath the alarms and nothing else — the one thing this rail exists to
+       surface must never be filed away under a heading (task 42052f0c). */
+    if (order === "project") {
+        return sessions.slice().sort(function (a, b) {
+            var r = rank(a) - rank(b);
+            if (r) return r;
+            if (rank(a) === 0) return (b.sinceSeconds - a.sinceSeconds) || (idx[a.id] - idx[b.id]);
+            var pa = a.project || "￿";   // unknown project sorts last, not first
+            var pb = b.project || "￿";
+            return pa.localeCompare(pb) || (b.sinceSeconds - a.sinceSeconds) || (idx[a.id] - idx[b.id]);
+        });
+    }
+
     return sessions.slice().sort(function (a, b) {
         return rank(a) - rank(b) || (b.sinceSeconds - a.sinceSeconds) || (idx[a.id] - idx[b.id]);
     });
+}
+
+/* A session's colour, reused as the ambient trace colour so the two channels agree.
+
+   CACHED, and that is not premature. This is read once per card per frame, so resolving it
+   through getComputedStyle each time would mean a style recalculation sixty times a second
+   for every card on the rail — a measurable cost imposed by the channel whose entire job is
+   to be cheap enough to leave running. Rebuilt on the theme message, which is the only thing
+   that can change the answer. */
+var colorCache = null;
+
+function rebuildColorCache() {
+    var css = getComputedStyle(document.body);
+    function v(name, fallback) { return (css.getPropertyValue(name) || "").trim() || fallback; }
+    colorCache = {
+        Working: v("--accent", "#89b4fa"),
+        Idle: v("--green", "#a6e3a1"),
+        BlockedQuestion: v("--mauve", "#cba6f7"),
+        BlockedPermission: v("--peach", "#fab387"),
+        BlockedUnknown: v("--peach", "#fab387"),
+        _default: v("--text-muted", "#707088")
+    };
+}
+
+function stateColor(state) {
+    if (!colorCache) rebuildColorCache();
+    return colorCache[state] || colorCache._default;
+}
+
+/* Project colours are derived from the name, not sent by the host: deterministic, stable
+   across restarts, and needing no plumbing for a project the registry has not been asked
+   about.
+
+   The palette is deliberately cool and desaturated, with NO red and NO amber in it. Those
+   two hues belong to the alarm channel, and a project that happened to be "the red one"
+   would read as a permanent emergency in the corner of the screen. */
+var PROJECT_HUES = ["#5b7bb0", "#4f8a72", "#7a6aa8", "#5f7285", "#6a8fa8", "#7d8a5e"];
+
+function projectColor(name) {
+    if (!name) return "";
+    var h = 0;
+    for (var i = 0; i < name.length; i++) { h = ((h << 5) - h + name.charCodeAt(i)) | 0; }
+    return PROJECT_HUES[Math.abs(h) % PROJECT_HUES.length];
+}
+
+function animFor(id) {
+    if (!anim[id]) anim[id] = { phase: Math.random() * 10, parts: [], walk: Math.random() * 20 };
+    return anim[id];
+}
+
+function isAcked(s) {
+    var a = acked[s.id];
+    return !!a && a.state === s.state;
 }
 
 function initials(name) {
@@ -251,7 +531,11 @@ function render() {
         /* NOT a <button>: the ticket chip is a nested control, and a button inside a button is
            invalid markup that silently breaks keyboard focus. */
         var card = document.createElement("div");
-        card.className = "card" + (s.state === "Offline" ? " offline" : "") + (isBlocking(s) ? " pulsing" : "");
+        card.className = "card"
+            + (s.state === "Offline" ? " offline" : "")
+            + (isBlocking(s) ? " pulsing" : "")
+            + (isBlocking(s) && isAcked(s) ? " acked" : "")
+            + (s.id === focusedId ? " focused" : "");
         card.setAttribute("role", "button");
         card.tabIndex = 0;
         card.setAttribute("data-id", s.id);
@@ -271,7 +555,15 @@ function render() {
         var n = document.createElement("span");
         n.className = "who-name"; n.textContent = s.agent || "(unnamed)";
         var pr = document.createElement("span");
-        pr.className = "who-proj"; pr.textContent = s.project || "";
+        pr.className = "who-proj";
+        if (s.project) {
+            var tick = document.createElement("i");
+            tick.className = "proj-tick";
+            tick.style.setProperty("--proj-c", projectColor(s.project));
+            var pname = document.createElement("span");
+            pname.textContent = s.project;
+            pr.appendChild(tick); pr.appendChild(pname);
+        }
         who.appendChild(n); who.appendChild(pr);
 
         var el = document.createElement("span");
@@ -285,6 +577,15 @@ function render() {
         var wrap = document.createElement("span");
         var verb = document.createElement("b"); verb.textContent = s.observedVerb || "";
         wrap.appendChild(verb);
+
+        /* The state is untouched by acknowledgement — this marker is the only thing that
+           changes, and it says what actually happened: the owner saw it. */
+        if (isBlocking(s) && isAcked(s)) {
+            var am = document.createElement("span");
+            am.className = "ack-mark";
+            am.textContent = "acknowledged";
+            wrap.appendChild(am);
+        }
         if (s.observedDetail) {
             var q = document.createElement("q"); q.textContent = s.observedDetail;
             wrap.appendChild(q);
@@ -310,6 +611,25 @@ function render() {
 
         card.appendChild(top); card.appendChild(obs);
 
+        /* The alarm overlays exist on every blocking card; CSS decides which one is visible,
+           so switching treatment never needs a re-render. */
+        if (isBlocking(s)) {
+            var bc = document.createElement("span"); bc.className = "beacon";
+            var kx = document.createElement("span"); kx.className = "klax";
+            card.appendChild(bc); card.appendChild(kx);
+        }
+
+        /* The stage, only for the canvas-drawn ambients. The CSS treatments and "off" cost
+           no height, so choosing a quiet option is quiet in layout too. */
+        if (CANVAS_AMBIENTS[ambient]) {
+            var stage = document.createElement("div");
+            stage.className = "stage";
+            var cv = document.createElement("canvas");
+            cv.setAttribute("data-id", s.id);
+            stage.appendChild(cv);
+            card.appendChild(stage);
+        }
+
         if (s.ticketId) {
             var cl = document.createElement("span");
             cl.className = "claimed";
@@ -329,9 +649,9 @@ function render() {
             card.appendChild(cl);
         }
 
-        card.addEventListener("click", function () { post({ type: "focus_session", sessionId: s.id }); });
+        card.addEventListener("click", function () { activate(s); });
         card.addEventListener("keydown", function (ev) {
-            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); post({ type: "focus_session", sessionId: s.id }); }
+            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activate(s); }
         });
 
         listEl.appendChild(card);
@@ -354,6 +674,81 @@ function render() {
     needsEl.setAttribute("data-count", String(n));
 }
 
+/* Clicking a card does TWO things, and they are different in kind (task 42052f0c).
+
+   FOCUS  — brings that terminal forward, and highlights the card. Marked optimistically
+            here so the click feels immediate; the host echoes the authoritative id back,
+            which is what keeps the highlight right when focus moves via a terminal tab
+            instead of a card.
+
+   ACK    — silences the alarm's MOTION only. The state, the stripe and the age are all
+            left exactly as they were, because the agent is still waiting. Acknowledging
+            is the owner saying "I have seen it"; only the agent may say "I am fine".
+            A falsely calm card is silent and indistinguishable from nobody needing you,
+            which is the failure this whole rail exists to prevent. */
+/* An acknowledgement covers ONE block, so it has to expire. Two ways it can:
+     - the state changed (the agent moved on, or is blocked on something else now);
+     - the block IDENTITY changed — enteredAtMs moved, meaning the state was re-entered, so
+       this is a NEW block of the same kind and must shout again rather than inherit the click.
+
+   The identity is the host's blockSeq — a COUNTER, not a clock. Two clocks were tried here
+   and both failed, which is why this comment is long (task 42052f0c, runs 1 and 2):
+
+     - sinceSeconds DROP. Age is whole seconds and the 1s ticker below increments the view's
+       own copy between pushes. Acknowledge inside the first second and the stored age is 0;
+       a fresh block also arrives at 0; `0 < 0` is false and the state is unchanged, so the
+       old click adopts the new block and a live alarm renders permanently calm.
+     - enteredAtMs. Finer, and still wrong twice over: the host only restamps that on a state
+       CHANGE, so a second prompt on an already-blocked card reused the first stamp; and two
+       notifications can genuinely land in the same millisecond. Every clock is a bet on
+       resolution.
+
+   A calm card is indistinguishable from nobody needing you — the one failure this rail
+   exists to prevent — so identity gets a counter, which has no resolution to run out of.
+
+   Widening `<` to `<=` was never the fix either: consecutive pushes inside one block
+   legitimately carry the same age, so that discards the acknowledgement almost immediately
+   and trades a silent alarm for one that refuses to stay quiet.
+
+   Hosts that never set blockSeq (0 on both sides) fall back to state-change expiry alone,
+   which is the pre-existing behaviour rather than a new failure. */
+function reconcileAcks() {
+    var live = Object.create(null);
+    sessions.forEach(function (s) { live[s.id] = s; });
+
+    Object.keys(acked).forEach(function (id) {
+        var s = live[id];
+        if (!s) { delete acked[id]; return; }                       // session gone
+        if (s.state !== acked[id].state) { delete acked[id]; return; }
+        if (blockId(s) !== acked[id].block) {
+            delete acked[id];                                        // state re-entered
+        }
+    });
+
+    if (focusedId && !live[focusedId]) focusedId = null;
+}
+
+/* The identity of the block a card is currently in. Normalised to a number so a missing or
+   malformed blockSeq compares equal to itself rather than throwing the ack away every push. */
+function blockId(s) {
+    return (s && typeof s.blockSeq === "number") ? s.blockSeq : 0;
+}
+
+/* Animation state outlives any one card element on purpose, so it must be pruned by
+   session id or a long-running panel accumulates one entry per terminal ever seen. */
+function pruneAnim() {
+    var live = Object.create(null);
+    sessions.forEach(function (s) { live[s.id] = 1; });
+    Object.keys(anim).forEach(function (id) { if (!live[id]) delete anim[id]; });
+}
+
+function activate(s) {
+    focusedId = s.id;
+    if (isBlocking(s)) acked[s.id] = { state: s.state, block: blockId(s) };
+    render();
+    post({ type: "focus_session", sessionId: s.id });
+}
+
 /* Attention-first would otherwise move a card out from under the cursor at exactly the moment
    several agents block at once -- which is when the owner is clicking fastest. Defer instead. */
 listEl.addEventListener("pointerenter", function () { pointerInList = true; });
@@ -365,6 +760,8 @@ listEl.addEventListener("pointerleave", function () {
 function applySessions(next) {
     sessions = next || [];
     haveReceivedData = true;
+    reconcileAcks();
+    pruneAnim();
     if (order === "attention" && pointerInList) {
         reshufflePending = true;
         var n = sessions.filter(isBlocking).length;
@@ -375,10 +772,74 @@ function applySessions(next) {
     render();
 }
 
-orderEl.addEventListener("change", function () {
-    order = orderEl.value;
-    post({ type: "set_order", order: order });
-    render();
+/* ---- the gear popover (task 42052f0c) ---- */
+
+function buildGroup(hostId, options, current, onPick) {
+    var host = document.getElementById(hostId);
+    host.textContent = "";
+    options.forEach(function (o) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "opt";
+        b.setAttribute("data-value", o[0]);
+        b.setAttribute("aria-pressed", String(o[0] === current));
+        var label = document.createElement("span");
+        label.textContent = o[1];
+        var hint = document.createElement("small");
+        hint.textContent = o[2];
+        b.appendChild(label); b.appendChild(hint);
+        b.addEventListener("click", function () { onPick(o[0]); });
+        host.appendChild(b);
+    });
+}
+
+function markGroup(hostId, value) {
+    var host = document.getElementById(hostId);
+    Array.prototype.forEach.call(host.children, function (b) {
+        b.setAttribute("aria-pressed", String(b.getAttribute("data-value") === value));
+    });
+}
+
+function buildPopover() {
+    buildGroup("grp-ambient", AMBIENTS, ambient, function (v) {
+        ambient = v;
+        markGroup("grp-ambient", v);
+        post({ type: "set_ambient", ambient: v });
+        applyChrome();
+        render();          // the stage appears/disappears with the treatment
+    });
+    buildGroup("grp-alarm", ALARMS, alarm, function (v) {
+        alarm = v;
+        markGroup("grp-alarm", v);
+        post({ type: "set_alarm", alarm: v });
+        applyChrome();     // pure CSS — no re-render needed
+    });
+    buildGroup("grp-order", ORDERS, order, function (v) {
+        order = v;
+        markGroup("grp-order", v);
+        post({ type: "set_order", order: v });
+        render();
+    });
+}
+
+function applyChrome() {
+    document.body.setAttribute("data-ambient", ambient);
+    document.body.setAttribute("data-alarm", alarm);
+}
+
+function setPopOpen(open) {
+    popEl.hidden = !open;
+    gearEl.setAttribute("aria-expanded", String(open));
+}
+
+gearEl.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    setPopOpen(popEl.hidden);
+});
+popEl.addEventListener("click", function (ev) { ev.stopPropagation(); });
+document.addEventListener("click", function () { setPopOpen(false); });
+document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && !popEl.hidden) { setPopOpen(false); gearEl.focus(); }
 });
 
 window.chrome.webview.addEventListener("message", function (ev) {
@@ -387,11 +848,26 @@ window.chrome.webview.addEventListener("message", function (ev) {
 
     if (msg.type === "theme") {
         document.body.classList.toggle("light", !msg.isDark);
+        rebuildColorCache();   // the only thing that changes what stateColor() resolves to
     } else if (msg.type === "sessions") {
         applySessions(msg.sessions);
     } else if (msg.type === "order") {
-        order = msg.order === "fixed" ? "fixed" : "attention";
-        orderEl.value = order;
+        order = msg.order || "attention";
+        markGroup("grp-order", order);
+        render();
+    } else if (msg.type === "ambient") {
+        ambient = msg.ambient || "stream";
+        markGroup("grp-ambient", ambient);
+        applyChrome();
+        render();
+    } else if (msg.type === "alarm") {
+        alarm = msg.alarm || "redalert";
+        markGroup("grp-alarm", alarm);
+        applyChrome();
+    } else if (msg.type === "focused") {
+        /* The host's word wins over the optimistic mark set on click — it is the only one
+           that knows about focus changed by clicking a terminal tab. */
+        focusedId = msg.sessionId || null;
         render();
     }
 });
@@ -408,7 +884,178 @@ setInterval(function () {
     });
 }, 1000);
 
+/* ============================================================================
+   THE AMBIENT LOOP (task 42052f0c)
+
+   One rAF for the whole rail, walking whatever canvases currently exist. It does no
+   work at all when the treatment is CSS-only or "off", and none when the pane is
+   hidden — WebView2 keeps a rAF loop running in a collapsed dock indefinitely, which
+   is real battery on a laptop for a panel nobody is looking at.
+
+   Motion is small-amplitude by design. This channel has to survive being shown on
+   eight cards simultaneously without becoming the thing you look at.
+   ============================================================================ */
+
+var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+var lastTs = 0;
+
+function loopActive() {
+    return !document.hidden && !!CANVAS_AMBIENTS[ambient] && !reduceMotion.matches;
+}
+
+function fitCanvas(cv) {
+    var r = cv.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.max(1, Math.round(r.width));
+    var h = Math.max(1, Math.round(r.height));
+    if (cv.width !== w * dpr || cv.height !== h * dpr) {
+        cv.width = w * dpr;
+        cv.height = h * dpr;
+    }
+    var g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { g: g, w: w, h: h };
+}
+
+/* A QRS-ish pulse over u in [0,1). Hand-shaped rather than sampled: the point is a
+   recognisable heartbeat silhouette at 18px tall, not clinical accuracy. */
+function beat(u) {
+    if (u < 0.10) return Math.sin(u / 0.10 * Math.PI) * 0.16;
+    if (u < 0.16) return 0;
+    if (u < 0.19) return -(u - 0.16) / 0.03 * 0.22;
+    if (u < 0.23) return -0.22 + (u - 0.19) / 0.04 * 1.22;
+    if (u < 0.27) return 1.00 - (u - 0.23) / 0.04 * 1.42;
+    if (u < 0.32) return -0.42 + (u - 0.27) / 0.05 * 0.42;
+    if (u < 0.46) return 0;
+    if (u < 0.64) return Math.sin((u - 0.46) / 0.18 * Math.PI) * 0.30;
+    return 0;
+}
+
+function drawVitals(st, s, g, w, h, dt) {
+    var mid = h * 0.6;
+    var live = s.state === "Working";
+    st.phase += dt * (live ? 0.00058 : 0);
+
+    g.strokeStyle = stateColor(s.state);
+    g.globalAlpha = live ? 0.9 : 0.4;
+    g.lineWidth = 1.3;
+    g.lineJoin = "round";
+    g.beginPath();
+    var amp = live ? h * 0.40 : 0;
+    for (var x = 0; x <= w; x++) {
+        var y = mid - (live ? beat(((x / 74) + st.phase) % 1) * amp : 0);
+        if (x === 0) { g.moveTo(x, y); } else { g.lineTo(x, y); }
+    }
+    g.stroke();
+    g.globalAlpha = 1;
+}
+
+function drawStream(st, s, g, w, h, dt) {
+    var live = s.state === "Working";
+    if (live && Math.random() < dt / 110) {
+        st.parts.push({
+            x: -3,
+            y: h * (0.22 + Math.random() * 0.62),
+            v: 0.026 + Math.random() * 0.045,
+            r: 0.9 + Math.random() * 1.3
+        });
+    }
+    g.fillStyle = stateColor(s.state);
+    for (var i = st.parts.length - 1; i >= 0; i--) {
+        var p = st.parts[i];
+        p.x += p.v * dt;
+        if (p.x > w + 3) { st.parts.splice(i, 1); continue; }
+        g.globalAlpha = 0.25 + (p.r / 2.2) * 0.5;
+        g.beginPath();
+        g.arc(p.x, p.y, p.r, 0, 6.283);
+        g.fill();
+    }
+    g.globalAlpha = 1;
+    /* An idle card keeps whatever particles are still in flight and spawns no more, so it
+       fades out rather than blinking empty. */
+}
+
+function drawWalker(st, s, g, w, h, dt) {
+    var ground = Math.round(h * 0.82);
+    var live = s.state === "Working";
+    var waving = isBlocking(s) && alarm === "hand" && !isAcked(s);
+
+    if (live) { st.walk += dt * 0.042; }
+    else if (waving) { st.walk += dt * 0.010; }
+
+    var t = st.walk;
+    var x = live ? (10 + (t % Math.max(20, w - 20))) : Math.round(w * 0.5);
+    var hipY = ground - 7;
+    var headY = hipY - 7.5;
+
+    g.strokeStyle = stateColor(s.state);
+    g.fillStyle = g.strokeStyle;
+    g.lineWidth = 1.3;
+    g.lineCap = "round";
+
+    g.beginPath(); g.arc(x, headY, 2.3, 0, 6.283); g.fill();
+    g.beginPath(); g.moveTo(x, headY + 2.4); g.lineTo(x, hipY); g.stroke();
+
+    g.beginPath();
+    if (s.state === "Idle") {                       // sitting
+        g.moveTo(x, hipY); g.lineTo(x + 4, hipY + 1); g.lineTo(x + 4, ground);
+        g.moveTo(x, hipY); g.lineTo(x - 1, ground);
+        g.moveTo(x, headY + 4); g.lineTo(x + 4, hipY - 1);
+        g.moveTo(x, headY + 4); g.lineTo(x - 3, hipY - 2);
+    } else if (waving) {
+        var wv = Math.sin(t * 1.5) * 0.5;
+        g.moveTo(x, hipY); g.lineTo(x - 2.5, ground);
+        g.moveTo(x, hipY); g.lineTo(x + 2.5, ground);
+        g.moveTo(x, headY + 4); g.lineTo(x + 5, headY - 3 + wv * 3);
+        g.moveTo(x, headY + 4); g.lineTo(x - 5, headY - 2 - wv * 3);
+    } else if (live) {
+        var sw = Math.sin(t * 0.5);
+        g.moveTo(x, hipY); g.lineTo(x + sw * 5, ground);
+        g.moveTo(x, hipY); g.lineTo(x - sw * 5, ground);
+        g.moveTo(x, headY + 4); g.lineTo(x - sw * 4.5, hipY - 1);
+        g.moveTo(x, headY + 4); g.lineTo(x + sw * 4.5, hipY - 1);
+    } else {                                        // standing, nothing observed
+        g.moveTo(x, hipY); g.lineTo(x - 2.5, ground);
+        g.moveTo(x, hipY); g.lineTo(x + 2.5, ground);
+        g.moveTo(x, headY + 4); g.lineTo(x - 3.5, hipY - 1);
+        g.moveTo(x, headY + 4); g.lineTo(x + 3.5, hipY - 1);
+    }
+    g.stroke();
+}
+
+function frame(ts) {
+    var dt = lastTs ? Math.min(ts - lastTs, 60) : 16;
+    lastTs = ts;
+
+    if (loopActive()) {
+        var byId = Object.create(null);
+        sessions.forEach(function (s) { byId[s.id] = s; });
+
+        var canvases = listEl.querySelectorAll("canvas");
+        for (var i = 0; i < canvases.length; i++) {
+            var cv = canvases[i];
+            var s = byId[cv.getAttribute("data-id")];
+            if (!s) continue;
+            var fit = fitCanvas(cv);
+            fit.g.clearRect(0, 0, fit.w, fit.h);
+            var st = animFor(s.id);
+            if (ambient === "vitals") { drawVitals(st, s, fit.g, fit.w, fit.h, dt); }
+            else if (ambient === "stream") { drawStream(st, s, fit.g, fit.w, fit.h, dt); }
+            else if (ambient === "walker") { drawWalker(st, s, fit.g, fit.w, fit.h, dt); }
+        }
+    }
+
+    requestAnimationFrame(frame);
+}
+
+/* A hidden pane resumes cleanly rather than jumping: the elapsed time while hidden must
+   not arrive as one enormous dt. */
+document.addEventListener("visibilitychange", function () { lastTs = 0; });
+
+applyChrome();
+buildPopover();
 render();
+requestAnimationFrame(frame);
 post({ type: "ready" });
 </script>
 </body>

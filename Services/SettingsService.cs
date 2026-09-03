@@ -125,6 +125,8 @@ namespace MultiTerminal.Services
         // Terminal font size settings
         private const string TerminalFontSizeKey = "TerminalFontSize";
         private const string AttentionPanelOrderKey = "AttentionPanelOrder";
+        private const string AttentionPanelAmbientKey = "AttentionPanelAmbient";
+        private const string AttentionPanelAlarmKey = "AttentionPanelAlarm";
         private const float DefaultTerminalFontSize = 10f;
         private const float MinTerminalFontSize = 6f;
         private const float MaxTerminalFontSize = 32f;
@@ -385,8 +387,7 @@ namespace MultiTerminal.Services
         /// </remarks>
         public string GetAttentionPanelOrder()
         {
-            string value = Get(AttentionPanelOrderKey);
-            return string.Equals(value, "fixed", StringComparison.OrdinalIgnoreCase) ? "fixed" : "attention";
+            return NormalizeAttentionOrder(Get(AttentionPanelOrderKey));
         }
 
         /// <summary>
@@ -395,9 +396,79 @@ namespace MultiTerminal.Services
         /// </summary>
         public void SetAttentionPanelOrder(string order)
         {
-            Set(AttentionPanelOrderKey,
-                string.Equals(order, "fixed", StringComparison.OrdinalIgnoreCase) ? "fixed" : "attention");
+            Set(AttentionPanelOrderKey, NormalizeAttentionOrder(order));
         }
+
+        /// <summary>
+        /// Card ordering modes the attention panel understands.
+        /// </summary>
+        /// <remarks>
+        /// <c>project</c> (task 42052f0c) groups the calm cards by project. It does NOT outrank a
+        /// blocking agent in any mode — the panel ranks blocking first and then applies the mode to
+        /// what is left, so the one thing the rail exists to surface can never be filed away under
+        /// a heading.
+        /// </remarks>
+        private static readonly string[] AttentionOrders = { "attention", "fixed", "project" };
+
+        /// <summary>
+        /// Ambient treatments — the "is it working?" channel, running on every card at once.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>off</c> is not an oversight, it is load-bearing. A user who finds all motion irritating
+        /// and is given no way to stop it closes the whole pane — and then the ALARM cannot reach
+        /// them either. Offering <c>off</c> is what keeps the alarm channel reachable.
+        /// </para>
+        /// <para>
+        /// The default is <c>stream</c> (Owner's choice), the quietest of the motion treatments.
+        /// That pairing is deliberate: the ambient channel stays near-silent so the alarm has
+        /// contrast left to spend. A change that makes the ambient treatment more eye-catching is
+        /// spending the alarm's budget, whatever it does to this list.
+        /// </para>
+        /// </remarks>
+        private static readonly string[] AttentionAmbients = { "stream", "vitals", "walker", "rail", "breath", "off" };
+
+        /// <summary>Alarm treatments — the rare "does it need me?" channel.</summary>
+        private static readonly string[] AttentionAlarms = { "redalert", "beacon", "klaxon", "hand" };
+
+        /// <summary>
+        /// Normalises a stored value against an allowlist, falling back to the first entry.
+        /// </summary>
+        /// <remarks>
+        /// The panel is driven by these strings, so an unrecognised one would select a treatment
+        /// that does not exist and render a card with no ambient layer and no error to explain it.
+        /// settings.txt is a plaintext file a user can edit, and a value can also survive a rename
+        /// across versions, so "trust what is stored" is not available. Same discipline as
+        /// <see cref="GetAttentionPanelOrder"/> has always applied.
+        /// </remarks>
+        private static string NormalizeFrom(string[] allowed, string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                foreach (var candidate in allowed)
+                {
+                    if (string.Equals(candidate, value.Trim(), StringComparison.OrdinalIgnoreCase)) return candidate;
+                }
+            }
+
+            return allowed[0];
+        }
+
+        private static string NormalizeAttentionOrder(string order) => NormalizeFrom(AttentionOrders, order);
+
+        /// <summary>Gets the attention panel's ambient (activity) treatment. Defaults to "stream".</summary>
+        public string GetAttentionPanelAmbient() => NormalizeFrom(AttentionAmbients, Get(AttentionPanelAmbientKey));
+
+        /// <summary>Sets the attention panel's ambient treatment. Unknown values store the default.</summary>
+        public void SetAttentionPanelAmbient(string ambient)
+            => Set(AttentionPanelAmbientKey, NormalizeFrom(AttentionAmbients, ambient));
+
+        /// <summary>Gets the attention panel's alarm treatment. Defaults to "redalert".</summary>
+        public string GetAttentionPanelAlarm() => NormalizeFrom(AttentionAlarms, Get(AttentionPanelAlarmKey));
+
+        /// <summary>Sets the attention panel's alarm treatment. Unknown values store the default.</summary>
+        public void SetAttentionPanelAlarm(string alarm)
+            => Set(AttentionPanelAlarmKey, NormalizeFrom(AttentionAlarms, alarm));
 
         /// <summary>
         /// Gets the prompts panel font size (8-14pt range).

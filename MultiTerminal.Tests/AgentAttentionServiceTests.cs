@@ -333,8 +333,56 @@ namespace MultiTerminal.Tests
             Assert.Equal(AttentionState.BlockedPermission, svc.Get(Session).State);
         }
 
+        /// <summary>
+        /// A repeated NON-blocking notification is a no-op and must stay quiet.
+        /// </summary>
+        /// <remarks>
+        /// This is the half of the original assertion that was actually protecting something: an
+        /// agent whose state has not moved should not spam the panel with repaints.
+        /// <para>
+        /// It used to assert the same for a repeated <c>permission_prompt</c>, and that half was
+        /// wrong — see <see cref="A_repeated_blocking_notification_is_a_new_block_and_must_fire"/>
+        /// for why (task 42052f0c, pipeline run 3).
+        /// </para>
+        /// </remarks>
         [Fact]
-        public void AttentionChanged_fires_on_change_and_stays_quiet_on_a_no_op()
+        public void AttentionChanged_stays_quiet_on_a_non_blocking_no_op()
+        {
+            var svc = new AgentAttentionService();
+            int fired = 0;
+            svc.AttentionChanged += (s, e) => fired++;
+
+            svc.ApplyNotification(Notification("idle_prompt", message: "same"));
+            Assert.Equal(1, fired);
+
+            svc.ApplyNotification(Notification("idle_prompt", message: "same"));
+            Assert.Equal(1, fired);
+        }
+
+        /// <summary>
+        /// A repeated BLOCKING notification is a new block, and must fire even though every
+        /// displayed field is identical.
+        /// </summary>
+        /// <remarks>
+        /// This test previously asserted the opposite, and that assertion encoded the defect rather
+        /// than guarding against it (task 42052f0c, pipeline run 3).
+        /// <para>
+        /// Two permission prompts for the same tool are indistinguishable: same message, both
+        /// <c>tool_use_id</c>s null — Claude Code does not send one on a Notification, confirmed
+        /// from the live presence-only diagnostic added for task 2289bb8a item 0 — and, while the
+        /// polled clear edge is still outstanding, the same state and activity line too. Treating
+        /// that as a no-op means the panel is never told, so the acknowledgement the owner gave the
+        /// FIRST prompt silently covers the second and a live alarm renders calm. The panel is
+        /// repainted only by this event; there is no timer that would catch up later.
+        /// </para>
+        /// <para>
+        /// The cost of being wrong the other way is one extra repaint and an alarm that shouts
+        /// again — visible, and dismissible with a click. This file's governing asymmetry already
+        /// says which way to break that tie.
+        /// </para>
+        /// </remarks>
+        [Fact]
+        public void A_repeated_blocking_notification_is_a_new_block_and_must_fire()
         {
             var svc = new AgentAttentionService();
             int fired = 0;
@@ -342,9 +390,11 @@ namespace MultiTerminal.Tests
 
             svc.ApplyNotification(Notification("permission_prompt", message: "same"));
             Assert.Equal(1, fired);
+            long first = svc.Get(Session).BlockSeq;
 
             svc.ApplyNotification(Notification("permission_prompt", message: "same"));
-            Assert.Equal(1, fired);
+            Assert.Equal(2, fired);
+            Assert.NotEqual(first, svc.Get(Session).BlockSeq);
         }
 
         // ─────────────────────────────────────────────────────────────────

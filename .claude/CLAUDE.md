@@ -60,6 +60,7 @@ Present-but-unparseable or clamped values are logged (`DebugLogService` "CodeGra
 2. Create inner control with WebView2 or custom renderer
 3. Add `Initialize(MessageBroker broker)` and `ApplyTheme(bool isDark)` methods
 4. In MainForm: instantiate, Initialize(), wire events, add toolbar toggle button
+5. Add a `persistString == "{Name}Panel"` case to `MainForm.GetContentFromPersistString` — this is what re-binds the pane from `layout.xml` on restart. Without it the pane is silently dropped every launch (`RestoreSinglePanel` only runs when there is no layout file). `PanelPersistRosterTests` fails the build if a declared persist string has no loader case.
 
 **Adding a Backend Feature:**
 1. Add model to `MCPServer/Models/`

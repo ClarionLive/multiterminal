@@ -10,7 +10,7 @@ namespace MultiTerminal.MCPServer.Services
     /// Shows manager-level view: plan lifecycle, phase transitions, builds.
     /// NOT for granular updates or chat messages.
     /// </summary>
-    public class ActivityFeedService : IDisposable
+    public class ActivityFeedService : IDisposable, IActivityFeedReader
     {
         private readonly string _databasePath;
         private readonly DbGate _gate = new DbGate();
@@ -443,17 +443,35 @@ namespace MultiTerminal.MCPServer.Services
             return entries;
         }
 
+        /// <summary>
+        /// Materialises one row. Never throws on the row's CONTENT: a bad timestamp or an
+        /// unexpected NULL degrades to a safe value rather than an exception.
+        /// </summary>
+        /// <remarks>
+        /// Rows are written by a separate process, and a reader that throws on one row throws for
+        /// the whole batch — <c>AgentActivityWatcher</c> then cannot advance its watermark past
+        /// that row, so the same unreadable row heads every batch forever and everything behind it
+        /// is starved (pipeline run 1, security finding). An unparseable timestamp becomes
+        /// <see cref="DateTime.MinValue"/> in UTC, which every consumer treats as "older than
+        /// anything" — the safe direction: it can never clear a block raised after it.
+        /// </remarks>
         private ActivityFeedEntry ReadEntry(SQLiteDataReader reader)
         {
+            string rawTimestamp = reader.IsDBNull(1) ? null : reader.GetString(1);
+            DateTime timestamp = rawTimestamp != null
+                && DateTime.TryParse(rawTimestamp, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed
+                : DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
+
             var entry = new ActivityFeedEntry
             {
                 Id = reader.GetInt64(0),
-                Timestamp = DateTime.Parse(reader.GetString(1)),
-                ActivityType = reader.GetString(2),
+                Timestamp = timestamp,
+                ActivityType = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
                 PlanId = reader.IsDBNull(3) ? null : reader.GetString(3),
                 PhaseId = reader.IsDBNull(4) ? null : reader.GetString(4),
                 Actor = reader.IsDBNull(5) ? null : reader.GetString(5),
-                Summary = reader.GetString(6),
+                Summary = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
                 Severity = reader.IsDBNull(7) ? "info" : reader.GetString(7),
                 DetailsJson = reader.IsDBNull(8) ? null : reader.GetString(8)
             };

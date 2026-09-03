@@ -665,24 +665,10 @@ namespace MultiTerminal
                 };
                 _codeGraphWatcher.Start();
 
-                // Wire up AgentActivityWatcher — the caller AgentAttentionService.NoteObservedActivity
-                // never had (task edcdcdd5). Without it a block is set and stays set forever, and the
-                // rail shows a frozen notification message in the position of a live observation.
-                if (_mcpServer?.Broker?.ActivityFeedService != null && _mcpServer.Broker.AgentAttention != null)
-                {
-                    _agentActivityWatcher = new MCPServer.Services.AgentActivityWatcher(
-                        _mcpServer.Broker.ActivityFeedService,
-                        _mcpServer.Broker.AgentAttention,
-                        msg => _debugLogService?.Info("AgentActivityWatcher", msg));
-                    _agentActivityWatcher.Start();
-                }
-                else
-                {
-                    _debugLogService?.Warning(
-                        "AgentActivityWatcher",
-                        "Not started: ActivityFeedService or AgentAttention unavailable. The attention "
-                        + "rail will show blocks that never clear.");
-                }
+                // AgentActivityWatcher is NOT constructed here. It needs Broker.ActivityFeedService,
+                // which the REST host assigns inside StartAsync — later than this line. The first
+                // cut lived here behind a null-guard, so it logged "Not started" on every launch and
+                // the rail never moved (task edcdcdd5). See StartAgentActivityWatcher().
 
                 // Wire up WikiGeneratorService — produces per-subsystem markdown articles
                 _mcpServer.Broker.WikiGenerator = new Services.WikiGeneratorService(
@@ -899,6 +885,11 @@ namespace MultiTerminal
                 // Push notification support - map terminal IDs to documents
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 15: Wiring TerminalRegistered event");
                 _mcpServer.Broker.TerminalRegistered += OnMcpTerminalRegistered;
+
+                // A closed terminal takes its attention card with it (task edcdcdd5). Before this,
+                // Remove/MarkOffline had no caller at all, so the rail kept cards for terminals that
+                // no longer existed.
+                _mcpServer.Broker.TerminalDisconnected += OnMcpTerminalDisconnectedForAttention;
                 _debugLogService?.Trace("InitializeMcpServerAndChatPanel", "Step 16: Setting OnMessageDelivery");
                 _mcpServer.Broker.OnMessageDelivery = OnMcpMessageDelivery;
 
@@ -1000,6 +991,10 @@ namespace MultiTerminal
                                 Services.WriteContentionDiagnostics.LogBusy("MainForm.CrashRecovery", crEx.Message);
                             }
                         }
+
+                        // The REST host has assigned Broker.ActivityFeedService by now, so the
+                        // attention rail's poller can actually be built (task edcdcdd5).
+                        StartAgentActivityWatcher();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -1633,6 +1628,28 @@ namespace MultiTerminal
             {
                 _debugLogService?.Info("MainForm", $"Ignoring temporary agent registration: {e.Name}");
                 return;
+            }
+
+            // The attention card exists from the moment the terminal does, not from its first
+            // notification 10-15s later (task edcdcdd5). Pre-registration raises this event before
+            // the shell even launches, which is the earliest point the agent has a name.
+            //
+            // EXCEPT the "Unassigned" sentinel. Session restore registers every terminal under that
+            // shared name and the broker later RENAMES the TerminalInfo in place (no disconnect is
+            // ever raised for "Unassigned"), so a card minted here would be a permanent phantom
+            // shared by N terminals. The broker skips profile creation for it for the same reason.
+            // The card appears on the real-name re-registration seconds later (pipeline run 1).
+            if (!IsUnassignedSentinel(e.Name))
+            {
+                try
+                {
+                    _mcpServer?.Broker?.AgentAttention?.NoteTerminalStarted(e.Name);
+                }
+                catch (Exception attnEx)
+                {
+                    // Must not abort the terminal-to-document mapping below.
+                    _debugLogService?.Error("AttentionPanel", $"Card creation on register failed: {attnEx.Message}");
+                }
             }
 
             // Map the MCP terminal ID to the TerminalDocument
@@ -3101,6 +3118,11 @@ namespace MultiTerminal
                 _settings.Set("Panel_ProjectPanel_Visible", "true");
                 _settings.Set("Panel_ProjectPanel_DockState", "DockLeft");
             }
+
+            // The Attention Rail is constructed in InitializeDockPanel, which runs BEFORE this
+            // method — so its preferences cannot be loaded at wiring time and are pushed here,
+            // once _settings exists (task 42052f0c, pipeline run 1).
+            ApplyAttentionPanelSettings();
 
             // Panel visibility is restored in RestorePanelStates() called from RestoreSession
         }
@@ -4759,6 +4781,10 @@ namespace MultiTerminal
             {
                 var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
 
+                // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
+                // not just focus it requested itself (task 42052f0c, pipeline run 1).
+                SyncAttentionPanelFocus(activeDoc);
+
                 // Update focus borders on all terminals
                 SuspendLayout();
                 foreach (var termDoc in _gridManager.GetTerminalDocuments())
@@ -5852,6 +5878,19 @@ namespace MultiTerminal
                 return _inboxPanel;
             }
 
+            // Missing until task edcdcdd5: the pane declared "AttentionPanel" as its persist string
+            // but nothing here answered to it, so LoadFromXml got null and silently dropped the pane
+            // on every restart. RestoreSinglePanel only runs on the no-layout-file path.
+            if (persistString == "AttentionPanel")
+            {
+                if (_attentionPanel == null || _attentionPanel.IsDisposed)
+                {
+                    _attentionPanel = new AttentionPanel.AttentionPanelDocument();
+                    WireAttentionPanel();
+                }
+                return _attentionPanel;
+            }
+
             if (persistString == "OfficePanel")
             {
                 if (_officePanel == null || _officePanel.IsDisposed)
@@ -6757,6 +6796,72 @@ namespace MultiTerminal
         }
 
         /// <summary>
+        /// Builds and starts the poller that feeds observed tool activity into the attention
+        /// rail (task edcdcdd5). Must run AFTER <c>_mcpServer.StartAsync()</c>: the REST host is
+        /// what assigns <c>Broker.ActivityFeedService</c>, and constructing this earlier is exactly
+        /// the bug that shipped first — a null-guard that logged "Not started" on every launch.
+        /// </summary>
+        private void StartAgentActivityWatcher()
+        {
+            try
+            {
+                if (_agentActivityWatcher != null) return;
+
+                var broker = _mcpServer?.Broker;
+                if (broker?.ActivityFeedService == null || broker.AgentAttention == null)
+                {
+                    _debugLogService?.Warning(
+                        "AgentActivityWatcher",
+                        "Not started: ActivityFeedService or AgentAttention unavailable AFTER StartAsync. "
+                        + "The attention rail will show blocks that never clear.");
+                    return;
+                }
+
+                // Start() arms its timer even when the first watermark read fails and retries on
+                // every tick, so holding the instance here cannot strand a dead watcher behind the
+                // idempotence guard above (pipeline run 1, adversary finding).
+                var watcher = new MCPServer.Services.AgentActivityWatcher(
+                    broker.ActivityFeedService,
+                    broker.AgentAttention,
+                    msg => _debugLogService?.Info("AgentActivityWatcher", msg));
+                watcher.Start();
+                _agentActivityWatcher = watcher;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("AgentActivityWatcher", $"Failed to start: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// The shared placeholder name every restored/anonymous terminal carries until its agent
+        /// registers a real one. Not an identity: the broker itself skips profile creation for it.
+        /// </summary>
+        private static bool IsUnassignedSentinel(string name)
+            => string.Equals(name, "Unassigned", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// A terminal went away; its attention card goes with it (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// Keyed by agent name because that is what the broker knows about a terminal. The service
+        /// is thread-safe and the panel repaint is marshalled by <see cref="OnAgentAttentionChanged"/>,
+        /// so this can run on whatever thread the broker raises the event from.
+        /// </remarks>
+        private void OnMcpTerminalDisconnectedForAttention(object sender, TerminalInfo e)
+        {
+            try
+            {
+                if (e == null || IsTemporaryAgent(e.Name) || IsUnassignedSentinel(e.Name)) return;
+                _mcpServer?.Broker?.AgentAttention?.NoteTerminalGone(e.Name);
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("AttentionPanel", $"Card removal on disconnect failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Rebuilds the attention panel's cards from observed state plus board claims
         /// (task 2289bb8a item 5).
         /// </summary>
@@ -6781,7 +6886,29 @@ namespace MultiTerminal
                     if (t?.Name != null && !colors.ContainsKey(t.Name)) colors[t.Name] = t.Color;
                 }
 
+                // Project id -> display name, so a claimed task can name the project it belongs to.
+                // Built once per refresh rather than per agent: the registry read is the expensive
+                // half and every agent would otherwise repeat it.
+                var projectNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var p in broker.GetProjectsList())
+                    {
+                        if (p?.Id != null && !string.IsNullOrWhiteSpace(p.Name)) projectNames[p.Id] = p.Name;
+                    }
+                }
+                catch (Exception projEx)
+                {
+                    // A registry hiccup costs the project LINE, not the rail. Cards still render.
+                    _debugLogService?.Info("AttentionPanel", $"Project name lookup failed: {projEx.Message}");
+                }
+
                 var claims = new Dictionary<string, AttentionPanel.AttentionTicketClaim>(StringComparer.OrdinalIgnoreCase);
+
+                // Fallback project per agent, for the many terminals that never block and so never
+                // receive the notification that is the ONLY writer of entry.Project (task 42052f0c).
+                var agentProjects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
                 foreach (var task in broker.GetTasks())
                 {
                     if (task == null || string.IsNullOrWhiteSpace(task.Assignee)) continue;
@@ -6798,10 +6925,24 @@ namespace MultiTerminal
                         ItemLabel = DescribeChecklistPosition(task),
                         UpdatedAtUtc = task.UpdatedAt,
                     };
+
+                    // Same winner as the claim above (newest in-progress task), so the project line
+                    // and the ticket chip can never describe two different tickets.
+                    if (task.ProjectId != null && projectNames.TryGetValue(task.ProjectId, out var pname))
+                    {
+                        agentProjects[task.Assignee] = pname;
+                    }
+                    else
+                    {
+                        // The claim moved to a task whose project cannot be named. Drop any name
+                        // carried over from the PREVIOUS winner rather than leaving it attached to
+                        // a ticket it no longer describes.
+                        agentProjects.Remove(task.Assignee);
+                    }
                 }
 
                 var cards = AttentionPanel.AttentionCardProjector.Project(
-                    broker.AgentAttention.Snapshot(), colors, claims, DateTime.UtcNow);
+                    broker.AgentAttention.Snapshot(), colors, claims, DateTime.UtcNow, agentProjects);
 
                 _attentionPanel.SetSessions(cards);
             }
@@ -6836,10 +6977,58 @@ namespace MultiTerminal
         {
             if (_attentionPanel == null) return;
 
-            _attentionPanel.FocusSessionRequested += (s, sessionId) => FocusTerminalForSession(sessionId);
+            _attentionPanel.FocusSessionRequested += (s, sessionId) =>
+            {
+                // Echo the click back only if a terminal was actually focused. The view highlights
+                // optimistically the instant a card is clicked; confirming unconditionally would
+                // leave that optimistic mark standing for a card whose terminal is gone, which is
+                // the highlight claiming focus landed somewhere it did not (task 42052f0c).
+                if (FocusTerminalForSession(sessionId)) _attentionPanel?.SetFocusedSession(sessionId);
+                else _attentionPanel?.SetFocusedSession(null);
+            };
             _attentionPanel.OpenTicketRequested += (s, taskId) => OpenTicketInTasksPanel(taskId);
-            _attentionPanel.SetOrder(_settings?.GetAttentionPanelOrder() ?? "attention");
+
             _attentionPanel.OrderChanged += (s, order) => _settings?.SetAttentionPanelOrder(order);
+            _attentionPanel.AmbientChanged += (s, ambient) => _settings?.SetAttentionPanelAmbient(ambient);
+            _attentionPanel.AlarmChanged += (s, alarm) => _settings?.SetAttentionPanelAlarm(alarm);
+
+            // Covers the two RECREATE paths (GetContentFromPersistString, ToggleAttentionPanel),
+            // which run long after LoadSettings and so must re-push the stored preferences
+            // themselves. On the CONSTRUCTION path this is a deliberate no-op — see
+            // ApplyAttentionPanelSettings.
+            ApplyAttentionPanelSettings();
+        }
+
+        /// <summary>
+        /// Pushes the stored Attention Rail preferences into the panel.
+        /// </summary>
+        /// <remarks>
+        /// Separate from <see cref="WireAttentionPanel"/> because subscribing and loading have
+        /// different timing requirements, and conflating them silently discarded every saved
+        /// preference (task 42052f0c, pipeline run 1).
+        /// <para>
+        /// <c>WireAttentionPanel</c> is called from <c>InitializeDockPanel</c>, which the
+        /// constructor runs BEFORE <c>LoadSettings</c> — and <c>LoadSettings</c> is where
+        /// <c>_settings</c> is first assigned. So the loads read a null <c>_settings</c>, the
+        /// <c>?? "default"</c> fallbacks fired every launch, and the rail always came up on the
+        /// defaults. The saves worked, which is what made it invisible: a preference appeared to
+        /// take, then reverted on next start with nothing failing. <c>order</c> had this defect
+        /// before this ticket; the ticket copied the shape twice more, which is how it was caught.
+        /// </para>
+        /// <para>
+        /// The null guard is what makes calling this from <c>WireAttentionPanel</c> safe on the
+        /// construction path: it returns rather than pushing wrong defaults, and
+        /// <c>LoadSettings</c> calls it again a moment later with real values. Pushing early would
+        /// be harmless but dishonest — it would look like the preferences had been applied.
+        /// </para>
+        /// </remarks>
+        private void ApplyAttentionPanelSettings()
+        {
+            if (_attentionPanel == null || _settings == null) return;
+
+            _attentionPanel.SetOrder(_settings.GetAttentionPanelOrder());
+            _attentionPanel.SetAmbient(_settings.GetAttentionPanelAmbient());
+            _attentionPanel.SetAlarm(_settings.GetAttentionPanelAlarm());
         }
 
         /// <summary>
@@ -6856,9 +7045,13 @@ namespace MultiTerminal
         /// tried, in that order.
         /// </para>
         /// </remarks>
-        private void FocusTerminalForSession(string sessionKey)
+        /// <returns>
+        /// <c>true</c> when a terminal was found and focused. Callers use this to avoid asserting a
+        /// focus change that did not happen (task 42052f0c, pipeline run 1).
+        /// </returns>
+        private bool FocusTerminalForSession(string sessionKey)
         {
-            if (string.IsNullOrWhiteSpace(sessionKey)) return;
+            if (string.IsNullOrWhiteSpace(sessionKey)) return false;
 
             string agentName = _mcpServer?.Broker?.AgentAttention?.Get(sessionKey)?.AgentName;
             if (string.IsNullOrWhiteSpace(agentName)) agentName = sessionKey;
@@ -6869,12 +7062,47 @@ namespace MultiTerminal
             if (doc == null)
             {
                 _debugLogService?.Trace("AttentionPanel", $"No terminal found for session '{sessionKey}' (agent '{agentName}')");
-                return;
+                return false;
             }
 
             doc.Activate();
             doc.FocusTerminal();
             _lastActiveTerminal = doc;
+            return true;
+        }
+
+        /// <summary>
+        /// Tells the Attention Rail which session has focus when focus changed OUTSIDE the rail.
+        /// </summary>
+        /// <remarks>
+        /// This is the caller the rail's focus contract always described and never had. Both
+        /// <c>SetFocusedSession</c>'s own remarks and the view's optimistic-highlight comment
+        /// claimed the host corrected the highlight when the owner switched terminals by clicking a
+        /// TAB — but the only call site was the echo inside <c>FocusSessionRequested</c>, which
+        /// merely repeated the id the view had just set itself. The highlight was therefore click
+        /// history wearing the label of focus, and it was wrong in exactly the case it was
+        /// documented to handle (task 42052f0c, pipeline run 1).
+        /// <para>
+        /// Resolution mirrors <see cref="FocusTerminalForSession"/> in reverse: the panel keys cards
+        /// by session id where one is known, and by agent name otherwise, so this prefers the
+        /// observed session id and falls back to the terminal's own name. A non-terminal document
+        /// clears the highlight rather than leaving it stale — no agent terminal has focus, and
+        /// saying nothing would let the previous card keep claiming it.
+        /// </para>
+        /// </remarks>
+        private void SyncAttentionPanelFocus(TerminalDocument activeDoc)
+        {
+            if (_attentionPanel == null) return;
+
+            string agentName = activeDoc?.CustomTitle;
+            if (string.IsNullOrWhiteSpace(agentName))
+            {
+                _attentionPanel.SetFocusedSession(null);
+                return;
+            }
+
+            string sessionId = _mcpServer?.Broker?.AgentAttention?.GetByAgent(agentName)?.SessionId;
+            _attentionPanel.SetFocusedSession(string.IsNullOrWhiteSpace(sessionId) ? agentName : sessionId);
         }
 
         /// <summary>
