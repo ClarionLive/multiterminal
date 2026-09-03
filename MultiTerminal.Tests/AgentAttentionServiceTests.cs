@@ -102,16 +102,34 @@ namespace MultiTerminal.Tests
         // Set edge
         // ─────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// The two raw types are distinct states, not interchangeable flavours of "blocked".
+        /// </summary>
+        /// <remarks>
+        /// ONE CARD PER FLAVOUR, DELIBERATELY (task ee17f42d, live test 1). This used to apply both
+        /// notifications to the SAME session in sequence, which asserted the intended thing and
+        /// also — by accident, and unremarked — pinned "a permission_prompt landing on a question
+        /// block wins". That is the Owner-reported bug: Claude Code emits its own permission_prompt
+        /// ~6s after every AskUserQuestion, so under the old behaviour a card raised honestly as
+        /// "Asked you a question" relabelled itself "Needs permission" while the question was still
+        /// on screen.
+        /// <para>
+        /// Separate cards keep this test asserting what its NAME says — that the mapping
+        /// distinguishes the two — without also asserting an overwrite rule it was never about.
+        /// Sequential-arrival behaviour is now covered explicitly, and on purpose, in
+        /// <c>AskUserQuestionBlockTests</c>.
+        /// </para>
+        /// </remarks>
         [Fact]
         public void Question_and_permission_are_distinct_states()
         {
-            var svc = new AgentAttentionService();
+            var asked = new AgentAttentionService();
+            asked.ApplyNotification(Notification("elicitation_dialog"));
+            Assert.Equal(AttentionState.BlockedQuestion, asked.Get(Session).State);
 
-            svc.ApplyNotification(Notification("elicitation_dialog"));
-            Assert.Equal(AttentionState.BlockedQuestion, svc.Get(Session).State);
-
-            svc.ApplyNotification(Notification("permission_prompt"));
-            Assert.Equal(AttentionState.BlockedPermission, svc.Get(Session).State);
+            var permission = new AgentAttentionService();
+            permission.ApplyNotification(Notification("permission_prompt"));
+            Assert.Equal(AttentionState.BlockedPermission, permission.Get(Session).State);
         }
 
         /// <summary>

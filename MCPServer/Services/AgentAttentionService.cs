@@ -136,6 +136,40 @@ namespace MultiTerminal.MCPServer.Services
             state == AttentionState.BlockedQuestion ||
             state == AttentionState.BlockedPermission ||
             state == AttentionState.BlockedUnknown;
+
+        /// <summary>
+        /// How certain a blocking state's PROVENANCE is. Higher means the flavour was reported by
+        /// something that could not have meant anything else. Non-blocking states rank 0.
+        /// </summary>
+        /// <remarks>
+        /// This is a ranking of how much the SIGNAL knew, not of how urgent the block is — a
+        /// permission request and a question are equally "the owner must act".
+        /// <para>
+        /// <c>ask_user_question</c> is emitted by a PreToolUse hook that saw the tool name. It
+        /// cannot describe anything else, so it ranks highest.
+        /// </para>
+        /// <para>
+        /// <c>permission_prompt</c> ranks below it because Claude Code emits that same type as its
+        /// GENERIC "waiting for your input" notification — measured live on 2026-09-03, one landed
+        /// 6.2s and 6.1s after two <c>AskUserQuestion</c>s that were not permission requests at
+        /// all. So the type is a real signal about a real block, but it is not reliable evidence of
+        /// the FLAVOUR.
+        /// </para>
+        /// <para>
+        /// <c>BlockedUnknown</c> ranks lowest by definition: it is the flattened
+        /// <c>permission_request</c> with no <c>raw_type</c> at all.
+        /// </para>
+        /// </remarks>
+        internal static int BlockCertainty(AttentionState state)
+        {
+            switch (state)
+            {
+                case AttentionState.BlockedQuestion: return 3;
+                case AttentionState.BlockedPermission: return 2;
+                case AttentionState.BlockedUnknown: return 1;
+                default: return 0;
+            }
+        }
     }
 
     /// <summary>
@@ -284,6 +318,42 @@ namespace MultiTerminal.MCPServer.Services
                 if (state == AttentionState.Idle
                     && _entries.TryGetValue(key, out var blocked)
                     && blocked.IsBlocking)
+                {
+                    return false;
+                }
+
+                // A VAGUER BLOCK MUST NOT TALK AWAY A PRECISE ONE (task ee17f42d, live test 1).
+                //
+                // The guard above stops Idle from clearing a block. It does not stop one blocking
+                // state from overwriting another, because `e.State = state` below is unconditional
+                // — and that is the SAME failure one door over.
+                //
+                // Measured, not assumed: Claude Code emits its own `permission_prompt` Notification
+                // ~6s after every AskUserQuestion (2026-09-03, 15:09:58.101 and 15:11:38.518,
+                // 6.2s and 6.1s after the two questions that preceded them). It lands second and
+                // wins, so a card raised honestly as "Asked you a question" reverts to "Needs
+                // permission" while the question is still on screen. The owner watched exactly that
+                // happen and reported it in those words.
+                //
+                // Wrong-flavour is not a cosmetic failure here. "Needs permission" tells the owner
+                // to go and approve something; the agent is in fact holding a multiple-choice
+                // question that approving nothing will ever answer.
+                //
+                // NARROW, and in the same shape as the idle guard: only a DOWNGRADE, and only over
+                // a state that is already blocking. An upgrade still applies, a block on a calm
+                // card still applies, and a repeat at the same certainty still restamps (which is
+                // what keeps the "every blocking notification is a new block" rule below intact).
+                //
+                // ACCEPTED COST, stated rather than hidden: if the owner answers a question and the
+                // agent's very next act needs permission with no observed activity in between, that
+                // permission block is suppressed and the card keeps reading "Asked you a question".
+                // The owner is still summoned — it is the right alarm with the wrong word, which is
+                // the side of this file's governing asymmetry we are meant to fall on. The clear
+                // edge (observed activity, TURN_END) closes that window as soon as the agent moves.
+                if (AttentionStates.IsBlocking(state)
+                    && _entries.TryGetValue(key, out var live)
+                    && live.IsBlocking
+                    && AttentionStates.BlockCertainty(state) < AttentionStates.BlockCertainty(live.State))
                 {
                     return false;
                 }

@@ -85,7 +85,12 @@ namespace MultiTerminal.AttentionPanel
                     State = e.State.ToString(),
                     ObservedVerb = Verb(e.State),
                     ObservedDetail = DetailFor(e),
-                    DetailIsLive = HasLiveActivity(e),
+
+                    // Derived from the SAME decision as ObservedDetail, never computed alongside
+                    // it. These two disagreeing is precisely the defect this flag exists to
+                    // prevent: it would stamp "seen 8s ago" onto a question that was never an
+                    // observation, reintroducing the fossil-as-live lie from the other direction.
+                    DetailIsLive = !PrefersNotificationDetail(e),
                     ActivityAgeSeconds = e.LastActivityAtUtc is DateTime seen
                         ? Seconds(nowUtc - seen)
                         : -1,
@@ -149,7 +154,33 @@ namespace MultiTerminal.AttentionPanel
         /// </para>
         /// </remarks>
         private static string DetailFor(AgentAttentionEntry e)
-            => HasLiveActivity(e) ? e.LastActivity : e.Detail;
+            => PrefersNotificationDetail(e) ? e.Detail : e.LastActivity;
+
+        /// <summary>
+        /// Whether the notification message should win over the live activity line.
+        /// </summary>
+        /// <remarks>
+        /// Normally it should not, for the reason documented on <see cref="DetailFor"/>: a frozen
+        /// sentence in the position of a live observation is how the owner read a 27-minute-old
+        /// line as current.
+        /// <para>
+        /// A QUESTION BLOCK is the exception, and it is not the same mistake (task ee17f42d, live
+        /// test 1). The notification message there is the question itself — the literal thing the
+        /// owner is being asked to answer, and the whole reason the card is shouting. The last tool
+        /// that ran before it is not an answer to "what do you want from me?"; the owner saw
+        /// <c>Bash: HOOK=$(ls …)</c> on a card that was waiting for them to pick an option, and
+        /// said so.
+        /// </para>
+        /// <para>
+        /// It also is not a fossil in the sense that mattered there. <see cref="HasLiveActivity"/>
+        /// stays false for it, so the view still labels it "from the alert, not observed since" —
+        /// which on a blocked agent is exactly true: it has not done anything since asking. The
+        /// honesty machinery is reused, not bypassed.
+        /// </para>
+        /// </remarks>
+        private static bool PrefersNotificationDetail(AgentAttentionEntry e)
+            => (e.State == AttentionState.BlockedQuestion && !string.IsNullOrWhiteSpace(e.Detail))
+               || !HasLiveActivity(e);
 
         private static long Seconds(TimeSpan span) =>
             span.Ticks <= 0 ? 0 : (long)span.TotalSeconds;
