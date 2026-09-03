@@ -117,6 +117,25 @@ namespace MultiTerminal.MCPServer.Services
         /// </remarks>
         public long BlockSeq { get; set; }
 
+        /// <summary>
+        /// Whether <see cref="Detail"/> holds the agent's ACTUAL question text, rather than a
+        /// notification's boilerplate about there being a question (task ee17f42d, run 1).
+        /// </summary>
+        /// <remarks>
+        /// <see cref="AttentionState.BlockedQuestion"/> is reached from two raw types and only one
+        /// of them carries anything worth reading. <c>ask_user_question</c> is built by a PreToolUse
+        /// hook that has the question in hand and sends "Alice asked: &lt;the question&gt;".
+        /// <c>elicitation_dialog</c> gets the notification hook's fixed string, "Alice has a
+        /// question that needs your response" — which is a restatement of the card's own verb.
+        /// <para>
+        /// So the state cannot be the test for "is this detail worth preferring over the live
+        /// activity line": preferring boilerplate would trade a real observation for a sentence the
+        /// reader has already read one line above. Provenance is carried explicitly because it
+        /// cannot be recovered later.
+        /// </para>
+        /// </remarks>
+        public bool DetailIsQuestionText { get; set; }
+
         /// <summary>True when the state is one the owner is actually being waited on for.</summary>
         public bool IsBlocking =>
             State == AttentionState.BlockedQuestion ||
@@ -350,12 +369,42 @@ namespace MultiTerminal.MCPServer.Services
                 // The owner is still summoned — it is the right alarm with the wrong word, which is
                 // the side of this file's governing asymmetry we are meant to fall on. The clear
                 // edge (observed activity, TURN_END) closes that window as soon as the agent moves.
+                // KEEP THE BETTER WORDS, BUT STILL COUNT THE BLOCK. Both halves are load-bearing
+                // and the second one was missing in pipeline run 1 (cross-model adversary, HIGH).
+                //
+                // Returning false here looked safe — "nothing changed, the card already says the
+                // truer thing". It is not, because of the acknowledgement contract documented
+                // below: the panel silences an alarm by (session id, state, blockSeq), and BlockSeq
+                // only advances inside UpsertLocked. Suppressing silently means an owner who
+                // acknowledged the QUESTION has also, invisibly, acknowledged a real permission
+                // block that arrived afterwards. The card stays calm while an agent waits — which
+                // is the precise failure the paragraph below forbids, reintroduced by the guard
+                // standing above it.
+                //
+                // So: preserve State and Detail (the honest flavour wins), and still restamp
+                // identity and announce. The owner is summoned by every genuine block; what the
+                // certainty ranking buys is only that they are summoned with the RIGHT WORD.
                 if (AttentionStates.IsBlocking(state)
-                    && _entries.TryGetValue(key, out var live)
+                    && TryGetLiveBlockLocked(key, agentName, out var liveKey, out var live)
                     && live.IsBlocking
                     && AttentionStates.BlockCertainty(state) < AttentionStates.BlockCertainty(live.State))
                 {
-                    return false;
+                    bool restamped = UpsertLocked(
+                        liveKey,
+                        e =>
+                        {
+                            // Learned-never-unlearned only. State, Detail and the question-text
+                            // provenance are deliberately NOT touched — keeping them is the point.
+                            e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
+                            e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
+                            e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
+                        },
+                        startsNewBlock: true);
+
+                    // Keep the card we just restamped and retire any other card for this agent, so
+                    // a suppressed downgrade cannot leave the second key behind as a stray card.
+                    bool supersededOnSuppress = SupersedeAgentLocked(agentName, liveKey);
+                    return restamped || supersededOnSuppress;
                 }
 
                 bool changed = UpsertLocked(key, e =>
@@ -370,6 +419,10 @@ namespace MultiTerminal.MCPServer.Services
                     e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                     e.State = state;
                     e.Detail = Str(payload, "message");
+
+                    // Set beside Detail, from the SAME payload, because it describes that exact
+                    // string. Computed anywhere else it would drift the moment Detail was rewritten.
+                    e.DetailIsQuestionText = IsQuestionTextType(rawType);
                     e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
 
                     // Learned, never unlearned: a later payload that omits these must not blank out
@@ -429,6 +482,55 @@ namespace MultiTerminal.MCPServer.Services
         /// <returns>True if anything was evicted.</returns>
         private bool SupersedeAgentLocked(string agentName, string keepKey)
             => EvictByAgentLocked(agentName, keepKey);
+
+        /// <summary>
+        /// The live card this notification is about — by key, else by the agent's NAME key.
+        /// </summary>
+        /// <remarks>
+        /// DEFENCE IN DEPTH FOR A GUARD THAT WAS OTHERWISE INERT (task ee17f42d, pipeline run 1,
+        /// debugger HIGH). A key lookup alone assumed the colliding notifications share a key. In
+        /// production they did not: <c>ask-user-relay-hook.js</c> sent an empty
+        /// <c>session_id</c> — it read an env var Claude Code does not export to hook children —
+        /// so the question was keyed by AGENT NAME, while <c>notification-hook.js</c> keyed its
+        /// <c>permission_prompt</c> by the real session uuid. The certainty guard's
+        /// <c>TryGetValue</c> missed every time, a second card was created, and supersede evicted
+        /// the question. The guard was correct and never executed.
+        /// <para>
+        /// The hook is fixed, but a hook lives in a SEPARATE REPOSITORY and ships on its own
+        /// schedule (a stale plugin-cache copy of this very file already exists on disk). A state
+        /// machine that is only correct while another repo's payload is well-formed is one bad
+        /// deploy from silently reverting, so the fallback stays.
+        /// </para>
+        /// <para>
+        /// NARROW ON PURPOSE — the agent's NAME key only, never a scan for any card the agent
+        /// owns. A name-keyed entry is exactly what a blank session id produces. Adopting an
+        /// arbitrary owned card would reach a PREVIOUS SESSION's uuid-keyed entry after a
+        /// <c>/clear</c> and let the retired session's wording outrank the live one — inverting
+        /// the rotation semantics the normal path establishes.
+        /// </para>
+        /// </remarks>
+        private bool TryGetLiveBlockLocked(
+            string key, string agentName, out string liveKey, out AgentAttentionEntry live)
+        {
+            if (_entries.TryGetValue(key, out live) && live != null)
+            {
+                liveKey = key;
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(agentName)
+                && !string.Equals(key, agentName, StringComparison.OrdinalIgnoreCase)
+                && _entries.TryGetValue(agentName, out live)
+                && live != null)
+            {
+                liveKey = agentName;
+                return true;
+            }
+
+            liveKey = null;
+            live = null;
+            return false;
+        }
 
         /// <summary>
         /// Whether an entry belongs to <paramref name="agentName"/>: by its recorded name, OR by
@@ -941,7 +1043,20 @@ namespace MultiTerminal.MCPServer.Services
             LastActivity = e.LastActivity,
             LastActivityAtUtc = e.LastActivityAtUtc,
             BlockSeq = e.BlockSeq,
+            DetailIsQuestionText = e.DetailIsQuestionText,
         };
+
+        /// <summary>
+        /// Whether a raw notification type's message is the agent's own question text.
+        /// </summary>
+        /// <remarks>
+        /// Only <c>ask_user_question</c> is, today. Kept as a named predicate beside
+        /// <see cref="MapState"/> rather than inlined, so that a future raw type carrying real
+        /// question text is added HERE, one line from the mapping that gives it its state — the
+        /// two facts about a raw type stay adjacent instead of drifting across files.
+        /// </remarks>
+        internal static bool IsQuestionTextType(string rawType) =>
+            string.Equals(rawType?.Trim(), "ask_user_question", StringComparison.OrdinalIgnoreCase);
 
         private static string Str(IDictionary<string, object> d, string key) =>
             d != null && d.TryGetValue(key, out var v) && v != null ? v.ToString() : null;

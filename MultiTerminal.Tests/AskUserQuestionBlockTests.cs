@@ -202,9 +202,13 @@ namespace MultiTerminal.Tests
             var svc = new AgentAttentionService();
             svc.ApplyNotification(Payload("ask_user_question", "Alice asked: Pick one"));
 
-            bool applied = svc.ApplyNotification(Payload("permission_prompt", "Alice needs permission to continue"));
+            svc.ApplyNotification(Payload("permission_prompt", "Alice needs permission to continue"));
 
-            Assert.False(applied);
+            // The WORDS are what the guard protects. Note it does not also assert "nothing
+            // changed": an earlier version did, and that assertion was the ack-inheritance bug
+            // written down as a requirement — see
+            // A_suppressed_downgrade_still_counts_as_a_new_block for the other half of the
+            // contract, which is that the block identity DOES move.
             var e = svc.Get(Session);
             Assert.Equal(AttentionState.BlockedQuestion, e.State);
             Assert.Contains("Pick one", e.Detail, StringComparison.Ordinal);
@@ -301,7 +305,8 @@ namespace MultiTerminal.Tests
 
         private static readonly DateTime Now = new DateTime(2026, 9, 3, 22, 11, 0, DateTimeKind.Utc);
 
-        private static AgentAttentionEntry Blocked(AttentionState state, string detail) =>
+        private static AgentAttentionEntry Blocked(
+            AttentionState state, string detail, bool detailIsQuestionText = false) =>
             new AgentAttentionEntry
             {
                 SessionId = Session,
@@ -309,6 +314,7 @@ namespace MultiTerminal.Tests
                 State = state,
                 EnteredAtUtc = Now.AddSeconds(-21),
                 Detail = detail,
+                DetailIsQuestionText = detailIsQuestionText,
                 LastActivity = "Bash: HOOK=$(ls \"C:/Users/…/marketplaces\"",
                 LastActivityAtUtc = Now.AddSeconds(-32),
             };
@@ -334,7 +340,7 @@ namespace MultiTerminal.Tests
         public void A_question_block_shows_the_question_not_the_last_tool_that_ran()
         {
             var cards = MultiTerminal.AttentionPanel.AttentionCardProjector.Project(
-                new[] { Blocked(AttentionState.BlockedQuestion, "Alice asked: Pick one") },
+                new[] { Blocked(AttentionState.BlockedQuestion, "Alice asked: Pick one", detailIsQuestionText: true) },
                 null,
                 null,
                 Now);
@@ -357,7 +363,7 @@ namespace MultiTerminal.Tests
         public void The_question_is_not_reported_as_a_live_observation()
         {
             var cards = MultiTerminal.AttentionPanel.AttentionCardProjector.Project(
-                new[] { Blocked(AttentionState.BlockedQuestion, "Alice asked: Pick one") },
+                new[] { Blocked(AttentionState.BlockedQuestion, "Alice asked: Pick one", detailIsQuestionText: true) },
                 null,
                 null,
                 Now);
@@ -393,12 +399,183 @@ namespace MultiTerminal.Tests
         public void A_question_block_with_no_message_falls_back_to_live_activity()
         {
             var cards = MultiTerminal.AttentionPanel.AttentionCardProjector.Project(
-                new[] { Blocked(AttentionState.BlockedQuestion, null) },
+                new[] { Blocked(AttentionState.BlockedQuestion, null, detailIsQuestionText: true) },
                 null,
                 null,
                 Now);
 
             Assert.StartsWith("Bash:", Assert.Single(cards).ObservedDetail, StringComparison.Ordinal);
+        }
+
+        // ═══════════ pipeline run 1 findings ═══════════
+
+        private static Dictionary<string, object> PayloadKeyed(
+            string rawType, string sessionId, string message = "msg") =>
+            new Dictionary<string, object>
+            {
+                ["session_id"] = sessionId,
+                ["agent_name"] = Agent,
+                ["notification_type"] = "permission_request",
+                ["raw_type"] = rawType,
+                ["message"] = message,
+            };
+
+        /// <summary>
+        /// THE ONE THAT PROVES THE GUARD RUNS AT ALL. Every test above shares one session constant,
+        /// and that shared constant was the assumption that made a correct guard inert.
+        /// </summary>
+        /// <remarks>
+        /// In production the two notifications did NOT share a key. `ask-user-relay-hook.js` sent an
+        /// empty session_id — it read an env var Claude Code does not export to hook children —
+        /// so the question was keyed by AGENT NAME, while `notification-hook.js` keyed its
+        /// permission_prompt by the real uuid. The guard's lookup missed every time, a second card
+        /// was created, and supersede evicted the question. The Owner saw the relabel exactly as
+        /// before the fix.
+        /// <para>
+        /// If this goes red, the guard has gone back to trusting that two hooks in two repositories
+        /// agree about a key. Fix the lookup, not the test.
+        /// </para>
+        /// </remarks>
+        [Fact]
+        public void A_permission_prompt_under_a_different_key_still_cannot_relabel_the_question()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(PayloadKeyed("ask_user_question", "", "Alice asked: Pick one"));
+
+            svc.ApplyNotification(PayloadKeyed("permission_prompt", "uuid-1", "Alice needs permission"));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal(AttentionState.BlockedQuestion, card.State);
+            Assert.Contains("Pick one", card.Detail, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// And exactly ONE card survives it. The pre-fix failure was not only a relabel: the
+        /// second key minted a second entry, so the terminal briefly owned two cards.
+        /// </summary>
+        [Fact]
+        public void A_suppressed_downgrade_leaves_one_card_not_two()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(PayloadKeyed("ask_user_question", ""));
+
+            svc.ApplyNotification(PayloadKeyed("permission_prompt", "uuid-1"));
+
+            Assert.Single(svc.Snapshot());
+        }
+
+        /// <summary>
+        /// THE ACKNOWLEDGEMENT CONTRACT — the finding that made the first attempt at this guard
+        /// unshippable, and the reason suppression is not a silent no-op.
+        /// </summary>
+        /// <remarks>
+        /// The panel silences an alarm by (session id, state, blockSeq), and `BlockSeq` advances
+        /// only inside `UpsertLocked`. A guard that returned early preserved the truer WORDS while
+        /// letting an owner who had acknowledged the QUESTION also, invisibly, acknowledge a real
+        /// permission block that arrived afterwards — a calm card in front of a waiting agent,
+        /// which is the one failure this rail exists to prevent.
+        /// <para>
+        /// So a suppressed downgrade must still count as a new block. This asserts the identity
+        /// moved; the test above asserts the wording did not. Neither alone is the contract.
+        /// </para>
+        /// </remarks>
+        [Fact]
+        public void A_suppressed_downgrade_still_counts_as_a_new_block()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(Payload("ask_user_question"));
+            long acknowledgedBlock = svc.Get(Session).BlockSeq;
+
+            bool announced = svc.ApplyNotification(Payload("permission_prompt"));
+
+            Assert.True(announced);
+            Assert.NotEqual(acknowledgedBlock, svc.Get(Session).BlockSeq);
+        }
+
+        /// <summary>
+        /// The untested rung. The ranking is a three-value ladder and the tests above only pin
+        /// 2-under-3 and 1-under-3 — a ranking of {3, 2, 2} would satisfy all of them.
+        /// </summary>
+        [Fact]
+        public void The_flattened_block_does_not_overwrite_a_permission_block_either()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(Payload("permission_prompt"));
+
+            svc.ApplyNotification(Payload("permission_request"));
+
+            Assert.Equal(AttentionState.BlockedPermission, svc.Get(Session).State);
+        }
+
+        /// <summary>
+        /// PARITY SWEEP. `BlockCertainty` is a third enumeration of the blocking states, beside the
+        /// two `IsBlocking` lists that carry a comment about not drifting apart.
+        /// </summary>
+        /// <remarks>
+        /// The drift here fails SILENTLY and in the dangerous direction: a future blocking state
+        /// added to both `IsBlocking` lists but missed in `BlockCertainty` falls to `default: 0`,
+        /// which ranks below every real block — so it would be suppressed over any live block and
+        /// the owner would simply never be told. A dropped alarm, arrived at by omission.
+        /// </remarks>
+        [Fact]
+        public void Every_blocking_state_has_a_certainty_rank()
+        {
+            foreach (AttentionState state in Enum.GetValues(typeof(AttentionState)))
+            {
+                if (!AttentionStates.IsBlocking(state)) continue;
+
+                Assert.True(
+                    AttentionStates.BlockCertainty(state) > 0,
+                    $"{state} is blocking but has no certainty rank, so it would be silently "
+                    + "suppressed over any live block. Add it to BlockCertainty.");
+            }
+        }
+
+        /// <summary>
+        /// A question block reached from `elicitation_dialog` keeps its live activity line.
+        /// </summary>
+        /// <remarks>
+        /// Both raw types land on `BlockedQuestion`, but only `ask_user_question` carries the
+        /// agent's actual words. `elicitation_dialog` gets the notification hook's fixed string,
+        /// "Alice has a question that needs your response" — which restates the card's own verb.
+        /// Preferring THAT over a real observation would be a worse card reached by the same
+        /// reasoning that makes the question case a better one, which is why the projector keys on
+        /// provenance rather than on state.
+        /// </remarks>
+        [Fact]
+        public void An_elicitation_dialog_block_keeps_its_live_activity_line()
+        {
+            var cards = MultiTerminal.AttentionPanel.AttentionCardProjector.Project(
+                new[]
+                {
+                    Blocked(
+                        AttentionState.BlockedQuestion,
+                        "Alice has a question that needs your response",
+                        detailIsQuestionText: false),
+                },
+                null,
+                null,
+                Now);
+
+            var card = Assert.Single(cards);
+            Assert.StartsWith("Bash:", card.ObservedDetail, StringComparison.Ordinal);
+            Assert.True(card.DetailIsLive);
+        }
+
+        /// <summary>
+        /// The provenance flag is set from the raw type, beside the Detail it describes — so an
+        /// `ask_user_question` notification is what makes the projector prefer its message.
+        /// </summary>
+        [Fact]
+        public void Only_ask_user_question_marks_its_detail_as_question_text()
+        {
+            var asked = new AgentAttentionService();
+            asked.ApplyNotification(Payload("ask_user_question", "Alice asked: Pick one"));
+            Assert.True(asked.Get(Session).DetailIsQuestionText);
+
+            var elicited = new AgentAttentionService();
+            elicited.ApplyNotification(Payload("elicitation_dialog", "Alice has a question"));
+            Assert.False(elicited.Get(Session).DetailIsQuestionText);
         }
     }
 }

@@ -172,6 +172,14 @@ namespace MultiTerminal.AttentionPanel
         /// said so.
         /// </para>
         /// <para>
+        /// The test is <see cref="AgentAttentionEntry.DetailIsQuestionText"/> and NOT the state
+        /// (pipeline run 1, debugger). <see cref="AttentionState.BlockedQuestion"/> is reached from
+        /// two raw types, and <c>elicitation_dialog</c>'s message is fixed boilerplate that merely
+        /// restates the card's own verb. Keying on the state would trade a real observation for a
+        /// sentence the reader has already read one line above — a worse card, arrived at by the
+        /// same reasoning that makes this one better.
+        /// </para>
+        /// <para>
         /// It also is not a fossil in the sense that mattered there. <see cref="HasLiveActivity"/>
         /// stays false for it, so the view still labels it "from the alert, not observed since" —
         /// which on a blocked agent is exactly true: it has not done anything since asking. The
@@ -179,7 +187,7 @@ namespace MultiTerminal.AttentionPanel
         /// </para>
         /// </remarks>
         private static bool PrefersNotificationDetail(AgentAttentionEntry e)
-            => (e.State == AttentionState.BlockedQuestion && !string.IsNullOrWhiteSpace(e.Detail))
+            => (e.DetailIsQuestionText && !string.IsNullOrWhiteSpace(e.Detail))
                || !HasLiveActivity(e);
 
         private static long Seconds(TimeSpan span) =>
