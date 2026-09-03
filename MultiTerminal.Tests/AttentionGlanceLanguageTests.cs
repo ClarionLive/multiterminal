@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Serialization;
 using MultiTerminal.AttentionPanel;
 using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
@@ -399,7 +400,19 @@ namespace MultiTerminal.Tests
         {
             string html = ReadRepoFile("AttentionPanel", "attention-panel.html");
 
-            Assert.Contains("enteredAtMs", html, StringComparison.Ordinal);
+            // Read the wire name off the C# attribute rather than hardcoding it, so renaming the
+            // JsonPropertyName ALONE fails here. Asserting a literal on the view side only would
+            // pin half a cross-language contract and quietly bless the other half — the exact
+            // shape of defect this file exists to catch.
+            string wireName = typeof(AttentionCard)
+                .GetProperty(nameof(AttentionCard.EnteredAtEpochMs))
+                .GetCustomAttributes(typeof(JsonPropertyNameAttribute), false)
+                .Cast<JsonPropertyNameAttribute>()
+                .Single()
+                .Name;
+
+            Assert.Equal("enteredAtMs", wireName);
+            Assert.Contains(wireName, html, StringComparison.Ordinal);
             Assert.Contains("block: blockId(s)", html, StringComparison.Ordinal);
             Assert.Contains("blockId(s) !== acked[id].block", html, StringComparison.Ordinal);
 
@@ -496,6 +509,11 @@ namespace MultiTerminal.Tests
                 "if (FocusTerminalForSession(sessionId)) _attentionPanel?.SetFocusedSession(sessionId);",
                 src,
                 StringComparison.Ordinal);
+
+            // The else is the half that matters and the half a "confirm on success" refactor is
+            // most likely to drop: without it a failed focus leaves the view's optimistic mark
+            // standing, which is the card claiming focus landed somewhere it did not.
+            Assert.Contains("else _attentionPanel?.SetFocusedSession(null);", src, StringComparison.Ordinal);
         }
     }
 }
