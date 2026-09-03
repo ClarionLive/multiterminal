@@ -102,11 +102,40 @@ namespace MultiTerminal.MCPServer.Services
         /// </remarks>
         public DateTime? LastActivityAtUtc { get; set; }
 
+        /// <summary>
+        /// Which blocked episode this is, counting from 0. Bumped once per blocking notification.
+        /// </summary>
+        /// <remarks>
+        /// The block's IDENTITY, and deliberately not a timestamp (task 42052f0c, pipeline run 2).
+        /// The panel silences an acknowledged alarm's motion and must expire that acknowledgement
+        /// when a NEW block starts, or one early click mutes a terminal for good. It cannot use
+        /// <see cref="State"/> (a second permission prompt leaves it unchanged) and it cannot use
+        /// <see cref="EnteredAtUtc"/>, which deliberately does NOT move on a detail rewrite so the
+        /// age keeps ranking who has been stuck longest. Every clock is also a resolution bet: an
+        /// earlier attempt keyed identity to epoch milliseconds and two notifications still landed
+        /// in the same one. A counter cannot collide.
+        /// </remarks>
+        public long BlockSeq { get; set; }
+
         /// <summary>True when the state is one the owner is actually being waited on for.</summary>
         public bool IsBlocking =>
             State == AttentionState.BlockedQuestion ||
             State == AttentionState.BlockedPermission ||
             State == AttentionState.BlockedUnknown;
+    }
+
+    /// <summary>Whether a state is one of the blocked-on-the-owner states.</summary>
+    /// <remarks>
+    /// The static twin of <see cref="AgentAttentionEntry.IsBlocking"/>, for deciding about a state
+    /// BEFORE it has been written to an entry (task 42052f0c, pipeline run 2). Kept beside it so
+    /// the two lists cannot drift apart unnoticed.
+    /// </remarks>
+    internal static class AttentionStates
+    {
+        internal static bool IsBlocking(AttentionState state) =>
+            state == AttentionState.BlockedQuestion ||
+            state == AttentionState.BlockedPermission ||
+            state == AttentionState.BlockedUnknown;
     }
 
     /// <summary>
@@ -256,7 +285,19 @@ namespace MultiTerminal.MCPServer.Services
                     // would otherwise make the card's project name flicker away mid-session.
                     e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
                     e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
-                });
+                },
+                // EVERY blocking notification is a new block, including one that arrives while the
+                // card already reads blocked. Claude Code does not supply a tool_use_id on a
+                // Notification payload — settled empirically, not assumed: the presence-only
+                // diagnostic added for task 2289bb8a item 0 logged toolUseId=(absent) on every
+                // permission_prompt and idle_prompt observed live. So there is no id to tell a
+                // second prompt from a repeat of the first, and the two failures are not
+                // symmetrical. Restamping a repeat costs a reset age and an alarm that shouts
+                // again, which the owner sees and can dismiss. NOT restamping a genuinely new
+                // prompt lets an earlier acknowledgement silence it, rendering a calm card while an
+                // agent waits — indistinguishable from nobody needing you. This file already states
+                // that asymmetry as its governing rule, so the tie breaks toward shouting.
+                startsNewBlock: AttentionStates.IsBlocking(state));
 
                 // A rotated session (/clear mints a new session id) must not leave its predecessor
                 // behind. Superseding is reported as a change even when the survivor itself did not
@@ -721,7 +762,11 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate)
+        /// <param name="startsNewBlock">
+        /// Forces the state clock to restart even when the state string did not change, because
+        /// this mutation is known to be a NEW blocking episode (task 42052f0c, pipeline run 2).
+        /// </param>
+        private bool UpsertLocked(string key, Action<AgentAttentionEntry> mutate, bool startsNewBlock = false)
         {
             if (!_entries.TryGetValue(key, out var entry))
             {
@@ -757,7 +802,19 @@ namespace MultiTerminal.MCPServer.Services
             // Only a STATE change restarts the clock. A card that re-stamped its age every time the
             // detail text was rewritten would reset "waiting 6m" to "waiting 0s" and quietly destroy
             // the one number that tells the owner which agent has been stuck longest.
+            //
             if (entry.State != beforeState) entry.EnteredAtUtc = DateTime.UtcNow;
+
+            // Block IDENTITY is a counter, deliberately NOT the clock above (task 42052f0c,
+            // pipeline run 2). The panel needs to tell one blocked episode from the next so an
+            // acknowledgement cannot carry over; the age needs to survive a detail rewrite so the
+            // owner can still see who has been stuck longest. Those two requirements conflict
+            // whenever a second prompt arrives on an already-blocked card — which is the common
+            // case, because the SET edge is synchronous while the CLEAR edge is polled. Deriving
+            // identity from any clock also inherits that clock's resolution: an earlier attempt
+            // used epoch MILLISECONDS and still collided, because two notifications really can land
+            // in the same millisecond. A counter has no resolution to run out of.
+            if (startsNewBlock) entry.BlockSeq++;
 
             var copy = Clone(entry);
             AttentionChanged?.Invoke(this, copy);
@@ -776,6 +833,7 @@ namespace MultiTerminal.MCPServer.Services
             Cwd = e.Cwd,
             LastActivity = e.LastActivity,
             LastActivityAtUtc = e.LastActivityAtUtc,
+            BlockSeq = e.BlockSeq,
         };
 
         private static string Str(IDictionary<string, object> d, string key) =>

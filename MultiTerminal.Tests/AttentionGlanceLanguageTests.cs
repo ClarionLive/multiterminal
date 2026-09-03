@@ -335,35 +335,37 @@ namespace MultiTerminal.Tests
         // sample zero are indistinguishable under that rule, so an early click adopted the next
         // block and a live alarm rendered permanently calm. These pin the identity that replaced it.
 
-        private static AgentAttentionEntry Blocked(string agent, DateTime enteredAtUtc) => new AgentAttentionEntry
+        private static AgentAttentionEntry Blocked(string agent, DateTime enteredAtUtc, long blockSeq = 0) => new AgentAttentionEntry
         {
             SessionId = "sess-" + agent,
             AgentName = agent,
             State = AttentionState.BlockedPermission,
             EnteredAtUtc = enteredAtUtc,
+            BlockSeq = blockSeq,
         };
 
         /// <summary>
-        /// The exact defect: two DIFFERENT blocks whose ages both round to zero must still be
-        /// distinguishable. This is the assertion that goes red if anyone reverts to age-based
-        /// identity, because under the old rule both cards were identical.
+        /// The exact defect: two DIFFERENT blocks that no clock can separate must still be
+        /// distinguishable. Their ages round to the same whole second AND land in the same
+        /// millisecond — the two things the first and second attempts at this identity each
+        /// relied on. Only a counter survives both.
         /// </summary>
         [Fact]
-        public void Two_blocks_inside_one_second_are_distinguishable()
+        public void Two_blocks_the_clock_cannot_separate_are_still_distinguishable()
         {
-            var first = new DateTime(2026, 9, 3, 12, 0, 0, 120, DateTimeKind.Utc);
-            var second = first.AddMilliseconds(400);          // same whole second, different block
-            var now = second.AddMilliseconds(50);
+            var instant = new DateTime(2026, 9, 3, 12, 0, 0, 120, DateTimeKind.Utc);
+            var now = instant.AddMilliseconds(50);
 
-            var a = AttentionCardProjector.Project(new[] { Blocked("Alice", first) }, null, null, now).Single();
-            var b = AttentionCardProjector.Project(new[] { Blocked("Alice", second) }, null, null, now).Single();
+            // Identical timestamps, to the millisecond. Any clock-derived identity collides here.
+            var a = AttentionCardProjector.Project(new[] { Blocked("Alice", instant, blockSeq: 4) }, null, null, now).Single();
+            var b = AttentionCardProjector.Project(new[] { Blocked("Alice", instant, blockSeq: 5) }, null, null, now).Single();
 
             // The age the view displays cannot tell these apart — that is the trap, asserted so the
             // reason for carrying a separate identity stays visible.
             Assert.Equal(a.SinceSeconds, b.SinceSeconds);
             Assert.Equal(0, a.SinceSeconds);
 
-            Assert.NotEqual(a.EnteredAtEpochMs, b.EnteredAtEpochMs);
+            Assert.NotEqual(a.BlockSeq, b.BlockSeq);
         }
 
         /// <summary>The identity is stable across pushes WITHIN one block, or the ack would drop instantly.</summary>
@@ -371,24 +373,129 @@ namespace MultiTerminal.Tests
         public void Block_identity_is_stable_while_the_block_lasts()
         {
             var entered = new DateTime(2026, 9, 3, 12, 0, 0, DateTimeKind.Utc);
-            var entry = Blocked("Alice", entered);
+            var entry = Blocked("Alice", entered, blockSeq: 3);
 
             var early = AttentionCardProjector.Project(new[] { entry }, null, null, entered.AddSeconds(1)).Single();
             var later = AttentionCardProjector.Project(new[] { entry }, null, null, entered.AddMinutes(5)).Single();
 
-            Assert.Equal(early.EnteredAtEpochMs, later.EnteredAtEpochMs);
+            Assert.Equal(early.BlockSeq, later.BlockSeq);
             Assert.NotEqual(early.SinceSeconds, later.SinceSeconds);
         }
 
-        /// <summary>An unset entry reads as "no identity" rather than a spuriously distinct one.</summary>
+        /// <summary>
+        /// A second blocking notification arriving while the card ALREADY reads blocked must mint a
+        /// new identity. This is the hole the first version of the identity fix left open, found by
+        /// the run-2 debugger: the producer restamped only on a state CHANGE, so block -> block of
+        /// the same kind reused one timestamp and an acknowledgement of the first prompt silenced
+        /// the second.
+        /// </summary>
+        /// <remarks>
+        /// Reachable on the ordinary cadence rather than in a corner: the SET edge is synchronous
+        /// while the CLEAR edge is polled, so two prompts closer together than one poll tick produce
+        /// exactly this block -> block sequence with no intervening Working ever rendered.
+        /// <para>
+        /// There is no tool_use_id to distinguish the two — Claude Code does not supply one on a
+        /// Notification payload, confirmed from the live presence-only diagnostic rather than
+        /// assumed. So every blocking notification counts as a new block.
+        /// </para>
+        /// </remarks>
         [Fact]
-        public void Unset_entry_time_projects_as_zero_not_a_negative_epoch()
+        public void A_second_prompt_in_the_same_state_starts_a_new_block()
+        {
+            var svc = new AgentAttentionService();
+
+            Assert.True(svc.ApplyNotification(new Dictionary<string, object>
+            {
+                ["session_id"] = "s1",
+                ["agent_name"] = "Alice",
+                ["notification_type"] = "permission_request",
+                ["raw_type"] = "permission_prompt",
+                ["message"] = "first prompt",
+            }));
+
+            DateTime firstAge = svc.Get("s1").EnteredAtUtc;
+            long firstSeq = svc.Get("s1").BlockSeq;
+            Assert.Equal(AttentionState.BlockedPermission, svc.Get("s1").State);
+
+            Assert.True(svc.ApplyNotification(new Dictionary<string, object>
+            {
+                ["session_id"] = "s1",
+                ["agent_name"] = "Alice",
+                ["notification_type"] = "permission_request",
+                ["raw_type"] = "permission_prompt",
+                ["message"] = "second prompt",
+            }));
+
+            var after = svc.Get("s1");
+
+            // The state never changed, which is precisely why a state diff could not see this.
+            Assert.Equal(AttentionState.BlockedPermission, after.State);
+
+            // The identity moved...
+            Assert.NotEqual(firstSeq, after.BlockSeq);
+
+            // ...and the age did NOT. Both halves matter: this is the same input that
+            // AgentAttentionServiceTests.Rewriting_the_detail_does_not_restart_the_age_clock
+            // asserts must preserve the age, so keying identity to the clock cannot satisfy both.
+            // Asserting them together is what stops a future fix from "solving" one by breaking
+            // the other, which is exactly what the first attempt at this did.
+            Assert.Equal(firstAge, after.EnteredAtUtc);
+
+            // And it must survive projection, since the wire field is what the view compares.
+            var b = AttentionCardProjector.Project(new[] { after }, null, null, DateTime.UtcNow).Single();
+            Assert.Equal(after.BlockSeq, b.BlockSeq);
+            Assert.NotEqual(firstSeq, b.BlockSeq);
+        }
+
+        /// <summary>
+        /// The counterweight: a NON-blocking update must still not restart the clock, or the age
+        /// that tells the owner which agent has been stuck longest resets on every detail rewrite.
+        /// </summary>
+        [Fact]
+        public void A_detail_rewrite_does_not_restart_the_clock()
+        {
+            var svc = new AgentAttentionService();
+
+            svc.ApplyNotification(new Dictionary<string, object>
+            {
+                ["session_id"] = "s1",
+                ["agent_name"] = "Alice",
+                ["notification_type"] = "idle_prompt",
+                ["message"] = "first",
+            });
+
+            var entered = svc.Get("s1").EnteredAtUtc;
+            var state = svc.Get("s1").State;
+            Assert.False(AgentAttentionServiceIsBlocking(state));
+
+            svc.ApplyNotification(new Dictionary<string, object>
+            {
+                ["session_id"] = "s1",
+                ["agent_name"] = "Alice",
+                ["notification_type"] = "idle_prompt",
+                ["message"] = "second",
+            });
+
+            Assert.Equal(entered, svc.Get("s1").EnteredAtUtc);
+        }
+
+        private static bool AgentAttentionServiceIsBlocking(AttentionState s) =>
+            s == AttentionState.BlockedQuestion ||
+            s == AttentionState.BlockedPermission ||
+            s == AttentionState.BlockedUnknown;
+
+        /// <summary>
+        /// A session that has never blocked carries identity 0, which the view treats as "no
+        /// identity" and falls back to state-change expiry — the pre-existing behaviour.
+        /// </summary>
+        [Fact]
+        public void A_session_that_never_blocked_has_identity_zero()
         {
             var card = AttentionCardProjector.Project(
                 new[] { new AgentAttentionEntry { SessionId = "s", AgentName = "Alice", State = AttentionState.Working } },
                 null, null, DateTime.UtcNow).Single();
 
-            Assert.Equal(0, card.EnteredAtEpochMs);
+            Assert.Equal(0, card.BlockSeq);
         }
 
         /// <summary>
@@ -405,13 +512,13 @@ namespace MultiTerminal.Tests
             // pin half a cross-language contract and quietly bless the other half — the exact
             // shape of defect this file exists to catch.
             string wireName = typeof(AttentionCard)
-                .GetProperty(nameof(AttentionCard.EnteredAtEpochMs))
+                .GetProperty(nameof(AttentionCard.BlockSeq))
                 .GetCustomAttributes(typeof(JsonPropertyNameAttribute), false)
                 .Cast<JsonPropertyNameAttribute>()
                 .Single()
                 .Name;
 
-            Assert.Equal("enteredAtMs", wireName);
+            Assert.Equal("blockSeq", wireName);
             Assert.Contains(wireName, html, StringComparison.Ordinal);
             Assert.Contains("block: blockId(s)", html, StringComparison.Ordinal);
             Assert.Contains("blockId(s) !== acked[id].block", html, StringComparison.Ordinal);
@@ -419,6 +526,7 @@ namespace MultiTerminal.Tests
             // The old age comparison must be GONE, not merely supplemented — leaving it in place
             // would re-expire acknowledgements on the ordinary local tick.
             Assert.DoesNotContain("s.sinceSeconds < acked[id].since", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("s.enteredAtMs", html, StringComparison.Ordinal);
         }
 
         // -------------------------------------------- pipeline run 1: preferences actually load

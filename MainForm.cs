@@ -6992,9 +6992,10 @@ namespace MultiTerminal
             _attentionPanel.AmbientChanged += (s, ambient) => _settings?.SetAttentionPanelAmbient(ambient);
             _attentionPanel.AlarmChanged += (s, alarm) => _settings?.SetAttentionPanelAlarm(alarm);
 
-            // Covers the two RECREATE paths (RestoreSinglePanel, ToggleAttentionPanel), which run
-            // long after LoadSettings and so must re-push the stored preferences themselves. On the
-            // CONSTRUCTION path this is a deliberate no-op — see ApplyAttentionPanelSettings.
+            // Covers the two RECREATE paths (GetContentFromPersistString, ToggleAttentionPanel),
+            // which run long after LoadSettings and so must re-push the stored preferences
+            // themselves. On the CONSTRUCTION path this is a deliberate no-op — see
+            // ApplyAttentionPanelSettings.
             ApplyAttentionPanelSettings();
         }
 

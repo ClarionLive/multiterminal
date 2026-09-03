@@ -66,28 +66,33 @@ namespace MultiTerminal.AttentionPanel
         public long SinceSeconds { get; set; }
 
         /// <summary>
-        /// When the agent entered the current state, as Unix epoch milliseconds. This is the
-        /// block's IDENTITY (task 42052f0c, pipeline run 1).
+        /// Which blocked episode this card is showing, counting from 0. The block's IDENTITY
+        /// (task 42052f0c, pipeline run 2).
         /// </summary>
         /// <remarks>
         /// The view acknowledges a block to silence its alarm's motion, and that acknowledgement
-        /// must cover ONE block — a card that blocks again has to shout again. Acknowledgement was
-        /// originally expired by watching for a DROP in <see cref="SinceSeconds"/>, on the reasoning
-        /// that re-entering a state resets the age. That is unsound at the second boundary: if the
-        /// owner clicks inside the first second the stored age is 0, and a fresh block also samples
-        /// 0, so `0 &lt; 0` is false, no state change is seen, and the new block inherits the old
-        /// click — rendering a live alarm permanently calm. A calm card is indistinguishable from
-        /// nobody needing you, which is the one failure this rail exists to prevent.
+        /// must cover ONE block — a card that blocks again has to shout again, or one early click
+        /// mutes that terminal for good. A calm card is indistinguishable from nobody needing you,
+        /// which is the one failure this rail exists to prevent.
         /// <para>
-        /// So the block carries an explicit identity instead of one inferred from a rounded clock.
-        /// Two gates (the proactive debugger and the cross-model adversary) found that hole
-        /// independently, which is why the fix is an identity rather than a wider comparison:
-        /// relaxing `&lt;` to `&lt;=` would drop the acknowledgement on every steady-state push,
-        /// trading a silent alarm for one that will not stay quiet.
+        /// Identity is a counter rather than a clock, after two clocks in a row proved unable to
+        /// carry it. Expiring on a DROP in <see cref="SinceSeconds"/> failed at the second boundary
+        /// (ack at 0, re-block also samples 0, so `0 &lt; 0` is false). Replacing that with an
+        /// epoch-millisecond stamp failed too, in two ways: the producer only restamps on a state
+        /// CHANGE, so a second prompt on an already-blocked card reused the first one's stamp; and
+        /// two notifications genuinely can land inside the same millisecond. Every clock is a bet
+        /// on resolution. A counter has none to lose.
+        /// </para>
+        /// <para>
+        /// It is also a separate field from the age ON PURPOSE. <c>EnteredAtUtc</c> must NOT move
+        /// when a blocked card's detail is rewritten, or the number telling the owner who has been
+        /// stuck longest resets — an invariant this codebase already holds under test. Identity
+        /// must move on exactly that event. One field cannot satisfy both, which is what made the
+        /// timestamp attempt fail.
         /// </para>
         /// </remarks>
-        [JsonPropertyName("enteredAtMs")]
-        public long EnteredAtEpochMs { get; set; }
+        [JsonPropertyName("blockSeq")]
+        public long BlockSeq { get; set; }
 
         /// <summary>
         /// How long ago <see cref="ObservedDetail"/> was observed, or -1 when nothing has been

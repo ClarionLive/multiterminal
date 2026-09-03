@@ -359,8 +359,8 @@ var reshufflePending = false;
    IDENTITY at the moment of the click, because acknowledgement belongs to ONE block and not
    to the card. A card that blocks again must shout again — otherwise a single early click
    mutes that terminal for the rest of the session, which is the annoyance arriving by the
-   other door. The identity is the host's enteredAtMs; see reconcileAcks() for why the age
-   cannot serve as one. */
+   other door. The identity is the host's blockSeq; see reconcileAcks() for why no clock
+   can serve as one. */
 var acked = Object.create(null);
 
 /* Ambient animation state, deliberately OUTSIDE the DOM. render() rebuilds the entire list
@@ -691,19 +691,26 @@ function render() {
      - the block IDENTITY changed — enteredAtMs moved, meaning the state was re-entered, so
        this is a NEW block of the same kind and must shout again rather than inherit the click.
 
-   The identity is the host's enteredAtMs, NOT a drop in sinceSeconds. Age looks like it
-   identifies a block and does not: it is whole seconds, and the 1s ticker below increments
-   the view's own copy between pushes. Acknowledge inside the first second and the stored age
-   is 0; a fresh block also arrives at 0; `0 < 0` is false and the state string is unchanged,
-   so the old click silently adopts the new block and a live alarm renders permanently calm.
+   The identity is the host's blockSeq — a COUNTER, not a clock. Two clocks were tried here
+   and both failed, which is why this comment is long (task 42052f0c, runs 1 and 2):
+
+     - sinceSeconds DROP. Age is whole seconds and the 1s ticker below increments the view's
+       own copy between pushes. Acknowledge inside the first second and the stored age is 0;
+       a fresh block also arrives at 0; `0 < 0` is false and the state is unchanged, so the
+       old click adopts the new block and a live alarm renders permanently calm.
+     - enteredAtMs. Finer, and still wrong twice over: the host only restamps that on a state
+       CHANGE, so a second prompt on an already-blocked card reused the first stamp; and two
+       notifications can genuinely land in the same millisecond. Every clock is a bet on
+       resolution.
+
    A calm card is indistinguishable from nobody needing you — the one failure this rail
-   exists to prevent. Found independently by two review gates (task 42052f0c, pipeline run 1).
+   exists to prevent — so identity gets a counter, which has no resolution to run out of.
 
-   Widening `<` to `<=` is NOT the fix: consecutive pushes inside one block legitimately carry
-   the same age, so that would discard the acknowledgement almost immediately and trade a
-   silent alarm for one that refuses to stay quiet.
+   Widening `<` to `<=` was never the fix either: consecutive pushes inside one block
+   legitimately carry the same age, so that discards the acknowledgement almost immediately
+   and trades a silent alarm for one that refuses to stay quiet.
 
-   Hosts that never set enteredAtMs (0 on both sides) fall back to state-change expiry alone,
+   Hosts that never set blockSeq (0 on both sides) fall back to state-change expiry alone,
    which is the pre-existing behaviour rather than a new failure. */
 function reconcileAcks() {
     var live = Object.create(null);
@@ -722,9 +729,9 @@ function reconcileAcks() {
 }
 
 /* The identity of the block a card is currently in. Normalised to a number so a missing or
-   malformed enteredAtMs compares equal to itself rather than throwing the ack away every push. */
+   malformed blockSeq compares equal to itself rather than throwing the ack away every push. */
 function blockId(s) {
-    return (s && typeof s.enteredAtMs === "number") ? s.enteredAtMs : 0;
+    return (s && typeof s.blockSeq === "number") ? s.blockSeq : 0;
 }
 
 /* Animation state outlives any one card element on purpose, so it must be pruned by
