@@ -60,7 +60,7 @@ namespace MultiTerminal.AttentionPanel
         /// <remarks>
         /// DISPLAY ONLY. Never infer block identity from this: it is whole seconds, and the view
         /// increments its own copy between pushes, so it is neither precise nor authoritative. Use
-        /// <see cref="EnteredAtEpochMs"/> to tell one block from the next.
+        /// <see cref="BlockSeq"/> to tell one block from the next.
         /// </remarks>
         [JsonPropertyName("sinceSeconds")]
         public long SinceSeconds { get; set; }

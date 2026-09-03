@@ -791,7 +791,26 @@ namespace MultiTerminal.MCPServer.Services
 
             mutate(entry);
 
-            bool changed = entry.State != beforeState
+            // Block IDENTITY is a counter, deliberately NOT the clock below (task 42052f0c,
+            // pipeline run 2). The panel needs to tell one blocked episode from the next so an
+            // acknowledgement cannot carry over; the age needs to survive a detail rewrite so the
+            // owner can still see who has been stuck longest. Those two requirements conflict
+            // whenever a second prompt arrives on an already-blocked card — which is the common
+            // case, because the SET edge is synchronous while the CLEAR edge is polled. Deriving
+            // identity from any clock also inherits that clock's resolution: an earlier attempt
+            // used epoch MILLISECONDS and still collided, because two notifications really can land
+            // in the same millisecond. A counter has no resolution to run out of.
+            //
+            // This MUST run before the `changed` gate below, and a new block MUST itself count as a
+            // change (run 3). Two prompts for the same tool are byte-identical — same message, both
+            // tool_use_ids null, same project, and while the polled clear edge is still outstanding
+            // the same state and activity line too. Every field the diff inspects compares equal, so
+            // an increment placed after the early return is simply never reached for the exact
+            // repeat this counter exists to catch.
+            if (startsNewBlock) entry.BlockSeq++;
+
+            bool changed = startsNewBlock
+                           || entry.State != beforeState
                            || !string.Equals(entry.Detail, beforeDetail, StringComparison.Ordinal)
                            || !string.Equals(entry.PendingToolUseId, beforePending, StringComparison.Ordinal)
                            || !string.Equals(entry.Project, beforeProject, StringComparison.Ordinal)
@@ -802,19 +821,7 @@ namespace MultiTerminal.MCPServer.Services
             // Only a STATE change restarts the clock. A card that re-stamped its age every time the
             // detail text was rewritten would reset "waiting 6m" to "waiting 0s" and quietly destroy
             // the one number that tells the owner which agent has been stuck longest.
-            //
             if (entry.State != beforeState) entry.EnteredAtUtc = DateTime.UtcNow;
-
-            // Block IDENTITY is a counter, deliberately NOT the clock above (task 42052f0c,
-            // pipeline run 2). The panel needs to tell one blocked episode from the next so an
-            // acknowledgement cannot carry over; the age needs to survive a detail rewrite so the
-            // owner can still see who has been stuck longest. Those two requirements conflict
-            // whenever a second prompt arrives on an already-blocked card — which is the common
-            // case, because the SET edge is synchronous while the CLEAR edge is polled. Deriving
-            // identity from any clock also inherits that clock's resolution: an earlier attempt
-            // used epoch MILLISECONDS and still collided, because two notifications really can land
-            // in the same millisecond. A counter has no resolution to run out of.
-            if (startsNewBlock) entry.BlockSeq++;
 
             var copy = Clone(entry);
             AttentionChanged?.Invoke(this, copy);

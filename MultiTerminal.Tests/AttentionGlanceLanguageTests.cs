@@ -448,6 +448,49 @@ namespace MultiTerminal.Tests
         }
 
         /// <summary>
+        /// The same thing again with a BYTE-IDENTICAL payload, which is the case that actually
+        /// happens and the one the first version of this test missed.
+        /// </summary>
+        /// <remarks>
+        /// Two permission prompts for the same tool carry the same message, both carry a null
+        /// tool_use_id, and while the polled clear edge is still outstanding they carry the same
+        /// state and activity line too. Every field <c>UpsertLocked</c>'s change-diff inspects
+        /// compares equal, so the whole call used to early-return before the counter was touched.
+        /// The previous test varied the message and so reached the increment through the Detail
+        /// diff — it passed against code that was still broken for the real case, which is the
+        /// entire reason this one exists alongside it (task 42052f0c, pipeline run 3).
+        /// </remarks>
+        [Fact]
+        public void An_identical_repeat_prompt_still_starts_a_new_block()
+        {
+            var svc = new AgentAttentionService();
+
+            // ONE payload object, sent twice. Nothing varies — not even by a character.
+            var payload = new Dictionary<string, object>
+            {
+                ["session_id"] = "s1",
+                ["agent_name"] = "Alice",
+                ["notification_type"] = "permission_request",
+                ["raw_type"] = "permission_prompt",
+                ["message"] = "Allow Bash(rm -rf build)?",
+            };
+
+            Assert.True(svc.ApplyNotification(payload));
+            long first = svc.Get("s1").BlockSeq;
+            DateTime firstAge = svc.Get("s1").EnteredAtUtc;
+
+            // Must report a change: a new block IS news, even when every displayed field matches.
+            Assert.True(svc.ApplyNotification(payload));
+
+            var after = svc.Get("s1");
+            Assert.NotEqual(first, after.BlockSeq);
+
+            // The age still must not move — same pairing as the test above, so a future fix cannot
+            // buy the identity back by spending the ordering signal.
+            Assert.Equal(firstAge, after.EnteredAtUtc);
+        }
+
+        /// <summary>
         /// The counterweight: a NON-blocking update must still not restart the clock, or the age
         /// that tells the owner which agent has been stuck longest resets on every detail rewrite.
         /// </summary>
