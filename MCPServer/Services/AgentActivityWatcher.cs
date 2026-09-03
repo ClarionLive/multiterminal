@@ -59,6 +59,34 @@ namespace MultiTerminal.MCPServer.Services
             "TOOL_START",
         };
 
+        /// <summary>Rows that clear a block but must never touch the live display line.</summary>
+        /// <remarks>
+        /// The exact mirror of <see cref="DisplayOnlyTypes"/>, and it exists because the two
+        /// concerns had been fused by accident. <c>activity-hook.js</c>'s <c>SKIP_TOOLS</c>
+        /// (Read/Glob/Grep/ToolSearch) dropped those completions ENTIRELY, for a good reason that
+        /// is only about one consumer: their lines are too noisy for the human-facing Activity
+        /// feed. But a completed Read still PROVES THE AGENT IS RUNNING, and the clear-edge is a
+        /// different consumer with a different need.
+        /// <para>
+        /// Fusing them meant a card stayed blocked through any read-only stretch, and — the case
+        /// the Owner actually hit — after every answered question. <c>AskUserQuestion</c> emits no
+        /// hook event AT ALL (verified: zero <c>tool=AskUserQuestion</c> entries across 150k+ hook
+        /// invocations), and blocks rather than ending a turn, so it produces neither a completion
+        /// row nor a <c>TURN_END</c>. The card therefore waited for some later, unrelated
+        /// non-skipped tool. Task edcdcdd5, Owner's live pass 2026-09-03.
+        /// </para>
+        /// <para>
+        /// These rows carry no summary into the service, so <c>RecordActivityLine</c>'s blank-guard
+        /// leaves the displayed line exactly as it was. They are excluded from the human-facing
+        /// readers at source — see <c>ActivityFeedService.QuietToolTypes</c> — so the Activity
+        /// panel's readability, which is the whole reason SKIP_TOOLS exists, is preserved.
+        /// </para>
+        /// </remarks>
+        private static readonly HashSet<string> ClearOnlyTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "TOOL_QUIET",
+        };
+
         private const string TurnEndType = "TURN_END";
 
         private readonly IActivityFeedReader _feed;
@@ -274,9 +302,10 @@ namespace MultiTerminal.MCPServer.Services
             string type = row.ActivityType ?? string.Empty;
             bool clears = ClearingTypes.Contains(type);
             bool displays = DisplayOnlyTypes.Contains(type);
+            bool clearsOnly = ClearOnlyTypes.Contains(type);
             bool turnEnded = string.Equals(type, TurnEndType, StringComparison.OrdinalIgnoreCase);
 
-            if (!clears && !displays && !turnEnded) return;
+            if (!clears && !displays && !clearsOnly && !turnEnded) return;
 
             bool isSubagent = LooksLikeSubagent(row.DetailsJson);
 
@@ -307,6 +336,22 @@ namespace MultiTerminal.MCPServer.Services
                 // Display-only: record the line WITHOUT taking the clear path. Passing isSubagent
                 // true would also suppress the line, so the summary is written directly.
                 _attention.NoteActivityLineOnly(sessionKey, row.Summary, observedAt);
+                return;
+            }
+
+            // Clear-only: take the clear path with NO summary, so RecordActivityLine's blank-guard
+            // leaves the displayed line untouched. Deliberately still subject to
+            // NoteObservedActivity's ordering guard (observedAt > EnteredAtUtc), so a queued row
+            // that predates the block cannot clear it.
+            if (clearsOnly)
+            {
+                _attention.NoteObservedActivity(
+                    sessionKey,
+                    observedAt,
+                    isSubagent: false,
+                    toolUseId: null,
+                    agentName: agent,
+                    activitySummary: null);
                 return;
             }
 

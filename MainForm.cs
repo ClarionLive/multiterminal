@@ -7056,8 +7056,30 @@ namespace MultiTerminal
             string agentName = _mcpServer?.Broker?.AgentAttention?.Get(sessionKey)?.AgentName;
             if (string.IsNullOrWhiteSpace(agentName)) agentName = sessionKey;
 
-            var doc = _dockPanel.Documents.OfType<TerminalDocument>()
-                .FirstOrDefault(d => string.Equals(d.CustomTitle, agentName, StringComparison.OrdinalIgnoreCase));
+            var candidates = _dockPanel.Documents.OfType<TerminalDocument>()
+                .Where(d => string.Equals(d.CustomTitle, agentName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            // A LIVE terminal beats one still showing the start screen. Task edcdcdd5 item 7 gives
+            // a terminal its title at PRE-registration, before the process launches, so for a
+            // window two documents can carry the same title: the not-yet-launched one and the real
+            // terminal. The previous FirstOrDefault took whichever the collection happened to yield
+            // first, which is how clicking a newly created agent's card focused the Home tab
+            // instead (Owner's live pass 2026-09-03). The start screen is chosen only when it is
+            // the ONLY candidate — that case is still a real terminal, just not booted yet.
+            var doc = candidates.FirstOrDefault(d => !d.IsStartScreenVisible) ?? candidates.FirstOrDefault();
+
+            if (candidates.Count > 1)
+            {
+                // Kept as a Trace rather than removed with the bug: the duplicate-title window is a
+                // consequence of pre-registration, so it can widen again if that timing changes,
+                // and the symptom (focus lands on the wrong terminal) is silent.
+                _debugLogService?.Trace(
+                    "AttentionPanel",
+                    $"Ambiguous focus target for agent '{agentName}': {candidates.Count} documents share the title " +
+                    $"[{string.Join(", ", candidates.Select(c => "startScreen=" + c.IsStartScreenVisible))}]; " +
+                    $"chose startScreen={doc?.IsStartScreenVisible}.");
+            }
 
             if (doc == null)
             {

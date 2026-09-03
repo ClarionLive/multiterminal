@@ -44,6 +44,31 @@ namespace MultiTerminal.MCPServer.Services
         };
 
         /// <summary>
+        /// Types that exist ONLY to prove an agent is still running, and are hidden from every
+        /// human-facing feed (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <c>activity-hook.js</c> used to DROP the completions of read-only tools
+        /// (Read/Glob/Grep/ToolSearch) outright. That kept this feed readable — a real goal — but
+        /// it also silently removed the Attention Rail's clear-edge, so a card stayed blocked
+        /// through any read-only stretch and after every answered question. Those are two
+        /// consumers with opposite needs, and one skip-set was serving both.
+        /// <para>
+        /// So the row is now written as <c>TOOL_QUIET</c> and filtered out HERE instead of at the
+        /// hook. <see cref="GetActivitiesSince"/> and <see cref="GetRecentActivities"/> — the
+        /// human-facing readers (Activity panel, HUD dashboard, SummaryService) — exclude it.
+        /// <see cref="GetActivitiesAfterId"/> does NOT, because that is the watcher's reader and
+        /// the row is the entire point of the change. Filtering at source rather than in each
+        /// panel means a future reader gets the right behaviour by default; the one reader that
+        /// wants these rows is the one that has to say so.
+        /// </para>
+        /// </remarks>
+        public static readonly HashSet<string> QuietToolTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "TOOL_QUIET"
+        };
+
+        /// <summary>
         /// Raised when a new activity is recorded, for UI refresh.
         /// </summary>
         public event EventHandler<ActivityFeedEntry> ActivityRecorded;
@@ -254,13 +279,13 @@ namespace MultiTerminal.MCPServer.Services
 
             var entries = new List<ActivityFeedEntry>();
 
-            var conditions = new List<string>();
+            // The quiet-row exclusion is unconditional here (a human-facing reader — see
+            // QuietToolTypes), so it seeds the list rather than being an optional clause.
+            var conditions = new List<string> { "activity_type <> 'TOOL_QUIET'" };
             if (planId != null) conditions.Add("plan_id = @planId");
             if (projectId != null) conditions.Add("project_id = @projectId");
 
-            var whereClause = conditions.Count > 0
-                ? "WHERE " + string.Join(" AND ", conditions)
-                : "";
+            var whereClause = "WHERE " + string.Join(" AND ", conditions);
 
             var sql = $@"SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                     FROM activity_feed {whereClause} ORDER BY timestamp DESC LIMIT @limit";
@@ -332,10 +357,11 @@ namespace MultiTerminal.MCPServer.Services
 
             var entries = new List<ActivityFeedEntry>();
 
+            // activity_type <> 'TOOL_QUIET': see QuietToolTypes. A human-facing reader.
             const string sql = @"
                 SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                 FROM activity_feed
-                WHERE timestamp >= @since
+                WHERE timestamp >= @since AND activity_type <> 'TOOL_QUIET'
                 ORDER BY timestamp DESC
                 LIMIT @limit";
 
