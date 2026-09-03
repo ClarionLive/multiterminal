@@ -355,12 +355,12 @@ var focusedId = null;
 var pointerInList = false;
 var reshufflePending = false;
 
-/* Acknowledged blocks (task 42052f0c). Keyed by session id, storing the state and the age
-   AT THE MOMENT OF THE CLICK, because acknowledgement belongs to ONE block and not to the
-   card. A card that blocks again must shout again — otherwise a single early click mutes
-   that terminal for the rest of the session, which is the annoyance arriving by the other
-   door. sinceSeconds rises monotonically within a state and resets when a new state is
-   entered, so a DROP is the signal that this is a different block. */
+/* Acknowledged blocks (task 42052f0c). Keyed by session id, storing the state and the BLOCK
+   IDENTITY at the moment of the click, because acknowledgement belongs to ONE block and not
+   to the card. A card that blocks again must shout again — otherwise a single early click
+   mutes that terminal for the rest of the session, which is the annoyance arriving by the
+   other door. The identity is the host's enteredAtMs; see reconcileAcks() for why the age
+   cannot serve as one. */
 var acked = Object.create(null);
 
 /* Ambient animation state, deliberately OUTSIDE the DOM. render() rebuilds the entire list
@@ -688,10 +688,23 @@ function render() {
             which is the failure this whole rail exists to prevent. */
 /* An acknowledgement covers ONE block, so it has to expire. Two ways it can:
      - the state changed (the agent moved on, or is blocked on something else now);
-     - sinceSeconds DROPPED, meaning the state was re-entered — a NEW block of the same
-       kind, which must shout again rather than inherit the old click.
-   Without the second case, an agent that blocks, clears and blocks again would come back
-   permanently silent, which is the exact annoyance this feature is meant to remove. */
+     - the block IDENTITY changed — enteredAtMs moved, meaning the state was re-entered, so
+       this is a NEW block of the same kind and must shout again rather than inherit the click.
+
+   The identity is the host's enteredAtMs, NOT a drop in sinceSeconds. Age looks like it
+   identifies a block and does not: it is whole seconds, and the 1s ticker below increments
+   the view's own copy between pushes. Acknowledge inside the first second and the stored age
+   is 0; a fresh block also arrives at 0; `0 < 0` is false and the state string is unchanged,
+   so the old click silently adopts the new block and a live alarm renders permanently calm.
+   A calm card is indistinguishable from nobody needing you — the one failure this rail
+   exists to prevent. Found independently by two review gates (task 42052f0c, pipeline run 1).
+
+   Widening `<` to `<=` is NOT the fix: consecutive pushes inside one block legitimately carry
+   the same age, so that would discard the acknowledgement almost immediately and trade a
+   silent alarm for one that refuses to stay quiet.
+
+   Hosts that never set enteredAtMs (0 on both sides) fall back to state-change expiry alone,
+   which is the pre-existing behaviour rather than a new failure. */
 function reconcileAcks() {
     var live = Object.create(null);
     sessions.forEach(function (s) { live[s.id] = s; });
@@ -700,12 +713,18 @@ function reconcileAcks() {
         var s = live[id];
         if (!s) { delete acked[id]; return; }                       // session gone
         if (s.state !== acked[id].state) { delete acked[id]; return; }
-        if (typeof s.sinceSeconds === "number" && s.sinceSeconds < acked[id].since) {
+        if (blockId(s) !== acked[id].block) {
             delete acked[id];                                        // state re-entered
         }
     });
 
     if (focusedId && !live[focusedId]) focusedId = null;
+}
+
+/* The identity of the block a card is currently in. Normalised to a number so a missing or
+   malformed enteredAtMs compares equal to itself rather than throwing the ack away every push. */
+function blockId(s) {
+    return (s && typeof s.enteredAtMs === "number") ? s.enteredAtMs : 0;
 }
 
 /* Animation state outlives any one card element on purpose, so it must be pruned by
@@ -718,7 +737,7 @@ function pruneAnim() {
 
 function activate(s) {
     focusedId = s.id;
-    if (isBlocking(s)) acked[s.id] = { state: s.state, since: s.sinceSeconds };
+    if (isBlocking(s)) acked[s.id] = { state: s.state, block: blockId(s) };
     render();
     post({ type: "focus_session", sessionId: s.id });
 }

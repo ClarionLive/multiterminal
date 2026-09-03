@@ -3119,6 +3119,11 @@ namespace MultiTerminal
                 _settings.Set("Panel_ProjectPanel_DockState", "DockLeft");
             }
 
+            // The Attention Rail is constructed in InitializeDockPanel, which runs BEFORE this
+            // method — so its preferences cannot be loaded at wiring time and are pushed here,
+            // once _settings exists (task 42052f0c, pipeline run 1).
+            ApplyAttentionPanelSettings();
+
             // Panel visibility is restored in RestorePanelStates() called from RestoreSession
         }
 
@@ -4775,6 +4780,10 @@ namespace MultiTerminal
             try
             {
                 var activeDoc = _dockPanel.ActiveDocument as TerminalDocument;
+
+                // The Attention Rail's highlight has to follow focus changed by clicking a TAB,
+                // not just focus it requested itself (task 42052f0c, pipeline run 1).
+                SyncAttentionPanelFocus(activeDoc);
 
                 // Update focus borders on all terminals
                 SuspendLayout();
@@ -6970,23 +6979,55 @@ namespace MultiTerminal
 
             _attentionPanel.FocusSessionRequested += (s, sessionId) =>
             {
-                FocusTerminalForSession(sessionId);
-
-                // Echo the authoritative focus back. The view already highlighted optimistically on
-                // click; this is what keeps the highlight honest when focus moves some OTHER way —
-                // a terminal tab, a toolbar button — which the view cannot observe (task 42052f0c).
-                _attentionPanel?.SetFocusedSession(sessionId);
+                // Echo the click back only if a terminal was actually focused. The view highlights
+                // optimistically the instant a card is clicked; confirming unconditionally would
+                // leave that optimistic mark standing for a card whose terminal is gone, which is
+                // the highlight claiming focus landed somewhere it did not (task 42052f0c).
+                if (FocusTerminalForSession(sessionId)) _attentionPanel?.SetFocusedSession(sessionId);
+                else _attentionPanel?.SetFocusedSession(null);
             };
             _attentionPanel.OpenTicketRequested += (s, taskId) => OpenTicketInTasksPanel(taskId);
 
-            _attentionPanel.SetOrder(_settings?.GetAttentionPanelOrder() ?? "attention");
             _attentionPanel.OrderChanged += (s, order) => _settings?.SetAttentionPanelOrder(order);
-
-            _attentionPanel.SetAmbient(_settings?.GetAttentionPanelAmbient() ?? "stream");
             _attentionPanel.AmbientChanged += (s, ambient) => _settings?.SetAttentionPanelAmbient(ambient);
-
-            _attentionPanel.SetAlarm(_settings?.GetAttentionPanelAlarm() ?? "redalert");
             _attentionPanel.AlarmChanged += (s, alarm) => _settings?.SetAttentionPanelAlarm(alarm);
+
+            // Covers the two RECREATE paths (RestoreSinglePanel, ToggleAttentionPanel), which run
+            // long after LoadSettings and so must re-push the stored preferences themselves. On the
+            // CONSTRUCTION path this is a deliberate no-op — see ApplyAttentionPanelSettings.
+            ApplyAttentionPanelSettings();
+        }
+
+        /// <summary>
+        /// Pushes the stored Attention Rail preferences into the panel.
+        /// </summary>
+        /// <remarks>
+        /// Separate from <see cref="WireAttentionPanel"/> because subscribing and loading have
+        /// different timing requirements, and conflating them silently discarded every saved
+        /// preference (task 42052f0c, pipeline run 1).
+        /// <para>
+        /// <c>WireAttentionPanel</c> is called from <c>InitializeDockPanel</c>, which the
+        /// constructor runs BEFORE <c>LoadSettings</c> — and <c>LoadSettings</c> is where
+        /// <c>_settings</c> is first assigned. So the loads read a null <c>_settings</c>, the
+        /// <c>?? "default"</c> fallbacks fired every launch, and the rail always came up on the
+        /// defaults. The saves worked, which is what made it invisible: a preference appeared to
+        /// take, then reverted on next start with nothing failing. <c>order</c> had this defect
+        /// before this ticket; the ticket copied the shape twice more, which is how it was caught.
+        /// </para>
+        /// <para>
+        /// The null guard is what makes calling this from <c>WireAttentionPanel</c> safe on the
+        /// construction path: it returns rather than pushing wrong defaults, and
+        /// <c>LoadSettings</c> calls it again a moment later with real values. Pushing early would
+        /// be harmless but dishonest — it would look like the preferences had been applied.
+        /// </para>
+        /// </remarks>
+        private void ApplyAttentionPanelSettings()
+        {
+            if (_attentionPanel == null || _settings == null) return;
+
+            _attentionPanel.SetOrder(_settings.GetAttentionPanelOrder());
+            _attentionPanel.SetAmbient(_settings.GetAttentionPanelAmbient());
+            _attentionPanel.SetAlarm(_settings.GetAttentionPanelAlarm());
         }
 
         /// <summary>
@@ -7003,9 +7044,13 @@ namespace MultiTerminal
         /// tried, in that order.
         /// </para>
         /// </remarks>
-        private void FocusTerminalForSession(string sessionKey)
+        /// <returns>
+        /// <c>true</c> when a terminal was found and focused. Callers use this to avoid asserting a
+        /// focus change that did not happen (task 42052f0c, pipeline run 1).
+        /// </returns>
+        private bool FocusTerminalForSession(string sessionKey)
         {
-            if (string.IsNullOrWhiteSpace(sessionKey)) return;
+            if (string.IsNullOrWhiteSpace(sessionKey)) return false;
 
             string agentName = _mcpServer?.Broker?.AgentAttention?.Get(sessionKey)?.AgentName;
             if (string.IsNullOrWhiteSpace(agentName)) agentName = sessionKey;
@@ -7016,12 +7061,47 @@ namespace MultiTerminal
             if (doc == null)
             {
                 _debugLogService?.Trace("AttentionPanel", $"No terminal found for session '{sessionKey}' (agent '{agentName}')");
-                return;
+                return false;
             }
 
             doc.Activate();
             doc.FocusTerminal();
             _lastActiveTerminal = doc;
+            return true;
+        }
+
+        /// <summary>
+        /// Tells the Attention Rail which session has focus when focus changed OUTSIDE the rail.
+        /// </summary>
+        /// <remarks>
+        /// This is the caller the rail's focus contract always described and never had. Both
+        /// <c>SetFocusedSession</c>'s own remarks and the view's optimistic-highlight comment
+        /// claimed the host corrected the highlight when the owner switched terminals by clicking a
+        /// TAB — but the only call site was the echo inside <c>FocusSessionRequested</c>, which
+        /// merely repeated the id the view had just set itself. The highlight was therefore click
+        /// history wearing the label of focus, and it was wrong in exactly the case it was
+        /// documented to handle (task 42052f0c, pipeline run 1).
+        /// <para>
+        /// Resolution mirrors <see cref="FocusTerminalForSession"/> in reverse: the panel keys cards
+        /// by session id where one is known, and by agent name otherwise, so this prefers the
+        /// observed session id and falls back to the terminal's own name. A non-terminal document
+        /// clears the highlight rather than leaving it stale — no agent terminal has focus, and
+        /// saying nothing would let the previous card keep claiming it.
+        /// </para>
+        /// </remarks>
+        private void SyncAttentionPanelFocus(TerminalDocument activeDoc)
+        {
+            if (_attentionPanel == null) return;
+
+            string agentName = activeDoc?.CustomTitle;
+            if (string.IsNullOrWhiteSpace(agentName))
+            {
+                _attentionPanel.SetFocusedSession(null);
+                return;
+            }
+
+            string sessionId = _mcpServer?.Broker?.AgentAttention?.GetByAgent(agentName)?.SessionId;
+            _attentionPanel.SetFocusedSession(string.IsNullOrWhiteSpace(sessionId) ? agentName : sessionId);
         }
 
         /// <summary>

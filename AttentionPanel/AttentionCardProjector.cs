@@ -90,6 +90,7 @@ namespace MultiTerminal.AttentionPanel
                         ? Seconds(nowUtc - seen)
                         : -1,
                     SinceSeconds = Seconds(nowUtc - e.EnteredAtUtc),
+                    EnteredAtEpochMs = EpochMs(e.EnteredAtUtc),
                     TicketId = claim?.TaskId,
                     TicketItem = claim?.ItemLabel,
                     ClaimAgeSeconds = claim == null ? 0 : Seconds(nowUtc - claim.UpdatedAtUtc),
@@ -152,5 +153,20 @@ namespace MultiTerminal.AttentionPanel
 
         private static long Seconds(TimeSpan span) =>
             span.Ticks <= 0 ? 0 : (long)span.TotalSeconds;
+
+        /// <summary>
+        /// Unix epoch milliseconds for a state-entry instant, or 0 when it was never set.
+        /// </summary>
+        /// <remarks>
+        /// Milliseconds, not seconds, precisely because the defect this exists to fix was a
+        /// second-boundary collision: two distinct blocks that round to the same whole second are
+        /// exactly the case that has to stay distinguishable. <c>default(DateTime)</c> maps to 0
+        /// rather than a large negative number so an unset entry reads as "no identity" on the
+        /// wire instead of as a spuriously distinct one.
+        /// </remarks>
+        private static long EpochMs(DateTime enteredAtUtc) =>
+            enteredAtUtc == default
+                ? 0
+                : new DateTimeOffset(DateTime.SpecifyKind(enteredAtUtc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
     }
 }

@@ -327,5 +327,175 @@ namespace MultiTerminal.Tests
             Assert.Equal("MultiTerminal", cards.Single(c => c.Agent == "Alice").Project);
             Assert.True(string.IsNullOrEmpty(cards.Single(c => c.Agent == "Diana").Project));
         }
+
+        // ------------------------------------------------- pipeline run 1: block identity
+        //
+        // Acknowledgement used to expire on a DROP in the whole-second age. Two blocks that both
+        // sample zero are indistinguishable under that rule, so an early click adopted the next
+        // block and a live alarm rendered permanently calm. These pin the identity that replaced it.
+
+        private static AgentAttentionEntry Blocked(string agent, DateTime enteredAtUtc) => new AgentAttentionEntry
+        {
+            SessionId = "sess-" + agent,
+            AgentName = agent,
+            State = AttentionState.BlockedPermission,
+            EnteredAtUtc = enteredAtUtc,
+        };
+
+        /// <summary>
+        /// The exact defect: two DIFFERENT blocks whose ages both round to zero must still be
+        /// distinguishable. This is the assertion that goes red if anyone reverts to age-based
+        /// identity, because under the old rule both cards were identical.
+        /// </summary>
+        [Fact]
+        public void Two_blocks_inside_one_second_are_distinguishable()
+        {
+            var first = new DateTime(2026, 9, 3, 12, 0, 0, 120, DateTimeKind.Utc);
+            var second = first.AddMilliseconds(400);          // same whole second, different block
+            var now = second.AddMilliseconds(50);
+
+            var a = AttentionCardProjector.Project(new[] { Blocked("Alice", first) }, null, null, now).Single();
+            var b = AttentionCardProjector.Project(new[] { Blocked("Alice", second) }, null, null, now).Single();
+
+            // The age the view displays cannot tell these apart — that is the trap, asserted so the
+            // reason for carrying a separate identity stays visible.
+            Assert.Equal(a.SinceSeconds, b.SinceSeconds);
+            Assert.Equal(0, a.SinceSeconds);
+
+            Assert.NotEqual(a.EnteredAtEpochMs, b.EnteredAtEpochMs);
+        }
+
+        /// <summary>The identity is stable across pushes WITHIN one block, or the ack would drop instantly.</summary>
+        [Fact]
+        public void Block_identity_is_stable_while_the_block_lasts()
+        {
+            var entered = new DateTime(2026, 9, 3, 12, 0, 0, DateTimeKind.Utc);
+            var entry = Blocked("Alice", entered);
+
+            var early = AttentionCardProjector.Project(new[] { entry }, null, null, entered.AddSeconds(1)).Single();
+            var later = AttentionCardProjector.Project(new[] { entry }, null, null, entered.AddMinutes(5)).Single();
+
+            Assert.Equal(early.EnteredAtEpochMs, later.EnteredAtEpochMs);
+            Assert.NotEqual(early.SinceSeconds, later.SinceSeconds);
+        }
+
+        /// <summary>An unset entry reads as "no identity" rather than a spuriously distinct one.</summary>
+        [Fact]
+        public void Unset_entry_time_projects_as_zero_not_a_negative_epoch()
+        {
+            var card = AttentionCardProjector.Project(
+                new[] { new AgentAttentionEntry { SessionId = "s", AgentName = "Alice", State = AttentionState.Working } },
+                null, null, DateTime.UtcNow).Single();
+
+            Assert.Equal(0, card.EnteredAtEpochMs);
+        }
+
+        /// <summary>
+        /// The C#-to-JavaScript half of the identity contract, which no compiler checks. The field
+        /// is useless if the view still keys acknowledgement off the age.
+        /// </summary>
+        [Fact]
+        public void The_view_keys_acknowledgement_off_the_block_identity()
+        {
+            string html = ReadRepoFile("AttentionPanel", "attention-panel.html");
+
+            Assert.Contains("enteredAtMs", html, StringComparison.Ordinal);
+            Assert.Contains("block: blockId(s)", html, StringComparison.Ordinal);
+            Assert.Contains("blockId(s) !== acked[id].block", html, StringComparison.Ordinal);
+
+            // The old age comparison must be GONE, not merely supplemented — leaving it in place
+            // would re-expire acknowledgements on the ordinary local tick.
+            Assert.DoesNotContain("s.sinceSeconds < acked[id].since", html, StringComparison.Ordinal);
+        }
+
+        // -------------------------------------------- pipeline run 1: preferences actually load
+        //
+        // The loads ran from WireAttentionPanel, which the constructor reaches BEFORE LoadSettings
+        // assigns _settings — so every `_settings?.Get... ?? "default"` took the literal default and
+        // the rail came up on defaults no matter what was saved. The saves worked, so it looked fine
+        // until a restart. These pin the split that fixed it.
+
+        /// <summary>
+        /// Loading is separate from wiring, and happens where <c>_settings</c> is known to exist.
+        /// </summary>
+        [Fact]
+        public void Preferences_are_pushed_from_a_loader_that_runs_after_settings_exist()
+        {
+            string src = ReadRepoFile("MainForm.cs");
+
+            Assert.Contains("private void ApplyAttentionPanelSettings()", src, StringComparison.Ordinal);
+
+            // The guard is what makes the construction-path call a no-op instead of a lie.
+            Assert.Contains("if (_attentionPanel == null || _settings == null) return;", src, StringComparison.Ordinal);
+
+            // The reads must be unconditional now: a surviving `_settings?.GetAttentionPanel...`
+            // would mean a null-settings path still silently yields the default.
+            Assert.DoesNotContain("_settings?.GetAttentionPanelAmbient()", src, StringComparison.Ordinal);
+            Assert.DoesNotContain("_settings?.GetAttentionPanelAlarm()", src, StringComparison.Ordinal);
+            Assert.DoesNotContain("_settings?.GetAttentionPanelOrder()", src, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// LoadSettings must call the loader. Without this the split is real but nothing on the
+        /// startup path ever pushes the stored values — the original bug, rearranged.
+        /// </summary>
+        [Fact]
+        public void LoadSettings_pushes_the_attention_preferences()
+        {
+            string src = ReadRepoFile("MainForm.cs");
+
+            int loadSettings = src.IndexOf("private void LoadSettings()", StringComparison.Ordinal);
+            Assert.True(loadSettings >= 0, "LoadSettings not found");
+
+            int nextMethod = src.IndexOf("private bool IsVisibleOnAnyScreen", loadSettings, StringComparison.Ordinal);
+            Assert.True(nextMethod > loadSettings, "could not bound LoadSettings");
+
+            Assert.Contains(
+                "ApplyAttentionPanelSettings();",
+                src.Substring(loadSettings, nextMethod - loadSettings),
+                StringComparison.Ordinal);
+        }
+
+        // ------------------------------------------ pipeline run 1: the focus contract has a caller
+        //
+        // SetFocusedSession documented itself as the correction that keeps the highlight honest when
+        // focus moves via a terminal TAB. Its only caller echoed back the id the view had just set
+        // itself, so the highlight was click history wearing the label of focus.
+
+        /// <summary>The documented tab-click correction now has the caller it always described.</summary>
+        [Fact]
+        public void Focus_follows_terminal_tab_clicks()
+        {
+            string src = ReadRepoFile("MainForm.cs");
+
+            Assert.Contains("private void SyncAttentionPanelFocus(TerminalDocument activeDoc)", src, StringComparison.Ordinal);
+
+            int handler = src.IndexOf("private void OnActiveDocumentChanged", StringComparison.Ordinal);
+            Assert.True(handler >= 0, "OnActiveDocumentChanged not found");
+
+            int end = src.IndexOf("OnActiveDocumentChanged error", handler, StringComparison.Ordinal);
+            Assert.True(end > handler, "could not bound OnActiveDocumentChanged");
+
+            Assert.Contains(
+                "SyncAttentionPanelFocus(activeDoc);",
+                src.Substring(handler, end - handler),
+                StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// A card whose terminal is gone must not keep the optimistic highlight. Focusing nothing
+        /// and confirming focus are different outcomes and have to stay that way.
+        /// </summary>
+        [Fact]
+        public void A_failed_focus_clears_the_highlight_instead_of_confirming_it()
+        {
+            string src = ReadRepoFile("MainForm.cs");
+
+            Assert.Contains("private bool FocusTerminalForSession(string sessionKey)", src, StringComparison.Ordinal);
+            Assert.Contains(
+                "if (FocusTerminalForSession(sessionId)) _attentionPanel?.SetFocusedSession(sessionId);",
+                src,
+                StringComparison.Ordinal);
+        }
     }
 }

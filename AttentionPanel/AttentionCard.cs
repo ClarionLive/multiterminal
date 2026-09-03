@@ -57,8 +57,37 @@ namespace MultiTerminal.AttentionPanel
         public string ObservedDetail { get; set; }
 
         /// <summary>Seconds in the current state. The view ticks this locally between pushes.</summary>
+        /// <remarks>
+        /// DISPLAY ONLY. Never infer block identity from this: it is whole seconds, and the view
+        /// increments its own copy between pushes, so it is neither precise nor authoritative. Use
+        /// <see cref="EnteredAtEpochMs"/> to tell one block from the next.
+        /// </remarks>
         [JsonPropertyName("sinceSeconds")]
         public long SinceSeconds { get; set; }
+
+        /// <summary>
+        /// When the agent entered the current state, as Unix epoch milliseconds. This is the
+        /// block's IDENTITY (task 42052f0c, pipeline run 1).
+        /// </summary>
+        /// <remarks>
+        /// The view acknowledges a block to silence its alarm's motion, and that acknowledgement
+        /// must cover ONE block — a card that blocks again has to shout again. Acknowledgement was
+        /// originally expired by watching for a DROP in <see cref="SinceSeconds"/>, on the reasoning
+        /// that re-entering a state resets the age. That is unsound at the second boundary: if the
+        /// owner clicks inside the first second the stored age is 0, and a fresh block also samples
+        /// 0, so `0 &lt; 0` is false, no state change is seen, and the new block inherits the old
+        /// click — rendering a live alarm permanently calm. A calm card is indistinguishable from
+        /// nobody needing you, which is the one failure this rail exists to prevent.
+        /// <para>
+        /// So the block carries an explicit identity instead of one inferred from a rounded clock.
+        /// Two gates (the proactive debugger and the cross-model adversary) found that hole
+        /// independently, which is why the fix is an identity rather than a wider comparison:
+        /// relaxing `&lt;` to `&lt;=` would drop the acknowledgement on every steady-state push,
+        /// trading a silent alarm for one that will not stay quiet.
+        /// </para>
+        /// </remarks>
+        [JsonPropertyName("enteredAtMs")]
+        public long EnteredAtEpochMs { get; set; }
 
         /// <summary>
         /// How long ago <see cref="ObservedDetail"/> was observed, or -1 when nothing has been
