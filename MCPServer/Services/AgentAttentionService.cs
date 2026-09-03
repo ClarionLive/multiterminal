@@ -265,6 +265,29 @@ namespace MultiTerminal.MCPServer.Services
 
             lock (_lock)
             {
+                // AN idle_prompt MUST NOT CLEAR A LIVE BLOCK (task ee17f42d).
+                //
+                // idle_prompt maps to Idle, correctly, for the case it was written for: the agent
+                // finished its turn and nobody is waiting. But Claude Code also emits it on an idle
+                // TIMER, so one can land while the owner simply has not answered yet — and the
+                // assignment below is unconditional, so it would overwrite BlockedQuestion or
+                // BlockedPermission with "Finished and idle".
+                //
+                // That is not a smaller lie than silence, it is the OPPOSITE of the truth, asserted
+                // in the one place built to answer "who needs me?". An idle_prompt arriving on a
+                // blocked card CORROBORATES the block — the agent is still waiting — so it is
+                // dropped rather than applied.
+                //
+                // Deliberately narrow: only Idle, and only over a state that is already blocking.
+                // A real clear still comes from observed activity or TURN_END, which are evidence
+                // that the agent MOVED. Nothing here can keep a stale block alive on its own.
+                if (state == AttentionState.Idle
+                    && _entries.TryGetValue(key, out var blocked)
+                    && blocked.IsBlocking)
+                {
+                    return false;
+                }
+
                 bool changed = UpsertLocked(key, e =>
                 {
                     e.SessionId = sessionId;
@@ -741,6 +764,13 @@ namespace MultiTerminal.MCPServer.Services
             switch (rawType.Trim().ToLowerInvariant())
             {
                 case "elicitation_dialog":
+                    return AttentionState.BlockedQuestion;
+                case "ask_user_question":
+                    // The agent asked the owner a multiple-choice question (task ee17f42d). Its own
+                    // raw type rather than a reuse of elicitation_dialog: that one is the MCP
+                    // elicitation path with its own relay hook, and this file treats notification
+                    // flavours as load-bearing rather than interchangeable. Both are a question, so
+                    // both map to BlockedQuestion — the distinction is in provenance, not rendering.
                     return AttentionState.BlockedQuestion;
                 case "permission_prompt":
                     return AttentionState.BlockedPermission;
