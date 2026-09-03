@@ -4467,6 +4467,15 @@ namespace MultiTerminal
                         }
                         ResumeLayout(true);
 
+                        // The rail is the THIRD consumer of this event and was the one added last
+                        // (task 8ca83257). Focus reaches the app by three routes — a card click, a
+                        // TAB click (OnActiveDocumentChanged, wired by 42052f0c item 10), and a
+                        // click into the terminal BODY, which lands here precisely because
+                        // ActiveDocumentChanged does not fire for a WebView2-hosted terminal. The
+                        // rail watched the first two. The green border above proved the third was
+                        // detectable all along; nothing was telling the rail about it.
+                        SyncAttentionPanelFocus(doc);
+
                         // Update dashboard header active session chip
                         _dashboardHeader?.SetActiveSession(doc.TabText);
 

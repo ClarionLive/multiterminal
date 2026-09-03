@@ -866,8 +866,24 @@ window.chrome.webview.addEventListener("message", function (ev) {
         applyChrome();
     } else if (msg.type === "focused") {
         /* The host's word wins over the optimistic mark set on click — it is the only one
-           that knows about focus changed by clicking a terminal tab. */
+           that knows about focus changed by clicking a terminal tab, or into a terminal.
+
+           FOCUS ALSO ACKNOWLEDGES (task 8ca83257). Looking straight at the terminal that is
+           asking is a STRONGER "I have seen it" than clicking its card, so it would be odd for
+           the weaker gesture to be the only one that quietens the alarm. This does NOT weaken
+           the rule 42052f0c set: acknowledgement silences the alarm's MOTION and never the
+           state, the card keeps its edge, its text and its climbing age, and the ack is keyed to
+           THIS block — so a card that blocks again shouts again.
+
+           A card that blocks while its terminal ALREADY has focus is untouched, and that falls
+           out of the design rather than needing a special case: no focus CHANGE occurs, so no
+           `focused` message is sent, so no ack is stored. That case is the one that would make
+           the rail lie, so it is pinned by a test rather than left to this comment. */
         focusedId = msg.sessionId || null;
+        if (focusedId) {
+            var f = sessions.filter(function (s) { return s.id === focusedId; })[0];
+            if (f && isBlocking(f)) acked[f.id] = { state: f.state, block: blockId(f) };
+        }
         render();
     }
 });
