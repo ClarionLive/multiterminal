@@ -186,8 +186,19 @@ namespace MultiTerminal.AttentionPanel
         /// honesty machinery is reused, not bypassed.
         /// </para>
         /// </remarks>
+        /// <remarks>
+        /// The state test is an AND with the provenance test, not a thing the provenance test
+        /// replaced (pipeline run 2, cross-model adversary). Provenance alone says the stored
+        /// string IS a question; it does not say the agent is STILL waiting on it. A terminal that
+        /// asked a question and then went <see cref="AttentionState.Offline"/> keeps both Detail
+        /// and the flag — <c>MarkOffline</c> changes only the state — so a card reading
+        /// "Disconnected" would have displaced its live activity line with a question nobody can
+        /// answer any more.
+        /// </remarks>
         private static bool PrefersNotificationDetail(AgentAttentionEntry e)
-            => (e.DetailIsQuestionText && !string.IsNullOrWhiteSpace(e.Detail))
+            => (e.State == AttentionState.BlockedQuestion
+                && e.DetailIsQuestionText
+                && !string.IsNullOrWhiteSpace(e.Detail))
                || !HasLiveActivity(e);
 
         private static long Seconds(TimeSpan span) =>

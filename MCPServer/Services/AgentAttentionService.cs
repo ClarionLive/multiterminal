@@ -165,7 +165,11 @@ namespace MultiTerminal.MCPServer.Services
         /// permission request and a question are equally "the owner must act".
         /// <para>
         /// <c>ask_user_question</c> is emitted by a PreToolUse hook that saw the tool name. It
-        /// cannot describe anything else, so it ranks highest.
+        /// cannot describe anything else, so it ranks highest. <c>elicitation_dialog</c> ranks
+        /// there too, and for the same reason: the TYPE is unambiguous even though its MESSAGE is
+        /// boilerplate. That message/type split is a separate axis, carried by
+        /// <see cref="AgentAttentionEntry.DetailIsQuestionText"/> — do not collapse the two, or a
+        /// real MCP elicitation would start losing its block to a generic permission notice.
         /// </para>
         /// <para>
         /// <c>permission_prompt</c> ranks below it because Claude Code emits that same type as its
@@ -334,8 +338,26 @@ namespace MultiTerminal.MCPServer.Services
                 // Deliberately narrow: only Idle, and only over a state that is already blocking.
                 // A real clear still comes from observed activity or TURN_END, which are evidence
                 // that the agent MOVED. Nothing here can keep a stale block alive on its own.
+                // Resolved through the SAME lookup as the guard below, and for the same reason
+                // (task ee17f42d, pipeline run 2 — found independently by three gates).
+                //
+                // This guard used a bare `_entries.TryGetValue(key, ...)`, so it failed in exactly
+                // the key-mismatch world the fallback was written for, and failed WORSE. Executed:
+                // a question keyed by agent name, then an idle_prompt carrying the real uuid —
+                // the lookup misses, Idle is written under the uuid, and SupersedeAgentLocked
+                // evicts the question card. The rail then reads "Finished and idle" in front of an
+                // agent that is waiting, which is the sentence this whole ticket was filed about.
+                //
+                // A relabel is a lie; this is silence, and silence is the worse half of the
+                // asymmetry this file is built around. Applying the fallback to one of two sibling
+                // guards left the more dangerous one open.
+                //
+                // NOTE the deliberate asymmetry that REMAINS: this path still writes nothing and
+                // still returns false. An idle timer is not a new block, so it must not restamp
+                // BlockSeq — doing so would re-shout an alarm the owner already acknowledged, on
+                // no new evidence.
                 if (state == AttentionState.Idle
-                    && _entries.TryGetValue(key, out var blocked)
+                    && TryGetLiveEntryLocked(key, agentName, out _, out var blocked)
                     && blocked.IsBlocking)
                 {
                     return false;
@@ -385,20 +407,15 @@ namespace MultiTerminal.MCPServer.Services
                 // identity and announce. The owner is summoned by every genuine block; what the
                 // certainty ranking buys is only that they are summoned with the RIGHT WORD.
                 if (AttentionStates.IsBlocking(state)
-                    && TryGetLiveBlockLocked(key, agentName, out var liveKey, out var live)
+                    && TryGetLiveEntryLocked(key, agentName, out var liveKey, out var live)
                     && live.IsBlocking
                     && AttentionStates.BlockCertainty(state) < AttentionStates.BlockCertainty(live.State))
                 {
                     bool restamped = UpsertLocked(
                         liveKey,
-                        e =>
-                        {
-                            // Learned-never-unlearned only. State, Detail and the question-text
-                            // provenance are deliberately NOT touched — keeping them is the point.
-                            e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
-                            e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
-                            e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
-                        },
+                        // Learned-never-unlearned only. State, Detail and the question-text
+                        // provenance are deliberately NOT touched — keeping them is the point.
+                        e => ApplyLearnedFields(e, agentName, payload),
                         startsNewBlock: true);
 
                     // Keep the card we just restamped and retire any other card for this agent, so
@@ -411,12 +428,7 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     e.SessionId = sessionId;
 
-                    // Learned, never unlearned (like Project/Cwd below). A payload that omits
-                    // agent_name must not blank a name we already know: with it blanked, the
-                    // supersede below finds nothing to retire, the name-keyed placeholder lives on,
-                    // and every later activity row routes to the placeholder while the real
-                    // session-keyed card pulses forever — two cards for one terminal.
-                    e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
+                    ApplyLearnedFields(e, agentName, payload);
                     e.State = state;
                     e.Detail = Str(payload, "message");
 
@@ -424,13 +436,6 @@ namespace MultiTerminal.MCPServer.Services
                     // string. Computed anywhere else it would drift the moment Detail was rewritten.
                     e.DetailIsQuestionText = IsQuestionTextType(rawType);
                     e.PendingToolUseId = NullIfBlank(Str(payload, "tool_use_id"));
-
-                    // Learned, never unlearned: a later payload that omits these must not blank out
-                    // a project we already know. The hook reads project.json from the cwd and can
-                    // legitimately come back empty (a directory with no .claude/project.json), which
-                    // would otherwise make the card's project name flicker away mid-session.
-                    e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
-                    e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
                 },
                 // EVERY blocking notification is a new block, including one that arrives while the
                 // card already reads blocked. Claude Code does not supply a tool_use_id on a
@@ -509,7 +514,7 @@ namespace MultiTerminal.MCPServer.Services
         /// the rotation semantics the normal path establishes.
         /// </para>
         /// </remarks>
-        private bool TryGetLiveBlockLocked(
+        private bool TryGetLiveEntryLocked(
             string key, string agentName, out string liveKey, out AgentAttentionEntry live)
         {
             if (_entries.TryGetValue(key, out live) && live != null)
@@ -646,6 +651,10 @@ namespace MultiTerminal.MCPServer.Services
                         e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                         e.State = AttentionState.Working;
                         e.Detail = null;
+
+                        // Cleared WITH Detail, never separately — the flag describes that exact
+                        // string, so a stale true outliving it is the drift its own doc forbids.
+                        e.DetailIsQuestionText = false;
                         e.PendingToolUseId = null;
                         RecordActivityLine(e, activitySummary, observedAtUtc);
                     });
@@ -680,6 +689,9 @@ namespace MultiTerminal.MCPServer.Services
                     e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
                     e.State = AttentionState.Working;
                     e.Detail = null;
+
+                    // Cleared WITH Detail — see the note at the sibling site above.
+                    e.DetailIsQuestionText = false;
                     e.PendingToolUseId = null;
                     RecordActivityLine(e, activitySummary, observedAtUtc);
                 });
@@ -767,6 +779,9 @@ namespace MultiTerminal.MCPServer.Services
                 {
                     e.State = AttentionState.Idle;
                     e.Detail = null;
+
+                    // Cleared WITH Detail — see the note at the sibling site above.
+                    e.DetailIsQuestionText = false;
                     e.PendingToolUseId = null;
                     RecordActivityLine(e, "Turn ended", observedAtUtc);
                 });
@@ -1055,6 +1070,32 @@ namespace MultiTerminal.MCPServer.Services
         /// question text is added HERE, one line from the mapping that gives it its state — the
         /// two facts about a raw type stay adjacent instead of drifting across files.
         /// </remarks>
+        /// <summary>
+        /// The fields a notification TEACHES a card, which a later notification must never unteach.
+        /// </summary>
+        /// <remarks>
+        /// One method, two callers — the normal upsert and the suppressed-downgrade restamp
+        /// (pipeline run 2, code review). Written out twice, the next learned field would be added
+        /// to one of them and nothing would fail: the suppressed path would quietly stop learning
+        /// it, which is invisible until a card is missing a project name nobody can explain.
+        /// <para>
+        /// "Learned, never unlearned" is the rule for all three. A payload that omits
+        /// <c>agent_name</c> must not blank a name already known — with it blanked, supersede finds
+        /// nothing to retire, the name-keyed placeholder lives on, and every later activity row
+        /// routes to the placeholder while the real session-keyed card pulses forever, giving two
+        /// cards for one terminal. The hook likewise reads <c>project.json</c> from the cwd and can
+        /// legitimately come back empty, which would otherwise make a card's project name flicker
+        /// away mid-session.
+        /// </para>
+        /// </remarks>
+        private static void ApplyLearnedFields(
+            AgentAttentionEntry e, string agentName, IDictionary<string, object> payload)
+        {
+            e.AgentName = NullIfBlank(agentName) ?? e.AgentName;
+            e.Project = NullIfBlank(Str(payload, "project_name")) ?? e.Project;
+            e.Cwd = NullIfBlank(Str(payload, "cwd")) ?? e.Cwd;
+        }
+
         internal static bool IsQuestionTextType(string rawType) =>
             string.Equals(rawType?.Trim(), "ask_user_question", StringComparison.OrdinalIgnoreCase);
 

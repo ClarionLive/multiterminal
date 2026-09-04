@@ -577,5 +577,103 @@ namespace MultiTerminal.Tests
             elicited.ApplyNotification(Payload("elicitation_dialog", "Alice has a question"));
             Assert.False(elicited.Get(Session).DetailIsQuestionText);
         }
+
+        // ═══════════ pipeline run 2 findings ═══════════
+
+        /// <summary>
+        /// THE WORSE HALF OF THE SAME BUG, and the one three separate gates found independently.
+        /// </summary>
+        /// <remarks>
+        /// The certainty guard got the cross-key lookup; its sibling idle guard did not. Under the
+        /// identical key split, an <c>idle_prompt</c> carrying the real uuid misses the guard, Idle
+        /// is written under that key, and supersede evicts the name-keyed question — so the card
+        /// reads "Finished and idle" in front of an agent that is waiting.
+        /// <para>
+        /// That is not a smaller failure than the relabel this ticket started with. It is the
+        /// SENTENCE this ticket was filed about, reached through a different door. A relabel is a
+        /// lie the Owner can see; silence is one they cannot.
+        /// </para>
+        /// <para>
+        /// Claude Code emits <c>idle_prompt</c> on a timer, so the second half of this sequence is
+        /// the routine case, not a contrivance.
+        /// </para>
+        /// </remarks>
+        [Fact]
+        public void An_idle_prompt_under_a_different_key_still_cannot_clear_the_question()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(PayloadKeyed("ask_user_question", "", "Alice asked: Pick one"));
+            long blockBefore = Assert.Single(svc.Snapshot()).BlockSeq;
+
+            svc.ApplyNotification(PayloadKeyed("idle_prompt", "uuid-1"));
+
+            var card = Assert.Single(svc.Snapshot());
+            Assert.Equal(AttentionState.BlockedQuestion, card.State);
+            Assert.Contains("Pick one", card.Detail, StringComparison.Ordinal);
+
+            // An idle timer is not new evidence, so it must not restamp the block either — that
+            // would re-shout an alarm the Owner had already acknowledged, for nothing.
+            Assert.Equal(blockBefore, card.BlockSeq);
+        }
+
+        /// <summary>
+        /// COUNTERWEIGHT: the idle guard's cross-key lookup must not make Idle unreachable. A card
+        /// that is not blocking still accepts an idle_prompt arriving under any key.
+        /// </summary>
+        [Fact]
+        public void An_idle_prompt_under_a_different_key_still_sets_idle_when_nothing_is_blocking()
+        {
+            var svc = new AgentAttentionService();
+
+            Assert.True(svc.ApplyNotification(PayloadKeyed("idle_prompt", "uuid-1")));
+
+            Assert.Equal(AttentionState.Idle, svc.Get("uuid-1").State);
+        }
+
+        /// <summary>
+        /// Provenance says the stored string IS a question. It does not say the agent is STILL
+        /// waiting on one, and the two are not the same claim.
+        /// </summary>
+        /// <remarks>
+        /// <c>MarkOffline</c> changes only the state, leaving Detail and the provenance flag in
+        /// place — so a card reading "Disconnected" would have displaced its live activity line
+        /// with a question nobody can answer any more. The state test is an AND with the provenance
+        /// test, not something the provenance test replaced.
+        /// </remarks>
+        [Fact]
+        public void A_disconnected_card_does_not_still_show_the_question()
+        {
+            var offline = Blocked(AttentionState.Offline, "Alice asked: Pick one", detailIsQuestionText: true);
+
+            var cards = MultiTerminal.AttentionPanel.AttentionCardProjector.Project(
+                new[] { offline }, null, null, Now);
+
+            var card = Assert.Single(cards);
+            Assert.StartsWith("Bash:", card.ObservedDetail, StringComparison.Ordinal);
+            Assert.True(card.DetailIsLive);
+        }
+
+        /// <summary>
+        /// The provenance flag is cleared WHERE Detail is cleared, not merely where it is set.
+        /// Its own doc says it must not outlive the string it describes; this is that sentence
+        /// made executable rather than aspirational.
+        /// </summary>
+        [Fact]
+        public void Clearing_a_question_block_also_clears_its_provenance()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(Payload("ask_user_question", "Alice asked: Pick one"));
+            Assert.True(svc.Get(Session).DetailIsQuestionText);
+
+            svc.NoteObservedActivity(
+                Session,
+                DateTime.UtcNow.AddSeconds(5),
+                isSubagent: false,
+                activitySummary: "Bash: git status");
+
+            var e = svc.Get(Session);
+            Assert.Null(e.Detail);
+            Assert.False(e.DetailIsQuestionText);
+        }
     }
 }
