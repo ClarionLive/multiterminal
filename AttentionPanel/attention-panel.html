@@ -67,11 +67,11 @@ body.light {
 .ctx {
     font-size: 9.5px; font-variant-numeric: tabular-nums;
     color: var(--text-muted); background: var(--bg-tag);
-    border-radius: 4px; padding: 1px 4px; margin-left: auto; margin-right: 6px;
+    border-radius: 4px; padding: 1px 4px;
     flex-shrink: 0;
 }
 .ctx-warn { color: var(--peach); }
-.ctx-high { color: var(--red, #f38ba8); font-weight: 600; }
+.ctx-high { color: var(--red); font-weight: 600; }
 /* Stale is about the READING, not the value, so it is an underline rather than a colour —
    a stale 91% must still read as high, and a colour swap would hide that. */
 .ctx-stale { text-decoration: underline dotted; text-underline-offset: 2px; }

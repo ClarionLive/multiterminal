@@ -313,6 +313,53 @@ namespace MultiTerminal.Tests
             Assert.Equal(0, quota.FiveHourLeft);
         }
 
+        // ───────── pipeline run 1: an impossible number is not a measurement ─────────
+
+        /// <summary>
+        /// <c>contextPct</c> is whatever number was in a temp file — nothing upstream constrains it
+        /// to 0–100. An out-of-range value is treated as NO reading.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not clamped. Clamping <c>int.MaxValue</c> to 100 would paint the card bold
+        /// red and tell the Owner to hand off immediately — inventing an emergency out of garbage,
+        /// which is the failure this panel exists to prevent, reached by trying to be helpful.
+        /// Negative is the mirror: clamped to 0 it would read as a freshly-cleared terminal with
+        /// maximum headroom.
+        /// </remarks>
+        [Theory]
+        [InlineData(-1)]
+        [InlineData(-50)]
+        [InlineData(101)]
+        [InlineData(int.MaxValue)]
+        public void An_impossible_percentage_is_treated_as_no_reading(int impossible)
+        {
+            var card = Assert.Single(Project(new TerminalUsageStats
+            {
+                Available = true,
+                ContextPercent = impossible,
+            }));
+
+            Assert.Null(card.ContextPercent);
+        }
+
+        /// <summary>
+        /// COUNTERWEIGHT: the range test must not eat the ENDS. 0 and 100 are the two values the
+        /// Owner most needs to see — a freshly cleared terminal and a completely full one.
+        /// </summary>
+        [Theory]
+        [InlineData(0)]
+        [InlineData(100)]
+        public void The_boundary_percentages_are_still_reported(int edge)
+        {
+            var card = Assert.Single(Project(new TerminalUsageStats
+            {
+                Available = true,
+                ContextPercent = edge,
+            }));
+
+            Assert.Equal(edge, card.ContextPercent);
+        }
+
         // ───────────── the contract the card sweeps cannot reach ─────────────
 
         private static string RepoRoot([CallerFilePath] string thisFile = "")

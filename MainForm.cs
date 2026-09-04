@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -6791,18 +6791,52 @@ namespace MultiTerminal
         /// Attention state changed on a background thread; repaint on the UI thread
         /// (task 2289bb8a item 5).
         /// </summary>
+        /// <remarks>
+        /// COALESCED (task 85af4635, pipeline run 1 debugger). One event per changed card is the
+        /// right granularity for the SOURCE — <c>AgentAttentionService</c> raises on every live
+        /// activity line so cards keep moving — but it is the wrong granularity for the SINK:
+        /// <see cref="RefreshAttentionPanel"/> rebuilds the entire rail from
+        /// <c>Snapshot()</c> every time, so N queued refreshes do N times the work to arrive at
+        /// the state the last one alone would have produced.
+        /// <para>
+        /// That was free while the refresh was pure in-memory work. It stopped being free the
+        /// moment it touched disk, and <c>AgentActivityWatcher</c> drains up to 200 rows per tick —
+        /// so a late-prime replay queued 200 full rebuilds. Dropping the redundant posts is
+        /// lossless precisely BECAUSE the refresh is a full rebuild: intermediate snapshots are
+        /// skipped, never merged, and the final state is identical.
+        /// </para>
+        /// </remarks>
         private void OnAgentAttentionChanged(object sender, AgentAttentionEntry e)
         {
             try
             {
                 if (IsDisposed || !IsHandleCreated) return;
-                BeginInvoke(new Action(RefreshAttentionPanel));
+
+                // Interlocked, not a plain bool: this fires from the watcher's background thread
+                // and from the broker's, so a check-then-set would let two posts through.
+                if (System.Threading.Interlocked.Exchange(ref _attentionRefreshPending, 1) == 1) return;
+
+                BeginInvoke(new Action(() =>
+                {
+                    // Cleared BEFORE the rebuild, so a change arriving DURING it still queues one
+                    // more pass. Clearing afterwards would drop that event and leave the rail
+                    // showing state it had already been told was out of date.
+                    System.Threading.Interlocked.Exchange(ref _attentionRefreshPending, 0);
+                    RefreshAttentionPanel();
+                }));
             }
             catch
             {
-                // The form can be tearing down between the check and the post.
+                // The form can be tearing down between the check and the post. Release the latch
+                // so a later event is not suppressed by a post that never landed.
+                System.Threading.Interlocked.Exchange(ref _attentionRefreshPending, 0);
             }
         }
+
+        /// <summary>
+        /// 1 while an attention repaint is already queued. See <see cref="OnAgentAttentionChanged"/>.
+        /// </summary>
+        private int _attentionRefreshPending;
 
         /// <summary>
         /// Builds and starts the poller that feeds observed tool activity into the attention
@@ -6890,9 +6924,18 @@ namespace MultiTerminal
             try
             {
                 var colors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                // Name -> docId for the LIVE terminals only (task 85af4635, pipeline run 1).
+                // Built from the loop that was already running for colours, so it costs nothing.
+                var liveDocIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var t in broker.GetTerminals())
                 {
-                    if (t?.Name != null && !colors.ContainsKey(t.Name)) colors[t.Name] = t.Color;
+                    if (t?.Name == null) continue;
+                    if (!colors.ContainsKey(t.Name)) colors[t.Name] = t.Color;
+                    if (!string.IsNullOrWhiteSpace(t.DocId) && !liveDocIds.ContainsKey(t.Name))
+                    {
+                        liveDocIds[t.Name] = t.DocId;
+                    }
                 }
 
                 // Project id -> display name, so a claimed task can name the project it belongs to.
@@ -6957,34 +7000,76 @@ namespace MultiTerminal
                 // pure — it takes prepared inputs and touches no disk, which is what lets the whole
                 // projection be tested without a running app.
                 //
-                // docId is deliberately NOT resolved: ReadFor globs mt-statusline-{name}-*.json and
-                // takes the newest, which is the right pick anyway when a terminal has reconnected
-                // under a new doc.
+                // EXACT PATH ONLY — never the name-only glob. Measured on a live machine (run 1
+                // debugger): ReadFor(name) with no docId does a Directory.GetFiles over the whole
+                // of %TEMP% (86,881 entries there) and parses every match — 48 ms per agent, 344 ms
+                // per refresh with 7 agents. RefreshAttentionPanel is BeginInvoke'd once per
+                // activity row with no coalescing, and AgentActivityWatcher drains up to 200 rows
+                // every 2s, so that is ~68 SECONDS of frozen UI on one batch. This method was pure
+                // in-memory work before usage stats were added, which is exactly why the
+                // un-coalesced fan-out had never cost anything.
+                //
+                // Restricting to live terminals is also what makes the number TRUE. The glob adopts
+                // the newest file matching a name whatever its age; the same probe found readings
+                // 40 and 58 DAYS old being returned as available, with real percentages, for agents
+                // whose current run had written nothing. An agent with no live terminal now gets no
+                // reading and the card shows "--%", which is the honest answer.
                 var agentStats = new Dictionary<string, Services.TerminalUsageStats>(
                     StringComparer.OrdinalIgnoreCase);
-                try
+                Services.TerminalUsageStats accountQuota = null;
+                var statsReader = new Services.StatusLineStatsReader();
+
+                // Belt and braces behind the docId: a file written before this process started
+                // cannot describe a terminal running inside it. Mirrors TerminalDocument's
+                // _launchedAtMs floor (task 1ba59334), which exists for this same failure.
+                long processStartMs = new DateTimeOffset(
+                    System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()).ToUnixTimeMilliseconds();
+
+                foreach (var entry in snapshot)
                 {
-                    var statsReader = new Services.StatusLineStatsReader();
-                    foreach (var entry in snapshot)
+                    string agent = entry?.AgentName;
+                    if (string.IsNullOrWhiteSpace(agent) || agentStats.ContainsKey(agent)) continue;
+                    if (!liveDocIds.TryGetValue(agent, out string docId)) continue;
+
+                    // Scoped INSIDE the loop: wrapping the whole loop let one bad agent silently
+                    // cost every agent after it, as an order-dependent subset nobody could see.
+                    try
                     {
-                        string agent = entry?.AgentName;
-                        if (string.IsNullOrWhiteSpace(agent) || agentStats.ContainsKey(agent)) continue;
-                        agentStats[agent] = statsReader.ReadFor(agent);
+                        agentStats[agent] = statsReader.ReadFor(agent, docId, processStartMs);
+                    }
+                    catch (Exception statsEx)
+                    {
+                        _debugLogService?.Info(
+                            "AttentionPanel", $"Usage stats read failed for '{agent}': {statsEx.Message}");
                     }
                 }
-                catch (Exception statsEx)
+
+                // ONE read for the whole account, not one per agent. The 5h/7d numbers live in a
+                // single shared file; reading them through ReadFor meant N parses of that same file
+                // with all but one result discarded — and worse, it returned early when a
+                // terminal's own file was missing, so an account-scoped number was suppressed by
+                // the absence of something unrelated to it.
+                try
                 {
-                    // Costs the NUMBERS, not the rail. An empty dictionary renders "--%" everywhere,
-                    // which is the honest state and exactly what a machine with no statusline files
-                    // shows anyway — so the failure mode is already a designed-for one.
-                    _debugLogService?.Info("AttentionPanel", $"Usage stats read failed: {statsEx.Message}");
+                    accountQuota = statsReader.ReadAccountQuota();
+                }
+                catch (Exception quotaEx)
+                {
+                    _debugLogService?.Info("AttentionPanel", $"Account quota read failed: {quotaEx.Message}");
                 }
 
                 var cards = AttentionPanel.AttentionCardProjector.Project(
                     snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats);
 
+                // The account reading is offered ALONGSIDE the per-terminal copies rather than
+                // instead of them: From() already ranks a shared-source reading above a
+                // per-terminal one, so the authoritative file wins when it is usable and the
+                // existing fallback still applies when it is not. No new precedence to get wrong.
+                var quotaCandidates = new List<Services.TerminalUsageStats>(agentStats.Values);
+                if (accountQuota != null) quotaCandidates.Add(accountQuota);
+
                 _attentionPanel.SetSessions(
-                    cards, AttentionPanel.AttentionQuota.From(agentStats.Values));
+                    cards, AttentionPanel.AttentionQuota.From(quotaCandidates));
             }
             catch (Exception ex)
             {

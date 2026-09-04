@@ -79,7 +79,21 @@ namespace MultiTerminal.AttentionPanel
                 // A reading that exists but is not Available carries nothing — treat it exactly as
                 // a missing one. `Available == false` is the reader's word for "no file, or a torn
                 // one", and its other fields are then default-valued rather than meaningful.
-                bool hasContext = stats != null && stats.Available && stats.ContextPercent != null;
+                //
+                // The RANGE test is part of the same question. `contextPct` is whatever number was
+                // in a temp file; nothing upstream constrains it to 0-100, so a corrupt or hostile
+                // file can offer -50 or int.MaxValue. An impossible value is not a measurement, so
+                // it is treated as NO measurement and the card shows "--%".
+                //
+                // Deliberately NOT clamped. Clamping 2147483647 to 100 would paint a card bold red
+                // and tell the owner to hand off immediately, inventing an emergency out of
+                // garbage — the exact failure this panel exists to prevent, arrived at by trying to
+                // be helpful. (pipeline run 1, security auditor.)
+                bool hasContext = stats != null
+                                  && stats.Available
+                                  && stats.ContextPercent is int pct
+                                  && pct >= 0
+                                  && pct <= 100;
 
                 // Observed beats inferred — see the remarks on Project().
                 string project = string.IsNullOrWhiteSpace(e.Project) ? fallbackProject : e.Project;
