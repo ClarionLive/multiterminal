@@ -52,7 +52,8 @@ namespace MultiTerminal.AttentionPanel
             IReadOnlyDictionary<string, string> agentColors,
             IReadOnlyDictionary<string, AttentionTicketClaim> claims,
             DateTime nowUtc,
-            IReadOnlyDictionary<string, string> agentProjects = null)
+            IReadOnlyDictionary<string, string> agentProjects = null,
+            IReadOnlyDictionary<string, MultiTerminal.Services.TerminalUsageStats> agentStats = null)
         {
             var cards = new List<AttentionCard>();
             if (entries == null) return cards;
@@ -65,13 +66,20 @@ namespace MultiTerminal.AttentionPanel
                 AttentionTicketClaim claim = null;
                 string color = null;
                 string fallbackProject = null;
+                MultiTerminal.Services.TerminalUsageStats stats = null;
 
                 if (!string.IsNullOrWhiteSpace(agent))
                 {
                     if (claims != null) claims.TryGetValue(agent, out claim);
                     if (agentColors != null) agentColors.TryGetValue(agent, out color);
                     if (agentProjects != null) agentProjects.TryGetValue(agent, out fallbackProject);
+                    if (agentStats != null) agentStats.TryGetValue(agent, out stats);
                 }
+
+                // A reading that exists but is not Available carries nothing — treat it exactly as
+                // a missing one. `Available == false` is the reader's word for "no file, or a torn
+                // one", and its other fields are then default-valued rather than meaningful.
+                bool hasContext = stats != null && stats.Available && stats.ContextPercent != null;
 
                 // Observed beats inferred — see the remarks on Project().
                 string project = string.IsNullOrWhiteSpace(e.Project) ? fallbackProject : e.Project;
@@ -99,6 +107,15 @@ namespace MultiTerminal.AttentionPanel
                     TicketId = claim?.TaskId,
                     TicketItem = claim?.ItemLabel,
                     ClaimAgeSeconds = claim == null ? 0 : Seconds(nowUtc - claim.UpdatedAtUtc),
+
+                    // Null, not zero, when there is nothing to report — see the remarks on
+                    // AttentionCard.ContextPercent. The two companions are derived from the SAME
+                    // `hasContext` decision so they cannot disagree with the number they describe.
+                    ContextPercent = hasContext ? stats.ContextPercent : null,
+                    ContextAgeSeconds = hasContext && stats.AgeSeconds is double age && age >= 0
+                        ? (long)age
+                        : -1,
+                    ContextStale = hasContext && stats.Stale,
                 });
             }
 

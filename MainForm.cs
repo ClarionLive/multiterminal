@@ -6950,10 +6950,41 @@ namespace MultiTerminal
                     }
                 }
 
-                var cards = AttentionPanel.AttentionCardProjector.Project(
-                    broker.AgentAttention.Snapshot(), colors, claims, DateTime.UtcNow, agentProjects);
+                var snapshot = broker.AgentAttention.Snapshot();
 
-                _attentionPanel.SetSessions(cards);
+                // Usage stats per agent, for the cards' context fill and the header's account quota
+                // (task 85af4635). Read here rather than inside the projector so the projector stays
+                // pure — it takes prepared inputs and touches no disk, which is what lets the whole
+                // projection be tested without a running app.
+                //
+                // docId is deliberately NOT resolved: ReadFor globs mt-statusline-{name}-*.json and
+                // takes the newest, which is the right pick anyway when a terminal has reconnected
+                // under a new doc.
+                var agentStats = new Dictionary<string, Services.TerminalUsageStats>(
+                    StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var statsReader = new Services.StatusLineStatsReader();
+                    foreach (var entry in snapshot)
+                    {
+                        string agent = entry?.AgentName;
+                        if (string.IsNullOrWhiteSpace(agent) || agentStats.ContainsKey(agent)) continue;
+                        agentStats[agent] = statsReader.ReadFor(agent);
+                    }
+                }
+                catch (Exception statsEx)
+                {
+                    // Costs the NUMBERS, not the rail. An empty dictionary renders "--%" everywhere,
+                    // which is the honest state and exactly what a machine with no statusline files
+                    // shows anyway — so the failure mode is already a designed-for one.
+                    _debugLogService?.Info("AttentionPanel", $"Usage stats read failed: {statsEx.Message}");
+                }
+
+                var cards = AttentionPanel.AttentionCardProjector.Project(
+                    snapshot, colors, claims, DateTime.UtcNow, agentProjects, agentStats);
+
+                _attentionPanel.SetSessions(
+                    cards, AttentionPanel.AttentionQuota.From(agentStats.Values));
             }
             catch (Exception ex)
             {

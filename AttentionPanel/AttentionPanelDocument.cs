@@ -74,7 +74,8 @@ namespace MultiTerminal.AttentionPanel
         }
 
         /// <summary>Pushes the current card list to the view.</summary>
-        public void SetSessions(IEnumerable<object> sessions) => _control?.SetSessions(sessions);
+        public void SetSessions(IEnumerable<object> sessions, object quota = null)
+            => _control?.SetSessions(sessions, quota);
 
         /// <summary>Applies the saved ordering preference.</summary>
         public void SetOrder(string order) => _control?.SetOrder(order);

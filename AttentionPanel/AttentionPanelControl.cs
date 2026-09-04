@@ -144,9 +144,20 @@ namespace MultiTerminal.AttentionPanel
         /// Pushes the full card list to the view. Safe to call before the WebView2 is ready — the
         /// most recent payload is held and replayed once the view reports ready.
         /// </summary>
-        public void SetSessions(IEnumerable<object> sessions)
+        /// <param name="quota">
+        /// Account rate-cap headroom for the header, or null when it is not being shown.
+        /// </param>
+        /// <remarks>
+        /// The quota rides INSIDE this envelope rather than arriving as its own message, and that
+        /// is load-bearing rather than tidy (task 85af4635). A second message is a second freshness
+        /// path: the cards and the header could then be from different moments while presenting as
+        /// one reading, which is this panel's signature failure in a new place. One envelope also
+        /// means the "keep only the LATEST" queue below covers both without a second copy of that
+        /// logic.
+        /// </remarks>
+        public void SetSessions(IEnumerable<object> sessions, object quota = null)
         {
-            string json = JsonSerializer.Serialize(new { type = "sessions", sessions });
+            string json = JsonSerializer.Serialize(new { type = "sessions", sessions, quota });
             if (!_isInitialized)
             {
                 // Keep only the LATEST: replaying a queue of stale snapshots would animate the

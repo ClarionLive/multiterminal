@@ -135,6 +135,51 @@ namespace MultiTerminal.AttentionPanel
         /// </summary>
         [JsonPropertyName("claimAgeSeconds")]
         public long ClaimAgeSeconds { get; set; }
+
+        /// <summary>
+        /// Context-window fill for this terminal, 0–100 USED, or null when nothing was read
+        /// (task 85af4635).
+        /// </summary>
+        /// <remarks>
+        /// USED rather than remaining, and that asymmetry with the header's quota is deliberate:
+        /// this is a FILL GAUGE — "how full is this conversation, do I need to hand off?" — while
+        /// the account quota beside the panel title is a BUDGET — "how much can I still do today?".
+        /// Two different questions, so two different framings, which is why the header labels its
+        /// numbers as remaining rather than leaving the reader to infer a shared polarity.
+        /// <para>
+        /// ⚠️ NULL IS NOT ZERO. Null means no reading was available, and must render as "--%".
+        /// Rendered as 0% it would say "plenty of room" at the exact moment it knows nothing —
+        /// the same class of confident falsehood as a card reading "Finished and idle" in front
+        /// of a waiting agent. This is not an edge case: an installed machine with no statusline
+        /// file shows exactly this state for every terminal at once.
+        /// </para>
+        /// </remarks>
+        [JsonPropertyName("contextPercent")]
+        public int? ContextPercent { get; set; }
+
+        /// <summary>
+        /// Age of the context reading in seconds, or -1 when there is no reading.
+        /// </summary>
+        /// <remarks>
+        /// Its own age, deliberately separate from <see cref="ActivityAgeSeconds"/> and
+        /// <see cref="SinceSeconds"/>. A percentage that stopped updating is the same lie the
+        /// frozen notification text was, and worse here because the owner ACTS on this number when
+        /// deciding whether to hand off.
+        /// </remarks>
+        [JsonPropertyName("contextAgeSeconds")]
+        public long ContextAgeSeconds { get; set; } = -1;
+
+        /// <summary>
+        /// True when the context reading is old enough that the reader no longer vouches for it.
+        /// </summary>
+        /// <remarks>
+        /// Distinct from the header quota's staleness on purpose — <c>StatusLineStatsReader</c>
+        /// keeps the two apart because "a terminal can have a fresh context fill but a stale
+        /// rate-cap reading". Collapsing them into one flag would mark a good number bad, or a bad
+        /// number good.
+        /// </remarks>
+        [JsonPropertyName("contextStale")]
+        public bool ContextStale { get; set; }
     }
 
     /// <summary>What the board says an agent is working on. A claim, not an observation.</summary>

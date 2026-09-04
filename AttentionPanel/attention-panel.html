@@ -53,6 +53,29 @@ body.light {
     font-variant-numeric: tabular-nums;
 }
 .needs[data-count="0"] { background: var(--bg-tag); color: var(--text-muted); }
+
+/* Account quota, beside the title because it describes the ACCOUNT and not any one agent
+   (task 85af4635). Quiet by default — it is a reference number, not an alarm. */
+.quota {
+    font-size: 9.5px; color: var(--text-muted); letter-spacing: 0.02em;
+    white-space: nowrap; margin-left: 6px;
+}
+.quota b { font-weight: 600; color: var(--text-secondary); }
+.quota.stale { color: var(--peach); }
+
+/* Context fill on each card. Neutral until it is worth acting on — see ctxChip(). */
+.ctx {
+    font-size: 9.5px; font-variant-numeric: tabular-nums;
+    color: var(--text-muted); background: var(--bg-tag);
+    border-radius: 4px; padding: 1px 4px; margin-left: auto; margin-right: 6px;
+    flex-shrink: 0;
+}
+.ctx-warn { color: var(--peach); }
+.ctx-high { color: var(--red, #f38ba8); font-weight: 600; }
+/* Stale is about the READING, not the value, so it is an underline rather than a colour —
+   a stale 91% must still read as high, and a colour swap would hide that. */
+.ctx-stale { text-decoration: underline dotted; text-underline-offset: 2px; }
+.ctx-unknown { color: var(--text-muted); opacity: 0.7; }
 .spacer { flex: 1; }
 
 /* ---- gear + settings popover (task 42052f0c) ----
@@ -319,6 +342,7 @@ body[data-alarm="hand"] .card.pulsing {
 <div class="head">
     <span class="head-title">Attention</span>
     <span class="needs" id="needs" data-count="0">0</span>
+    <span class="quota" id="quota" hidden></span>
     <span class="spacer"></span>
     <button class="gear" id="gear" type="button" aria-haspopup="true" aria-expanded="false"
             aria-controls="pop" title="Rail settings">&#9881;</button>
@@ -569,7 +593,7 @@ function render() {
         var el = document.createElement("span");
         el.className = "elapsed"; el.textContent = fmtAge(s.sinceSeconds);
 
-        top.appendChild(av); top.appendChild(who); top.appendChild(el);
+        top.appendChild(av); top.appendChild(who); top.appendChild(ctxChip(s)); top.appendChild(el);
 
         var obs = document.createElement("span");
         obs.className = "observed";
@@ -728,6 +752,102 @@ function reconcileAcks() {
     if (focusedId && !live[focusedId]) focusedId = null;
 }
 
+/* ACCOUNT QUOTA in the header — 5h and 7d REMAINING (task 85af4635).
+
+   LEFT, not used, and labelled as such. The owner's framing and the actionable one: "I rarely even
+   look at how much I've used, so what's left is the one to highlight." The cards next door show
+   context USED, so the word "left" is doing real work here — without it, two percentages sitting a
+   few pixels apart would read as one scale and mean opposite things.
+
+   ACCOUNT-scoped, which is why it is here and not on the cards: every terminal reports the same
+   pair of numbers, so on a card it would be one value repeated N times, implying a per-agent fact
+   that does not exist.
+
+   Hidden entirely when there is no reading. An empty header is honest; "0% left" would be a
+   fabricated emergency. */
+var quotaEl = document.getElementById("quota");
+
+function applyQuota(quota) {
+    if (!quotaEl) return;
+
+    var has5 = quota && typeof quota.fiveHourLeft === "number";
+    var has7 = quota && typeof quota.sevenDayLeft === "number";
+    if (!has5 && !has7) { quotaEl.hidden = true; quotaEl.textContent = ""; return; }
+
+    quotaEl.hidden = false;
+    quotaEl.textContent = "";
+
+    if (has5) quotaEl.appendChild(quotaPart("5h", quota.fiveHourLeft));
+    if (has5 && has7) quotaEl.appendChild(document.createTextNode(" · "));
+    if (has7) quotaEl.appendChild(quotaPart("7d", quota.sevenDayLeft));
+    quotaEl.appendChild(document.createTextNode(" left"));
+
+    quotaEl.classList.toggle("stale", !!(quota && quota.stale));
+
+    var tip = "Account rate limits remaining";
+    if (quota && quota.stale) tip += " — reading has gone stale";
+    if (quota && typeof quota.ageSeconds === "number" && quota.ageSeconds >= 0) {
+        tip += " (read " + fmtAge(quota.ageSeconds) + " ago)";
+    }
+    /* A per-terminal copy is the same account, but it is second-hand: the shared file the other
+       terminals agree on was unusable. Worth saying, not worth shouting. */
+    if (quota && quota.fromSharedFile === false) tip += " · from a single terminal's copy, not the shared file";
+    quotaEl.title = tip;
+}
+
+function quotaPart(label, pct) {
+    var span = document.createElement("span");
+    span.appendChild(document.createTextNode(label + " "));
+    var b = document.createElement("b");
+    b.textContent = pct + "%";
+    span.appendChild(b);
+    return span;
+}
+
+/* CONTEXT FILL — how full this terminal's conversation is, as a percentage USED (task 85af4635).
+   Deliberately the opposite framing from the header's quota, because they answer different
+   questions: this is a fill gauge ("do I need to hand off?"), that is a budget ("how much can I
+   still do today?"). The header labels its numbers "left" so the two are never read as one scale.
+
+   THE NULL CASE IS THE POINT. No reading renders "--%", never 0%. Rendered as 0 it would say
+   "plenty of room" at the exact moment it knows nothing — the same shape of confident falsehood as
+   a card reading "Finished and idle" in front of a waiting agent. It is also the COMMON case: a
+   machine with no statusline files shows it for every terminal at once.
+
+   Colour is deliberately rare. This rail already spends colour on who needs you, and an alarm that
+   is always lit gets ignored inside a day — so context stays neutral until it is genuinely worth
+   acting on. */
+function ctxChip(s) {
+    var chip = document.createElement("span");
+    chip.className = "ctx";
+
+    if (typeof s.contextPercent !== "number") {
+        chip.className += " ctx-unknown";
+        chip.textContent = "--%";
+        chip.title = "Context: no reading available";
+        return chip;
+    }
+
+    var pct = s.contextPercent;
+    chip.textContent = pct + "%";
+    if (pct >= 90) chip.className += " ctx-high";
+    else if (pct >= 75) chip.className += " ctx-warn";
+
+    /* A percentage that stopped updating is the frozen-detail lie in a new position, and worse:
+       the owner ACTS on this number when deciding whether to hand off. Say so on the chip rather
+       than only in a tooltip nobody hovers. */
+    var tip = "Context " + pct + "% used";
+    if (s.contextStale) {
+        chip.className += " ctx-stale";
+        tip += " — reading has gone stale";
+    }
+    if (typeof s.contextAgeSeconds === "number" && s.contextAgeSeconds >= 0) {
+        tip += " (read " + fmtAge(s.contextAgeSeconds) + " ago)";
+    }
+    chip.title = tip;
+    return chip;
+}
+
 /* The identity of the block a card is currently in. Normalised to a number so a missing or
    malformed blockSeq compares equal to itself rather than throwing the ack away every push. */
 function blockId(s) {
@@ -851,6 +971,10 @@ window.chrome.webview.addEventListener("message", function (ev) {
         rebuildColorCache();   // the only thing that changes what stateColor() resolves to
     } else if (msg.type === "sessions") {
         applySessions(msg.sessions);
+        /* Arrives in the SAME envelope as the cards, deliberately — a separate message would be a
+           second freshness path, letting the header and the cards come from different moments
+           while presenting as one reading. */
+        applyQuota(msg.quota);
     } else if (msg.type === "order") {
         order = msg.order || "attention";
         markGroup("grp-order", order);
