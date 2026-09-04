@@ -325,6 +325,41 @@ namespace MultiTerminal.Tests
             return File.ReadAllText(path);
         }
 
+        /// <summary>
+        /// The panel html with its <c>&lt;style&gt;</c> block removed, for the sweeps below.
+        /// </summary>
+        /// <remarks>
+        /// NOT tidiness — the sweeps are WRONG without it, and that was demonstrated rather than
+        /// theorised. The CSS rule <c>.quota.stale { … }</c> matches <c>\bquota\.stale\b</c>, so the
+        /// stylesheet alone satisfied the forward sweep for that one name: deleting both JavaScript
+        /// reads of <c>quota.stale</c> left the test green.
+        /// <para>
+        /// A contract test that can be satisfied by a CSS class name is not checking the contract,
+        /// it is checking that a string appears in a file — and it fails in the direction that
+        /// matters, quietly reporting coverage it does not have. Stripping the style block leaves
+        /// only code the browser executes.
+        /// </para>
+        /// </remarks>
+        private static string PanelScript() =>
+            Regex.Replace(PanelHtml(), @"<style\b[^>]*>.*?</style>", string.Empty,
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// The stripper must actually strip. Without this, a change to the panel's markup that broke
+        /// the regex would silently restore the blind spot above — the sweeps would keep passing and
+        /// nothing would say why.
+        /// </summary>
+        [Fact]
+        public void The_sweep_ignores_the_stylesheet()
+        {
+            Assert.Contains(".quota.stale", PanelHtml(), StringComparison.Ordinal);
+            Assert.DoesNotContain(".quota.stale", PanelScript(), StringComparison.Ordinal);
+
+            // And the script half survived: stripping too much would make the sweeps vacuous in the
+            // other direction, passing because they find nothing at all to check.
+            Assert.Contains("applyQuota", PanelScript(), StringComparison.Ordinal);
+        }
+
         private static IReadOnlyList<string> QuotaJsonNames() =>
             typeof(AttentionQuota)
                 .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -364,7 +399,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Every_quota_field_the_host_sends_is_read_by_the_panel()
         {
-            string html = PanelHtml();
+            string html = PanelScript();
 
             var unread = QuotaJsonNames()
                 .Where(name => !Regex.IsMatch(html, @"\bquota\." + Regex.Escape(name) + @"\b"))
@@ -382,7 +417,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Every_quota_field_the_panel_reads_is_sent_by_the_host()
         {
-            string html = PanelHtml();
+            string html = PanelScript();
             var sent = new HashSet<string>(QuotaJsonNames(), StringComparer.Ordinal);
 
             var read = Regex.Matches(html, @"\bquota\.([A-Za-z_][A-Za-z0-9_]*)")
@@ -405,7 +440,7 @@ namespace MultiTerminal.Tests
         [Fact]
         public void The_panel_reads_the_quota_from_the_sessions_message()
         {
-            string html = PanelHtml();
+            string html = PanelScript();
 
             Assert.Matches(@"applyQuota\(\s*msg\.quota\s*\)", html);
         }
