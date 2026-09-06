@@ -65,13 +65,79 @@ namespace MultiTerminal.Services
         public string SharedQuotaPath() => Path.Combine(_tempDir, SharedQuotaFileName);
 
         /// <summary>
+        /// Read the ACCOUNT rate-cap numbers alone, from the shared file, with no
+        /// per-terminal file involved.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Exists because the account quota was reachable only as a by-product of
+        /// <see cref="ReadFor"/>, which returns early when the caller's per-terminal file is
+        /// missing — <b>before</b> the shared-quota block. So an account-scoped number that is
+        /// present and fresh on disk was suppressed by the absence of one terminal's private
+        /// file, which has nothing to do with it (task 85af4635, pipeline run 1 debugger LOW).
+        /// </para>
+        /// <para>
+        /// It also removes N-1 redundant parses: a caller wanting one account figure across N
+        /// terminals previously called <c>ReadFor</c> N times and re-read this same file each
+        /// time, discarding all but one result (same run, code review MINOR).
+        /// </para>
+        /// <para>
+        /// <see cref="TerminalUsageStats.Available"/> reports whether the SHARED FILE was read,
+        /// so the result composes with per-terminal readings under the same rules —
+        /// see <c>AttentionQuota.From</c>.
+        /// </para>
+        /// </remarks>
+        public TerminalUsageStats ReadAccountQuota()
+        {
+            var result = new TerminalUsageStats();
+
+            if (!TryReadJson(SharedQuotaPath(), out JsonElement shared)) return result;
+
+            long? ts = GetLong(shared, "timestamp");
+            if (ts == null) return result;
+
+            double age = (_clock().ToUnixTimeMilliseconds() - ts.Value) / 1000.0;
+
+            result.Available = true;
+            result.QuotaSource = TerminalUsageStats.QuotaSourceShared;
+            result.QuotaSourceTimestampMs = ts;
+            result.QuotaAgeSeconds = age;
+
+            // Same polarity as ReadFor: a future-dated file is a planted or clock-skewed one, and
+            // a legitimate writer always writes before we read. Stale, never "extra fresh".
+            result.QuotaStale = age < 0 || age > _staleThresholdSeconds;
+            ApplyQuota(shared, result);
+
+            return result;
+        }
+
+        /// <summary>
         /// Read usage stats for a terminal. When <paramref name="docId"/> is supplied
         /// the exact per-terminal file is used; otherwise the newest
         /// <c>mt-statusline-{name}-*.json</c> (by the data's own <c>timestamp</c>) is
         /// selected, so a caller that only knows its name still resolves the right
         /// file (and skips a stale sibling/zombie).
         /// </summary>
-        public TerminalUsageStats ReadFor(string terminalName, string docId = null)
+        /// <param name="notBeforeUnixMs">
+        /// Optional freshness FLOOR: reject a reading whose file predates this instant.
+        /// </param>
+        /// <remarks>
+        /// <b>On the floor.</b> <see cref="TerminalUsageStats.Stale"/> answers "is this reading
+        /// old?", which is advisory. The floor answers a different question — "could this file
+        /// possibly describe a terminal running NOW?" — and its answer is disqualifying. A caller
+        /// that knows every terminal it cares about was created after some instant (an app start,
+        /// a process launch) can pass it and never adopt an orphan.
+        /// <para>
+        /// Without it, the name-only path adopts the newest file matching the name whatever its
+        /// age. Measured on a live machine (task 85af4635, run 1 debugger): readings 40 and 58
+        /// DAYS old were returned as available, with real percentages, for agents whose current
+        /// run had written no file. Rendered, that is a confident number about a session that
+        /// ended six weeks ago. <c>TerminalDocument</c> already carries this guard as
+        /// <c>_launchedAtMs</c> (task 1ba59334) for the identical failure; this makes it
+        /// available to every caller instead of one.
+        /// </para>
+        /// </remarks>
+        public TerminalUsageStats ReadFor(string terminalName, string docId = null, long? notBeforeUnixMs = null)
         {
             var result = new TerminalUsageStats { TerminalName = terminalName };
             if (string.IsNullOrEmpty(terminalName)) return result;
@@ -96,6 +162,19 @@ namespace MultiTerminal.Services
 #pragma warning restore CA3003
 
             if (!TryReadJson(perTerminalPath, out JsonElement perTerminal)) return result;
+
+            // THE FLOOR, applied before anything is published. A file older than the caller's
+            // floor cannot describe a terminal the caller knows about, so the honest answer is
+            // "no reading" — not a number with a stale flag beside it. Marking it stale would
+            // still put a percentage on screen, and a percentage is what gets acted on.
+            //
+            // A file with NO timestamp is rejected too when a floor is in force: it cannot prove
+            // it is recent, and the caller asked for proof.
+            if (notBeforeUnixMs.HasValue)
+            {
+                long? floorTs = GetLong(perTerminal, "timestamp");
+                if (floorTs == null || floorTs.Value < notBeforeUnixMs.Value) return result;
+            }
 
             result.Available = true;
             result.Model = GetString(perTerminal, "model");
@@ -140,7 +219,7 @@ namespace MultiTerminal.Services
                         || GetNumberAsInt(shared, "quota7d").HasValue;
                     if (sharedAge >= 0 && sharedAge <= _staleThresholdSeconds && sharedHasQuota)
                     {
-                        result.QuotaSource = "shared";
+                        result.QuotaSource = TerminalUsageStats.QuotaSourceShared;
                         result.QuotaSourceTimestampMs = sharedTs;
                         result.QuotaAgeSeconds = sharedAge;
                         result.QuotaStale = false;
@@ -154,7 +233,7 @@ namespace MultiTerminal.Services
             {
                 // Shared file missing, corrupt, untimestamped, future-dated, or stale →
                 // use this terminal's own quota copy and inherit its freshness.
-                result.QuotaSource = "per-terminal";
+                result.QuotaSource = TerminalUsageStats.QuotaSourcePerTerminal;
                 result.QuotaSourceTimestampMs = result.SourceTimestampMs;
                 result.QuotaAgeSeconds = result.AgeSeconds;
                 result.QuotaStale = result.Stale;
@@ -305,6 +384,20 @@ namespace MultiTerminal.Services
     /// </summary>
     public sealed class TerminalUsageStats
     {
+        /// <summary>
+        /// <see cref="QuotaSource"/> value meaning "the authoritative shared account file".
+        /// </summary>
+        /// <remarks>
+        /// A constant because the writer and every reader compare against it across file
+        /// boundaries, and a rename on one side alone fails SILENTLY: the comparison simply stops
+        /// matching, callers quietly treat an authoritative reading as second-hand, and tests that
+        /// spell the literal themselves stay green (task 85af4635, pipeline run 1 code review).
+        /// </remarks>
+        public const string QuotaSourceShared = "shared";
+
+        /// <summary><see cref="QuotaSource"/> value meaning "this terminal's own copy".</summary>
+        public const string QuotaSourcePerTerminal = "per-terminal";
+
         /// <summary>False when no per-terminal stats file was found/readable.</summary>
         public bool Available { get; set; }
 

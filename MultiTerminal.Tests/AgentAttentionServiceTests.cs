@@ -102,16 +102,34 @@ namespace MultiTerminal.Tests
         // Set edge
         // ─────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// The two raw types are distinct states, not interchangeable flavours of "blocked".
+        /// </summary>
+        /// <remarks>
+        /// ONE CARD PER FLAVOUR, DELIBERATELY (task ee17f42d, live test 1). This used to apply both
+        /// notifications to the SAME session in sequence, which asserted the intended thing and
+        /// also — by accident, and unremarked — pinned "a permission_prompt landing on a question
+        /// block wins". That is the Owner-reported bug: Claude Code emits its own permission_prompt
+        /// ~6s after every AskUserQuestion, so under the old behaviour a card raised honestly as
+        /// "Asked you a question" relabelled itself "Needs permission" while the question was still
+        /// on screen.
+        /// <para>
+        /// Separate cards keep this test asserting what its NAME says — that the mapping
+        /// distinguishes the two — without also asserting an overwrite rule it was never about.
+        /// Sequential-arrival behaviour is now covered explicitly, and on purpose, in
+        /// <c>AskUserQuestionBlockTests</c>.
+        /// </para>
+        /// </remarks>
         [Fact]
         public void Question_and_permission_are_distinct_states()
         {
-            var svc = new AgentAttentionService();
+            var asked = new AgentAttentionService();
+            asked.ApplyNotification(Notification("elicitation_dialog"));
+            Assert.Equal(AttentionState.BlockedQuestion, asked.Get(Session).State);
 
-            svc.ApplyNotification(Notification("elicitation_dialog"));
-            Assert.Equal(AttentionState.BlockedQuestion, svc.Get(Session).State);
-
-            svc.ApplyNotification(Notification("permission_prompt"));
-            Assert.Equal(AttentionState.BlockedPermission, svc.Get(Session).State);
+            var permission = new AgentAttentionService();
+            permission.ApplyNotification(Notification("permission_prompt"));
+            Assert.Equal(AttentionState.BlockedPermission, permission.Get(Session).State);
         }
 
         /// <summary>
@@ -333,8 +351,56 @@ namespace MultiTerminal.Tests
             Assert.Equal(AttentionState.BlockedPermission, svc.Get(Session).State);
         }
 
+        /// <summary>
+        /// A repeated NON-blocking notification is a no-op and must stay quiet.
+        /// </summary>
+        /// <remarks>
+        /// This is the half of the original assertion that was actually protecting something: an
+        /// agent whose state has not moved should not spam the panel with repaints.
+        /// <para>
+        /// It used to assert the same for a repeated <c>permission_prompt</c>, and that half was
+        /// wrong — see <see cref="A_repeated_blocking_notification_is_a_new_block_and_must_fire"/>
+        /// for why (task 42052f0c, pipeline run 3).
+        /// </para>
+        /// </remarks>
         [Fact]
-        public void AttentionChanged_fires_on_change_and_stays_quiet_on_a_no_op()
+        public void AttentionChanged_stays_quiet_on_a_non_blocking_no_op()
+        {
+            var svc = new AgentAttentionService();
+            int fired = 0;
+            svc.AttentionChanged += (s, e) => fired++;
+
+            svc.ApplyNotification(Notification("idle_prompt", message: "same"));
+            Assert.Equal(1, fired);
+
+            svc.ApplyNotification(Notification("idle_prompt", message: "same"));
+            Assert.Equal(1, fired);
+        }
+
+        /// <summary>
+        /// A repeated BLOCKING notification is a new block, and must fire even though every
+        /// displayed field is identical.
+        /// </summary>
+        /// <remarks>
+        /// This test previously asserted the opposite, and that assertion encoded the defect rather
+        /// than guarding against it (task 42052f0c, pipeline run 3).
+        /// <para>
+        /// Two permission prompts for the same tool are indistinguishable: same message, both
+        /// <c>tool_use_id</c>s null — Claude Code does not send one on a Notification, confirmed
+        /// from the live presence-only diagnostic added for task 2289bb8a item 0 — and, while the
+        /// polled clear edge is still outstanding, the same state and activity line too. Treating
+        /// that as a no-op means the panel is never told, so the acknowledgement the owner gave the
+        /// FIRST prompt silently covers the second and a live alarm renders calm. The panel is
+        /// repainted only by this event; there is no timer that would catch up later.
+        /// </para>
+        /// <para>
+        /// The cost of being wrong the other way is one extra repaint and an alarm that shouts
+        /// again — visible, and dismissible with a click. This file's governing asymmetry already
+        /// says which way to break that tie.
+        /// </para>
+        /// </remarks>
+        [Fact]
+        public void A_repeated_blocking_notification_is_a_new_block_and_must_fire()
         {
             var svc = new AgentAttentionService();
             int fired = 0;
@@ -342,9 +408,160 @@ namespace MultiTerminal.Tests
 
             svc.ApplyNotification(Notification("permission_prompt", message: "same"));
             Assert.Equal(1, fired);
+            long first = svc.Get(Session).BlockSeq;
 
             svc.ApplyNotification(Notification("permission_prompt", message: "same"));
-            Assert.Equal(1, fired);
+            Assert.Equal(2, fired);
+            Assert.NotEqual(first, svc.Get(Session).BlockSeq);
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // One live terminal, exactly one card (task cafd47b9)
+        // ─────────────────────────────────────────────────────────────────
+
+        private static Dictionary<string, object> NotificationFor(
+            string sessionId, string agent, string rawType = "permission_prompt")
+            => new Dictionary<string, object>
+            {
+                ["session_id"] = sessionId,
+                ["agent_name"] = agent,
+                ["notification_type"] = "permission_request",
+                ["raw_type"] = rawType,
+                ["message"] = "why",
+            };
+
+        /// <summary>
+        /// THE INVARIANT. The owner reasons in terminals, not sessions: two terminals must produce
+        /// two cards however many times either one has rotated its session.
+        /// <para>
+        /// This is the bug as reported — <c>/clear</c> in Diana's terminal mints a new session id,
+        /// and before the fix the pre-clear entry was orphaned under the old key with no living
+        /// agent to ever move it. The owner saw three cards for two terminals, one of them pulsing
+        /// "needs permission" 49 minutes after that session had ceased to exist.
+        /// </para>
+        /// If this goes red, the rail has started accumulating corpses again.
+        /// </summary>
+        [Fact]
+        public void Rotating_a_session_never_grows_the_card_count()
+        {
+            var svc = new AgentAttentionService();
+
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            Assert.Equal(2, svc.Snapshot().Count);
+
+            // Diana runs /clear repeatedly. Each rotation is a brand-new session id.
+            for (int i = 2; i <= 6; i++)
+            {
+                svc.ApplyNotification(NotificationFor("diana-" + i, "Diana"));
+                Assert.Equal(2, svc.Snapshot().Count);
+            }
+
+            var snapshot = svc.Snapshot();
+            Assert.Equal("diana-6", snapshot.Single(e => e.AgentName == "Diana").SessionId);
+            Assert.Equal("alice-1", snapshot.Single(e => e.AgentName == "Alice").SessionId);
+        }
+
+        /// <summary>
+        /// The clear path has to supersede too. A terminal that is /cleared and then simply gets
+        /// back to work never blocks, so <c>ApplyNotification</c> is never reached — if only that
+        /// path superseded, the most common rotation of all would still leave a ghost.
+        /// </summary>
+        [Fact]
+        public void Activity_on_a_rotated_session_also_supersedes_its_predecessor()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+
+            svc.NoteObservedActivity(
+                "diana-2", DateTime.UtcNow, isSubagent: false, toolUseId: null, agentName: "Diana");
+
+            var snapshot = svc.Snapshot();
+            Assert.Single(snapshot);
+            Assert.Equal("diana-2", snapshot[0].SessionId);
+            Assert.Equal(AttentionState.Working, snapshot[0].State);
+        }
+
+        /// <summary>
+        /// An entry that arrived with no agent name has no established terminal identity. Letting a
+        /// blank name match would turn unattributable input into a delete-everything primitive —
+        /// one malformed payload would clear the whole rail, silently, and the owner's evidence
+        /// that anyone needed them would be gone.
+        /// </summary>
+        [Fact]
+        public void A_blank_agent_name_evicts_nothing()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+
+            var anonymous = new Dictionary<string, object>
+            {
+                ["session_id"] = "ghost-1",
+                ["agent_name"] = "",
+                ["raw_type"] = "permission_prompt",
+                ["message"] = "who am I",
+            };
+            svc.ApplyNotification(anonymous);
+
+            Assert.Equal(3, svc.Snapshot().Count);
+        }
+
+        /// <summary>
+        /// Superseding must not become a back door around the age rule. <c>EnteredAtUtc</c> is the
+        /// one number telling the owner which agent has been stuck longest; re-stamping a survivor
+        /// because some OTHER terminal rotated would reset "waiting 40m" to "waiting 0s".
+        /// </summary>
+        [Fact]
+        public void Superseding_one_agent_does_not_restart_another_agents_clock()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            DateTime aliceEntered = svc.Get("alice-1").EnteredAtUtc;
+
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            svc.ApplyNotification(NotificationFor("diana-2", "Diana"));
+
+            Assert.Equal(aliceEntered, svc.Get("alice-1").EnteredAtUtc);
+        }
+
+        /// <summary>
+        /// The panel rebuilds from <see cref="AgentAttentionService.Snapshot"/>, so a silent
+        /// eviction leaves the ghost on screen until some unrelated event happens to fire. The
+        /// removal must announce itself.
+        /// </summary>
+        [Fact]
+        public void An_eviction_raises_AttentionRemoved_carrying_the_dropped_session()
+        {
+            var svc = new AgentAttentionService();
+            var removed = new List<AgentAttentionEntry>();
+            svc.AttentionRemoved += (s, e) => removed.Add(e);
+
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            Assert.Empty(removed);
+
+            svc.ApplyNotification(NotificationFor("diana-2", "Diana"));
+
+            Assert.Single(removed);
+            Assert.Equal("diana-1", removed[0].SessionId);
+            Assert.Equal("Diana", removed[0].AgentName);
+        }
+
+        /// <summary>
+        /// Two agents are two terminals. Superseding is scoped to one agent and must never reach
+        /// across — the whole point is that Alice keeps her card while Diana rotates hers.
+        /// </summary>
+        [Fact]
+        public void Superseding_is_scoped_to_one_agent()
+        {
+            var svc = new AgentAttentionService();
+            svc.ApplyNotification(NotificationFor("alice-1", "Alice"));
+            svc.ApplyNotification(NotificationFor("diana-1", "Diana"));
+            svc.ApplyNotification(NotificationFor("diana-2", "Diana"));
+
+            Assert.NotNull(svc.Get("alice-1"));
+            Assert.Null(svc.Get("diana-1"));
+            Assert.NotNull(svc.Get("diana-2"));
         }
     }
 }

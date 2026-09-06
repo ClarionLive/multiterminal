@@ -34,8 +34,14 @@ namespace MultiTerminal.AttentionPanel
         /// <summary>Raised when the user clicks a ticket chip. Argument is the task id.</summary>
         public event EventHandler<string> OpenTicketRequested;
 
-        /// <summary>Raised when the user changes the ordering preference ("attention" | "fixed").</summary>
+        /// <summary>Raised when the user changes the ordering preference ("attention" | "fixed" | "project").</summary>
         public event EventHandler<string> OrderChanged;
+
+        /// <summary>Raised when the user picks an ambient (activity) treatment from the gear.</summary>
+        public event EventHandler<string> AmbientChanged;
+
+        /// <summary>Raised when the user picks an alarm treatment from the gear.</summary>
+        public event EventHandler<string> AlarmChanged;
 
         /// <summary>Creates the dockable attention panel.</summary>
         public AttentionPanelDocument()
@@ -61,15 +67,27 @@ namespace MultiTerminal.AttentionPanel
             _control.FocusSessionRequested += (s, id) => FocusSessionRequested?.Invoke(this, id);
             _control.OpenTicketRequested += (s, taskId) => OpenTicketRequested?.Invoke(this, taskId);
             _control.OrderChanged += (s, order) => OrderChanged?.Invoke(this, order);
+            _control.AmbientChanged += (s, ambient) => AmbientChanged?.Invoke(this, ambient);
+            _control.AlarmChanged += (s, alarm) => AlarmChanged?.Invoke(this, alarm);
 
             Controls.Add(_control);
         }
 
         /// <summary>Pushes the current card list to the view.</summary>
-        public void SetSessions(IEnumerable<object> sessions) => _control?.SetSessions(sessions);
+        public void SetSessions(IEnumerable<object> sessions, object quota = null)
+            => _control?.SetSessions(sessions, quota);
 
         /// <summary>Applies the saved ordering preference.</summary>
         public void SetOrder(string order) => _control?.SetOrder(order);
+
+        /// <summary>Applies the saved ambient (activity) treatment.</summary>
+        public void SetAmbient(string ambient) => _control?.SetAmbient(ambient);
+
+        /// <summary>Applies the saved alarm treatment.</summary>
+        public void SetAlarm(string alarm) => _control?.SetAlarm(alarm);
+
+        /// <summary>Tells the view which session has focus. Null clears the highlight.</summary>
+        public void SetFocusedSession(string sessionId) => _control?.SetFocusedSession(sessionId);
 
         /// <summary>Applies the app theme to the panel.</summary>
         public void ApplyTheme(bool isDark)

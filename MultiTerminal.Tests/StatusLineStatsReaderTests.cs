@@ -292,5 +292,121 @@ namespace MultiTerminal.Tests
             Assert.True(s.Available);
             Assert.Equal(77, s.ContextPercent);
         }
+
+        // ───────── the freshness floor (task 85af4635, pipeline run 1) ─────────
+
+        /// <summary>
+        /// A file older than the caller's floor yields NO reading, not a stale one.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="TerminalUsageStats.Stale"/> answers "is this old?" and is advisory. The floor
+        /// answers "could this possibly describe a terminal running now?" and is disqualifying.
+        /// Measured on a live machine before this existed: readings 40 and 58 DAYS old came back
+        /// available, with real percentages, for agents whose current run had written nothing. A
+        /// consumer that renders a percentage cannot be handed that and be expected to do the right
+        /// thing with a boolean beside it — the percentage is what gets read and acted on.
+        /// </remarks>
+        [Fact]
+        public void A_reading_older_than_the_floor_is_not_available()
+        {
+            long weekOld = NowMs - (7L * 24 * 60 * 60 * 1000);
+            WritePerTerminal("Alice", "doc1", $"{{\"contextPct\":44,\"timestamp\":{weekOld}}}");
+
+            var s = _reader.ReadFor("Alice", "doc1", notBeforeUnixMs: NowMs - 60_000);
+
+            Assert.False(s.Available);
+            Assert.Null(s.ContextPercent);
+        }
+
+        /// <summary>
+        /// COUNTERWEIGHT: a reading ON or after the floor still comes through. Without this the
+        /// floor is indistinguishable from "never report anything".
+        /// </summary>
+        [Fact]
+        public void A_reading_at_or_after_the_floor_is_still_available()
+        {
+            WritePerTerminal("Alice", "doc1", $"{{\"contextPct\":44,\"timestamp\":{NowMs - 5_000}}}");
+
+            var s = _reader.ReadFor("Alice", "doc1", notBeforeUnixMs: NowMs - 60_000);
+
+            Assert.True(s.Available);
+            Assert.Equal(44, s.ContextPercent);
+        }
+
+        /// <summary>
+        /// A file with NO timestamp cannot prove it is recent, and a caller that passed a floor
+        /// asked for proof. Rejected rather than assumed fresh.
+        /// </summary>
+        [Fact]
+        public void An_untimestamped_reading_is_rejected_when_a_floor_is_in_force()
+        {
+            WritePerTerminal("Alice", "doc1", "{\"contextPct\":44}");
+
+            Assert.False(_reader.ReadFor("Alice", "doc1", notBeforeUnixMs: NowMs - 60_000).Available);
+
+            // ...but is still returned when no floor was asked for, so existing callers are
+            // untouched. The floor is opt-in; this is the proof it did not change the default.
+            Assert.True(_reader.ReadFor("Alice", "doc1").Available);
+        }
+
+        // ───────── the account quota, standalone ─────────
+
+        /// <summary>
+        /// The account numbers must be reachable WITHOUT a per-terminal file.
+        /// </summary>
+        /// <remarks>
+        /// <c>ReadFor</c> returns early when the caller's own file is missing — before the
+        /// shared-quota block — so an account-scoped number that was present and fresh on disk was
+        /// being suppressed by the absence of one terminal's private file, which has nothing to do
+        /// with it.
+        /// </remarks>
+        [Fact]
+        public void The_account_quota_is_readable_with_no_per_terminal_file_present()
+        {
+            WriteShared($"{{\"quota5h\":30,\"quota7d\":82,\"timestamp\":{NowMs - 5_000}}}");
+
+            var q = _reader.ReadAccountQuota();
+
+            Assert.True(q.Available);
+            Assert.Equal(30, q.FiveHourPercent);
+            Assert.Equal(82, q.SevenDayPercent);
+            Assert.Equal(TerminalUsageStats.QuotaSourceShared, q.QuotaSource);
+            Assert.False(q.QuotaStale);
+        }
+
+        /// <summary>An old shared file is reported, and flagged — shown-but-marked, not hidden.</summary>
+        [Fact]
+        public void A_stale_account_quota_is_returned_and_flagged()
+        {
+            WriteShared($"{{\"quota5h\":30,\"timestamp\":{NowMs - 600_000}}}");
+
+            var q = _reader.ReadAccountQuota();
+
+            Assert.True(q.Available);
+            Assert.True(q.QuotaStale);
+            Assert.Equal(30, q.FiveHourPercent);
+        }
+
+        /// <summary>
+        /// A future-dated shared file is stale, never "extra fresh" — same polarity as
+        /// <see cref="ReadFor"/>, because a legitimate writer always writes before we read.
+        /// </summary>
+        [Fact]
+        public void A_future_dated_account_quota_is_stale_not_fresh()
+        {
+            WriteShared($"{{\"quota5h\":30,\"timestamp\":{NowMs + 600_000}}}");
+
+            Assert.True(_reader.ReadAccountQuota().QuotaStale);
+        }
+
+        /// <summary>No shared file, and an untimestamped one, both mean no account reading.</summary>
+        [Fact]
+        public void A_missing_or_untimestamped_account_quota_is_unavailable()
+        {
+            Assert.False(_reader.ReadAccountQuota().Available);
+
+            WriteShared("{\"quota5h\":30}");
+            Assert.False(_reader.ReadAccountQuota().Available);
+        }
     }
 }

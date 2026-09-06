@@ -10,7 +10,7 @@ namespace MultiTerminal.MCPServer.Services
     /// Shows manager-level view: plan lifecycle, phase transitions, builds.
     /// NOT for granular updates or chat messages.
     /// </summary>
-    public class ActivityFeedService : IDisposable
+    public class ActivityFeedService : IDisposable, IActivityFeedReader
     {
         private readonly string _databasePath;
         private readonly DbGate _gate = new DbGate();
@@ -41,6 +41,31 @@ namespace MultiTerminal.MCPServer.Services
         public static readonly HashSet<string> ValidSubagentTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "SUBAGENT_START", "SUBAGENT_COMPLETE", "SUBAGENT_FAILED"
+        };
+
+        /// <summary>
+        /// Types that exist ONLY to prove an agent is still running, and are hidden from every
+        /// human-facing feed (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <c>activity-hook.js</c> used to DROP the completions of read-only tools
+        /// (Read/Glob/Grep/ToolSearch) outright. That kept this feed readable — a real goal — but
+        /// it also silently removed the Attention Rail's clear-edge, so a card stayed blocked
+        /// through any read-only stretch and after every answered question. Those are two
+        /// consumers with opposite needs, and one skip-set was serving both.
+        /// <para>
+        /// So the row is now written as <c>TOOL_QUIET</c> and filtered out HERE instead of at the
+        /// hook. <see cref="GetActivitiesSince"/> and <see cref="GetRecentActivities"/> — the
+        /// human-facing readers (Activity panel, HUD dashboard, SummaryService) — exclude it.
+        /// <see cref="GetActivitiesAfterId"/> does NOT, because that is the watcher's reader and
+        /// the row is the entire point of the change. Filtering at source rather than in each
+        /// panel means a future reader gets the right behaviour by default; the one reader that
+        /// wants these rows is the one that has to say so.
+        /// </para>
+        /// </remarks>
+        public static readonly HashSet<string> QuietToolTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "TOOL_QUIET"
         };
 
         /// <summary>
@@ -254,13 +279,13 @@ namespace MultiTerminal.MCPServer.Services
 
             var entries = new List<ActivityFeedEntry>();
 
-            var conditions = new List<string>();
+            // The quiet-row exclusion is unconditional here (a human-facing reader — see
+            // QuietToolTypes), so it seeds the list rather than being an optional clause.
+            var conditions = new List<string> { "activity_type <> 'TOOL_QUIET'" };
             if (planId != null) conditions.Add("plan_id = @planId");
             if (projectId != null) conditions.Add("project_id = @projectId");
 
-            var whereClause = conditions.Count > 0
-                ? "WHERE " + string.Join(" AND ", conditions)
-                : "";
+            var whereClause = "WHERE " + string.Join(" AND ", conditions);
 
             var sql = $@"SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                     FROM activity_feed {whereClause} ORDER BY timestamp DESC LIMIT @limit";
@@ -332,10 +357,11 @@ namespace MultiTerminal.MCPServer.Services
 
             var entries = new List<ActivityFeedEntry>();
 
+            // activity_type <> 'TOOL_QUIET': see QuietToolTypes. A human-facing reader.
             const string sql = @"
                 SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
                 FROM activity_feed
-                WHERE timestamp >= @since
+                WHERE timestamp >= @since AND activity_type <> 'TOOL_QUIET'
                 ORDER BY timestamp DESC
                 LIMIT @limit";
 
@@ -350,6 +376,68 @@ namespace MultiTerminal.MCPServer.Services
             }
 
             return entries;
+        }
+
+        /// <summary>
+        /// Rows written after <paramref name="afterId"/>, oldest first (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Deliberately by ID rather than by timestamp, unlike
+        /// <see cref="GetActivitiesSince(DateTime, int)"/>. Rows are written by a Node hook process,
+        /// so their <c>timestamp</c> is that process's clock, not this one's — a poller that
+        /// remembered a timestamp would silently re-read or skip rows around the boundary whenever
+        /// the two disagreed, and `timestamp >= @since` re-reads the boundary row every poll even
+        /// when they agree. <c>id</c> is a monotonic AUTOINCREMENT and has neither problem.
+        /// </para>
+        /// <para>
+        /// Oldest first, because a consumer applying a state machine has to see the events in the
+        /// order they happened. Every other reader here is newest-first for display.
+        /// </para>
+        /// </remarks>
+        /// <param name="afterId">Exclusive lower bound. Pass 0 to start from the beginning.</param>
+        /// <param name="limit">Maximum rows to return.</param>
+        public List<ActivityFeedEntry> GetActivitiesAfterId(long afterId, int limit = 200)
+        {
+            using var gate = _gate.Enter();
+
+            var entries = new List<ActivityFeedEntry>();
+
+            const string sql = @"
+                SELECT id, timestamp, activity_type, plan_id, phase_id, actor, summary, severity, details_json, project_id
+                FROM activity_feed
+                WHERE id > @afterId
+                ORDER BY id ASC
+                LIMIT @limit";
+
+            using var command = new SQLiteCommand(sql, _connection);
+            command.Parameters.AddWithValue("@afterId", afterId);
+            command.Parameters.AddWithValue("@limit", limit);
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                entries.Add(ReadEntry(reader));
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// The highest row id currently in the table, or 0 when it is empty (task edcdcdd5).
+        /// </summary>
+        /// <remarks>
+        /// A poller starting up uses this as its watermark so it processes only rows written from
+        /// now on. Replaying history at startup would re-apply long-dead tool events to the live
+        /// attention state — clearing blocks that were raised after them.
+        /// </remarks>
+        public long GetMaxActivityId()
+        {
+            using var gate = _gate.Enter();
+
+            using var command = new SQLiteCommand("SELECT COALESCE(MAX(id), 0) FROM activity_feed", _connection);
+            object result = command.ExecuteScalar();
+            return result == null || result == DBNull.Value ? 0L : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
         }
 
         /// <summary>
@@ -381,17 +469,35 @@ namespace MultiTerminal.MCPServer.Services
             return entries;
         }
 
+        /// <summary>
+        /// Materialises one row. Never throws on the row's CONTENT: a bad timestamp or an
+        /// unexpected NULL degrades to a safe value rather than an exception.
+        /// </summary>
+        /// <remarks>
+        /// Rows are written by a separate process, and a reader that throws on one row throws for
+        /// the whole batch — <c>AgentActivityWatcher</c> then cannot advance its watermark past
+        /// that row, so the same unreadable row heads every batch forever and everything behind it
+        /// is starved (pipeline run 1, security finding). An unparseable timestamp becomes
+        /// <see cref="DateTime.MinValue"/> in UTC, which every consumer treats as "older than
+        /// anything" — the safe direction: it can never clear a block raised after it.
+        /// </remarks>
         private ActivityFeedEntry ReadEntry(SQLiteDataReader reader)
         {
+            string rawTimestamp = reader.IsDBNull(1) ? null : reader.GetString(1);
+            DateTime timestamp = rawTimestamp != null
+                && DateTime.TryParse(rawTimestamp, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed
+                : DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
+
             var entry = new ActivityFeedEntry
             {
                 Id = reader.GetInt64(0),
-                Timestamp = DateTime.Parse(reader.GetString(1)),
-                ActivityType = reader.GetString(2),
+                Timestamp = timestamp,
+                ActivityType = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
                 PlanId = reader.IsDBNull(3) ? null : reader.GetString(3),
                 PhaseId = reader.IsDBNull(4) ? null : reader.GetString(4),
                 Actor = reader.IsDBNull(5) ? null : reader.GetString(5),
-                Summary = reader.GetString(6),
+                Summary = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
                 Severity = reader.IsDBNull(7) ? "info" : reader.GetString(7),
                 DetailsJson = reader.IsDBNull(8) ? null : reader.GetString(8)
             };

@@ -35,6 +35,9 @@ namespace MultiTerminal.AttentionPanel
         private bool _isDarkTheme = true;
         private string _pendingSessionsJson;
         private string _order = "attention";
+        private string _ambient = "stream";
+        private string _alarm = "redalert";
+        private string _focusedSessionId;
 
         /// <summary>Raised when the user clicks a card. Argument is the session id.</summary>
         public event EventHandler<string> FocusSessionRequested;
@@ -42,8 +45,14 @@ namespace MultiTerminal.AttentionPanel
         /// <summary>Raised when the user clicks a ticket chip. Argument is the task id.</summary>
         public event EventHandler<string> OpenTicketRequested;
 
-        /// <summary>Raised when the user changes the ordering preference ("attention" | "fixed").</summary>
+        /// <summary>Raised when the user changes the ordering preference ("attention" | "fixed" | "project").</summary>
         public event EventHandler<string> OrderChanged;
+
+        /// <summary>Raised when the user picks an ambient (activity) treatment from the gear.</summary>
+        public event EventHandler<string> AmbientChanged;
+
+        /// <summary>Raised when the user picks an alarm treatment from the gear.</summary>
+        public event EventHandler<string> AlarmChanged;
 
         /// <summary>Creates the control. The WebView2 initialises lazily, on first show.</summary>
         public AttentionPanelControl()
@@ -65,17 +74,90 @@ namespace MultiTerminal.AttentionPanel
         /// <summary>Applies the current ordering preference, echoing it to the view.</summary>
         public void SetOrder(string order)
         {
-            _order = string.Equals(order, "fixed", StringComparison.OrdinalIgnoreCase) ? "fixed" : "attention";
+            _order = NormalizeOrder(order);
             if (_isInitialized) PostJson(new { type = "order", order = _order });
         }
+
+        /// <summary>Applies the ambient (activity) treatment, echoing it to the view.</summary>
+        public void SetAmbient(string ambient)
+        {
+            _ambient = NormalizeAmbient(ambient);
+            if (_isInitialized) PostJson(new { type = "ambient", ambient = _ambient });
+        }
+
+        /// <summary>Applies the alarm treatment, echoing it to the view.</summary>
+        public void SetAlarm(string alarm)
+        {
+            _alarm = NormalizeAlarm(alarm);
+            if (_isInitialized) PostJson(new { type = "alarm", alarm = _alarm });
+        }
+
+        /// <summary>
+        /// Tells the view which session currently has focus, so the highlight follows the terminal
+        /// the owner is actually looking at.
+        /// </summary>
+        /// <remarks>
+        /// The view also marks focus optimistically the instant a card is clicked, because a round
+        /// trip through the host would make the click feel dead. This is the authoritative correction
+        /// — and it is what makes the highlight track focus changed by clicking a TERMINAL TAB, which
+        /// the view cannot see at all. Without it the indicator would silently describe click history
+        /// rather than where the owner is, and would be wrong precisely when it mattered.
+        /// <para>Null clears the highlight — a legitimate state when no agent terminal has focus.</para>
+        /// </remarks>
+        public void SetFocusedSession(string sessionId)
+        {
+            _focusedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId;
+            if (_isInitialized) PostJson(new { type = "focused", sessionId = _focusedSessionId });
+        }
+
+        /// <summary>
+        /// Normalises a value against the allowlist the VIEW understands, defaulting to the first.
+        /// </summary>
+        /// <remarks>
+        /// Duplicated deliberately from <c>SettingsService</c>: these lists are the contract between
+        /// this control and <c>attention-panel.html</c>, and the panel must not be able to receive a
+        /// treatment it cannot render even if a caller hands it something odd. The settings layer
+        /// guards the DISK; this guards the WIRE.
+        /// </remarks>
+        private static string Normalize(string[] allowed, string value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                foreach (var candidate in allowed)
+                {
+                    if (string.Equals(candidate, value.Trim(), StringComparison.OrdinalIgnoreCase)) return candidate;
+                }
+            }
+
+            return allowed[0];
+        }
+
+        internal static readonly string[] Orders = { "attention", "fixed", "project" };
+        internal static readonly string[] Ambients = { "stream", "vitals", "walker", "rail", "breath", "off" };
+        internal static readonly string[] Alarms = { "redalert", "beacon", "klaxon", "hand" };
+
+        private static string NormalizeOrder(string v) => Normalize(Orders, v);
+        private static string NormalizeAmbient(string v) => Normalize(Ambients, v);
+        private static string NormalizeAlarm(string v) => Normalize(Alarms, v);
 
         /// <summary>
         /// Pushes the full card list to the view. Safe to call before the WebView2 is ready — the
         /// most recent payload is held and replayed once the view reports ready.
         /// </summary>
-        public void SetSessions(IEnumerable<object> sessions)
+        /// <param name="quota">
+        /// Account rate-cap headroom for the header, or null when it is not being shown.
+        /// </param>
+        /// <remarks>
+        /// The quota rides INSIDE this envelope rather than arriving as its own message, and that
+        /// is load-bearing rather than tidy (task 85af4635). A second message is a second freshness
+        /// path: the cards and the header could then be from different moments while presenting as
+        /// one reading, which is this panel's signature failure in a new place. One envelope also
+        /// means the "keep only the LATEST" queue below covers both without a second copy of that
+        /// logic.
+        /// </remarks>
+        public void SetSessions(IEnumerable<object> sessions, object quota = null)
         {
-            string json = JsonSerializer.Serialize(new { type = "sessions", sessions });
+            string json = JsonSerializer.Serialize(new { type = "sessions", sessions, quota });
             if (!_isInitialized)
             {
                 // Keep only the LATEST: replaying a queue of stale snapshots would animate the
@@ -166,6 +248,9 @@ namespace MultiTerminal.AttentionPanel
                     _isInitializing = false;
                     PostJson(new { type = "theme", isDark = _isDarkTheme });
                     PostJson(new { type = "order", order = _order });
+                    PostJson(new { type = "ambient", ambient = _ambient });
+                    PostJson(new { type = "alarm", alarm = _alarm });
+                    if (_focusedSessionId != null) PostJson(new { type = "focused", sessionId = _focusedSessionId });
                     if (_pendingSessionsJson != null)
                     {
                         PostRaw(_pendingSessionsJson);
@@ -195,8 +280,32 @@ namespace MultiTerminal.AttentionPanel
                         string order = orderEl.GetString();
                         if (!string.IsNullOrEmpty(order))
                         {
-                            _order = string.Equals(order, "fixed", StringComparison.OrdinalIgnoreCase) ? "fixed" : "attention";
+                            _order = NormalizeOrder(order);
                             OrderChanged?.Invoke(this, _order);
+                        }
+                    }
+                }
+                else if (msgType == "set_ambient")
+                {
+                    if (doc.RootElement.TryGetProperty("ambient", out var ambientEl))
+                    {
+                        string ambient = ambientEl.GetString();
+                        if (!string.IsNullOrEmpty(ambient))
+                        {
+                            _ambient = NormalizeAmbient(ambient);
+                            AmbientChanged?.Invoke(this, _ambient);
+                        }
+                    }
+                }
+                else if (msgType == "set_alarm")
+                {
+                    if (doc.RootElement.TryGetProperty("alarm", out var alarmEl))
+                    {
+                        string alarm = alarmEl.GetString();
+                        if (!string.IsNullOrEmpty(alarm))
+                        {
+                            _alarm = NormalizeAlarm(alarm);
+                            AlarmChanged?.Invoke(this, _alarm);
                         }
                     }
                 }
