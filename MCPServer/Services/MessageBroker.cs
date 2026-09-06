@@ -2115,6 +2115,42 @@ namespace MultiTerminal.MCPServer.Services
                 existingByName = null;
             }
 
+            // (4) PROOF-OF-ORIGIN FOR A REAL NAME (c9285d2a — Owner-requested duplicate rejection).
+            //     Gates (1)-(3) all concern the "Unassigned" sentinel; (3) says so itself — "Real-named
+            //     rows never reach here". So a REAL name arriving here is reused with NO origin check,
+            //     and that is the hole: a foreign register_terminal("Alice") carrying no docId and no
+            //     nonce falls straight into the reuse branch below and OVERWRITES Alice's ChannelPort,
+            //     silently taking delivery of her pushed messages. Name is the only thing channel
+            //     delivery is keyed on (multiterminal-channel.mjs isAddressedToMe), so this is
+            //     impersonation, not merely a bookkeeping collision.
+            //
+            //     Require the registrant to present the row's seeded nonce. Both legitimate callers
+            //     already can: mcp/index.js echoes MULTITERMINAL_LAUNCH_NONCE (:3197), and the channel
+            //     server's own port report now echoes it too. THAT SECOND ONE IS LOAD-BEARING — the
+            //     port report and its 30s drift heartbeat arrive here as a same-name registration with
+            //     no docId, so shipping this gate without the plugin-side echo would refuse every port
+            //     registration and kill push delivery for every terminal, while polling kept working
+            //     and hid it.
+            //
+            //     FAIL-OPEN when the row carries no seeded nonce, matching the (3) precedent: such a row
+            //     predates the gate and refusing it would lock out a terminal that never had a nonce to
+            //     present. Rows for DISCONNECTED terminals never reach here at all (the existingByName
+            //     lookup filters on IsConnected), so a name is released on disconnect rather than burned.
+            //     "Unassigned" is exempt — it is a deliberate shared sentinel (see RegisterTerminalUnique).
+            if (existingByName != null
+                && !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(existingByName.LaunchNonce)
+                && !string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal))
+            {
+                DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present its launch nonce. Refusing the claim.");
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} => refused"); // task c9285d2a
+                return new RegisterResult
+                {
+                    Success = false,
+                    Error = $"The name '{name}' is already in use by a connected terminal. Pick a different name, or disconnect the terminal currently holding it."
+                };
+            }
+
             if (existingByName != null)
             {
                 // Update existing terminal
