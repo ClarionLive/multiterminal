@@ -3204,6 +3204,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           docId: effectiveDocId,
         };
         if (launchNonce) regPayload.nonce = launchNonce;
+        // Owning process id (task c9285d2a). This MCP server and the channel server are siblings
+        // under one claude.exe, so process.ppid is the same integer for both and is the only thing
+        // they share when MT did not launch the session (no MULTITERMINAL_LAUNCH_NONCE to echo).
+        // Sending it is what lets an ADOPTED terminal — a plain shell that ran register_terminal —
+        // have its channel server discover the claimed name and prove it belongs to the same
+        // session. Read from the process, never from a caller arg, so an agent cannot assert
+        // someone else's pid.
+        if (process.ppid) regPayload.ownerPid = process.ppid;
         const result = await apiCall("/api/messaging/register", "POST", regPayload);
         const channelInfo = `\nChannel Port: (managed by channel server)`;
         return {

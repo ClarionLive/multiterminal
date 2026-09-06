@@ -62,6 +62,26 @@ namespace MultiTerminal.MCPServer.Models
         public string LaunchNonce { get; set; }
 
         /// <summary>
+        /// PID of the Claude Code process this terminal's registration came from (task c9285d2a).
+        /// <para>This exists because an ADOPTED terminal — one MT did not launch, registered by name
+        /// from a plain shell — has no <see cref="LaunchNonce"/> to present, and so would fall through
+        /// the duplicate-name gate's unseeded fail-open path. Its two processes (the MCP server that
+        /// serves register_terminal, and the channel server that reports the port) share no secret, but
+        /// they ARE siblings under one claude.exe, so the parent pid is the one thing both can state
+        /// and a foreign process cannot state truthfully.</para>
+        /// <para>HONEST LIMIT: a pid is a small enumerable integer, so this is materially WEAKER than
+        /// the 32-char nonce and is accident-prevention (a stray session claiming a live name), not a
+        /// defence against a determined local process. That is consistent with the surface it sits on:
+        /// the REST API binds loopback and has no auth boundary by design, so any local process can
+        /// already post anything. It never WEAKENS an MT-launched terminal, which is still held by its
+        /// nonce — it only gives adopted rows a check where they previously had none.</para>
+        /// <para>SECURITY: JsonIgnore'd for the same reason as the nonce. It is a check value, and a
+        /// listing that discloses it hands a caller the thing it would otherwise have to guess.</para>
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public int? OwnerPid { get; set; }
+
+        /// <summary>
         /// Whether the agent has sent the ready confirmation (via webhook or message).
         /// Used for spawn handshake to ensure agent is initialized before sending work.
         /// </summary>

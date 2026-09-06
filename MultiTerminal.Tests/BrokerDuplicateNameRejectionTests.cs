@@ -124,6 +124,71 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void An_adopted_row_with_no_nonce_is_still_protected_by_its_owning_pid()
+        {
+            using var broker = new MessageBroker();
+
+            // An ADOPTED terminal: registered by name from a plain shell, so MT seeded no launch
+            // nonce. All it has is the pid of the Claude Code process both of its children share.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 4242);
+
+            // A foreign process claims that name. Different parent, no nonce — nothing to prove with.
+            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8811, nonce: null, ownerPid: 9999);
+
+            Assert.False(result.Success);
+
+            // Lynn keeps her port, so pushed messages keep reaching the session that claimed the name.
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+            Assert.Equal(8810, lynn.ChannelPort);
+        }
+
+        [Fact]
+        public void The_channel_server_of_an_adopted_session_re_registers_by_pid()
+        {
+            using var broker = new MessageBroker();
+
+            // register_terminal arrives first, from the MCP server: name + owning pid, no port.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: 4242);
+
+            // Then the sibling channel server reports its port under the SAME parent. It holds no
+            // secret — the shared pid is the entire proof, which is what adoption rests on.
+            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 4242);
+
+            Assert.True(result.Success);
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+            Assert.Equal(8810, lynn.ChannelPort);
+        }
+
+        [Fact]
+        public void A_channel_server_can_find_the_name_its_own_session_claimed()
+        {
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: 4242);
+
+            // The adoption lookup resolves on the pid the caller's PARENT owns, never on anything
+            // the caller asserts about itself.
+            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(4242));
+            Assert.Null(broker.GetTerminalNameByOwnerPid(9999));
+            Assert.Null(broker.GetTerminalNameByOwnerPid(0));
+        }
+
+        [Fact]
+        public void An_established_pid_cannot_be_repointed_by_a_later_caller()
+        {
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 4242);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8812, nonce: null, ownerPid: 4242);
+
+            // set-if-empty: a caller may re-register with the right pid, but cannot move an
+            // established row onto some other process. Otherwise a claimant could take a row and
+            // then own it outright.
+            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(4242));
+            Assert.Null(broker.GetTerminalNameByOwnerPid(8888));
+        }
+
+        [Fact]
         public void A_row_that_never_had_a_nonce_fails_open_so_it_cannot_lock_its_own_owner_out()
         {
             using var broker = new MessageBroker();

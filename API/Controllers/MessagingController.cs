@@ -25,11 +25,36 @@ namespace MultiTerminal.API.Controllers
         [HttpPost("register")]
         public IActionResult RegisterTerminal([FromBody] RegisterTerminalRequest request)
         {
-            var result = _broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort, nonce: request.Nonce);
+            var result = _broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort, nonce: request.Nonce, ownerPid: request.OwnerPid);
             if (!result.Success)
                 return Problem(detail: result.Error, statusCode: 400);
 
             return Ok(new { terminalId = result.TerminalId });
+        }
+
+        /// <summary>
+        /// Resolve the agent name registered for a given Claude Code process id, so a channel server
+        /// that started with no identity can discover the name its own session has since claimed
+        /// (task c9285d2a). Returns 404 while nothing has claimed one, which is the normal state for
+        /// a session that is simply not part of MultiTerminal.
+        /// </summary>
+        /// <remarks>
+        /// Discloses only a NAME, which <c>GET /api/messaging/terminals</c> already lists in full, so
+        /// this adds no new disclosure. It deliberately does NOT return the launch nonce: that is a
+        /// secret, and handing it to anything that can guess a pid would turn proof-of-origin into a
+        /// bearer token — the exact collapse TerminalInfo.LaunchNonce is JsonIgnore'd to prevent.
+        /// </remarks>
+        [HttpGet("channel-identity")]
+        public IActionResult GetChannelIdentity([FromQuery] int ppid)
+        {
+            if (ppid <= 0)
+                return BadRequest(new { error = "ppid must be a positive process id." });
+
+            string name = _broker.GetTerminalNameByOwnerPid(ppid);
+            if (string.IsNullOrEmpty(name))
+                return NotFound();
+
+            return Ok(new { name });
         }
 
         /// <summary>
@@ -194,6 +219,15 @@ namespace MultiTerminal.API.Controllers
         /// null/absent for legacy clients (broker fails open on an unseeded placeholder).
         /// </summary>
         public string Nonce { get; set; }
+
+        /// <summary>
+        /// PID of the Claude Code process this registration came from (task c9285d2a), sent as
+        /// process.ppid by the MCP server and the channel server — siblings under one claude.exe.
+        /// It is what lets an ADOPTED terminal (one MT never launched, and which therefore has no
+        /// launch nonce) prove that its two processes belong to the same session. Null/absent for
+        /// every other client; the broker simply has no pid proof to check in that case.
+        /// </summary>
+        public int? OwnerPid { get; set; }
     }
 
     public class SendMessageRequest

@@ -1903,6 +1903,25 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Returns the name of the CONNECTED terminal registered from the given Claude Code process
+        /// id, or null when none is (task c9285d2a).
+        /// <para>This is how a channel server that started with no identity discovers the name its own
+        /// session has since claimed. It resolves on OwnerPid rather than anything the caller asserts
+        /// about itself, so a process can only ever find the row belonging to its own parent.</para>
+        /// <para>Returns the NAME only. The launch nonce is never exposed here — see
+        /// <see cref="TerminalInfo.LaunchNonce"/> for why disclosing it would collapse proof-of-origin
+        /// into a bearer token.</para>
+        /// </summary>
+        public string GetTerminalNameByOwnerPid(int ownerPid)
+        {
+            if (ownerPid <= 0) return null;
+
+            return _terminals.Values
+                .FirstOrDefault(t => t.IsConnected && t.OwnerPid.HasValue && t.OwnerPid.Value == ownerPid)
+                ?.Name;
+        }
+
+        /// <summary>
         /// Register a terminal with the broker.
         /// <para>Documented write-path bypass (P5 / 1df2a534): this registration orchestration writes
         /// profiles in-place (SaveProfile across several branches — docId match, name match, rename,
@@ -1912,7 +1931,7 @@ namespace MultiTerminal.MCPServer.Services
         /// (and UnregisterTerminal) to the write path and REMOVES it from the allowlist as its close
         /// condition, so the exception set shrinks rather than accretes.</para>
         /// </summary>
-        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null, string nonce = null)
+        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null, string nonce = null, int? ownerPid = null)
         {
             LogInfo($"RegisterTerminal ENTRY: name='{name}', docId='{docId ?? "null"}', channelPort={channelPort?.ToString() ?? "null"}, noncePresented={!string.IsNullOrEmpty(nonce)}, stack={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name ?? "?"}");
 
@@ -2137,10 +2156,26 @@ namespace MultiTerminal.MCPServer.Services
             //     present. Rows for DISCONNECTED terminals never reach here at all (the existingByName
             //     lookup filters on IsConnected), so a name is released on disconnect rather than burned.
             //     "Unassigned" is exempt — it is a deliberate shared sentinel (see RegisterTerminalUnique).
+            //     ADOPTED ROWS (c9285d2a item 2): a terminal MT did not launch has no nonce to
+            //     present, so the nonce clause alone would leave it on the unseeded fail-open path
+            //     forever. Its two processes — the MCP server that serves register_terminal and the
+            //     channel server that reports the port — share no secret, but they ARE siblings under
+            //     one claude.exe, so OwnerPid is the one thing both can state and a stranger cannot
+            //     state truthfully. Either proof admits the caller. See TerminalInfo.OwnerPid for why
+            //     this is deliberately weaker than the nonce and why that is acceptable here.
+            bool nonceProves = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
+                               && string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal);
+            bool pidProves = ownerPid.HasValue
+                             && existingByName?.OwnerPid != null
+                             && existingByName.OwnerPid.Value == ownerPid.Value;
+            bool hasSomethingToProveAgainst = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
+                                              || existingByName?.OwnerPid != null;
+
             if (existingByName != null
                 && !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
-                && !string.IsNullOrEmpty(existingByName.LaunchNonce)
-                && !string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal))
+                && hasSomethingToProveAgainst
+                && !nonceProves
+                && !pidProves)
             {
                 DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present its launch nonce. Refusing the claim.");
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} => refused"); // task c9285d2a
@@ -2176,6 +2211,13 @@ namespace MultiTerminal.MCPServer.Services
                 if (!string.IsNullOrEmpty(nonce) && string.IsNullOrEmpty(existingByName.LaunchNonce))
                 {
                     existingByName.LaunchNonce = nonce;
+                }
+
+                // Same set-if-empty rule for the owning pid (c9285d2a). First writer binds it; a later
+                // caller cannot repoint an established row at its own process, which is the whole point.
+                if (ownerPid.HasValue && existingByName.OwnerPid == null)
+                {
+                    existingByName.OwnerPid = ownerPid.Value;
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // Always re-raise event so MainForm updates its mapping
@@ -2243,7 +2285,11 @@ namespace MultiTerminal.MCPServer.Services
                 // Bind the launch nonce (fd3437e6): for an MT-seeded "Unassigned" placeholder this is
                 // the authoritative proof-of-origin value; for any other fresh registration it records
                 // what the registrant presented. Either way it's what a later adoption must match.
-                LaunchNonce = nonce
+                LaunchNonce = nonce,
+
+                // Records which Claude Code process this registration came from, so the terminal's
+                // OTHER child process (the channel server) can prove it belongs to the same session.
+                OwnerPid = ownerPid
             };
             LogInfo($"NEW TERMINAL: '{name}' id={id} channelPort={channelPort?.ToString() ?? "null"} docId={docId ?? "null"}");
 
