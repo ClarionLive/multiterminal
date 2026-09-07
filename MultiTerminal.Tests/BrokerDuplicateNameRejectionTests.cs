@@ -302,8 +302,21 @@ namespace MultiTerminal.Tests
             });
 
             Assert.NotNull(child);
-            Assert.True(MessageBroker.TryGetProcessStartTime(child.Id, out _),
-                "The child process's start time must be readable, or it cannot be bound as an owner.");
+
+            // Kill the child if the readability assert fails — otherwise a failing run orphans a
+            // `cmd.exe /c pause` that nothing will ever reap.
+            try
+            {
+                Assert.True(MessageBroker.TryGetProcessStartTime(child.Id, out _),
+                    "The child process's start time must be readable, or it cannot be bound as an owner.");
+            }
+            catch
+            {
+                try { if (!child.HasExited) child.Kill(); } catch { }
+                child.Dispose();
+                throw;
+            }
+
             return child;
         }
 
@@ -327,7 +340,13 @@ namespace MultiTerminal.Tests
                 Assert.NotNull(bound.OwnerStartTime);            // ...by a verified incarnation
 
                 child.Kill();
-                child.WaitForExit(10000);
+
+                // Assert the exit rather than discarding it. If the child outlived the wait, liveness
+                // would read Alive, gate (4) would refuse the second registration, and this fact would
+                // fail on the PORT assertion below — reporting the wrong cause. Fail on the real one.
+                Assert.True(child.WaitForExit(10000),
+                    "The child process did not exit within 10s, so the row's owner is not actually dead "
+                    + "and this fact would otherwise fail for the wrong reason.");
             }
             finally
             {
@@ -377,19 +396,28 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
-        public void A_same_pid_re_registration_keeps_its_port()
+        public void A_live_owners_heartbeat_never_reaches_the_port_clearing_branch_at_all()
         {
             using var broker = new MessageBroker();
 
-            // The guard above must be conditional on the owner ACTUALLY changing. The channel server
-            // re-registers under the same pid on its drift heartbeat; clearing the port there would
-            // kill push delivery for every healthy adopted terminal on every heartbeat.
+            // Renamed from A_same_pid_re_registration_keeps_its_port, which claimed to test the
+            // "owner actually changed" guard and could not: a LIVE owner makes rowIsUnowned false, so
+            // execution never reaches the guarded block. It was green under the buggy guard and the
+            // fixed one alike — vacuous as a guard test.
+            //
+            // What it genuinely pins is worth keeping under an honest name: the channel server
+            // re-registers under the same pid on its 30s drift heartbeat, and that path must leave a
+            // healthy terminal's routing alone. It is protected by the OUTER condition (a live owner
+            // is not unowned), not by the inner one.
             broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
             broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
             broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
 
             var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
             Assert.Equal(8810, lynn.ChannelPort);
+
+            // The row is still owned by the live session throughout — the heartbeat never re-binds.
+            Assert.Equal(LivePid, lynn.OwnerPid);
         }
 
         [Fact]
