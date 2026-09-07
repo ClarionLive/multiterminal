@@ -2517,18 +2517,34 @@ namespace MultiTerminal.MCPServer.Services
                     // DisconnectTerminalByName nulls the port for exactly this reason; an ownership
                     // change is the adopted-row analogue of that disconnect.
                     //
-                    // Three conditions, and each one is load-bearing:
+                    // Two conditions, and each one is load-bearing:
                     //   previousOwnerDied  — a row that never had an owner has not changed hands, and
                     //                        clearing its port kills a healthy terminal's push.
-                    //   rebindSucceeded    — if the new pid could not be bound, dropping the routing
-                    //                        as well leaves the row with neither owner nor delivery.
                     //   !channelPort       — this same call supplying a port already replaces it.
                     // Note this is NOT "the pid differs": the same-pid heartbeat never reaches here
                     // (a live owner makes rowIsUnowned false), so an equality test was never what
                     // distinguished the cases.
-                    if (previousOwnerDied && rebindSucceeded && !channelPort.HasValue && existingByName.ChannelPort != null)
+                    //
+                    // ⚠️ Run 3b finding (a): `rebindSucceeded` used to be a third conjunct, on the
+                    // reasoning that clearing the port when the new pid could not be bound "leaves the
+                    // row with neither owner nor delivery". It is gone, because a dead session's port
+                    // is NOT delivery. The old owner being Dead is what makes its port stale, and that
+                    // fact does not depend on whether the NEW owner could be identified — the two are
+                    // independent, and conflating them meant an unreadable start time silently
+                    // preserved routing that was already known-invalid. Worse, IsReady stayed true
+                    // alongside it, so the row advertised a handshake that died with the old session.
+                    // The real choice was never "delivery vs no delivery"; it was "an honest absence
+                    // of routing vs a false appearance of it", and the appearance is precisely what
+                    // stops anyone noticing. Recovery does not depend on this conjunct either: the
+                    // channel server's 30s heartbeat re-registers on drift, and that — not a retained
+                    // stale number — is what restores a real port.
+                    if (previousOwnerDied && !channelPort.HasValue && existingByName.ChannelPort != null)
                     {
-                        LogInfo($"CHANNEL_PORT CLEARED (owner change): '{existingByName.Name}' {existingByName.ChannelPort} → null; the previous owner is gone and its port may since have been re-issued. task c9285d2a");
+                        // ownerRebound distinguishes the two ways to reach this line. false means the
+                        // new pid's start time was unreadable, so the row is now BOTH unowned and
+                        // unrouted — the state the old conjunct was hiding, and the one worth seeing
+                        // in a log when someone asks why push went quiet.
+                        LogInfo($"CHANNEL_PORT CLEARED (owner change): '{existingByName.Name}' {existingByName.ChannelPort} → null; the previous owner is gone and its port may since have been re-issued. ownerRebound={rebindSucceeded}. task c9285d2a");
                         existingByName.ChannelPort = null;
                         existingByName.IsReady = false;   // the handshake belonged to the old session
                     }

@@ -395,6 +395,94 @@ namespace MultiTerminal.Tests
             Assert.Equal(8810, lynn.ChannelPort);
         }
 
+        /// <summary>
+        /// A pid that genuinely CANNOT be bound right now: a real process, started and then reaped, so
+        /// nothing can read its start time. Asserted rather than assumed — a pid that turned out to be
+        /// readable would silently exercise the REBOUND branch, and the fact using it would pass while
+        /// pinning the opposite path. Three facts on this ticket already failed exactly that way.
+        /// </summary>
+        private static int UnbindablePid()
+        {
+            var probe = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/c exit",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            });
+
+            Assert.NotNull(probe);
+            int pid = probe.Id;
+            try
+            {
+                Assert.True(probe.WaitForExit(10000),
+                    "The probe process did not exit within 10s, so its pid is still bindable and this "
+                    + "helper would hand back the wrong kind of pid.");
+            }
+            finally
+            {
+                try { if (!probe.HasExited) probe.Kill(); } catch { }
+                probe.Dispose();
+            }
+
+            Assert.False(MessageBroker.TryGetProcessStartTime(pid, out _),
+                "The reaped pid is still readable (pid reuse, or the probe outlived its wait). This "
+                + "helper must return a pid that cannot be bound, or the caller silently tests the "
+                + "rebound branch instead of the unbindable one.");
+
+            return pid;
+        }
+
+        [Fact]
+        public void A_dead_owners_port_is_cleared_even_when_the_new_owner_cannot_be_bound()
+        {
+            // Run 3b finding (a). `rebindSucceeded` used to gate the port clearing, so when the NEW
+            // pid's start time was unreadable the row KEPT the dead session's port — and kept IsReady
+            // true alongside it. The justification was that clearing would leave the row with "neither
+            // owner nor delivery", but a dead session's port is not delivery: it is a number in the
+            // recycled 8800-8899 range whose owning process is gone, and which may since have been
+            // re-issued to a different live terminal. The old owner being Dead is what makes the port
+            // stale, and that is independent of whether the new owner could be identified.
+            using var broker = new MessageBroker();
+
+            var child = StartBindableChild();
+            int deadOwnerPid = child.Id;
+            try
+            {
+                broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: deadOwnerPid);
+
+                var bound = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+                Assert.Equal(deadOwnerPid, bound.OwnerPid);   // the row really is OWNED...
+                Assert.NotNull(bound.OwnerStartTime);         // ...by a verified incarnation
+
+                child.Kill();
+                Assert.True(child.WaitForExit(10000),
+                    "The child process did not exit within 10s, so the row's owner is not actually dead "
+                    + "and this fact would otherwise fail for the wrong reason.");
+            }
+            finally
+            {
+                try { if (!child.HasExited) child.Kill(); } catch { }
+                child.Dispose();
+            }
+
+            // Session 2 claims the released name presenting a pid whose start time cannot be read.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: UnbindablePid());
+
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+
+            // PRECONDITION, asserted so this fact cannot go vacuous: the rebind must NOT have happened,
+            // or we are on the already-covered rebound path and the finding is untested. The row still
+            // carries the DEAD owner's pid because an unverifiable pid is deliberately never bound.
+            Assert.Equal(deadOwnerPid, lynn.OwnerPid);
+
+            // THE CLAIM: the stale routing goes anyway. Under the old conjunct both of these held the
+            // dead session's values.
+            Assert.Null(lynn.ChannelPort);
+            Assert.False(lynn.IsReady);
+        }
+
         [Fact]
         public void A_live_owners_heartbeat_never_reaches_the_port_clearing_branch_at_all()
         {
