@@ -257,6 +257,25 @@ namespace MultiTerminal.Tests
             var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8811, nonce: null, ownerPid: LivePid);
 
             Assert.True(result.Success);
+
+            // ...and the row must now BELONG to the new session, not merely have admitted it.
+            //
+            // Asserting only Success is what let a half-fix through review: the name was released but
+            // the pid was never rebound (the set-if-empty guard saw a non-null corpse pid), so the row
+            // still pointed at a dead process. Registration reported success while
+            // GetTerminalNameByOwnerPid returned null for the live pid — and an adopted session has no
+            // MULTITERMINAL_NAME, so its channel server had no other way to learn its name and never
+            // bound. Push delivery was dead with every visible signal saying healthy: exactly the
+            // observability trap this ticket exists to close.
+            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(LivePid));
+
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+            Assert.Equal(LivePid, lynn.OwnerPid);
+            Assert.NotNull(lynn.OwnerStartTime);
+
+            // And protection is RESTORED for the new owner, not spent — a stranger is refused again.
+            var stranger = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8899, nonce: null, ownerPid: 424243);
+            Assert.False(stranger.Success);
         }
 
         [Fact]

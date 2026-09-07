@@ -2332,12 +2332,27 @@ namespace MultiTerminal.MCPServer.Services
                     existingByName.LaunchNonce = nonce;
                 }
 
-                // Same set-if-empty rule for the owning pid (c9285d2a). First writer binds it; a later
-                // caller cannot repoint an established row at its own process, which is the whole point.
-                // The start time is captured WITH the pid and never separately — a pid without its
-                // incarnation stamp is not an identity (see TerminalInfo.OwnerStartTime), and
-                // OwnerProcessStillAlive treats a pid with no start time as a corpse.
-                if (ownerPid.HasValue && existingByName.OwnerPid == null)
+                // Set-if-unowned for the owning pid (c9285d2a). A LIVE owner's pid is never repointed —
+                // that is what stops a later caller taking an established row for itself. But "unowned"
+                // has to include a row whose recorded owner is DEAD, not just one that never had a pid.
+                //
+                // Run 2 caught the half-fix here. Making a corpse row release its NAME (see
+                // OwnerProcessStillAlive) let the next session register — and then this guard, testing
+                // only `OwnerPid == null`, refused to rebind, because the corpse's pid is non-null. So
+                // the second adopted session under a name got a successful registration whose row still
+                // pointed at a dead process: GetTerminalNameByOwnerPid returned null for the new pid,
+                // channel-identity?ppid= 404'd, and — since an adopted session has no
+                // MULTITERMINAL_NAME, which is the whole premise — its channel server had no other way
+                // to learn its name and never bound. Push delivery dead, registration reporting success.
+                // The row also carried no live proof from then on, so the protection lasted exactly one
+                // session.
+                //
+                // Rebinding a dead-owner row is safe precisely BECAUSE it is dead: such a row already
+                // grants no protection (existingCarriesProof is false for it, so the gate fail-opens
+                // for everyone), and stamping the new live owner RESTORES protection rather than
+                // weakening it. A row with a live owner still cannot be repointed.
+                bool rowIsUnowned = existingByName.OwnerPid == null || !OwnerProcessStillAlive(existingByName);
+                if (ownerPid.HasValue && rowIsUnowned)
                 {
                     existingByName.OwnerPid = ownerPid.Value;
                     existingByName.OwnerStartTime =
