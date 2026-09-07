@@ -551,6 +551,41 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void A_refused_report_from_someone_else_does_not_mark_a_healthy_terminal_dead()
+        {
+            // PIPELINE RUN 4, found independently by four gates. The first cut counted every refusal
+            // that carried a port, reasoning that "carries a port" means "is a port report". It does
+            // not distinguish WHOSE report was refused — and a refusal is by definition the case where
+            // the broker could NOT attribute the report to this row. So the count landed on the
+            // incumbent, who may be entirely healthy.
+            //
+            // No impostor is needed for this: registerPortOnce sends name AND port together, so a
+            // second shell claiming a live name produces exactly this call.
+            using var broker = new MessageBroker();
+
+            // A healthy terminal with a working route.
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: 8820, nonce: "NONCE-Z", ownerPid: null);
+
+            var healthy = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(8820, healthy.ChannelPort);
+
+            // Somebody else reports a DIFFERENT port for the same name and is refused — correctly.
+            var intruder = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8899, nonce: null, ownerPid: null);
+            Assert.False(intruder.Success);
+
+            // THE CLAIM: that refusal was about the caller, not about Zoe. Zoe still holds a live route,
+            // so nothing about her delivery has been demonstrated and she must not be marked dead.
+            // Before the fix this read 1, and list_terminals told every agent Zoe needed restarting —
+            // permanently, because the reset needs an accepted port report and a healthy terminal's
+            // drift-gated heartbeat never sends another one.
+            var afterIntruder = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(8820, afterIntruder.ChannelPort);   // route untouched
+            Assert.Equal(0, afterIntruder.ChannelPortRefusalCount);
+            Assert.Null(afterIntruder.LastChannelPortRefusalAt);
+        }
+
+        [Fact]
         public void A_recovered_terminal_stops_reporting_a_dead_channel()
         {
             // A health signal that cannot go back to healthy is just a second way to be wrong. The row

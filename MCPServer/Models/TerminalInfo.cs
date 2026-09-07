@@ -153,10 +153,14 @@ namespace MultiTerminal.MCPServer.Models
         /// stays null, and the terminal keeps looking healthy — <see cref="IsConnected"/> is true and
         /// <c>get_messages</c> polling works perfectly, because polling does not use the port. The
         /// failure is invisible precisely where an agent would look for it.</para>
-        /// <para>⚠️ Counts ONLY refusals that carried a channelPort. A refusal WITHOUT one is a name
-        /// claim being rejected — an impostor, or a second terminal legitimately told it cannot have a
-        /// name already in use — which is the gate working and says nothing about anyone's delivery.
-        /// Conflating the two would make this fire on healthy refusals and destroy the signal.</para>
+        /// <para>⚠️ Counts ONLY a refusal that carried a channelPort AND landed on a row that has no
+        /// <see cref="ChannelPort"/> of its own. BOTH conjuncts are load-bearing, and the second was
+        /// missing in the first cut (found by four pipeline gates). A refusal is by definition the case
+        /// where the broker could NOT attribute the report to this row, so counting it here records
+        /// someone else's failure against the incumbent — and since a name claim always carries a port
+        /// too (registerPortOnce sends name and port together), a second shell claiming a live name was
+        /// enough to have a HEALTHY terminal reported as dead. Requiring the row to hold no route is
+        /// what makes the count a statement about THIS terminal rather than about whoever was refused.</para>
         /// <para>NOT JsonIgnore'd, unlike the nonce and pid: those are check values that must never
         /// leave the process, whereas this exists to be read. It is a count of failures, discloses
         /// nothing an attacker could present as proof, and a health signal nobody can see is the exact

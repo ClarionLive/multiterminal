@@ -241,3 +241,62 @@ test("negative fixture: a throwing body would propagate without the try/catch", 
   // ...whereas the real one absorbs it:
   assert.equal(await readErrorDetail(exploding), null);
 });
+
+// ─── Run 4: the relayed detail must not be able to fake a connection failure ─────────────────
+// Found by the pipeline's debugger gate. Relaying the server's message made err.message partly
+// SERVER-CONTROLLED, and apiCall's retry path classifies errors with
+// isConnectionRefused(err) -> msg.includes("econnrefused"). A response body carrying that token
+// would therefore be read as "the connection was refused", and the retry that follows is only
+// safe because "the server never saw the request" — which is exactly false for a 4xx/5xx. A POST
+// or DELETE would silently execute twice and then report "MultiTerminal isn't running".
+//
+// No MT endpoint emits that token today, so this was LATENT, not live. It is pinned anyway,
+// because the coupling would be silently re-introduced by any future change to the error text.
+
+const guardBlock = slice(
+  "// An error carrying an HTTP status came FROM the server",
+  "if (isConnectionRefused(err)) {",
+  "apiCall status-first guard",
+);
+assert.ok(guardBlock.includes("if (err.status) throw err;"), "extraction lost the status guard");
+
+test("an error carrying an HTTP status short-circuits before the connection-refused heuristic", () => {
+  // Execute the REAL guard with an error whose message contains the poison token.
+  const run = new Function("err", `${guardBlock} return "reached-the-heuristic";`);
+
+  const poisoned = new Error("API error: 500 Internal Server Error — upstream ECONNREFUSED talking to db");
+  poisoned.status = 500;
+
+  assert.throws(
+    () => run(poisoned),
+    (e) => e === poisoned,
+    "a status-bearing error must rethrow before isConnectionRefused sees the message",
+  );
+});
+
+test("a genuine connection failure still reaches the heuristic", () => {
+  // The guard must not swallow the case the retry exists for: no HTTP status means no response.
+  const run = new Function("err", `${guardBlock} return "reached-the-heuristic";`);
+
+  const refused = new Error("connect ECONNREFUSED 127.0.0.1:5050");
+  refused.code = "ECONNREFUSED";                       // no .status — nothing answered
+
+  assert.equal(run(refused), "reached-the-heuristic");
+});
+
+test("negative fixture: without the guard, a poisoned 500 is classified as connection-refused", () => {
+  // Reproduces the pre-fix behaviour so the two tests above are demonstrably load-bearing rather
+  // than trivially true.
+  const isConnectionRefusedPreFix = (err) => {
+    const msg = String(err?.message ?? "").toLowerCase();
+    return msg.includes("econnrefused");
+  };
+
+  const poisoned = new Error("API error: 500 Internal Server Error — upstream ECONNREFUSED talking to db");
+  poisoned.status = 500;
+
+  assert.ok(
+    isConnectionRefusedPreFix(poisoned),
+    "the pre-fix path would retry a 500 as though the server never saw the request",
+  );
+});

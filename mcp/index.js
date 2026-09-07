@@ -190,6 +190,19 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
           `The app may be busy or wedged on ${API_BASE}.`
         );
       }
+      // An error carrying an HTTP status came FROM the server, so by construction the connection was
+      // never refused — bail out before the substring heuristic below can be fooled.
+      //
+      // This guard exists because relaying the server's message (above) made err.message partly
+      // server-controlled, and isConnectionRefused() decides by `msg.includes("econnrefused")`. A
+      // response body containing that token would classify a 4xx/5xx as a connection failure, and the
+      // retry that follows is only safe because "the server never saw the request" — which is exactly
+      // false here. A POST or DELETE would silently execute twice, then report "MultiTerminal isn't
+      // running". No MT endpoint emits that token today, so this was latent rather than live; it is
+      // also the kind of coupling that would be re-introduced by any future error-text change, so the
+      // guard is structural rather than a filter on the token.
+      if (err.status) throw err;
+
       if (isConnectionRefused(err)) {
         if (attempt === 0) {
           // Brief backoff, then one retry — covers a mid-restart window.
@@ -312,9 +325,25 @@ function formatTerminals(terminals) {
     // the one place anyone looks says it is fine while every push to it is undeliverable. Say it here,
     // because a health signal nobody reads is the same as not having one.
     const refusals = t.channelPortRefusalCount || 0;
-    const health = refusals > 0
-      ? `  ⚠️ PUSH DELIVERY DEAD — ${refusals} port report(s) refused; this terminal can be messaged only by polling. If it keeps climbing, its channel server predates the launch-nonce echo and the terminal needs restarting.`
-      : "";
+    // The `channelPort == null` conjunct is repeated here deliberately, not redundantly. The broker
+    // already refuses to count against a row that holds a route, but a stale count could still arrive
+    // from a path neither of us has enumerated (an older build, a reconnect that reused the row), and
+    // the cost of the two states is wildly asymmetric: failing to warn loses a diagnostic, while
+    // warning wrongly tells an agent to restart a terminal that is working. Only claim "dead" when
+    // this row has no route of its own.
+    //
+    // The wording no longer asserts a cause. It previously named version skew and prescribed a
+    // restart, which an agent relays to the Owner as diagnosis — and skew is only one of the ways to
+    // get here. Say what is observed, point at the log, let the reader conclude.
+    const refusalsAreDead = refusals > 0 && (t.channelPort === null || t.channelPort === undefined);
+    let health = "";
+    if (refusalsAreDead) {
+      health = `  ⚠️ PUSH DELIVERY DEAD — this terminal has no channel port and ${refusals} port report(s) were refused. It can be reached only by polling. Causes include a channel server predating the launch-nonce echo (restart that terminal) or another process claiming its name; the broker log line "CHANNEL PORT REPORT REFUSED" distinguishes them.`;
+    } else if (refusals > 0) {
+      // Refusals recorded, but this row HAS a route — so they were about someone else claiming the
+      // name, not about this terminal's delivery. Worth surfacing, worth not calling dead.
+      health = `  ℹ️ ${refusals} port report(s) claiming this name were refused, but this terminal has a live channel port — its own delivery is fine.`;
+    }
 
     output += `• ${t.name} (${t.id.substring(0, 8)}) - Last active ${timeStr}\n`;
     if (health) output += `${health}\n`;

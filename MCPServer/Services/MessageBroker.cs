@@ -2384,18 +2384,33 @@ namespace MultiTerminal.MCPServer.Services
                 string expected = heldByNonce ? "its launch nonce" : "the owning process id it was registered from";
                 DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present {expected}. Refusing the claim.");
 
-                // Item 10 — make a dead channel say so. A refusal that CARRIED a port is a port report
-                // being rejected, which means this terminal has no route and every push to it is
-                // undeliverable. A refusal WITHOUT a port is a name claim being rejected — the gate
-                // working as intended — and says nothing about anyone's delivery, so it is deliberately
-                // not counted here. Conflating them would fire this on healthy refusals and leave the
-                // signal worthless.
+                // Item 10 — make a dead channel say so.
+                //
+                // ⚠️ RUN 4 CORRECTION, found by four gates independently. The first cut counted every
+                // refusal that CARRIED a port, on the reasoning that a port means "port report" and no
+                // port means "name claim". That reasoning is wrong, and the comment defending it was
+                // the confident kind: it distinguishes WHAT KIND of refusal this was, not WHOSE report
+                // was refused — and a refusal is BY DEFINITION the case where the broker could not
+                // attribute the report to this row. So the count landed on `existingByName`, the
+                // INCUMBENT, who may be a perfectly healthy terminal that merely shares the name the
+                // refused caller wanted. `registerPortOnce` sends name AND port together, so this needs
+                // no impostor: a second shell claiming a live name is enough. list_terminals then told
+                // every agent that a WORKING terminal's push was dead and it needed restarting, while
+                // the genuinely broken row read clean.
+                //
+                // The extra conjunct is the whole claim, stated honestly: only a row that HAS NO ROUTE
+                // can be provably dead. A row holding a live port is not, whoever else was refused.
+                // It also closes the "never clears" half — the reset needs an accepted port report, but
+                // the channel server's heartbeat is drift-gated (multiterminal-channel.mjs: it returns
+                // early when the roster already shows its port), so a healthy terminal never re-reports
+                // and a false count would have been permanent for MT's whole uptime. With this guard a
+                // row that holds a port cannot accrue one in the first place.
                 //
                 // Nothing else reports this. The row stays IsConnected, and get_messages polling keeps
                 // working because polling never uses the port, so the terminal looks fine in exactly
                 // the place anyone would check. The recorded count is what turns a silent failure into
                 // one a person or an agent can see (surfaced by list_terminals).
-                if (channelPort.HasValue)
+                if (channelPort.HasValue && existingByName.ChannelPort == null)
                 {
                     existingByName.ChannelPortRefusalCount++;
                     existingByName.LastChannelPortRefusalAt = DateTime.UtcNow;
