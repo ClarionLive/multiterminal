@@ -78,6 +78,64 @@ function seg(value) {
   return encodeURIComponent(s);
 }
 
+/** Longest server explanation worth relaying. The real ones are ~250 chars; this guards against a
+ *  stack trace or an HTML error page being pasted into an agent's context. */
+const MAX_ERROR_DETAIL_CHARS = 500;
+
+/**
+ * Pull the server's own explanation out of a failed response, or return null.
+ *
+ * NEVER THROWS. That is the whole contract: this runs on a path that is already failing, and an
+ * exception here would replace a real "the name is held by a live terminal" with a parse error —
+ * strictly worse than the bare status line it exists to improve on.
+ *
+ * MT's controllers return ASP.NET ProblemDetails (`Problem(detail:)`, 252 sites), so `detail` is
+ * the field that matters; `title` is the generic "Bad Request" and is only a fallback. One
+ * endpoint returns `{ error }` instead, and non-JSON bodies happen when something upstream of the
+ * controller fails, so all three are handled rather than assuming the dominant shape.
+ */
+async function readErrorDetail(response) {
+  try {
+    const text = await response.text();
+    if (!text) return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    // A body that was MEANT as JSON is read structurally or not at all. Falling back to the raw
+    // text when parsing fails would relay a half-written `{"detail": "trunca` as the reason —
+    // worse than saying nothing, because it reads like an explanation and carries none.
+    if (/^[[{"]/.test(trimmed) || trimmed === "null") {
+      let parsed;
+      try { parsed = JSON.parse(trimmed); } catch { return null; }
+
+      // A bare JSON string body is already the message.
+      if (typeof parsed === "string") return parsed.trim() ? clampDetail(parsed) : null;
+      if (!parsed || typeof parsed !== "object") return null;
+
+      // `detail` first: ProblemDetails puts the useful sentence there and a generic label in
+      // `title`, so preferring title would relay "Bad Request" and drop the actual reason.
+      const picked = parsed.detail ?? parsed.error ?? parsed.title;
+      return typeof picked === "string" && picked.trim() ? clampDetail(picked) : null;
+    }
+
+    // Plain text. An HTML error page is noise, not an explanation, and truncating one just pastes
+    // half a <head> into the conversation — so relay short plain text only.
+    if (trimmed.startsWith("<") || trimmed.length > MAX_ERROR_DETAIL_CHARS) return null;
+    return clampDetail(trimmed);
+  } catch {
+    // Body unreadable (already consumed, connection dropped mid-read, decode failure). The status
+    // line alone is still worth throwing, so say nothing rather than lose it.
+    return null;
+  }
+}
+
+function clampDetail(s) {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > MAX_ERROR_DETAIL_CHARS
+    ? `${flat.slice(0, MAX_ERROR_DETAIL_CHARS)}…`
+    : flat;
+}
+
 async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -101,8 +159,25 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       if (!response.ok) {
-        const apiErr = new Error(`API error: ${response.status} ${response.statusText}`);
+        // Carry the server's OWN explanation, not just the status line (task c9285d2a).
+        //
+        // This used to throw `API error: 400 Bad Request` and never read the body, so every
+        // reason the API took the trouble to write was discarded here — for all ~91 tools, since
+        // this is their single funnel. It surfaced on gate (4): the broker refuses a duplicate
+        // name with a precise, actionable message ("The name 'Lynn' is already in use by a
+        // connected terminal... if this IS your own terminal's channel server, it is running a
+        // build older than the one that echoes the launch nonce — restart the terminal"), and the
+        // caller saw none of it. Told only "400 Bad Request", an agent reasoned — correctly, from
+        // what it was given — that its REQUEST was malformed, invented a docId, retried, was
+        // refused again, and reported success to the Owner. A status code cannot distinguish
+        // "you sent nonsense" from "you may not have that name"; the body always could.
+        const detail = await readErrorDetail(response);
+        const apiErr = new Error(
+          `API error: ${response.status} ${response.statusText}` + (detail ? ` — ${detail}` : ""),
+        );
         apiErr.status = response.status;
+        // Kept separately so a caller can branch on the reason without re-parsing the message.
+        if (detail) apiErr.detail = detail;
         throw apiErr;
       }
       const text = await response.text();
