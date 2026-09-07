@@ -1935,16 +1935,27 @@ namespace MultiTerminal.MCPServer.Services
                 .Where(t => t.IsConnected
                             && t.OwnerPid.HasValue
                             && t.OwnerPid.Value == ownerPid
-                            && OwnerProcessStillAlive(t)
-                            && !IsTemporaryAgent(t.Name))
-                .OrderByDescending(t => t.LastActiveAt)
+                            && ResolveOwnerLiveness(t) != OwnerLiveness.Dead
+                            && !IsTemporaryAgent(t.Name)
+
+                            // "Unassigned" is the deliberate shared sentinel, never anyone's identity
+                            // (see RegisterTerminalUnique). Handing it back would let a channel server
+                            // bind the placeholder name and start answering for it.
+                            && !t.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+
+                            // Ordered by when the OWNER was bound, not by LastActiveAt: the latter is
+                            // an activity clock that SendMessage/Broadcast/MarkAgentReady bump on the
+                            // sender's row, so "newest wins" could run backwards after ordinary
+                            // traffic and resolve to a stale identity.
+                .OrderByDescending(t => t.OwnerBoundAt ?? DateTime.MinValue)
                 .ToList();
 
             if (candidates.Count == 0) return null;
 
-            // A tie on LastActiveAt between two real identities is genuinely ambiguous — say so by
-            // answering nothing rather than picking one at random.
-            if (candidates.Count > 1 && candidates[0].LastActiveAt == candidates[1].LastActiveAt)
+            // A tie between two real identities is genuinely ambiguous — say so by answering nothing
+            // rather than picking one at random.
+            if (candidates.Count > 1
+                && (candidates[0].OwnerBoundAt ?? DateTime.MinValue) == (candidates[1].OwnerBoundAt ?? DateTime.MinValue))
             {
                 DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected rows tie on LastActiveAt ('{candidates[0].Name}', '{candidates[1].Name}'). Refusing to guess — the caller stays unbound.");
                 return null;
@@ -1967,51 +1978,122 @@ namespace MultiTerminal.MCPServer.Services
         /// <para>Comparing the start time as well pins the pid to one incarnation. A row whose owner is
         /// gone reports FALSE and is treated as unheld, which releases the name.</para>
         /// </summary>
-        private static bool OwnerProcessStillAlive(TerminalInfo terminal)
+        /// <remarks>
+        /// ⚠️ Run 2 correction: "cannot verify" is NOT "dead". The first cut collapsed every failure —
+        /// no such process, exited, AND access-denied — into a single false, so a `Win32Exception`
+        /// (MT unelevated while claude is elevated, a protected process, a cross-session pid) made a
+        /// LIVE owner read as a corpse and SILENTLY released its name to the next claimant. Three
+        /// states, not two: only <see cref="OwnerLiveness.Dead"/> releases a name.
+        /// </remarks>
+        private enum OwnerLiveness
         {
-            if (terminal?.OwnerPid == null) return false;
+            /// <summary>The row names no owner at all — nothing holds it.</summary>
+            Unowned,
 
-            // A row bound before this field existed has no start time to compare. Treat it as NOT a
-            // live holder: it is indistinguishable from a corpse, and failing open releases the name
-            // rather than burning it — the same fail-open philosophy as gates (1)-(3).
-            if (terminal.OwnerStartTime == null) return false;
+            /// <summary>The pid names the very process incarnation it was bound to.</summary>
+            Alive,
 
-            return TryGetProcessStartTime(terminal.OwnerPid.Value, out DateTime startTime)
-                   && startTime == terminal.OwnerStartTime.Value;
+            /// <summary>The process is gone, or the pid was recycled onto a different one.</summary>
+            Dead,
+
+            /// <summary>
+            /// A process with that pid exists but its identity could not be confirmed (access denied).
+            /// The row stays HELD — releasing on an unverifiable read is how a live session loses its
+            /// name — but the degraded check falls back to bare pid equality so the legitimate owner,
+            /// who knows the pid, is not locked out either.
+            /// </summary>
+            Unknown,
         }
 
         /// <summary>
-        /// Reads a process's start time, returning false when the pid names no live process.
-        /// Every failure mode (exited, never existed, access denied, platform refusal) is "cannot
-        /// prove this pid is alive", which callers must treat as not-alive.
+        /// Classifies whether the row's <see cref="TerminalInfo.OwnerPid"/> still names the process
+        /// incarnation it was bound to (task c9285d2a).
+        /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
+        /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
+        /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
+        /// defining property of an adopted session; there is no staleness reaper either. So without a
+        /// liveness test the row sits connected forever and gate (4) refuses the name's real owner on
+        /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
+        /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
+        /// session's claim.</para>
         /// </summary>
-        internal static bool TryGetProcessStartTime(int pid, out DateTime startTime)
+        private OwnerLiveness ResolveOwnerLiveness(TerminalInfo terminal)
+        {
+            if (terminal?.OwnerPid == null) return OwnerLiveness.Unowned;
+
+            // A pid is only ever bound together with a verified start time (see the stamp sites), so a
+            // row carrying a pid without one predates that rule. Unverifiable, not provably gone.
+            if (terminal.OwnerStartTime == null) return OwnerLiveness.Unknown;
+
+            switch (ReadProcessStartTime(terminal.OwnerPid.Value, out DateTime startTime))
+            {
+                case ProcessProbe.NotRunning:
+                    return OwnerLiveness.Dead;
+
+                case ProcessProbe.Unreadable:
+                    DebugLogService?.Warning("MessageBroker", $"Owner liveness for '{terminal.Name}' (pid {terminal.OwnerPid}) is UNKNOWN — the start time could not be read. Keeping the name held and falling back to bare pid equality; a name is not released on an unverifiable read.");
+                    return OwnerLiveness.Unknown;
+
+                default:
+                    return startTime == terminal.OwnerStartTime.Value
+                        ? OwnerLiveness.Alive
+                        : OwnerLiveness.Dead;   // pid recycled onto a different process
+            }
+        }
+
+        /// <summary>Outcome of probing a pid for its start time.</summary>
+        private enum ProcessProbe
+        {
+            /// <summary>Start time read successfully.</summary>
+            Read,
+
+            /// <summary>No process with that id is running.</summary>
+            NotRunning,
+
+            /// <summary>A process may exist but its start time could not be read (access denied).</summary>
+            Unreadable,
+        }
+
+        /// <summary>
+        /// Probes a pid's start time, distinguishing "no such process" from "cannot read it".
+        /// Conflating those two is what let an access-denied read silently release a live name.
+        /// </summary>
+        private static ProcessProbe ReadProcessStartTime(int pid, out DateTime startTime)
         {
             startTime = default;
-            if (pid <= 0) return false;
+            if (pid <= 0) return ProcessProbe.NotRunning;
 
             try
             {
                 using var process = System.Diagnostics.Process.GetProcessById(pid);
                 startTime = process.StartTime;
-                return true;
+                return ProcessProbe.Read;
             }
             catch (ArgumentException)
             {
                 // No process with that id is running.
-                return false;
+                return ProcessProbe.NotRunning;
             }
             catch (InvalidOperationException)
             {
                 // The process exited between lookup and read.
-                return false;
+                return ProcessProbe.NotRunning;
             }
             catch (System.ComponentModel.Win32Exception)
             {
-                // Access denied reading start time — cannot prove liveness, so do not claim it.
-                return false;
+                // Access denied — a process with this pid may well be alive; we simply cannot confirm
+                // which one. Never treat this as death: that is how a live session loses its name.
+                return ProcessProbe.Unreadable;
             }
         }
+
+        /// <summary>
+        /// Reads a process's start time for BINDING (as opposed to verification). Returns false when
+        /// the value could not be established, in which case the caller must NOT bind the pid at all —
+        /// a pid stored without a verified start time is an identity nobody can check later.
+        /// </summary>
+        internal static bool TryGetProcessStartTime(int pid, out DateTime startTime)
+            => ReadProcessStartTime(pid, out startTime) == ProcessProbe.Read;
 
         /// <summary>
         /// Register a terminal with the broker.
@@ -2264,13 +2346,20 @@ namespace MultiTerminal.MCPServer.Services
             //     sweepable rather than guessable, so the nonce arm was bypassable in seconds.
             //     Now: the pid proves origin ONLY for a row that has NO nonce — an adopted session,
             //     which genuinely has nothing else. A row holding a nonce is held by that nonce alone.
+            OwnerLiveness ownerLiveness = ResolveOwnerLiveness(existingByName);
+
             bool nonceProves = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
                                && string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal);
+
+            // Alive proves identity outright. Unknown (start time unreadable) degrades to bare pid
+            // equality rather than refusing: the row stays held against a stranger who does not know
+            // the pid, and its real owner — who does — still gets in. Dead proves nothing, because the
+            // process being compared against no longer exists.
             bool pidProves = ownerPid.HasValue
                              && string.IsNullOrEmpty(existingByName?.LaunchNonce)
                              && existingByName?.OwnerPid != null
                              && existingByName.OwnerPid.Value == ownerPid.Value
-                             && OwnerProcessStillAlive(existingByName);
+                             && (ownerLiveness == OwnerLiveness.Alive || ownerLiveness == OwnerLiveness.Unknown);
 
             //     A row is only HELD if someone is still there to hold it. A nonce-bearing row is held
             //     by its (immortal) nonce; a pid-only row is held only while its owning process lives.
@@ -2279,8 +2368,11 @@ namespace MultiTerminal.MCPServer.Services
             //     SessionEnd hook early-returns without MULTITERMINAL_NAME), and no reaper exists, so
             //     the row would otherwise sit connected for MT's whole uptime and refuse the same
             //     person's next shell. A dead owner means the name is free.
+            // Only DEAD releases a name. Unknown keeps the row held — releasing on a read we could not
+            // perform is how a live session silently loses its name to whoever asks next.
             bool existingCarriesProof = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
-                                        || (existingByName?.OwnerPid != null && OwnerProcessStillAlive(existingByName));
+                                        || ownerLiveness == OwnerLiveness.Alive
+                                        || ownerLiveness == OwnerLiveness.Unknown;
 
             if (existingByName != null
                 && !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
@@ -2327,9 +2419,43 @@ namespace MultiTerminal.MCPServer.Services
                 // Seed the launch nonce if not already bound (fd3437e6) — mirrors the DocId
                 // set-if-empty rule so a pre-registration that reuses a shared "Unassigned" row
                 // still records its proof-of-origin, but never overwrites an established nonce.
+                //
+                // ⚠️ Run 2: NOT onto a row that has been owned by a pid. Seeding here is a capture
+                // primitive, because a nonce — unlike a pid — is never checked for liveness and never
+                // expires. So after an adopted session exits and its name is released, any local
+                // process could POST that name with a nonce of its own choosing, and the row became
+                // PERMANENTLY nonce-held: pidProves is disabled for nonce-bearing rows, so the real
+                // owner could never reclaim it for the rest of MT's uptime. That is the same
+                // permanent-lockout class the liveness change was written to remove, re-entered
+                // through the door next to it.
+                //
+                // The rule: seed only when the caller PROVED it owns this row, or when the row is the
+                // shared "Unassigned" sentinel — which is the fd3437e6 case this seeding was written
+                // for (a pre-registration promoting the placeholder it was handed).
+                //
+                // Keying it on "has the row ever had a pid" is NOT enough, and the test caught that:
+                // a dead pid is never bound at all (a pid is stored only with a verified start time),
+                // so a row whose owner has died looks exactly like a placeholder that never had one.
+                // Proof-or-sentinel is the property that actually distinguishes the two.
+                //
+                // The cost is that a legacy real-name row carrying no nonce stays unprotected instead
+                // of being upgraded by the next registrant. That is the status quo before this ticket,
+                // not a regression — and it is strictly better than the alternative, where an unproven
+                // caller can make its claim permanent.
+                bool callerMayBindNonce = nonceProves
+                                          || pidProves
+                                          || name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase);
+
                 if (!string.IsNullOrEmpty(nonce) && string.IsNullOrEmpty(existingByName.LaunchNonce))
                 {
-                    existingByName.LaunchNonce = nonce;
+                    if (callerMayBindNonce)
+                    {
+                        existingByName.LaunchNonce = nonce;
+                    }
+                    else
+                    {
+                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-seed-refused name='{name}' — the caller proved nothing about this row, so its nonce is not seeded. A seeded nonce is never liveness-checked and never expires, so seeding here would hold the name permanently against its real owner. task c9285d2a");
+                    }
                 }
 
                 // Set-if-unowned for the owning pid (c9285d2a). A LIVE owner's pid is never repointed —
@@ -2351,14 +2477,45 @@ namespace MultiTerminal.MCPServer.Services
                 // grants no protection (existingCarriesProof is false for it, so the gate fail-opens
                 // for everyone), and stamping the new live owner RESTORES protection rather than
                 // weakening it. A row with a live owner still cannot be repointed.
-                bool rowIsUnowned = existingByName.OwnerPid == null || !OwnerProcessStillAlive(existingByName);
+                bool rowIsUnowned = ownerLiveness == OwnerLiveness.Unowned || ownerLiveness == OwnerLiveness.Dead;
                 if (ownerPid.HasValue && rowIsUnowned)
                 {
-                    existingByName.OwnerPid = ownerPid.Value;
-                    existingByName.OwnerStartTime =
-                        TryGetProcessStartTime(ownerPid.Value, out DateTime reusedOwnerStart)
-                            ? reusedOwnerStart
-                            : (DateTime?)null;
+                    bool ownerActuallyChanged = existingByName.OwnerPid != ownerPid.Value;
+
+                    // Bind the pid ONLY with a verified start time. A pid stored without one is an
+                    // identity nobody can check later: it reads as Unknown forever, which keeps the
+                    // name held on a claim we can never confirm. Better to record no owner at all.
+                    if (TryGetProcessStartTime(ownerPid.Value, out DateTime reusedOwnerStart))
+                    {
+                        existingByName.OwnerPid = ownerPid.Value;
+                        existingByName.OwnerStartTime = reusedOwnerStart;
+                        existingByName.OwnerBoundAt = DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        DebugLogService?.Warning("MessageBroker", $"Not binding owner pid {ownerPid.Value} to '{name}': its start time could not be read, and a pid without one cannot be verified later. The row stays unowned rather than held by an unverifiable claim.");
+                    }
+
+                    // ⚠️ Run 2: a new owner must not inherit the old one's ROUTING. The reuse branch
+                    // only touches ChannelPort when the caller supplies one, and the real rebind
+                    // caller never does — mcp/index.js deliberately omits channelPort because the
+                    // channel server reports its own. So without this, the row ended up with the new
+                    // session's OwnerPid and the DEAD session's port. Ports are a small recycled range
+                    // (8800-8899) handed out to whatever is free, so that stale port may already
+                    // belong to a different live terminal's channel server — which does not enforce
+                    // the envelope's `to` field. The POST returns 200, delivery is marked done, and
+                    // one agent's messages land in another's session with nothing reporting it.
+                    // DisconnectTerminalByName nulls the port for exactly this reason; an ownership
+                    // change is the adopted-row analogue of that disconnect.
+                    //
+                    // Conditional on the owner ACTUALLY changing: clearing on the same-pid heartbeat
+                    // would drop the port of every healthy adopted terminal on every re-registration.
+                    if (ownerActuallyChanged && !channelPort.HasValue && existingByName.ChannelPort != null)
+                    {
+                        LogInfo($"CHANNEL_PORT CLEARED (owner change): '{existingByName.Name}' {existingByName.ChannelPort} → null; the previous owner is gone and its port may since have been re-issued. task c9285d2a");
+                        existingByName.ChannelPort = null;
+                        existingByName.IsReady = false;   // the handshake belonged to the old session
+                    }
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // Always re-raise event so MainForm updates its mapping
@@ -2416,6 +2573,25 @@ namespace MultiTerminal.MCPServer.Services
                 };
             }
 
+            // Resolve the owner ONCE. A pid is bound only together with a verified start time: stored
+            // without one it can never be checked again, so it would hold the name on a claim nobody
+            // can confirm (it reads as Unknown forever). If the start time is unreadable, the row
+            // records no owner at all — which leaves the name claimable rather than stuck.
+            int? boundOwnerPid = null;
+            DateTime? boundOwnerStart = null;
+            if (ownerPid.HasValue)
+            {
+                if (TryGetProcessStartTime(ownerPid.Value, out DateTime freshOwnerStart))
+                {
+                    boundOwnerPid = ownerPid.Value;
+                    boundOwnerStart = freshOwnerStart;
+                }
+                else
+                {
+                    DebugLogService?.Warning("MessageBroker", $"Not binding owner pid {ownerPid.Value} to new terminal '{name}': its start time could not be read, so the pid could never be verified later. The row records no owner.");
+                }
+            }
+
             var terminal = new TerminalInfo
             {
                 Id = id,
@@ -2432,10 +2608,9 @@ namespace MultiTerminal.MCPServer.Services
                 // OTHER child process (the channel server) can prove it belongs to the same session.
                 // Paired with the process's start time so the pid names one incarnation and not merely
                 // a number Windows may later reissue (see TerminalInfo.OwnerStartTime).
-                OwnerPid = ownerPid,
-                OwnerStartTime = ownerPid.HasValue && TryGetProcessStartTime(ownerPid.Value, out DateTime newOwnerStart)
-                    ? newOwnerStart
-                    : (DateTime?)null
+                OwnerPid = boundOwnerPid,
+                OwnerStartTime = boundOwnerStart,
+                OwnerBoundAt = boundOwnerPid.HasValue ? DateTime.UtcNow : (DateTime?)null
             };
             LogInfo($"NEW TERMINAL: '{name}' id={id} channelPort={channelPort?.ToString() ?? "null"} docId={docId ?? "null"}");
 

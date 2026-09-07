@@ -253,8 +253,13 @@ namespace MultiTerminal.Tests
             // on their very next shell, which is how the feature would have failed on first use.
             broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
 
-            // The same person opens a new shell: different pid, still no nonce.
-            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8811, nonce: null, ownerPid: LivePid);
+            // The same person opens a new shell: different pid, still no nonce, AND NO PORT.
+            //
+            // Omitting the port matters — an earlier version of this fact passed one, which is the one
+            // thing the real caller never does. mcp/index.js deliberately omits channelPort because
+            // the channel server reports its own, so supplying it here masked the bug where the row
+            // kept the DEAD session's port (see The_new_owner_does_not_inherit_the_dead_sessions_port).
+            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
 
             Assert.True(result.Success);
 
@@ -276,6 +281,85 @@ namespace MultiTerminal.Tests
             // And protection is RESTORED for the new owner, not spent — a stranger is refused again.
             var stranger = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8899, nonce: null, ownerPid: 424243);
             Assert.False(stranger.Success);
+        }
+
+        [Fact]
+        public void The_new_owner_does_not_inherit_the_dead_sessions_port()
+        {
+            using var broker = new MessageBroker();
+
+            // Session 1 registered a port; its process then died without ever being disconnected
+            // (an adopted row has no docId for UnregisterTerminal, and the SessionEnd hook does not
+            // run without MULTITERMINAL_NAME).
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
+
+            // Session 2 claims the released name. The real caller sends NO port — the channel server
+            // reports its own once it starts listening.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
+
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+
+            // The port must NOT survive the ownership change. Ports come from a small recycled range
+            // (8800-8899) handed out to whatever is free, so 8810 may already belong to a DIFFERENT
+            // live terminal's channel server — which does not enforce the envelope's `to` field. The
+            // POST would return 200, delivery would be marked done, and Lynn's messages would land in
+            // someone else's session with nothing reporting it. DisconnectTerminalByName nulls the
+            // port for exactly this reason; an ownership change is its adopted-row analogue.
+            Assert.Null(lynn.ChannelPort);
+
+            // The old session's handshake does not carry over either.
+            Assert.False(lynn.IsReady);
+        }
+
+        [Fact]
+        public void A_same_pid_re_registration_keeps_its_port()
+        {
+            using var broker = new MessageBroker();
+
+            // The guard above must be conditional on the owner ACTUALLY changing. The channel server
+            // re-registers under the same pid on its drift heartbeat; clearing the port there would
+            // kill push delivery for every healthy adopted terminal on every heartbeat.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
+
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+            Assert.Equal(8810, lynn.ChannelPort);
+        }
+
+        [Fact]
+        public void A_released_name_cannot_be_captured_permanently_by_an_attacker_nonce()
+        {
+            using var broker = new MessageBroker();
+
+            // An adopted session held "Lynn" by pid, then exited. The name is released.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
+
+            // A hostile local process claims the released name and supplies a nonce of its own
+            // choosing. It may take the name — an unheld name is claimable, by design — but seeding
+            // that nonce would make the claim PERMANENT: a nonce is never liveness-checked and never
+            // expires, and pidProves is disabled for nonce-bearing rows, so the real owner could
+            // never reclaim the name for the rest of MT's uptime. That is the same permanent-lockout
+            // class the liveness change exists to remove, re-entered through the door beside it.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8899, nonce: "ATTACKER-NONCE", ownerPid: 424243);
+
+            // The legitimate owner comes back and must still be able to claim its name by pid.
+            var legitimate = broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
+
+            Assert.True(legitimate.Success);
+            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(LivePid));
+        }
+
+        [Fact]
+        public void The_pid_lookup_never_hands_back_the_shared_placeholder()
+        {
+            using var broker = new MessageBroker();
+
+            // "Unassigned" is the deliberate shared sentinel, never anyone's identity. Returning it
+            // would let a channel server bind the placeholder and start answering for it.
+            broker.RegisterTerminal("Unassigned", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
+
+            Assert.Null(broker.GetTerminalNameByOwnerPid(LivePid));
         }
 
         [Fact]

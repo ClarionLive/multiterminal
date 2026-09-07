@@ -119,6 +119,18 @@ namespace MultiTerminal.MCPServer.Models
         public DateTime? OwnerStartTime { get; set; }
 
         /// <summary>
+        /// When <see cref="OwnerPid"/> was last bound to this row (task c9285d2a, pipeline Run 2).
+        /// <para>Exists so the pid lookup can order candidates by REGISTRATION recency.
+        /// <see cref="LastActiveAt"/> looks like the same thing and is not: it is an activity clock,
+        /// bumped by sending a message and by the ready handshake, on the SENDER's row. So one
+        /// process holding two rows could see "newest wins" run backwards the moment the older row
+        /// sent anything — and a channel server resolving after that flip would bind the stale
+        /// identity, which is the very wrong-name-bound outcome the ordering exists to prevent.</para>
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public DateTime? OwnerBoundAt { get; set; }
+
+        /// <summary>
         /// Whether the agent has sent the ready confirmation (via webhook or message).
         /// Used for spawn handshake to ensure agent is initialized before sending work.
         /// </summary>
