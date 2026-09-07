@@ -2383,6 +2383,24 @@ namespace MultiTerminal.MCPServer.Services
                 bool heldByNonce = !string.IsNullOrEmpty(existingByName.LaunchNonce);
                 string expected = heldByNonce ? "its launch nonce" : "the owning process id it was registered from";
                 DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present {expected}. Refusing the claim.");
+
+                // Item 10 — make a dead channel say so. A refusal that CARRIED a port is a port report
+                // being rejected, which means this terminal has no route and every push to it is
+                // undeliverable. A refusal WITHOUT a port is a name claim being rejected — the gate
+                // working as intended — and says nothing about anyone's delivery, so it is deliberately
+                // not counted here. Conflating them would fire this on healthy refusals and leave the
+                // signal worthless.
+                //
+                // Nothing else reports this. The row stays IsConnected, and get_messages polling keeps
+                // working because polling never uses the port, so the terminal looks fine in exactly
+                // the place anyone would check. The recorded count is what turns a silent failure into
+                // one a person or an agent can see (surfaced by list_terminals).
+                if (channelPort.HasValue)
+                {
+                    existingByName.ChannelPortRefusalCount++;
+                    existingByName.LastChannelPortRefusalAt = DateTime.UtcNow;
+                    DebugLogService?.Warning("MessageBroker", $"CHANNEL PORT REPORT REFUSED for '{name}' (port {channelPort.Value}, refusal #{existingByName.ChannelPortRefusalCount}): push delivery is DEAD for this terminal and polling will hide it. If this repeats every ~30s, the terminal's channel server predates the launch-nonce echo (plugin 7875686) — restart that terminal. task c9285d2a");
+                }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
                 return new RegisterResult
                 {
@@ -2409,6 +2427,19 @@ namespace MultiTerminal.MCPServer.Services
                     if (existingByName.ChannelPort != channelPort.Value)
                         LogInfo($"CHANNEL_PORT CHANGE (name path): '{existingByName.Name}' {existingByName.ChannelPort} → {channelPort.Value}");
                     existingByName.ChannelPort = channelPort.Value;
+
+                    // A port report got through, so whatever was refusing has stopped (item 10). The row
+                    // survives a channel-server restart via the name-match path, so without this reset a
+                    // terminal that RECOVERED would carry its old refusal count forever and keep reading
+                    // as broken — a health signal that cannot go back to healthy is just a second way to
+                    // be wrong. The count therefore means "consecutive refusals since delivery last
+                    // worked", and non-zero means the channel is dead RIGHT NOW.
+                    if (existingByName.ChannelPortRefusalCount > 0)
+                    {
+                        DebugLogService?.Info("MessageBroker", $"Channel port report for '{existingByName.Name}' accepted after {existingByName.ChannelPortRefusalCount} refusal(s); push delivery is live again. task c9285d2a");
+                        existingByName.ChannelPortRefusalCount = 0;
+                        existingByName.LastChannelPortRefusalAt = null;
+                    }
                 }
 
                 // Update DocId if provided AND existing DocId is empty (don't overwrite valid pre-registration)

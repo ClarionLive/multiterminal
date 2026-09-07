@@ -484,6 +484,127 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void An_old_channel_servers_port_report_is_refused_and_its_push_delivery_stays_dead()
+        {
+            // Item 10, characterisation. VERSION SKEW: a channel server started before plugin commit
+            // 7875686 does not echo the launch nonce (and predates ownerPid too). MT launched the
+            // terminal, so the row it registers against DOES carry a nonce — which means the row is
+            // held, the report proves nothing, and gate (4) refuses it.
+            using var broker = new MessageBroker();
+
+            // MT-launched terminal: the MCP server registers first, presenting the nonce it inherited.
+            // reportPortToBroker deliberately sleeps 1s so this ordering is the normal one.
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+
+            // The OLD channel server reports its port with neither nonce nor pid.
+            var report = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
+
+            Assert.False(report.Success);
+
+            var zoe = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+
+            // THE DEFECT: the terminal is connected and looks healthy, but has no route. Every push
+            // is undeliverable, while get_messages polling keeps working — so nothing reports it.
+            Assert.True(zoe.IsConnected);
+            Assert.Null(zoe.ChannelPort);
+
+            // THE FIX: it now says so. Without this the two lines above are the entire observable
+            // state, and they are indistinguishable from a terminal that simply has not reported a
+            // port yet.
+            Assert.Equal(1, zoe.ChannelPortRefusalCount);
+            Assert.NotNull(zoe.LastChannelPortRefusalAt);
+        }
+
+        [Fact]
+        public void A_name_claim_refusal_is_not_counted_as_a_dead_channel()
+        {
+            // The distinction the whole signal rests on. A refusal WITHOUT a port is a name claim being
+            // rejected — gate (4) working exactly as designed, and the observed CHECK 4 behaviour where
+            // a stranger is told it cannot have a name in use. It says nothing about anyone's delivery.
+            // Counting it would make the health field fire on healthy refusals, and a signal that fires
+            // when nothing is wrong is worse than no signal: it trains its reader to ignore it.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+
+            var claim = broker.RegisterTerminal("Zoe", docId: null, channelPort: null, nonce: null, ownerPid: null);
+
+            Assert.False(claim.Success);   // refused, correctly
+
+            var afterClaim = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(0, afterClaim.ChannelPortRefusalCount);
+            Assert.Null(afterClaim.LastChannelPortRefusalAt);
+
+            // Asserting only the zero above would be a fact that passes when counting is BROKEN
+            // ENTIRELY — "not counted" and "nothing is ever counted" are indistinguishable from one
+            // side. (Confirmed: with the counter reverted, the zero-only version stayed green while
+            // three sibling facts went red.) So drive the OTHER side in the same fact: a port report,
+            // refused for the identical reason by the identical branch, MUST count. What is being
+            // pinned is the discrimination, not either value on its own.
+            var report = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
+
+            Assert.False(report.Success);   // same gate, same refusal...
+
+            var afterReport = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(1, afterReport.ChannelPortRefusalCount);   // ...but this one is a dead channel
+            Assert.NotNull(afterReport.LastChannelPortRefusalAt);
+        }
+
+        [Fact]
+        public void A_recovered_terminal_stops_reporting_a_dead_channel()
+        {
+            // A health signal that cannot go back to healthy is just a second way to be wrong. The row
+            // survives a channel-server restart through the name-match path, so a cumulative count would
+            // leave a terminal that RECOVERED reading as broken forever.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
+
+            var sick = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(2, sick.ChannelPortRefusalCount);
+
+            // The terminal is restarted; its channel server now echoes the nonce, so the report is
+            // admitted and delivery is live again.
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: "NONCE-Z", ownerPid: null);
+
+            var healed = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(8815, healed.ChannelPort);
+            Assert.Equal(0, healed.ChannelPortRefusalCount);
+            Assert.Null(healed.LastChannelPortRefusalAt);
+        }
+
+        [Fact]
+        public void The_proposed_same_port_migration_path_cannot_apply_because_there_is_no_port_to_match()
+        {
+            // Item 10 proposed two fixes. This pins why the SECOND one — "allow an old no-nonce port
+            // refresh only when it MATCHES the row's already-recorded port, so it cannot repoint
+            // delivery" — does not address the skew it was written for.
+            //
+            // It presumes the row already holds the port being re-reported. It never does: the very
+            // first report is refused, so ChannelPort is still null, and every subsequent 30s
+            // heartbeat compares against that null. A match rule over a value that was never allowed
+            // to be written can only ever refuse. The idea is sound for a REFRESH and this is not a
+            // refresh — it is an initial registration that never succeeded.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+
+            for (int heartbeat = 0; heartbeat < 3; heartbeat++)
+            {
+                broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
+            }
+
+            var zoe = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Null(zoe.ChannelPort);   // still nothing to match against, after three heartbeats
+
+            // And every one of those heartbeats is now counted, which is what distinguishes an ONGOING
+            // failure from a single blip — the thing a reader actually needs in order to act.
+            Assert.Equal(3, zoe.ChannelPortRefusalCount);
+        }
+
+        [Fact]
         public void A_live_owners_heartbeat_never_reaches_the_port_clearing_branch_at_all()
         {
             using var broker = new MessageBroker();

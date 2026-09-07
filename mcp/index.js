@@ -307,7 +307,17 @@ function formatTerminals(terminals) {
     const minutesAgo = Math.floor((now - lastActive) / 60000);
     const timeStr = minutesAgo === 0 ? "just now" : `${minutesAgo} min ago`;
 
+    // Push delivery health (task c9285d2a item 10). A terminal whose port reports are being refused
+    // is CONNECTED and answers get_messages perfectly — polling never touches the channel port — so
+    // the one place anyone looks says it is fine while every push to it is undeliverable. Say it here,
+    // because a health signal nobody reads is the same as not having one.
+    const refusals = t.channelPortRefusalCount || 0;
+    const health = refusals > 0
+      ? `  ⚠️ PUSH DELIVERY DEAD — ${refusals} port report(s) refused; this terminal can be messaged only by polling. If it keeps climbing, its channel server predates the launch-nonce echo and the terminal needs restarting.`
+      : "";
+
     output += `• ${t.name} (${t.id.substring(0, 8)}) - Last active ${timeStr}\n`;
+    if (health) output += `${health}\n`;
   });
 
   return output.trim();

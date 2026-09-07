@@ -142,6 +142,36 @@ namespace MultiTerminal.MCPServer.Models
         /// instead of the legacy inbox file + [cm] nudge system.
         /// </summary>
         public int? ChannelPort { get; set; }
+
+        /// <summary>
+        /// CONSECUTIVE refused PORT REPORTS for this terminal since delivery last worked — reset to zero
+        /// the moment one is accepted (task c9285d2a, item 10). Non-zero therefore means push delivery is
+        /// dead for this terminal RIGHT NOW, and nothing else will say so.
+        /// <para>The motivating case is version skew: a channel server started before plugin commit
+        /// 7875686 echoes no launch nonce, so its port report cannot prove origin against a row that MT
+        /// created WITH a nonce. Every 30s heartbeat is refused identically, <see cref="ChannelPort"/>
+        /// stays null, and the terminal keeps looking healthy — <see cref="IsConnected"/> is true and
+        /// <c>get_messages</c> polling works perfectly, because polling does not use the port. The
+        /// failure is invisible precisely where an agent would look for it.</para>
+        /// <para>⚠️ Counts ONLY refusals that carried a channelPort. A refusal WITHOUT one is a name
+        /// claim being rejected — an impostor, or a second terminal legitimately told it cannot have a
+        /// name already in use — which is the gate working and says nothing about anyone's delivery.
+        /// Conflating the two would make this fire on healthy refusals and destroy the signal.</para>
+        /// <para>NOT JsonIgnore'd, unlike the nonce and pid: those are check values that must never
+        /// leave the process, whereas this exists to be read. It is a count of failures, discloses
+        /// nothing an attacker could present as proof, and a health signal nobody can see is the exact
+        /// defect this field was added to fix.</para>
+        /// </summary>
+        public int ChannelPortRefusalCount { get; set; }
+
+        /// <summary>
+        /// When the most recent port report for this terminal was refused, or null if none ever was.
+        /// Cleared alongside <see cref="ChannelPortRefusalCount"/> the moment a port report is accepted,
+        /// so the pair always describes the CURRENT state rather than accumulating history: non-zero
+        /// means the channel is dead right now. A health signal that cannot return to healthy would just
+        /// be a second way to be wrong — a recovered terminal would read as broken forever.
+        /// </summary>
+        public DateTime? LastChannelPortRefusalAt { get; set; }
     }
 
     /// <summary>
