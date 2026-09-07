@@ -30,7 +30,15 @@ namespace MultiTerminal.API.Gateway
 
             app.MapPost("/api/terminals/register", (RegisterTerminalRequest request, MessageBroker broker) =>
             {
-                var result = broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort, nonce: request.Nonce);
+                // EVERY field of the shared DTO must be forwarded, not just the ones this route
+                // happened to need when it was written (task c9285d2a, pipeline Run 1). The class
+                // comment above promises "the request DTOs are reused from MT's controllers so binding
+                // stays identical" — and that promise is only kept if the FORWARDING stays identical
+                // too. It did not: OwnerPid was added to the DTO for the controller route and silently
+                // dropped here, so a caller could send proof this endpoint advertised accepting and
+                // have it discarded, then be refused by a gate that never saw it. Adding a field to
+                // RegisterTerminalRequest means adding it here in the same commit.
+                var result = broker.RegisterTerminal(request.Name, request.DocId, channelPort: request.ChannelPort, nonce: request.Nonce, ownerPid: request.OwnerPid);
                 if (!result.Success)
                     return Results.BadRequest(new { error = result.Error });
                 return Results.Ok(new { terminalId = result.TerminalId });

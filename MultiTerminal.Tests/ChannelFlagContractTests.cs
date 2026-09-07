@@ -60,6 +60,19 @@ namespace MultiTerminal.Tests
             Path.Combine("Services", "TerminalSpawner.cs"),
         };
 
+        /// <summary>
+        /// Launch paths that load the plugin but are KNOWN to omit the channel flag — i.e. their
+        /// terminals run with channels dead. This is a defect list, not an exemption list: it is
+        /// asserted positively by
+        /// <see cref="MainForm_is_recorded_as_a_known_defect_rather_than_merely_omitted"/> so the gap
+        /// cannot hide inside a green run as a mere absence from
+        /// <see cref="ExpectedChannelFlagFiles"/>. Tracked as task 5999a182.
+        /// </summary>
+        private static readonly string[] KnownMissingChannelFlagFiles =
+        {
+            "MainForm.cs",
+        };
+
         [Fact]
         public void Every_channel_flag_site_in_source_uses_the_inline_marketplace()
         {
@@ -103,14 +116,65 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Census_falsifies_on_the_marketplace_string_that_would_break_channels()
         {
-            // Negative fixture. Without this, the census above could go green because the scanner
-            // silently matched nothing — the failure mode that let the real defect live for months.
-            // Assembled from parts so this fixture is not itself picked up by the source scan.
-            string wouldBreakChannels =
-                ChannelFlag + " plugin:multiterminal" + "@multiterminal-marketplace";
+            // Negative fixture: run the REAL scanner over a file carrying the regression and prove it
+            // is caught. An earlier version of this fact built a string and asserted Contains on it
+            // without ever calling the scanner — so it stayed green even if the scanner were deleted,
+            // which is the exact vacuous-pass class it is named for. Caught in review; fixed here.
+            // Assembled from parts so this source file is not itself flagged by the census.
+            string offending =
+                "flags += \" " + ChannelFlag + " plugin:{pluginName}" + "@multiterminal-marketplace\";";
+            string benign =
+                "flags += \" " + ChannelFlag + " plugin:{pluginName}" + RequiredMarketplaceSuffix + "\";";
 
-            Assert.DoesNotContain(RequiredMarketplaceSuffix, wouldBreakChannels, StringComparison.Ordinal);
-            Assert.Contains(ChannelFlag, wouldBreakChannels, StringComparison.Ordinal);
+            string dir = Path.Combine(Path.GetTempPath(), "mt-channel-census-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string file = Path.Combine(dir, "Fake.cs");
+                File.WriteAllLines(file, new[] { "// a comment mentioning " + ChannelFlag, offending, benign });
+
+                var flagged = ScanFile(file).ToList();
+
+                // The comment line is skipped; both code lines are seen.
+                Assert.Equal(2, flagged.Count);
+
+                // And the offending one — and only it — fails the rule the census enforces.
+                var offenders = flagged
+                    .Where(line => !line.Text.Contains(RequiredMarketplaceSuffix, StringComparison.Ordinal))
+                    .ToList();
+                Assert.Single(offenders);
+                Assert.Contains("@multiterminal-marketplace", offenders[0].Text, StringComparison.Ordinal);
+            }
+            finally
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+
+        [Fact]
+        public void MainForm_is_recorded_as_a_known_defect_rather_than_merely_omitted()
+        {
+            // A whitelist expresses a known bug as an ABSENCE, so a green run reads as "every launch
+            // path is correct" when one demonstrably is not. State the defect positively instead: this
+            // fact fails the day MainForm gains the flag, forcing whoever fixes task 5999a182 to delete
+            // the excuse rather than leave a stale exemption behind.
+            var withFlag = ChannelFlagLines()
+                .Select(line => line.RelativePath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (string knownMissing in KnownMissingChannelFlagFiles)
+            {
+                Assert.False(
+                    withFlag.Contains(knownMissing, StringComparer.OrdinalIgnoreCase),
+                    $"'{knownMissing}' now builds the channel flag — task 5999a182 appears to be fixed. "
+                    + $"Remove it from {nameof(KnownMissingChannelFlagFiles)} and add it to "
+                    + $"{nameof(ExpectedChannelFlagFiles)} in the same commit.");
+
+                string path = Path.Combine(RepoRoot(), knownMissing);
+                Assert.True(File.Exists(path), $"Known-defect file '{knownMissing}' no longer exists at '{path}'.");
+                Assert.Contains("--plugin-dir", File.ReadAllText(path), StringComparison.Ordinal);
+            }
         }
 
         [Fact]
@@ -166,17 +230,30 @@ namespace MultiTerminal.Tests
 
             foreach (string file in EnumerateFirstPartySources(repoRoot))
             {
-                string[] lines = File.ReadAllLines(file);
-                for (int i = 0; i < lines.Length; i++)
+                foreach (SourceLine line in ScanFile(file, repoRoot))
                 {
-                    if (lines[i].Contains(ChannelFlag, StringComparison.Ordinal)
-                        && !IsCommentLine(lines[i]))
-                    {
-                        yield return new SourceLine(
-                            Path.GetRelativePath(repoRoot, file),
-                            i + 1,
-                            lines[i]);
-                    }
+                    yield return line;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The scanner itself, over a single file. Split out so the negative fixture can drive the
+        /// REAL predicate over a controlled file instead of re-implementing it — a fixture that
+        /// re-implements the thing it is checking proves only that the copy agrees with itself.
+        /// </summary>
+        private static IEnumerable<SourceLine> ScanFile(string file, string repoRoot = null)
+        {
+            string[] lines = File.ReadAllLines(file);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (lines[i].Contains(ChannelFlag, StringComparison.Ordinal)
+                    && !IsCommentLine(lines[i]))
+                {
+                    yield return new SourceLine(
+                        repoRoot == null ? Path.GetFileName(file) : Path.GetRelativePath(repoRoot, file),
+                        i + 1,
+                        lines[i]);
                 }
             }
         }

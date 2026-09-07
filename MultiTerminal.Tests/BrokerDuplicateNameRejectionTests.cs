@@ -26,6 +26,20 @@ namespace MultiTerminal.Tests
     /// </summary>
     public sealed class BrokerDuplicateNameRejectionTests : IDisposable
     {
+        /// <summary>
+        /// A pid that genuinely names a running process — this test process itself.
+        /// <para>These facts used to use an invented number (4242). After pipeline Run 1 the gate
+        /// requires the owning process to still be ALIVE, and to be the same incarnation the pid was
+        /// bound to (<see cref="MultiTerminal.MCPServer.Models.TerminalInfo.OwnerStartTime"/>), because
+        /// a bare pid is not an identity: Windows recycles pids, and an adopted row is never marked
+        /// disconnected, so a stale row could otherwise hold a name for MT's whole uptime and let a
+        /// recycled pid inherit the claim.</para>
+        /// <para>An invented pid therefore no longer proves anything — it reads as a corpse, the row
+        /// counts as unheld, and the gate correctly fails OPEN. Using the real process id keeps these
+        /// facts exercising the live mechanism rather than a path that happens to agree with them.</para>
+        /// </summary>
+        private static int LivePid => Environment.ProcessId;
+
         private readonly string _dbPath;
         private readonly string _msgDbPath;
 
@@ -130,7 +144,7 @@ namespace MultiTerminal.Tests
 
             // An ADOPTED terminal: registered by name from a plain shell, so MT seeded no launch
             // nonce. All it has is the pid of the Claude Code process both of its children share.
-            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 4242);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
 
             // A foreign process claims that name. Different parent, no nonce — nothing to prove with.
             var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8811, nonce: null, ownerPid: 9999);
@@ -148,11 +162,11 @@ namespace MultiTerminal.Tests
             using var broker = new MessageBroker();
 
             // register_terminal arrives first, from the MCP server: name + owning pid, no port.
-            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: 4242);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
 
             // Then the sibling channel server reports its port under the SAME parent. It holds no
             // secret — the shared pid is the entire proof, which is what adoption rests on.
-            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 4242);
+            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
 
             Assert.True(result.Success);
             var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
@@ -164,11 +178,11 @@ namespace MultiTerminal.Tests
         {
             using var broker = new MessageBroker();
 
-            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: 4242);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
 
             // The adoption lookup resolves on the pid the caller's PARENT owns, never on anything
             // the caller asserts about itself.
-            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(4242));
+            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(LivePid));
             Assert.Null(broker.GetTerminalNameByOwnerPid(9999));
             Assert.Null(broker.GetTerminalNameByOwnerPid(0));
         }
@@ -178,13 +192,13 @@ namespace MultiTerminal.Tests
         {
             using var broker = new MessageBroker();
 
-            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 4242);
-            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8812, nonce: null, ownerPid: 4242);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8812, nonce: null, ownerPid: LivePid);
 
             // set-if-empty: a caller may re-register with the right pid, but cannot move an
             // established row onto some other process. Otherwise a claimant could take a row and
             // then own it outright.
-            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(4242));
+            Assert.Equal("Lynn", broker.GetTerminalNameByOwnerPid(LivePid));
             Assert.Null(broker.GetTerminalNameByOwnerPid(8888));
         }
 
@@ -200,6 +214,86 @@ namespace MultiTerminal.Tests
             var result = broker.RegisterTerminal("Carol", docId: null, channelPort: 8804, nonce: null);
 
             Assert.True(result.Success);
+        }
+
+        // ---------------------------------------------------------------------------------------
+        // Pipeline Run 1 regressions. Each of the three below is a defect that shipped and was
+        // caught in review, not a hypothetical. They are the reason the pid means less than it did.
+        // ---------------------------------------------------------------------------------------
+
+        [Fact]
+        public void A_pid_does_not_defeat_the_nonce_on_a_row_that_has_one()
+        {
+            using var broker = new MessageBroker();
+
+            // An MT-launched terminal: held by a real 32-char secret.
+            broker.RegisterTerminal("Alice", docId: "DA", channelPort: 8801, nonce: "NONCE-A", ownerPid: LivePid);
+
+            // A caller that learned the owning pid — by sweeping channel-identity, say — presents it
+            // instead of the nonce. The first cut OR'd the two proofs and stamped a pid on EVERY row,
+            // so this SUCCEEDED and repointed Alice's channel port. The pid is discovery, not
+            // authorization: a row holding a nonce is held by that nonce alone.
+            var result = broker.RegisterTerminal("Alice", docId: null, channelPort: 8899, nonce: null, ownerPid: LivePid);
+
+            Assert.False(result.Success);
+
+            var alice = Assert.Single(broker.GetTerminals(), t => t.Name == "Alice");
+            Assert.Equal(8801, alice.ChannelPort);
+        }
+
+        [Fact]
+        public void A_dead_owner_releases_the_name_instead_of_burning_it()
+        {
+            using var broker = new MessageBroker();
+
+            // An adopted row whose owning process is NOT running. This is the ordinary end state of
+            // every adopted session: it has no docId for UnregisterTerminal and no MULTITERMINAL_NAME
+            // for the SessionEnd hook, and no reaper exists — so the row stays IsConnected forever.
+            // Treating that corpse as a live holder is what made gate (4) refuse the name's real owner
+            // on their very next shell, which is how the feature would have failed on first use.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
+
+            // The same person opens a new shell: different pid, still no nonce.
+            var result = broker.RegisterTerminal("Lynn", docId: null, channelPort: 8811, nonce: null, ownerPid: LivePid);
+
+            Assert.True(result.Success);
+        }
+
+        [Fact]
+        public void A_recycled_pid_cannot_inherit_a_dead_sessions_claim()
+        {
+            using var broker = new MessageBroker();
+
+            // A row bound to a pid that is not live. An unrelated process later holding that same pid
+            // number must NOT be able to adopt the name — pid plus start time names one incarnation,
+            // and the lookup refuses to answer for a pid whose process is gone.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
+
+            Assert.Null(broker.GetTerminalNameByOwnerPid(424242));
+        }
+
+        [Fact]
+        public void The_pid_lookup_refuses_to_guess_between_two_real_identities()
+        {
+            using var broker = new MessageBroker();
+
+            // One Claude process can own several connected rows — a subagent shares its parent's MCP
+            // server, and a rename leaves the first row connected. FirstOrDefault over
+            // ConcurrentDictionary.Values picked one at random, so an unbound channel server could
+            // bind the WRONG name and start answering another agent's messages.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
+            broker.RegisterTerminal("Robin", docId: null, channelPort: 8811, nonce: null, ownerPid: LivePid);
+
+            // Whatever it returns, it must be one of the two real names and must be STABLE — never a
+            // coin flip between calls.
+            string first = broker.GetTerminalNameByOwnerPid(LivePid);
+            for (int i = 0; i < 20; i++)
+            {
+                Assert.Equal(first, broker.GetTerminalNameByOwnerPid(LivePid));
+            }
+
+            Assert.True(first == null || first == "Lynn" || first == "Robin",
+                $"Lookup returned '{first}', which is neither of the registered names nor a refusal.");
         }
     }
 }

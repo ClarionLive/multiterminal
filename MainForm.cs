@@ -2088,10 +2088,34 @@ namespace MultiTerminal
                     mcpConfigPath: mcpConfigPath,
                     environmentVars: spawnEnv);
 
-                // Register with MessageBroker so other terminals can message this agent
+                // Register with MessageBroker so other terminals can message this agent.
+                //
+                // The refusal must NOT be swallowed (task c9285d2a, pipeline Run 1). Gate (4) made a
+                // previously-impossible outcome reachable here: when the requested agent name is held
+                // by a connected terminal, RegisterTerminal now returns Success=false with a null
+                // TerminalId. The old `regResult?.TerminalId ?? agentDocId` turned that refusal into a
+                // plausible-looking id the broker had never heard of — the panel appeared, the agent
+                // was mapped in _agentProcessMap, and every message addressed to it went nowhere, with
+                // nothing logged. That is the same silent-wrong-recipient class this ticket exists to
+                // remove, reintroduced one call site over.
                 string agentDocId = $"agent-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
                 var regResult = _mcpServer?.Broker?.RegisterTerminal(agentName, agentDocId);
-                string agentTerminalId = regResult?.TerminalId ?? agentDocId;
+                if (regResult == null || !regResult.Success)
+                {
+                    string reason = regResult?.Error ?? "the message broker is unavailable";
+                    _debugLogService?.Error("MainForm", $"Refusing to spawn agent '{agentName}': registration failed — {reason}. Stopping the spawned process rather than mapping it to an id the broker does not know.");
+
+                    // Best-effort teardown: the process is already running, and leaving it orphaned
+                    // would be a worse outcome than the registration failure we are reporting.
+                    try { await agent.StopAsync(); } catch { /* teardown is best-effort */ }
+                    try { agent.Dispose(); } catch { /* teardown is best-effort */ }
+
+                    // The enclosing catch turns this into (false, null, error) for the caller, so the
+                    // refusal reaches the requester instead of becoming an unroutable agent panel.
+                    throw new InvalidOperationException($"Could not register agent '{agentName}' with the message broker: {reason}");
+                }
+
+                string agentTerminalId = regResult.TerminalId;
 
                 // Map the terminal ID to this AgentProcess for message delivery
                 lock (_agentProcessMap)

@@ -1912,13 +1912,105 @@ namespace MultiTerminal.MCPServer.Services
         /// <see cref="TerminalInfo.LaunchNonce"/> for why disclosing it would collapse proof-of-origin
         /// into a bearer token.</para>
         /// </summary>
+        /// <remarks>
+        /// <para>DETERMINISM (pipeline Run 1). One Claude process can own SEVERAL connected rows — a
+        /// subagent shares its parent's MCP server process, and a rename creates a second row while the
+        /// first is still connected — and every row that session creates is stamped with the same pid.
+        /// <c>FirstOrDefault</c> over <c>ConcurrentDictionary.Values</c> has unspecified ordering, so an
+        /// unbound channel server could adopt the WRONG name and answer another agent's messages. This
+        /// method already documents that exact hazard for the "Unassigned" sentinel a few hundred lines
+        /// below; the lesson was learned here and originally not applied to this lookup.</para>
+        /// <para>So: temporary agent rows are excluded (they are never the session's real identity), the
+        /// newest row wins among what remains, and a genuine tie between two non-temporary rows returns
+        /// NULL rather than guessing. Refusing to answer keeps the channel server unbound, which is the
+        /// safe state — it registers no port and answers nothing.</para>
+        /// <para>LIVENESS: the pid must still name the process it was bound to. See
+        /// <see cref="TerminalInfo.OwnerStartTime"/>.</para>
+        /// </remarks>
         public string GetTerminalNameByOwnerPid(int ownerPid)
         {
             if (ownerPid <= 0) return null;
 
-            return _terminals.Values
-                .FirstOrDefault(t => t.IsConnected && t.OwnerPid.HasValue && t.OwnerPid.Value == ownerPid)
-                ?.Name;
+            var candidates = _terminals.Values
+                .Where(t => t.IsConnected
+                            && t.OwnerPid.HasValue
+                            && t.OwnerPid.Value == ownerPid
+                            && OwnerProcessStillAlive(t)
+                            && !IsTemporaryAgent(t.Name))
+                .OrderByDescending(t => t.LastActiveAt)
+                .ToList();
+
+            if (candidates.Count == 0) return null;
+
+            // A tie on LastActiveAt between two real identities is genuinely ambiguous — say so by
+            // answering nothing rather than picking one at random.
+            if (candidates.Count > 1 && candidates[0].LastActiveAt == candidates[1].LastActiveAt)
+            {
+                DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected rows tie on LastActiveAt ('{candidates[0].Name}', '{candidates[1].Name}'). Refusing to guess — the caller stays unbound.");
+                return null;
+            }
+
+            return candidates[0].Name;
+        }
+
+        /// <summary>
+        /// True when the row's <see cref="TerminalInfo.OwnerPid"/> still names the very process
+        /// incarnation it was bound to (task c9285d2a, pipeline Run 1).
+        /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
+        /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
+        /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
+        /// defining property of an adopted session; there is no staleness reaper either. So without a
+        /// liveness test the row sits connected forever and gate (4) refuses the name's real owner on
+        /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
+        /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
+        /// session's claim.</para>
+        /// <para>Comparing the start time as well pins the pid to one incarnation. A row whose owner is
+        /// gone reports FALSE and is treated as unheld, which releases the name.</para>
+        /// </summary>
+        private static bool OwnerProcessStillAlive(TerminalInfo terminal)
+        {
+            if (terminal?.OwnerPid == null) return false;
+
+            // A row bound before this field existed has no start time to compare. Treat it as NOT a
+            // live holder: it is indistinguishable from a corpse, and failing open releases the name
+            // rather than burning it — the same fail-open philosophy as gates (1)-(3).
+            if (terminal.OwnerStartTime == null) return false;
+
+            return TryGetProcessStartTime(terminal.OwnerPid.Value, out DateTime startTime)
+                   && startTime == terminal.OwnerStartTime.Value;
+        }
+
+        /// <summary>
+        /// Reads a process's start time, returning false when the pid names no live process.
+        /// Every failure mode (exited, never existed, access denied, platform refusal) is "cannot
+        /// prove this pid is alive", which callers must treat as not-alive.
+        /// </summary>
+        internal static bool TryGetProcessStartTime(int pid, out DateTime startTime)
+        {
+            startTime = default;
+            if (pid <= 0) return false;
+
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                startTime = process.StartTime;
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                // No process with that id is running.
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited between lookup and read.
+                return false;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // Access denied reading start time — cannot prove liveness, so do not claim it.
+                return false;
+            }
         }
 
         /// <summary>
@@ -2163,26 +2255,53 @@ namespace MultiTerminal.MCPServer.Services
             //     one claude.exe, so OwnerPid is the one thing both can state and a stranger cannot
             //     state truthfully. Either proof admits the caller. See TerminalInfo.OwnerPid for why
             //     this is deliberately weaker than the nonce and why that is acceptable here.
+            //     ⚠️ PIPELINE RUN 1 CORRECTION — the pid is DISCOVERY, NOT AUTHORIZATION (Owner ruling).
+            //     The first cut OR'd the pid proof with the nonce proof and stamped an OwnerPid on
+            //     EVERY registration, MT-launched included. That did not "give adopted rows a check
+            //     where they had none" — it gave every row a SECOND, weaker key, so presenting a
+            //     terminal's pid claimed its name without the nonce, and the reuse branch below then
+            //     repointed its ChannelPort. GET /api/messaging/channel-identity?ppid= made the pid
+            //     sweepable rather than guessable, so the nonce arm was bypassable in seconds.
+            //     Now: the pid proves origin ONLY for a row that has NO nonce — an adopted session,
+            //     which genuinely has nothing else. A row holding a nonce is held by that nonce alone.
             bool nonceProves = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
                                && string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal);
             bool pidProves = ownerPid.HasValue
+                             && string.IsNullOrEmpty(existingByName?.LaunchNonce)
                              && existingByName?.OwnerPid != null
-                             && existingByName.OwnerPid.Value == ownerPid.Value;
-            bool hasSomethingToProveAgainst = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
-                                              || existingByName?.OwnerPid != null;
+                             && existingByName.OwnerPid.Value == ownerPid.Value
+                             && OwnerProcessStillAlive(existingByName);
+
+            //     A row is only HELD if someone is still there to hold it. A nonce-bearing row is held
+            //     by its (immortal) nonce; a pid-only row is held only while its owning process lives.
+            //     That second clause is what stops gate (4) locking out its own owner: an adopted
+            //     session is never marked disconnected (no docId for UnregisterTerminal, and the
+            //     SessionEnd hook early-returns without MULTITERMINAL_NAME), and no reaper exists, so
+            //     the row would otherwise sit connected for MT's whole uptime and refuse the same
+            //     person's next shell. A dead owner means the name is free.
+            bool existingCarriesProof = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
+                                        || (existingByName?.OwnerPid != null && OwnerProcessStillAlive(existingByName));
 
             if (existingByName != null
                 && !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
-                && hasSomethingToProveAgainst
+                && existingCarriesProof
                 && !nonceProves
                 && !pidProves)
             {
-                DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present its launch nonce. Refusing the claim.");
-                LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} => refused"); // task c9285d2a
+                bool heldByNonce = !string.IsNullOrEmpty(existingByName.LaunchNonce);
+                string expected = heldByNonce ? "its launch nonce" : "the owning process id it was registered from";
+                DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present {expected}. Refusing the claim.");
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
                 return new RegisterResult
                 {
                     Success = false,
-                    Error = $"The name '{name}' is already in use by a connected terminal. Pick a different name, or disconnect the terminal currently holding it."
+
+                    // The likeliest real-world trigger is NOT an impostor — it is this terminal's own
+                    // channel server running a build that predates the nonce echo (plugin 7875686).
+                    // Telling that caller to "pick a different name" sends it chasing a collision that
+                    // does not exist: it IS the terminal holding the name.
+                    Error = $"The name '{name}' is already in use by a connected terminal. Pick a different name, or disconnect the terminal currently holding it. "
+                            + "(If this IS your own terminal's channel server, it is running a build older than the one that echoes the launch nonce — restart the terminal.)"
                 };
             }
 
@@ -2215,9 +2334,16 @@ namespace MultiTerminal.MCPServer.Services
 
                 // Same set-if-empty rule for the owning pid (c9285d2a). First writer binds it; a later
                 // caller cannot repoint an established row at its own process, which is the whole point.
+                // The start time is captured WITH the pid and never separately — a pid without its
+                // incarnation stamp is not an identity (see TerminalInfo.OwnerStartTime), and
+                // OwnerProcessStillAlive treats a pid with no start time as a corpse.
                 if (ownerPid.HasValue && existingByName.OwnerPid == null)
                 {
                     existingByName.OwnerPid = ownerPid.Value;
+                    existingByName.OwnerStartTime =
+                        TryGetProcessStartTime(ownerPid.Value, out DateTime reusedOwnerStart)
+                            ? reusedOwnerStart
+                            : (DateTime?)null;
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
                 // Always re-raise event so MainForm updates its mapping
@@ -2289,7 +2415,12 @@ namespace MultiTerminal.MCPServer.Services
 
                 // Records which Claude Code process this registration came from, so the terminal's
                 // OTHER child process (the channel server) can prove it belongs to the same session.
-                OwnerPid = ownerPid
+                // Paired with the process's start time so the pid names one incarnation and not merely
+                // a number Windows may later reissue (see TerminalInfo.OwnerStartTime).
+                OwnerPid = ownerPid,
+                OwnerStartTime = ownerPid.HasValue && TryGetProcessStartTime(ownerPid.Value, out DateTime newOwnerStart)
+                    ? newOwnerStart
+                    : (DateTime?)null
             };
             LogInfo($"NEW TERMINAL: '{name}' id={id} channelPort={channelPort?.ToString() ?? "null"} docId={docId ?? "null"}");
 

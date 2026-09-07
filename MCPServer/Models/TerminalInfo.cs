@@ -73,13 +73,50 @@ namespace MultiTerminal.MCPServer.Models
         /// the 32-char nonce and is accident-prevention (a stray session claiming a live name), not a
         /// defence against a determined local process. That is consistent with the surface it sits on:
         /// the REST API binds loopback and has no auth boundary by design, so any local process can
-        /// already post anything. It never WEAKENS an MT-launched terminal, which is still held by its
-        /// nonce — it only gives adopted rows a check where they previously had none.</para>
+        /// already post anything.</para>
+        /// <para>⚠️ SCOPE, CORRECTED BY PIPELINE RUN 1. An earlier version of this comment claimed the
+        /// pid "never WEAKENS an MT-launched terminal, which is still held by its nonce". That was
+        /// FALSE of the code: the gate OR'd the pid proof with the nonce proof, and every registration
+        /// stamps an OwnerPid, so any row carrying a pid could be claimed by presenting that pid
+        /// instead of the nonce — and <c>GET /api/messaging/channel-identity?ppid=</c> let a caller
+        /// sweep pids to find which one held a name. Three reviewers flagged it; the Owner ruled the
+        /// pid is DISCOVERY METADATA, NOT AUTHORIZATION.</para>
+        /// <para>So the pid now proves origin ONLY for a row with no <see cref="LaunchNonce"/> — an
+        /// adopted session, which has no nonce to present and previously had no check at all. A row
+        /// that carries a nonce is held by that nonce and by nothing else. See
+        /// <c>MessageBroker.RegisterTerminal</c> gate (4).</para>
+        /// <para>⚠️ RESIDUAL RISK, STATED PLAINLY SO NOBODY RE-DISCOVERS IT AS A SURPRISE. Pairing the
+        /// pid with a start time defeats pid RECYCLING, not pid ASSERTION. Both sides of that
+        /// comparison are derived by the broker from the live process, so a local process that simply
+        /// knows an adopted session's owning pid can still present it and be believed. Adopted rows
+        /// are therefore protected at the "accident-prevention" level the original comment claimed for
+        /// everything — a stray session cannot blunder into a live name — and not above it. Closing
+        /// this properly needs a real shared secret between the MCP server and the channel server,
+        /// which today share none; that is why the Owner scoped the pid to discovery rather than
+        /// removing it. MT-launched terminals are unaffected: they are held by the nonce.</para>
         /// <para>SECURITY: JsonIgnore'd for the same reason as the nonce. It is a check value, and a
         /// listing that discloses it hands a caller the thing it would otherwise have to guess.</para>
         /// </summary>
         [System.Text.Json.Serialization.JsonIgnore]
         public int? OwnerPid { get; set; }
+
+        /// <summary>
+        /// Start time of the process named by <see cref="OwnerPid"/>, captured when the pid was bound
+        /// (task c9285d2a, pipeline Run 1).
+        /// <para>A bare pid is not an identity — Windows recycles pids, and an adopted row is never
+        /// marked disconnected (its session has no docId for <c>UnregisterTerminal</c> and no
+        /// <c>MULTITERMINAL_NAME</c> for the SessionEnd hook), so a stale row can sit connected for
+        /// MT's whole uptime. Without this field, an unrelated process that inherited the recycled pid
+        /// would satisfy the pid check, adopt a live agent's name and repoint its channel port —
+        /// silently receiving that agent's messages.</para>
+        /// <para>(pid, start time) is the standard way to pin a pid to one specific process
+        /// incarnation. It is also what lets the gate tell "held by a live owner" from "held by a
+        /// corpse": a row whose owner is gone is treated as UNHELD and fails open, so a name is
+        /// released when its session dies rather than burned until MT restarts.</para>
+        /// <para>JsonIgnore'd alongside the pid — together they are the check value.</para>
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public DateTime? OwnerStartTime { get; set; }
 
         /// <summary>
         /// Whether the agent has sent the ready confirmation (via webhook or message).
