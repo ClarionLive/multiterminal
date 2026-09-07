@@ -1957,7 +1957,7 @@ namespace MultiTerminal.MCPServer.Services
             if (candidates.Count > 1
                 && (candidates[0].OwnerBoundAt ?? DateTime.MinValue) == (candidates[1].OwnerBoundAt ?? DateTime.MinValue))
             {
-                DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected rows tie on LastActiveAt ('{candidates[0].Name}', '{candidates[1].Name}'). Refusing to guess — the caller stays unbound.");
+                DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected rows tie on OwnerBoundAt ('{candidates[0].Name}', '{candidates[1].Name}'). Refusing to guess — the caller stays unbound.");
                 return null;
             }
 
@@ -2480,16 +2480,25 @@ namespace MultiTerminal.MCPServer.Services
                 bool rowIsUnowned = ownerLiveness == OwnerLiveness.Unowned || ownerLiveness == OwnerLiveness.Dead;
                 if (ownerPid.HasValue && rowIsUnowned)
                 {
-                    bool ownerActuallyChanged = existingByName.OwnerPid != ownerPid.Value;
+                    // "A previous owner existed and is gone" — NOT merely "this row had no owner".
+                    // Getting that distinction wrong cost a live regression: `OwnerPid != ownerPid`
+                    // is true for a null OwnerPid, so an UNOWNED row was treated as an ownership
+                    // change and had its port cleared. Rows in exactly that state are ordinary —
+                    // a channel server reports its port with no ownerPid (any session started
+                    // before the plugin sent one), and spawned-agent/Oracle rows carry no pid — so a
+                    // healthy terminal lost its push routing on its own next registration.
+                    bool previousOwnerDied = ownerLiveness == OwnerLiveness.Dead;
 
                     // Bind the pid ONLY with a verified start time. A pid stored without one is an
                     // identity nobody can check later: it reads as Unknown forever, which keeps the
                     // name held on a claim we can never confirm. Better to record no owner at all.
+                    bool rebindSucceeded = false;
                     if (TryGetProcessStartTime(ownerPid.Value, out DateTime reusedOwnerStart))
                     {
                         existingByName.OwnerPid = ownerPid.Value;
                         existingByName.OwnerStartTime = reusedOwnerStart;
                         existingByName.OwnerBoundAt = DateTime.UtcNow;
+                        rebindSucceeded = true;
                     }
                     else
                     {
@@ -2508,9 +2517,16 @@ namespace MultiTerminal.MCPServer.Services
                     // DisconnectTerminalByName nulls the port for exactly this reason; an ownership
                     // change is the adopted-row analogue of that disconnect.
                     //
-                    // Conditional on the owner ACTUALLY changing: clearing on the same-pid heartbeat
-                    // would drop the port of every healthy adopted terminal on every re-registration.
-                    if (ownerActuallyChanged && !channelPort.HasValue && existingByName.ChannelPort != null)
+                    // Three conditions, and each one is load-bearing:
+                    //   previousOwnerDied  — a row that never had an owner has not changed hands, and
+                    //                        clearing its port kills a healthy terminal's push.
+                    //   rebindSucceeded    — if the new pid could not be bound, dropping the routing
+                    //                        as well leaves the row with neither owner nor delivery.
+                    //   !channelPort       — this same call supplying a port already replaces it.
+                    // Note this is NOT "the pid differs": the same-pid heartbeat never reaches here
+                    // (a live owner makes rowIsUnowned false), so an equality test was never what
+                    // distinguished the cases.
+                    if (previousOwnerDied && rebindSucceeded && !channelPort.HasValue && existingByName.ChannelPort != null)
                     {
                         LogInfo($"CHANNEL_PORT CLEARED (owner change): '{existingByName.Name}' {existingByName.ChannelPort} → null; the previous owner is gone and its port may since have been re-issued. task c9285d2a");
                         existingByName.ChannelPort = null;

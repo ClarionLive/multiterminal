@@ -283,15 +283,57 @@ namespace MultiTerminal.Tests
             Assert.False(stranger.Success);
         }
 
+        /// <summary>
+        /// Starts a real, short-lived child process and returns its pid, having waited for it to be
+        /// bindable. Needed because a DEAD-owner row cannot be faked: a pid is bound only together
+        /// with a verified start time, so an invented number is never bound at all and produces an
+        /// UNOWNED row — a different state with different (and, as it turned out, opposite) handling.
+        /// </summary>
+        private static System.Diagnostics.Process StartBindableChild()
+        {
+            var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/c pause",
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            });
+
+            Assert.NotNull(child);
+            Assert.True(MessageBroker.TryGetProcessStartTime(child.Id, out _),
+                "The child process's start time must be readable, or it cannot be bound as an owner.");
+            return child;
+        }
+
         [Fact]
         public void The_new_owner_does_not_inherit_the_dead_sessions_port()
         {
             using var broker = new MessageBroker();
 
-            // Session 1 registered a port; its process then died without ever being disconnected
-            // (an adopted row has no docId for UnregisterTerminal, and the SessionEnd hook does not
-            // run without MULTITERMINAL_NAME).
-            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
+            // Session 1 must be a GENUINELY dead owner, which means a real process bound while alive
+            // and then killed. An earlier version of this fact used an invented pid — which under the
+            // verified-start-time rule is never bound at all, leaving the row UNOWNED rather than
+            // Dead. It passed while pinning the opposite path, and the clearing bug it was supposed to
+            // guard was in the Unowned branch it accidentally exercised.
+            var child = StartBindableChild();
+            try
+            {
+                broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: child.Id);
+
+                var bound = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+                Assert.Equal(child.Id, bound.OwnerPid);          // the row really is OWNED...
+                Assert.NotNull(bound.OwnerStartTime);            // ...by a verified incarnation
+
+                child.Kill();
+                child.WaitForExit(10000);
+            }
+            finally
+            {
+                try { if (!child.HasExited) child.Kill(); } catch { }
+                child.Dispose();
+            }
 
             // Session 2 claims the released name. The real caller sends NO port — the channel server
             // reports its own once it starts listening.
@@ -309,6 +351,29 @@ namespace MultiTerminal.Tests
 
             // The old session's handshake does not carry over either.
             Assert.False(lynn.IsReady);
+
+            // And the name genuinely changed hands.
+            Assert.Equal(LivePid, lynn.OwnerPid);
+        }
+
+        [Fact]
+        public void A_row_that_never_had_an_owner_keeps_its_port()
+        {
+            using var broker = new MessageBroker();
+
+            // The negative of the fact above, and the regression that shipped: a row with a port but
+            // NO bound owner has not changed hands, so its routing must survive.
+            //
+            // This state is ordinary, not exotic. A channel server reports its port with no ownerPid
+            // (any session predating the plugin that sends one — i.e. every terminal already running
+            // when this deploys), and spawned-agent and Oracle rows carry no pid at all. Clearing
+            // here killed push delivery for a healthy terminal on its own next registration, and
+            // because polling keeps working, nothing would have reported it.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: null);
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: LivePid);
+
+            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+            Assert.Equal(8810, lynn.ChannelPort);
         }
 
         [Fact]
