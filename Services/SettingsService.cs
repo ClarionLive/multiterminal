@@ -1582,6 +1582,129 @@ namespace MultiTerminal.Services
             }
         }
 
+        // ----------------------------------------------------------------------------
+        // GitHub App identity (task b42b1883) — agents comment as a bot, not as the Owner.
+        //
+        // ⚠️ THE PRIVATE KEY GETS EXACTLY ONE COPY, AND IT LIVES HERE.
+        // Never per-project, never in SQLite, never in a repo. `.claude/project.json` is
+        // COMMITTED, so a key placed there would be published; MT's SQLite is readable by any
+        // agent that can run a shell command. Either would rebuild the credential-exposure
+        // problem this ticket exists to remove, with more moving parts. The routing values
+        // (app id, slug, installation id) are deliberately NOT secret and NOT protected — they
+        // say WHICH installation to authenticate as, never how to authenticate.
+        //
+        // What an agent is meant to hold is a ~1h installation token minted FROM this key by
+        // TokenService, fetched per operation. The key itself never leaves this process.
+        //
+        // Honest limit, stated so nobody oversells it later: the PEM is long-lived and it IS on
+        // disk. DPAPI (CurrentUser) means another Windows user on this machine cannot read it and
+        // a copied settings.txt is inert elsewhere — it does NOT stop code running as this user.
+        // The real gain is that the key is not directly usable against the API, tokens are narrow
+        // and expire, and rotation is cheap.
+        // ----------------------------------------------------------------------------
+        private const string GitHubAppIdKey = "GitHub.App.Id";
+        private const string GitHubAppSlugKey = "GitHub.App.Slug";
+        private const string GitHubAppClientIdKey = "GitHub.App.ClientId";
+        private const string GitHubAppDefaultInstallationIdKey = "GitHub.App.DefaultInstallationId";
+        private const string GitHubAppPrivateKeyPemKey = "GitHub.App.PrivateKeyPem";      // DPAPI
+        private const string GitHubAppClientSecretKey = "GitHub.App.ClientSecret";        // DPAPI
+        private const string GitHubAppWebhookSecretKey = "GitHub.App.WebhookSecret";      // DPAPI
+
+        // --- Non-secret routing: which App / which installation, never how to authenticate ---
+
+        /// <summary>Numeric GitHub App id, or null when no App is registered.</summary>
+        public string GetGitHubAppId() => Get(GitHubAppIdKey);
+
+        /// <summary>Sets, or (null/blank) clears, the GitHub App id.</summary>
+        public void SetGitHubAppId(string value) => SetOrRemove(GitHubAppIdKey, value);
+
+        /// <summary>
+        /// The App's slug (e.g. <c>clarionlive-agent</c>). Comments render as <c>{slug}[bot]</c>, so
+        /// this is what the acceptance check compares against — worth storing rather than re-deriving.
+        /// </summary>
+        public string GetGitHubAppSlug() => Get(GitHubAppSlugKey);
+
+        /// <summary>Sets, or (null/blank) clears, the App slug.</summary>
+        public void SetGitHubAppSlug(string value) => SetOrRemove(GitHubAppSlugKey, value);
+
+        /// <summary>OAuth client id from the manifest conversion. Semi-public; not protected.</summary>
+        public string GetGitHubAppClientId() => Get(GitHubAppClientIdKey);
+
+        /// <summary>Sets, or (null/blank) clears, the OAuth client id.</summary>
+        public void SetGitHubAppClientId(string value) => SetOrRemove(GitHubAppClientIdKey, value);
+
+        /// <summary>
+        /// Fallback installation id used when a project declares no routing of its own. Both repos in
+        /// play are under one account, so one installation covers them; per-project routing exists for
+        /// the case where that stops being true, not because it is needed today.
+        /// </summary>
+        public string GetGitHubAppDefaultInstallationId() => Get(GitHubAppDefaultInstallationIdKey);
+
+        /// <summary>Sets, or (null/blank) clears, the fallback installation id.</summary>
+        public void SetGitHubAppDefaultInstallationId(string value) => SetOrRemove(GitHubAppDefaultInstallationIdKey, value);
+
+        // --- DPAPI-protected App secrets (decrypted on read; null when unset/undecryptable) ---
+
+        /// <summary>
+        /// The App's RSA private key, PEM-encoded. Multi-line plaintext is fine: SetProtected stores the
+        /// base64 of the DPAPI blob, which is a single line, and Load() splits on the FIRST '=' so the
+        /// base64 padding survives intact.
+        /// <para>⚠️ Callers must never log this, return it over REST, or place it in a process
+        /// environment. It exists to sign a short-lived JWT inside MT and for nothing else.</para>
+        /// </summary>
+        public string GetGitHubAppPrivateKeyPem() => GetProtected(GitHubAppPrivateKeyPemKey);
+
+        /// <summary>Stores the App private key DPAPI-protected, or (null/blank) removes it.</summary>
+        public void SetGitHubAppPrivateKeyPem(string value) => SetProtected(GitHubAppPrivateKeyPemKey, value);
+
+        /// <summary>OAuth client secret from the manifest conversion.</summary>
+        public string GetGitHubAppClientSecret() => GetProtected(GitHubAppClientSecretKey);
+
+        /// <summary>Stores the OAuth client secret DPAPI-protected, or (null/blank) removes it.</summary>
+        public void SetGitHubAppClientSecret(string value) => SetProtected(GitHubAppClientSecretKey, value);
+
+        /// <summary>
+        /// Webhook secret returned by the manifest conversion. The manifest requests no webhook, so this
+        /// is unused today — stored rather than discarded because it cannot be retrieved again later,
+        /// and regenerating it means a new App.
+        /// </summary>
+        public string GetGitHubAppWebhookSecret() => GetProtected(GitHubAppWebhookSecretKey);
+
+        /// <summary>Stores the webhook secret DPAPI-protected, or (null/blank) removes it.</summary>
+        public void SetGitHubAppWebhookSecret(string value) => SetProtected(GitHubAppWebhookSecretKey, value);
+
+        /// <summary>
+        /// True when an App private key is stored, WITHOUT decrypting it. Use this for "is the bot
+        /// configured?" checks so a status read never handles the key material.
+        /// </summary>
+        public bool HasGitHubAppPrivateKey() => !string.IsNullOrWhiteSpace(Get(GitHubAppPrivateKeyPemKey));
+
+        /// <summary>
+        /// True when the App is registered AND routable — an id and a key, which is the minimum needed
+        /// to mint a token. Does not decrypt anything.
+        /// </summary>
+        public bool IsGitHubAppConfigured() =>
+            !string.IsNullOrWhiteSpace(Get(GitHubAppIdKey)) && HasGitHubAppPrivateKey();
+
+        /// <summary>
+        /// Removes every stored GitHub App value, secret and routing alike.
+        /// <para>This is the local half of revocation and exists because the ticket's acceptance is
+        /// "revoking the installation stops agent access immediately, with no leftover credential that
+        /// still works". Revoking on GitHub's side is what actually withdraws access; this makes sure MT
+        /// is not left holding a key it will keep trying to sign with, and that a re-registration starts
+        /// from nothing rather than inheriting half a previous App's identity.</para>
+        /// </summary>
+        public void ClearGitHubApp()
+        {
+            Remove(GitHubAppIdKey);
+            Remove(GitHubAppSlugKey);
+            Remove(GitHubAppClientIdKey);
+            Remove(GitHubAppDefaultInstallationIdKey);
+            Remove(GitHubAppPrivateKeyPemKey);
+            Remove(GitHubAppClientSecretKey);
+            Remove(GitHubAppWebhookSecretKey);
+        }
+
         private void Load()
         {
             _settings.Clear();
