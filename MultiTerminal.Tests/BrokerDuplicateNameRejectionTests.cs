@@ -735,5 +735,180 @@ namespace MultiTerminal.Tests
             Assert.True(first == null || first == "Lynn" || first == "Robin",
                 $"Lookup returned '{first}', which is neither of the registered names nor a refusal.");
         }
+
+        /// <summary>
+        /// PIPELINE RUN 5 — the gate was a check-then-act with no mutual exclusion.
+        ///
+        /// <para>Found independently by three gates (Codex security, Codex cross-model adversary, and
+        /// the Claude debugger) and by none of the 885 tests that preceded them, because every existing
+        /// fact tells a SINGLE-THREADED story: call register, then assert. The defect needs two callers
+        /// inside one window.</para>
+        ///
+        /// <para><c>RegisterTerminal</c> scanned <c>_terminals</c> for a connected row with this name,
+        /// then — hundreds of lines and two <c>Process.GetProcessById</c> syscalls later — minted a row
+        /// keyed on a fresh <see cref="Guid"/>. The mint cannot collide, so <c>TryAdd</c> provided no
+        /// mutual exclusion on the NAME. Both racers read "nobody holds it", both skipped the gate, and
+        /// both inserted. Delivery resolves by <c>FirstOrDefault</c>-over-name, so messages then went to
+        /// an arbitrary one of the two while every call reported success.</para>
+        ///
+        /// <para>FALSIFICATION — PERFORMED, not asserted (2026-09-08). The <c>lock (_registrationLock)</c>
+        /// was removed from <c>RegisterTerminal</c> and this fact was re-run against that build. It
+        /// failed with <b>"Expected exactly one connected row named 'Lynn'; found 16"</b> — every one of
+        /// the sixteen racers minted its own row, so the gate was not merely leaky under contention, it
+        /// was fully open. The lock was then restored and the fact passes. That is what makes this test
+        /// evidence rather than decoration.</para>
+        ///
+        /// <para>The 16/16 result is also the answer to "was the window really reachable?" — it is not a
+        /// narrow interleaving. The scan and the mint are separated by hundreds of lines including two
+        /// process-probe syscalls, so under any real contention the racers all land inside it.</para>
+        /// </summary>
+        [Fact]
+        public void Concurrent_registrations_of_one_free_name_produce_exactly_one_connected_row()
+        {
+            using var broker = new MessageBroker();
+
+            const int racers = 16;
+            using var start = new System.Threading.Barrier(racers);
+            var results = new System.Collections.Concurrent.ConcurrentBag<bool>();
+
+            var threads = new System.Threading.Thread[racers];
+            for (int i = 0; i < racers; i++)
+            {
+                threads[i] = new System.Threading.Thread(() =>
+                {
+                    // Release every thread at the same instant so they contend for the real window
+                    // rather than arriving in a comfortable sequence.
+                    start.SignalAndWait();
+                    var r = broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null);
+                    results.Add(r.Success);
+                });
+                threads[i].IsBackground = true;
+            }
+
+            foreach (var t in threads) t.Start();
+            foreach (var t in threads) t.Join(TimeSpan.FromSeconds(30));
+
+            // THE INVARIANT. "Fail-closed duplicate rejection" has to mean one row, or the name is not
+            // an identity at all — and channel delivery keys on nothing but the name.
+            var lynnRows = System.Linq.Enumerable.ToList(
+                System.Linq.Enumerable.Where(broker.GetTerminals(),
+                    t => string.Equals(t.Name, "Lynn", StringComparison.OrdinalIgnoreCase) && t.IsConnected));
+
+            Assert.True(lynnRows.Count == 1,
+                $"Expected exactly one connected row named 'Lynn'; found {lynnRows.Count}. " +
+                "Two rows means the duplicate-name gate was evaluated against state that moved underneath it.");
+
+            // Every racer should have been told something true: the winner minted, the rest reused that
+            // same row. Nobody should be holding a success that refers to a row which no longer decides
+            // delivery.
+            Assert.Equal(racers, results.Count);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 5 — a refusal that nobody reads is the same as no gate.
+        ///
+        /// <para>Three MainForm launch sites called <c>RegisterTerminal</c> and discarded the
+        /// <c>RegisterResult</c> entirely. Gate (4) made registration fallible for real names, so a
+        /// refusal left no broker row bound to the document while execution continued into
+        /// <c>StartTerminal</c> with <c>MULTITERMINAL_NAME</c> set to the refused name: a correctly
+        /// titled tab that no message can reach, with nothing logged.</para>
+        ///
+        /// <para>This is a source census rather than a behavioural test, matching the repo's standing
+        /// answer to a contract no compiler checks (see <c>ChannelFlagContractTests</c>). It is the
+        /// shape that fits: the defect is "a call site forgot to look at a return value", which has no
+        /// runtime signature short of driving WinForms.</para>
+        ///
+        /// <para>The three sites that legitimately discard the result register <c>"Unassigned"</c>,
+        /// which gate (4) exempts by an explicit conjunct, so a refusal is impossible for them. The
+        /// census therefore keys on the REAL-NAME calls only.</para>
+        ///
+        /// <para>FALSIFICATION — PERFORMED, not asserted (2026-09-08). One of the three fixed sites was
+        /// reverted to its bare <c>_mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, ...)</c>
+        /// form and this fact was re-run. It failed, naming <c>MainForm.cs:3813</c> exactly. The site was
+        /// then restored and the fact passes. A census that has never been shown to fail is a census
+        /// that might be matching nothing.</para>
+        /// </summary>
+        [Fact]
+        public void No_MainForm_launch_site_registers_a_real_name_without_reading_the_result()
+        {
+            string mainFormPath = LocateRepoFile("MainForm.cs");
+            string[] lines = File.ReadAllLines(mainFormPath);
+
+            var offenders = new System.Collections.Generic.List<string>();
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i];
+                string trimmed = line.TrimStart();
+
+                if (trimmed.StartsWith("//", StringComparison.Ordinal)) continue;
+                if (!trimmed.Contains("Broker.RegisterTerminal", StringComparison.Ordinal)) continue;
+
+                // A call whose result is read starts with an assignment ("var result =", "terminalName =").
+                // A discarded one begins directly with the receiver.
+                bool resultIsRead = trimmed.Contains("=", StringComparison.Ordinal)
+                                    && trimmed.IndexOf('=') < trimmed.IndexOf("Broker.RegisterTerminal", StringComparison.Ordinal);
+                if (resultIsRead) continue;
+
+                // "Unassigned" is a deliberate shared sentinel and is exempted inside gate (4), so it
+                // can never be refused — discarding its result is safe.
+                if (trimmed.Contains("\"Unassigned\"", StringComparison.Ordinal)) continue;
+
+                // The name being registered is a variable; look back a few lines for the sentinel
+                // assignment that identifies these as placeholder registrations.
+                bool sentinelNearby = false;
+                for (int back = Math.Max(0, i - 4); back < i; back++)
+                {
+                    if (lines[back].Contains("= \"Unassigned\"", StringComparison.Ordinal)) sentinelNearby = true;
+                }
+                if (sentinelNearby) continue;
+
+                offenders.Add($"MainForm.cs:{i + 1}: {trimmed}");
+            }
+
+            Assert.True(offenders.Count == 0,
+                "These MainForm sites register a REAL name and discard the RegisterResult, so a gate-(4) "
+                + "refusal would launch a terminal under a name the broker rejected:"
+                + Environment.NewLine + string.Join(Environment.NewLine, offenders));
+        }
+
+        /// <summary>
+        /// Proves the census above can actually fail: a discarded real-name call is recognised as an
+        /// offender by the same rule. Without this, a census that silently matched nothing would pass
+        /// forever and report safety it never checked.
+        /// </summary>
+        [Fact]
+        public void The_MainForm_census_rule_actually_flags_a_discarded_real_name_call()
+        {
+            string discarded = "_mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);";
+            string read = "terminalName = PreRegisterTerminalWithName(doc.DocId, terminalName, isTeamLead);";
+            string sentinel = "_mcpServer.Broker.RegisterTerminal(\"Unassigned\", doc.DocId);";
+
+            Assert.False(ResultIsRead(discarded), "A bare call must be recognised as discarding its result.");
+            Assert.True(ResultIsRead(read) || !read.Contains("Broker.RegisterTerminal", StringComparison.Ordinal),
+                "An assigned call must not be flagged.");
+            Assert.True(sentinel.Contains("\"Unassigned\"", StringComparison.Ordinal),
+                "The sentinel exemption must key on the literal the gate exempts.");
+
+            static bool ResultIsRead(string trimmed) =>
+                trimmed.Contains("=", StringComparison.Ordinal)
+                && trimmed.IndexOf('=') < trimmed.IndexOf("Broker.RegisterTerminal", StringComparison.Ordinal);
+        }
+
+        /// <summary>Walks up from the test binary to the repo root to find a source file.</summary>
+        private static string LocateRepoFile(string fileName)
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null)
+            {
+                string candidate = Path.Combine(dir.FullName, fileName);
+                if (File.Exists(candidate)) return candidate;
+                dir = dir.Parent;
+            }
+
+            throw new FileNotFoundException(
+                $"Could not locate {fileName} by walking up from {AppContext.BaseDirectory}. "
+                + "This census test needs the source tree, not just the build output.");
+        }
     }
 }

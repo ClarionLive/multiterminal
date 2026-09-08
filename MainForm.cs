@@ -3646,15 +3646,19 @@ namespace MultiTerminal
                     // concurrent launch took the name since our resolve, we get a
                     // fresh suffix atomically. Team-lead path keeps the existing
                     // IdentityPickerDialog flow (dialog is authoritative).
-                    if (!isTeamLead && kind == TerminalKind.Codex)
-                    {
-                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
-                        terminalName = resolved;
-                    }
-                    else
-                    {
-                        _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
-                    }
+                    // Run 5: both arms used to DISCARD the RegisterResult. Since gate (4) made
+                    // registration fallible for real names, a refusal left no broker row bound to this
+                    // doc while execution carried straight on into StartTerminal with MULTITERMINAL_NAME
+                    // set to the refused name — a correctly-titled tab that no message can reach, with
+                    // nothing logged. PreRegisterTerminalWithName is the one site that already handled
+                    // this properly (check Success, else fall back to an unnamed pre-registration), so
+                    // route through it rather than re-implementing the check three times.
+                    terminalName = PreRegisterTerminalWithName(
+                        doc.DocId,
+                        terminalName,
+                        isTeamLead,
+                        atomicUniqueness: kind == TerminalKind.Codex,
+                        launchNonce: doc.LaunchNonce);
                 }
 
                 // Sync MCP configs: gateway-aware path if available, else standard path.
@@ -3805,7 +3809,13 @@ namespace MultiTerminal
 
                 if (_mcpServer?.Broker != null)
                 {
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
+                    // Run 5: was discarding the RegisterResult — see the note at the project-launch site.
+                    // A gate-(4) refusal here launched the session under a name the broker had rejected.
+                    terminalName = PreRegisterTerminalWithName(
+                        doc.DocId,
+                        terminalName,
+                        isTeamLead,
+                        launchNonce: doc.LaunchNonce);
                 }
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
@@ -3911,12 +3921,22 @@ namespace MultiTerminal
                 {
                     if (!isTeamLead && terminalKind == Models.TerminalKind.Codex)
                     {
-                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, sourceDoc.DocId, isTeamLead, nonce: sourceDoc.LaunchNonce);
-                        terminalName = resolved;
+                        // Run 5: was discarding the RegisterResult on both arms — see the note at the
+                        // project-launch site. Routed through the one site that checks Success.
+                        terminalName = PreRegisterTerminalWithName(
+                            sourceDoc.DocId,
+                            terminalName,
+                            isTeamLead,
+                            atomicUniqueness: true,
+                            launchNonce: sourceDoc.LaunchNonce);
                     }
                     else
                     {
-                        _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead, nonce: sourceDoc.LaunchNonce);
+                        terminalName = PreRegisterTerminalWithName(
+                            sourceDoc.DocId,
+                            terminalName,
+                            isTeamLead,
+                            launchNonce: sourceDoc.LaunchNonce);
                     }
                 }
 
@@ -4166,12 +4186,19 @@ namespace MultiTerminal
                     var uniqueResult = _mcpServer.Broker.RegisterTerminalUnique(identityName, out string resolved, docId, isTeamLead, nonce: launchNonce);
                     if (uniqueResult.Success)
                         return resolved;
+
+                    // Run 5: the refusal REASON used to be dropped here, so a gate-(4) rejection was
+                    // indistinguishable from "no identity was requested" — the terminal simply came up
+                    // as a placeholder and nobody could say why. Log the broker's own sentence.
+                    _debugLogService?.Warning("MainForm", $"Unique pre-registration of '{identityName}' was refused by the broker; falling back to an unnamed placeholder. Broker said: {uniqueResult.Error ?? "(no reason given)"}");
                 }
                 else
                 {
                     var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead, nonce: launchNonce);
                     if (result.Success)
                         return identityName;
+
+                    _debugLogService?.Warning("MainForm", $"Pre-registration of '{identityName}' was refused by the broker; falling back to an unnamed placeholder. Broker said: {result.Error ?? "(no reason given)"}");
                 }
             }
             catch (Exception ex)

@@ -1809,11 +1809,32 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        // Lock used to make "probe for unique name + register" an atomic pair
-        // (see RegisterTerminalUnique). Only covers the narrow critical section
-        // where a racing launch could choose the same candidate suffix; the
-        // regular RegisterTerminal path is unaffected.
-        private readonly object _uniqueRegistrationLock = new object();
+        // Serializes the whole registration DECISION — every name/docId lookup, the gate (4) proof
+        // check, and the row mutation or mint that follows from it. One lock for all callers, because
+        // the decision is a check-then-act over shared state and the act is only correct if nothing
+        // moved in between.
+        //
+        // ⚠️ It used to say: "Only covers the narrow critical section where a racing launch could
+        // choose the same candidate suffix; the regular RegisterTerminal path is unaffected." That
+        // sentence WAS the defect, written down as a design note. RegisterTerminal is the path gate (4)
+        // guards, and it held no lock at all: two callers registering the same free name both read
+        // existingByName == null, both skipped the gate, and both TryAdd'd a row — because the mint is
+        // keyed on a fresh Guid, so TryAdd cannot collide and provides no mutual exclusion on the NAME.
+        // Delivery then resolves by FirstOrDefault-over-name and picks arbitrarily, while reporting
+        // success. Found independently by three pipeline gates (Run 5); the "fail-closed" duplicate-name
+        // rejection this ticket exists to add was not closed against a second process.
+        //
+        // ⚠️ THE LOCK MUST NOT COVER SIDE EFFECTS. RaiseSafe(TerminalRegistered, ...) fans out to
+        // WinForms handlers that marshal to the UI thread, and the profile calls write SQLite. Holding a
+        // process-wide lock across either is a deadlock: a handler waiting on the UI thread while the UI
+        // thread waits for this lock. All three gates recommended locking "from the lookup through the
+        // TryAdd", which taken literally spans exactly that. So the decision runs here and the side
+        // effects run in ApplyRegistrationSideEffects AFTER release — see RegisterTerminal.
+        //
+        // Monitor is reentrant, so RegisterTerminalUnique can keep holding this across
+        // FindUniqueCandidate + RegisterTerminal and get the atomic pair it always wanted; that pair is
+        // now genuinely atomic, because the inner call no longer runs unsynchronized.
+        private readonly object _registrationLock = new object();
 
         /// <summary>
         /// Returns a name safe to use for a fresh terminal registration.
@@ -1868,11 +1889,20 @@ namespace MultiTerminal.MCPServer.Services
                 return RegisterTerminal(requested, docId, isTeamLead, channelPort, nonce);
             }
 
-            lock (_uniqueRegistrationLock)
+            // Decide under the lock, apply side effects after it. Calling RegisterTerminal here instead
+            // would LOOK fine — Monitor is reentrant so the inner lock succeeds — but reentrancy means
+            // the inner release does NOT release: RegisterTerminal's event dispatch and profile writes
+            // would run while this outer lock is still held, which is the exact deadlock the split was
+            // made to avoid. Reaching for DecideRegistration directly is what keeps the atomic
+            // find-candidate-then-register pair honest AND the side effects outside.
+            RegistrationOutcome outcome;
+            lock (_registrationLock)
             {
                 resolvedName = FindUniqueCandidate(requested);
-                return RegisterTerminal(resolvedName, docId, isTeamLead, channelPort, nonce);
+                outcome = DecideRegistration(resolvedName, docId, isTeamLead, channelPort, nonce, null);
             }
+
+            return ApplyRegistrationSideEffects(outcome);
         }
 
         /// <summary>
@@ -2107,6 +2137,30 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null, string nonce = null, int? ownerPid = null)
         {
+            RegistrationOutcome outcome;
+            lock (_registrationLock)
+            {
+                outcome = DecideRegistration(name, docId, isTeamLead, channelPort, nonce, ownerPid);
+            }
+
+            // Deliberately OUTSIDE the lock — see _registrationLock's remarks. Event dispatch reaches
+            // WinForms handlers and the profile calls write SQLite; either under a process-wide lock is
+            // a deadlock waiting for the UI thread.
+            return ApplyRegistrationSideEffects(outcome);
+        }
+
+        /// <summary>
+        /// The registration DECISION and row mutation, with every side effect deferred to the returned
+        /// outcome. MUST be called with <see cref="_registrationLock"/> held — that is what makes the
+        /// lookup-then-mutate pair atomic, which is the entire point of gate (4).
+        /// </summary>
+        /// <remarks>
+        /// Split out of <see cref="RegisterTerminal"/> in Run 5 so the lock can cover the check-then-act
+        /// without also covering event dispatch and DB writes. Nothing in here may raise an event, touch
+        /// <c>_profileService</c>, or call <c>ActivityService</c>; put it on the outcome instead.
+        /// </remarks>
+        private RegistrationOutcome DecideRegistration(string name, string docId, bool isTeamLead, int? channelPort, string nonce, int? ownerPid)
+        {
             LogInfo($"RegisterTerminal ENTRY: name='{name}', docId='{docId ?? "null"}', channelPort={channelPort?.ToString() ?? "null"}, noncePresented={!string.IsNullOrEmpty(nonce)}, stack={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name ?? "?"}");
 
             // Validate channel port range to prevent SSRF — only allow ports in the assigned range
@@ -2183,64 +2237,20 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 existingByDocId.IsConnected = true;
 
-                // Handle profile transitions
-                try
+                // Profile transitions and the TerminalRegistered re-raise are DEFERRED to
+                // ApplyRegistrationSideEffects — they must not run under _registrationLock.
+                return new RegistrationOutcome
                 {
-                    // Mark OLD profile offline (write path: clone→persist→swap; no-op if not cached)
-                    if (_profileService.MutateProfile(oldName, p =>
+                    Kind = RegistrationOutcomeKind.DocIdRename,
+                    Row = existingByDocId,
+                    OldName = oldName,
+                    Name = newName,
+                    IsTeamLead = isTeamLead,
+                    Result = new RegisterResult
                     {
-                        p.IsOnline = false;
-                        p.UpdatedAt = DateTime.UtcNow;
-                    }) != null)
-                    {
-                        DebugLogService?.Info("MessageBroker", $"Marked old profile offline: {oldName}");
+                        Success = true,
+                        TerminalId = existingByDocId.Id
                     }
-
-                    // Mark NEW profile online (or create if doesn't exist)
-                    // Skip profile creation for temporary agents (e.g. "Agent Alice")
-                    if (!IsTemporaryAgent(newName))
-                    {
-                        if (_profileService.ContainsProfile(newName))
-                        {
-                            _profileService.MutateProfile(newName, p =>
-                            {
-                                p.IsOnline = true;
-                                p.UpdatedAt = DateTime.UtcNow;
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Marked new profile online: {newName}");
-                        }
-                        else
-                        {
-                            // Create new profile online (persist-first via the write path)
-                            _profileService.InsertProfile(new TeamMemberProfile
-                            {
-                                Id = newName,
-                                DisplayName = newName,
-                                IsOnline = true, // Online because registration is happening
-                                IsTeamLead = isTeamLead,
-                                CreatedAt = DateTime.UtcNow,
-                                UpdatedAt = DateTime.UtcNow
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
-                        }
-                    }
-                    else
-                    {
-                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for temporary agent: {newName}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLogService?.Error("MessageBroker", $"Failed to handle profile transitions: {ex.Message}");
-                }
-
-                // Re-raise event so MainForm updates tab title
-                RaiseSafe(TerminalRegistered, existingByDocId);
-
-                return new RegisterResult
-                {
-                    Success = true,
-                    TerminalId = existingByDocId.Id
                 };
                 } // end else (Unassigned rename)
             }
@@ -2417,16 +2427,24 @@ namespace MultiTerminal.MCPServer.Services
                     DebugLogService?.Warning("MessageBroker", $"CHANNEL PORT REPORT REFUSED for '{name}' (port {channelPort.Value}, refusal #{existingByName.ChannelPortRefusalCount}): push delivery is DEAD for this terminal and polling will hide it. If this repeats every ~30s, the terminal's channel server predates the launch-nonce echo (plugin 7875686) — restart that terminal. task c9285d2a");
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
-                return new RegisterResult
-                {
-                    Success = false,
 
-                    // The likeliest real-world trigger is NOT an impostor — it is this terminal's own
-                    // channel server running a build that predates the nonce echo (plugin 7875686).
-                    // Telling that caller to "pick a different name" sends it chasing a collision that
-                    // does not exist: it IS the terminal holding the name.
-                    Error = $"The name '{name}' is already in use by a connected terminal. Pick a different name, or disconnect the terminal currently holding it. "
-                            + "(If this IS your own terminal's channel server, it is running a build older than the one that echoes the launch nonce — restart the terminal.)"
+                // No side effects on the refusal path — nothing was registered, so nothing to raise or
+                // profile. The counter increment above is a plain field write on a row we hold the lock
+                // for, which is also what makes it atomic now (it was a lost-update race before Run 5).
+                return new RegistrationOutcome
+                {
+                    Kind = RegistrationOutcomeKind.Refused,
+                    Result = new RegisterResult
+                    {
+                        Success = false,
+
+                        // The likeliest real-world trigger is NOT an impostor — it is this terminal's own
+                        // channel server running a build that predates the nonce echo (plugin 7875686).
+                        // Telling that caller to "pick a different name" sends it chasing a collision that
+                        // does not exist: it IS the terminal holding the name.
+                        Error = $"The name '{name}' is already in use by a connected terminal. Pick a different name, or disconnect the terminal currently holding it. "
+                                + "(If this IS your own terminal's channel server, it is running a build older than the one that echoes the launch nonce — restart the terminal.)"
+                    }
                 };
             }
 
@@ -2596,58 +2614,20 @@ namespace MultiTerminal.MCPServer.Services
                     }
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
-                // Always re-raise event so MainForm updates its mapping
-                RaiseSafe(TerminalRegistered, existingByName);
-
-                // Auto-create profile if it doesn't exist, then set online
-                // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
-                try
+                // The TerminalRegistered re-raise, the profile auto-create/online work and the message
+                // queue are DEFERRED to ApplyRegistrationSideEffects — none of them may run under
+                // _registrationLock. The row mutation above is finished, so releasing here is safe.
+                return new RegistrationOutcome
                 {
-                    if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
+                    Kind = RegistrationOutcomeKind.Reused,
+                    Row = existingByName,
+                    Name = name,
+                    IsTeamLead = isTeamLead,
+                    Result = new RegisterResult
                     {
-                        if (!_profileService.ContainsProfile(name))
-                        {
-                            // Persist-first auto-create (offline; set online below)
-                            _profileService.InsertProfile(new TeamMemberProfile
-                            {
-                                Id = name,
-                                DisplayName = name,
-                                IsOnline = false,  // Start offline, will be set online below
-                                IsTeamLead = isTeamLead,
-                                CreatedAt = DateTime.UtcNow,
-                                UpdatedAt = DateTime.UtcNow
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
-                        }
-                        else if (isTeamLead)
-                        {
-                            // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
-                            _profileService.MutateProfile(name, p => p.IsTeamLead = true);
-                        }
-
-                        // Set profile online now that terminal is registering
-                        SetProfileOnline(name);
-
-                        // Trigger status bar refresh after profile update
-                        ActivityService?.UpdateActivity(name, "idle", "Connected");
+                        Success = true,
+                        TerminalId = existingByName.Id
                     }
-                    else
-                    {
-                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
-                }
-
-                // Ensure message queue exists (may be missing after disconnect/reconnect)
-                _messageQueues.TryAdd(existingByName.Id, new BlockingCollection<Message>());
-
-                return new RegisterResult
-                {
-                    Success = true,
-                    TerminalId = existingByName.Id
                 };
             }
 
@@ -2694,63 +2674,225 @@ namespace MultiTerminal.MCPServer.Services
 
             if (_terminals.TryAdd(id, terminal))
             {
-                _messageQueues.TryAdd(id, new BlockingCollection<Message>());
-                RaiseSafe(TerminalRegistered, terminal);
-
-                // Auto-create profile if it doesn't exist, then set online
-                // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
-                try
+                // Queue creation, the TerminalRegistered raise and the profile work are DEFERRED to
+                // ApplyRegistrationSideEffects. The name is claimed the moment TryAdd returns while we
+                // still hold _registrationLock, which is what makes gate (4) above binding against a
+                // concurrent registrant rather than advisory.
+                return new RegistrationOutcome
                 {
-                    if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
+                    Kind = RegistrationOutcomeKind.Minted,
+                    Row = terminal,
+                    Name = name,
+                    IsTeamLead = isTeamLead,
+                    Result = new RegisterResult
                     {
-                        if (!_profileService.ContainsProfile(name))
-                        {
-                            // Persist-first auto-create (offline; set online below)
-                            _profileService.InsertProfile(new TeamMemberProfile
-                            {
-                                Id = name,
-                                DisplayName = name,
-                                IsOnline = false,  // Start offline, will be set online below
-                                IsTeamLead = isTeamLead,
-                                CreatedAt = DateTime.UtcNow,
-                                UpdatedAt = DateTime.UtcNow
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
-                        }
-                        else if (isTeamLead)
-                        {
-                            // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
-                            _profileService.MutateProfile(name, p => p.IsTeamLead = true);
-                        }
-
-                        // Set profile online now that terminal is registering
-                        SetProfileOnline(name);
-
-                        // Trigger status bar refresh after profile update
-                        ActivityService?.UpdateActivity(name, "idle", "Connected");
+                        Success = true,
+                        TerminalId = id
                     }
-                    else
-                    {
-                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
-                }
-
-                return new RegisterResult
-                {
-                    Success = true,
-                    TerminalId = id
                 };
             }
 
-            return new RegisterResult
+            return new RegistrationOutcome
             {
-                Success = false,
-                Error = "Failed to register terminal"
+                Kind = RegistrationOutcomeKind.MintFailed,
+                Result = new RegisterResult
+                {
+                    Success = false,
+                    Error = "Failed to register terminal"
+                }
             };
+        }
+
+        /// <summary>What <see cref="DecideRegistration"/> concluded, and what still has to happen for it.</summary>
+        private enum RegistrationOutcomeKind
+        {
+            /// <summary>An "Unassigned" placeholder was adopted under a real name.</summary>
+            DocIdRename,
+
+            /// <summary>Gate (4) refused the claim. Nothing was registered; there is nothing to do.</summary>
+            Refused,
+
+            /// <summary>An existing connected row was reused and updated.</summary>
+            Reused,
+
+            /// <summary>A fresh row was created and added to <c>_terminals</c>.</summary>
+            Minted,
+
+            /// <summary><c>_terminals.TryAdd</c> failed — should be unreachable, the id is a fresh Guid.</summary>
+            MintFailed
+        }
+
+        /// <summary>
+        /// The decision, plus everything <see cref="ApplyRegistrationSideEffects"/> needs to finish the
+        /// job once <see cref="_registrationLock"/> has been released.
+        /// </summary>
+        private sealed class RegistrationOutcome
+        {
+            public RegistrationOutcomeKind Kind { get; set; }
+
+            /// <summary>The registration result to hand back to the caller. Never null.</summary>
+            public RegisterResult Result { get; set; }
+
+            /// <summary>The row to raise <c>TerminalRegistered</c> for; null on the refusal paths.</summary>
+            public TerminalInfo Row { get; set; }
+
+            /// <summary>Profile name to bring online / create. Null when there is no profile work.</summary>
+            public string Name { get; set; }
+
+            /// <summary>Rename only: the profile to mark offline.</summary>
+            public string OldName { get; set; }
+
+            public bool IsTeamLead { get; set; }
+        }
+
+        /// <summary>
+        /// Runs the effects of a registration decision — event dispatch, profile writes, message queue —
+        /// AFTER <see cref="_registrationLock"/> has been released.
+        /// </summary>
+        /// <remarks>
+        /// Separated in Run 5. These must never run under the registration lock: <c>RaiseSafe</c> reaches
+        /// WinForms handlers that marshal to the UI thread, and the profile calls write SQLite. A
+        /// process-wide lock held across either deadlocks against any thread that takes the lock from the
+        /// UI thread. Per-branch ORDER is preserved exactly as it was before the split — the rename path
+        /// did its profile transitions before raising, the reuse/mint paths raise first.
+        /// </remarks>
+        private RegisterResult ApplyRegistrationSideEffects(RegistrationOutcome outcome)
+        {
+            switch (outcome.Kind)
+            {
+                case RegistrationOutcomeKind.DocIdRename:
+                    ApplyRenameProfileTransition(outcome.OldName, outcome.Name, outcome.IsTeamLead);
+
+                    // Re-raise event so MainForm updates tab title
+                    RaiseSafe(TerminalRegistered, outcome.Row);
+                    break;
+
+                case RegistrationOutcomeKind.Reused:
+                    // Always re-raise event so MainForm updates its mapping
+                    RaiseSafe(TerminalRegistered, outcome.Row);
+                    ApplyRegistrationProfile(outcome.Name, outcome.IsTeamLead);
+
+                    // Ensure message queue exists (may be missing after disconnect/reconnect)
+                    _messageQueues.TryAdd(outcome.Row.Id, new BlockingCollection<Message>());
+                    break;
+
+                case RegistrationOutcomeKind.Minted:
+                    _messageQueues.TryAdd(outcome.Row.Id, new BlockingCollection<Message>());
+                    RaiseSafe(TerminalRegistered, outcome.Row);
+                    ApplyRegistrationProfile(outcome.Name, outcome.IsTeamLead);
+                    break;
+
+                case RegistrationOutcomeKind.Refused:
+                case RegistrationOutcomeKind.MintFailed:
+                    // Nothing was registered, so there is nothing to raise or persist.
+                    break;
+            }
+
+            return outcome.Result;
+        }
+
+        /// <summary>
+        /// Auto-create the profile if absent, then bring it online. Shared by the reuse and mint paths,
+        /// which carried two near-identical copies of this block before Run 5.
+        /// </summary>
+        private void ApplyRegistrationProfile(string name, bool isTeamLead)
+        {
+            // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
+            try
+            {
+                if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
+                {
+                    if (!_profileService.ContainsProfile(name))
+                    {
+                        // Persist-first auto-create (offline; set online below)
+                        _profileService.InsertProfile(new TeamMemberProfile
+                        {
+                            Id = name,
+                            DisplayName = name,
+                            IsOnline = false,  // Start offline, will be set online below
+                            IsTeamLead = isTeamLead,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                        DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
+                    }
+                    else if (isTeamLead)
+                    {
+                        // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
+                        _profileService.MutateProfile(name, p => p.IsTeamLead = true);
+                    }
+
+                    // Set profile online now that terminal is registering
+                    SetProfileOnline(name);
+
+                    // Trigger status bar refresh after profile update
+                    ActivityService?.UpdateActivity(name, "idle", "Connected");
+                }
+                else
+                {
+                    DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Move the profile online-ness from the placeholder's old name to the adopted real name.
+        /// </summary>
+        private void ApplyRenameProfileTransition(string oldName, string newName, bool isTeamLead)
+        {
+            try
+            {
+                // Mark OLD profile offline (write path: clone→persist→swap; no-op if not cached)
+                if (_profileService.MutateProfile(oldName, p =>
+                {
+                    p.IsOnline = false;
+                    p.UpdatedAt = DateTime.UtcNow;
+                }) != null)
+                {
+                    DebugLogService?.Info("MessageBroker", $"Marked old profile offline: {oldName}");
+                }
+
+                // Mark NEW profile online (or create if doesn't exist)
+                // Skip profile creation for temporary agents (e.g. "Agent Alice")
+                if (!IsTemporaryAgent(newName))
+                {
+                    if (_profileService.ContainsProfile(newName))
+                    {
+                        _profileService.MutateProfile(newName, p =>
+                        {
+                            p.IsOnline = true;
+                            p.UpdatedAt = DateTime.UtcNow;
+                        });
+                        DebugLogService?.Info("MessageBroker", $"Marked new profile online: {newName}");
+                    }
+                    else
+                    {
+                        // Create new profile online (persist-first via the write path)
+                        _profileService.InsertProfile(new TeamMemberProfile
+                        {
+                            Id = newName,
+                            DisplayName = newName,
+                            IsOnline = true, // Online because registration is happening
+                            IsTeamLead = isTeamLead,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                        DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
+                    }
+                }
+                else
+                {
+                    DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for temporary agent: {newName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("MessageBroker", $"Failed to handle profile transitions: {ex.Message}");
+            }
         }
 
         /// <summary>
