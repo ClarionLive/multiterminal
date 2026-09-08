@@ -2437,6 +2437,38 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Resolves a presented launch nonce to the CONNECTED terminal that holds it, or null
+        /// (task b42b1883, item 2).
+        ///
+        /// <para>Used by the GitHub token mint endpoint as both the authentication check and the
+        /// attribution: MT's REST API is loopback and unauthenticated by design, so without this any
+        /// local process could ask for a bot token. The nonce is per-launch, injected into the
+        /// terminal's environment, and already redacted from the debug log — existing machinery rather
+        /// than a second secret.</para>
+        ///
+        /// <para><b>⚠️ An empty or missing nonce matches NOTHING, and that guard is the whole method.</b>
+        /// Rows legitimately carry an empty <c>LaunchNonce</c> — a terminal MT did not launch has no
+        /// nonce to seed — so a naive equality test would let a caller presenting <c>""</c> match every
+        /// one of them and mint under the first. The check is "does this SECRET identify a terminal",
+        /// never "do these two values happen to be equal".</para>
+        ///
+        /// <para>Ordinal comparison rather than a fixed-time one is deliberate. The threat model here is
+        /// a local process, and a local process that could mount a timing attack against this could
+        /// equally read the nonce out of the target terminal's environment — constant-time comparison
+        /// would imply a guarantee the surrounding design does not make.</para>
+        /// </summary>
+        public TerminalInfo GetConnectedTerminalByLaunchNonce(string nonce)
+        {
+            if (string.IsNullOrEmpty(nonce)) return null;
+
+            return _terminals.Values.FirstOrDefault(t =>
+                t != null
+                && t.IsConnected
+                && !string.IsNullOrEmpty(t.LaunchNonce)
+                && string.Equals(t.LaunchNonce, nonce, StringComparison.Ordinal));
+        }
+
+        /// <summary>
         /// Get all registered terminals that are online (both connected and have online profiles).
         /// </summary>
         public List<TerminalInfo> GetTerminals()

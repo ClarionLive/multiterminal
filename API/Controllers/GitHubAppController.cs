@@ -3,6 +3,8 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
+using MultiTerminal.MCPServer.Models;
+using MultiTerminal.MCPServer.Services;
 using MultiTerminal.Services;
 
 namespace MultiTerminal.API.Controllers
@@ -30,11 +32,19 @@ namespace MultiTerminal.API.Controllers
     {
         private readonly GitHubAppManifestService _manifest;
         private readonly SettingsService _settings;
+        private readonly GitHubAppTokenService _tokens;
+        private readonly MessageBroker _broker;
 
-        public GitHubAppController(GitHubAppManifestService manifest, SettingsService settings)
+        public GitHubAppController(
+            GitHubAppManifestService manifest,
+            SettingsService settings,
+            GitHubAppTokenService tokens,
+            MessageBroker broker)
         {
             _manifest = manifest;
             _settings = settings;
+            _tokens = tokens;
+            _broker = broker;
         }
 
         /// <summary>
@@ -145,6 +155,78 @@ it to an agent. Agents receive tokens that expire within the hour.</p>
             slug = _settings.GetGitHubAppSlug(),
             defaultInstallationId = _settings.GetGitHubAppDefaultInstallationId(),
         });
+
+        /// <summary>
+        /// Mints a short-lived installation token for the terminal that presents its launch nonce
+        /// (task b42b1883, item 2). This is what the git credential helper and the <c>gh</c> shim call,
+        /// once per operation — nothing stores the result.
+        ///
+        /// <para><b>Why this needs a gate at all.</b> MT's REST API is loopback and unauthenticated by
+        /// design (established by task c9285d2a's security audit). Without one, any process on this
+        /// machine could ask for a token that can comment and push code as the bot. The launch nonce is
+        /// already per-launch, already injected into the terminal's environment, and already redacted
+        /// from the debug log, so it is the gate that adds no new secret.</para>
+        ///
+        /// <para><b>What that does and does not buy — stated plainly so nobody oversells it.</b> An
+        /// AGENT can still mint tokens: it can read its own environment, and it is legitimately allowed
+        /// to act as the bot — any design where it can run <c>gh</c> gives it that. What the gate bounds
+        /// is OTHER local processes, and it makes every mint attributable to a named terminal. The
+        /// security of this ticket rests on the private key being unreachable and the token expiring in
+        /// an hour, not on pretending the agent is walled off from the identity it is meant to use.</para>
+        ///
+        /// <para>POST rather than GET on purpose: minting creates a credential at GitHub, so it is not a
+        /// safe method, and POST additionally puts it behind
+        /// <see cref="SecFetchSiteWriteGuardMiddleware"/> — a browser-driven cross-site call is refused
+        /// before it reaches here, while a credential helper (not a browser) passes.</para>
+        /// </summary>
+        [HttpPost("/api/github/token")]
+        public async Task<IActionResult> MintToken(
+            [FromBody] MintTokenRequest request,
+            CancellationToken ct)
+        {
+            // Header rather than body: it keeps the secret out of anything that logs request bodies,
+            // and it is what a credential helper can set most simply.
+            string nonce = Request.Headers["X-MultiTerminal-Launch-Nonce"].ToString();
+
+            TerminalInfo terminal = _broker?.GetConnectedTerminalByLaunchNonce(nonce);
+            if (terminal == null)
+            {
+                // Deliberately identical for "no nonce", "wrong nonce" and "nonce of a terminal that has
+                // since disconnected" — the distinction is only useful to someone probing.
+                return StatusCode(401, new
+                {
+                    error = "This request did not present a valid MultiTerminal launch nonce. "
+                          + "Token minting is available to MT-launched terminals only.",
+                });
+            }
+
+            try
+            {
+                string token = await _tokens
+                    .GetInstallationTokenAsync(request?.InstallationId, ct)
+                    .ConfigureAwait(false);
+
+                // The token is the point of the response, so it is in the body — but nothing here logs
+                // it, and the caller (helper or shim) uses it for one command and discards it.
+                return Ok(new { token, terminal = terminal.Name });
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Configuration and GitHub-side failures. GitHubAppTokenService guarantees these
+                // messages describe the shape of the problem and never carry key material.
+                return StatusCode(503, new { error = ex.Message, terminal = terminal.Name });
+            }
+        }
+
+        /// <summary>Body of a mint request. The nonce travels in a header, not here.</summary>
+        public sealed class MintTokenRequest
+        {
+            /// <summary>
+            /// Which installation to mint for. Omitted means the configured default, which is the
+            /// normal case while one installation covers both repositories.
+            /// </summary>
+            public string InstallationId { get; set; }
+        }
 
         private static string Page(string title, string body, string footer) => $@"<!doctype html>
 <html><head><meta charset=""utf-8""><title>{WebUtility.HtmlEncode(title)}</title>

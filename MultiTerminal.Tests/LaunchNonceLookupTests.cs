@@ -1,0 +1,104 @@
+using System;
+using MultiTerminal.MCPServer.Models;
+using MultiTerminal.MCPServer.Services;
+using Xunit;
+
+namespace MultiTerminal.Tests
+{
+    /// <summary>
+    /// The launch-nonce gate on GitHub token minting (task b42b1883, item 2).
+    ///
+    /// <para>This lookup is the whole authentication story for the mint endpoint. MT's REST API is
+    /// loopback and unauthenticated by design (established by task c9285d2a's security audit), so
+    /// without it any local process could ask MultiTerminal for a token that comments and pushes code
+    /// as the bot. It is a small method carrying a large amount of weight, which is why it has more
+    /// tests than lines.</para>
+    ///
+    /// <para><b>The fact that matters is the empty-nonce one.</b> Rows legitimately carry an empty
+    /// <c>LaunchNonce</c> — a terminal MT did not launch has no nonce to seed — so the obvious
+    /// equality test would let a caller presenting <c>""</c> match every one of them. That is a
+    /// "does the secret identify a terminal" question being answered as "are these two values equal",
+    /// and it is the exact shape of bug the sibling ticket kept producing.</para>
+    /// </summary>
+    public sealed class LaunchNonceLookupTests
+    {
+        [Fact]
+        public void A_connected_terminals_nonce_resolves_to_that_terminal()
+        {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: "NONCE-ALICE");
+
+            TerminalInfo found = broker.GetConnectedTerminalByLaunchNonce("NONCE-ALICE");
+
+            Assert.NotNull(found);
+            Assert.Equal("Alice", found.Name);
+        }
+
+        [Fact]
+        public void An_empty_nonce_matches_nothing_even_though_rows_with_empty_nonces_exist()
+        {
+            // THE fact this gate exists for. "Bob" is an ordinary terminal MT did not launch, so it
+            // carries no nonce. A naive `t.LaunchNonce == nonce` would match Bob for a caller presenting
+            // "" — and the endpoint would then mint a bot token for anything that asked with no
+            // credential at all, while looking like it had authenticated something.
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Bob", docId: "DB", nonce: null);
+
+            Assert.Null(broker.GetConnectedTerminalByLaunchNonce(""));
+            Assert.Null(broker.GetConnectedTerminalByLaunchNonce(null));
+
+            // And Bob really is present and really has no nonce — otherwise the assertions above pass
+            // trivially against an empty roster, which would be a vacuous test of exactly the kind this
+            // codebase keeps catching.
+            TerminalInfo bob = Assert.Single(broker.GetTerminals(), t => t.Name == "Bob");
+            Assert.True(string.IsNullOrEmpty(bob.LaunchNonce));
+        }
+
+        [Fact]
+        public void A_wrong_nonce_matches_nothing()
+        {
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: "NONCE-ALICE");
+
+            Assert.Null(broker.GetConnectedTerminalByLaunchNonce("NONCE-SOMEONE-ELSE"));
+        }
+
+        [Fact]
+        public void A_nonce_is_matched_exactly_and_not_case_insensitively()
+        {
+            // Ordinal comparison, stated as a fact. A case-insensitive match would shrink the effective
+            // keyspace of the secret for no benefit.
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: "NONCE-ALICE");
+
+            Assert.Null(broker.GetConnectedTerminalByLaunchNonce("nonce-alice"));
+        }
+
+        [Fact]
+        public void A_disconnected_terminals_nonce_stops_working()
+        {
+            // A closed terminal must not keep the ability to mint. The nonce outlives the session in
+            // the row, so "is it connected" is the part that expires.
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: "NONCE-ALICE");
+            Assert.NotNull(broker.GetConnectedTerminalByLaunchNonce("NONCE-ALICE"));
+
+            broker.DisconnectTerminalByName("Alice");
+
+            Assert.Null(broker.GetConnectedTerminalByLaunchNonce("NONCE-ALICE"));
+        }
+
+        [Fact]
+        public void One_terminals_nonce_never_resolves_to_another()
+        {
+            // Attribution: the endpoint reports which terminal minted, and that is only meaningful if
+            // the mapping is exact when several terminals are live at once.
+            using var broker = new MessageBroker();
+            broker.RegisterTerminal("Alice", docId: "DA", nonce: "NONCE-ALICE");
+            broker.RegisterTerminal("Charlie", docId: "DC", nonce: "NONCE-CHARLIE");
+
+            Assert.Equal("Alice", broker.GetConnectedTerminalByLaunchNonce("NONCE-ALICE")?.Name);
+            Assert.Equal("Charlie", broker.GetConnectedTerminalByLaunchNonce("NONCE-CHARLIE")?.Name);
+        }
+    }
+}
