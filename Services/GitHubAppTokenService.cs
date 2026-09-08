@@ -29,7 +29,7 @@ namespace MultiTerminal.Services
     /// deterministically with no GitHub App in existence and no network. A service that could only be
     /// exercised against real GitHub would be a service nobody verifies.</para>
     /// </summary>
-    internal sealed class GitHubAppTokenService
+    public sealed class GitHubAppTokenService
     {
         /// <summary>
         /// GitHub rejects a JWT whose lifetime exceeds 10 minutes. Nine is used rather than ten so a

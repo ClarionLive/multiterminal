@@ -168,6 +168,13 @@ namespace MultiTerminal.API
                 builder.Services.AddSingleton<MultiTerminal.Services.GatewayIntegrationService>();
                 builder.Services.AddSingleton<MultiTerminal.Services.RipgrepService>();
                 builder.Services.AddSingleton(SettingsService.Default);
+                // GitHub App identity (task b42b1883). Singletons on purpose, and for different
+                // reasons: the token service holds the installation-token CACHE and its per-installation
+                // mint gates — per-request instances would each mint their own token and defeat both.
+                // The manifest service holds the pending registration STATES, and a state issued by one
+                // instance must be consumable by the callback that arrives on another request.
+                builder.Services.AddSingleton<MultiTerminal.Services.GitHubAppTokenService>();
+                builder.Services.AddSingleton<MultiTerminal.Services.GitHubAppManifestService>();
                 builder.Services.AddSingleton<PermissionRelayService>();
                 builder.Services.AddSingleton(_companionProcessManager);
                 // bb2b0104: these services own their OWN connection to multiterminal.db (one owner per
