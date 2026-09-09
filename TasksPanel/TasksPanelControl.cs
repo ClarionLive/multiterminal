@@ -991,7 +991,10 @@ namespace MultiTerminal.TasksPanel
 
             var terminals = _broker.GetTerminals();
             var terminalNames = terminals?.Select(t => t.Name).ToList() ?? new List<string>();
-            var onlineNames = _broker.GetOnlineAgentNames();
+            // Derived from the SAME snapshot as terminalNames. Two separate broker calls would be two
+            // independent snapshots, and a terminal dying between them puts one payload in
+            // disagreement with itself (task d1151661).
+            var onlineNames = _broker.GetOnlineAgentNames(terminals);
 
             // Get all team member profiles (online + offline) for assignee dropdowns
             var profilesResult = _broker.ListProfiles();

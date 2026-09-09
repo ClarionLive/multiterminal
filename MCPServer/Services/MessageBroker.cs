@@ -2300,7 +2300,12 @@ namespace MultiTerminal.MCPServer.Services
                     return OwnerLiveness.Dead;
 
                 case ProcessProbe.Unreadable:
-                    DebugLogService?.Warning("MessageBroker", $"Owner liveness for '{terminal.Name}' (pid {terminal.OwnerPid}) is UNKNOWN — the start time could not be read. Keeping the name held and falling back to bare pid equality; a name is not released on an unverifiable read.");
+                    // Rate-limited per (name, pid). Since task d1151661 this runs on a UI read path
+                    // (the roster, the panels) rather than only at registration, and Unknown's own
+                    // documented trigger — MT unelevated while claude is elevated — is a PERSISTENT
+                    // condition, not a blip. Unthrottled it is a continuous write-to-disk stream that
+                    // would bury everything else in the log.
+                    WarnUnreadableOwnerOnce(terminal);
                     return OwnerLiveness.Unknown;
 
                 default:
@@ -2308,6 +2313,29 @@ namespace MultiTerminal.MCPServer.Services
                         ? OwnerLiveness.Alive
                         : OwnerLiveness.Dead;   // pid recycled onto a different process
             }
+        }
+
+        /// <summary>Last time an Unreadable-owner warning was emitted, keyed by name + pid.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _unreadableOwnerWarnedAt
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly TimeSpan UnreadableOwnerWarnInterval = TimeSpan.FromMinutes(1);
+
+        /// <summary>
+        /// Emit the "owner liveness is UNKNOWN" warning at most once a minute per (name, pid).
+        /// <para>The condition it reports is persistent, and since d1151661 the probe sits on a read
+        /// path that fires per panel refresh and per activity event, so the honest choice is to keep
+        /// the signal and drop the repetition.</para>
+        /// </summary>
+        private void WarnUnreadableOwnerOnce(TerminalInfo terminal)
+        {
+            string key = $"{terminal?.Name}|{terminal?.OwnerPid}";
+            DateTime now = DateTime.UtcNow;
+            DateTime last = _unreadableOwnerWarnedAt.GetOrAdd(key, DateTime.MinValue);
+            if (now - last < UnreadableOwnerWarnInterval) return;
+            _unreadableOwnerWarnedAt[key] = now;
+
+            DebugLogService?.Warning("MessageBroker", $"Owner liveness for '{terminal?.Name}' (pid {terminal?.OwnerPid}) is UNKNOWN — the start time could not be read. Keeping the name held and falling back to bare pid equality; a name is not released on an unverifiable read. (Further identical warnings suppressed for {UnreadableOwnerWarnInterval.TotalSeconds:F0}s.)");
         }
 
         /// <summary>Outcome of probing a pid for its start time.</summary>
@@ -3395,7 +3423,11 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Get all registered terminals that are online (both connected and have online profiles).
+        /// Get all registered terminals that are reachable: connected, not a temporary subagent,
+        /// with an online profile, and whose owner process is not PROVABLY dead. The Dead-only rule
+        /// (and why Unknown must stay listed) is explained inline below.
+        /// <para>This is the UI-LISTING view. It is the wrong accessor for "is this name taken" —
+        /// see <see cref="GetAllConnectedTerminals"/> and the note at MainForm.PreRegisterTerminal.</para>
         /// </summary>
         public List<TerminalInfo> GetTerminals()
         {
@@ -3403,6 +3435,9 @@ namespace MultiTerminal.MCPServer.Services
             {
                 // Must be connected
                 if (!t.IsConnected) return false;
+
+                // Exclude temporary subagents (e.g. "Agent Alice") from terminal listings
+                if (IsTemporaryAgent(t.Name)) return false;
 
                 // A row whose owner process is PROVABLY gone is a ghost that nothing else clears.
                 // An adopted session has no docId for UnregisterTerminal and no MULTITERMINAL_NAME
@@ -3416,10 +3451,9 @@ namespace MultiTerminal.MCPServer.Services
                 // cross-session pid — makes a LIVE owner read as a corpse. Hiding those would erase
                 // live terminals from the roster and leave them unmessageable, which is strictly
                 // worse than the ghost this filter removes.
+                // Ordered LAST among the cheap predicates: this one enumerates the process table,
+                // so a row the free string check would reject anyway must not pay for a probe.
                 if (ResolveOwnerLiveness(t) == OwnerLiveness.Dead) return false;
-
-                // Exclude temporary subagents (e.g. "Agent Alice") from terminal listings
-                if (IsTemporaryAgent(t.Name)) return false;
 
                 // Check if profile exists and is online
                 if (_profileService.TryGetProfile(t.Name, out var profile))
@@ -3450,10 +3484,23 @@ namespace MultiTerminal.MCPServer.Services
         /// <para>Derived, never stored: it inherits every filter <see cref="GetTerminals"/> applies,
         /// owner-liveness included, so it cannot fall out of date the way the flag did.</para>
         /// </summary>
-        public HashSet<string> GetOnlineAgentNames()
+        public HashSet<string> GetOnlineAgentNames() => GetOnlineAgentNames(GetTerminals());
+
+        /// <summary>
+        /// The projection half of <see cref="GetOnlineAgentNames()"/>, over a list the caller already
+        /// holds.
+        /// <para>Callers that also need the terminal rows themselves must use this overload rather
+        /// than calling both, and not for cost alone: two calls are two INDEPENDENT SNAPSHOTS, so a
+        /// terminal dying between them lands in one and not the other. That renders a single payload
+        /// carrying two different answers to "is this agent online" — which is the exact defect this
+        /// helper exists to remove.</para>
+        /// </summary>
+        public HashSet<string> GetOnlineAgentNames(IEnumerable<TerminalInfo> terminals)
         {
             return new HashSet<string>(
-                GetTerminals().Select(t => t.Name),
+                (terminals ?? Enumerable.Empty<TerminalInfo>())
+                    .Select(t => t?.Name)
+                    .Where(n => !string.IsNullOrEmpty(n)),
                 StringComparer.OrdinalIgnoreCase);
         }
 

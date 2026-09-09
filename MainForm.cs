@@ -2469,11 +2469,20 @@ namespace MultiTerminal
         {
             try
             {
-                // id + to are forward-compatible extras (old channel servers ignore unknown
-                // fields): id lets a future channel server dedup Tier-3 re-deliveries after an
-                // inbox-file belt write; to lets it refuse a POST aimed at a different agent
-                // (stale/reused port — the GH#7 per-recipient loss signature). Plugin-side
-                // enforcement is a follow-up in the marketplace repo.
+                // id + to are enforced by the channel server, NOT merely forward-compatible extras:
+                // id dedups Tier-3 re-deliveries after an inbox-file belt write, and `to` lets the
+                // recipient refuse a POST aimed at a different agent (stale/reused port — the GH#7
+                // per-recipient loss signature). multiterminal-channel.mjs isAddressedToMe() answers
+                // a mismatch with 409 `wrong_recipient`, deliberately non-2xx so MT does not mark it
+                // delivered; 18 assertions cover it (ticket 6b093a22).
+                //
+                // ⚠️ This comment previously read "Plugin-side enforcement is a follow-up in the
+                // marketplace repo". That was stale, and it was not harmless: on task d1151661 TWO
+                // independent review models read it and each filed a HIGH claiming a recycled port
+                // could route one agent's messages into another live session. Verified live the same
+                // day — same port, same live server, 18s apart, only the addressee differing: the
+                // correctly-addressed message was delivered and the mis-addressed one failed three
+                // times and went to the inbox. Keep this comment true; it is load-bearing for review.
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     from = sender,
@@ -3617,7 +3626,10 @@ namespace MultiTerminal
                     // Check if this identity is already active in another terminal
                     if (isTeamLead)
                     {
-                        var activeTerminals = _mcpServer.Broker.GetTerminals();
+                        // RAW view for the same reason as PreRegisterTerminal: a held-but-hidden
+                        // name must still count as in use, or we skip the IdentityPicker and let the
+                        // launch be refused instead (task d1151661).
+                        var activeTerminals = _mcpServer.Broker.GetAllConnectedTerminals();
                         bool nameInUse = activeTerminals.Any(t =>
                             t.Name.Equals(terminalName, StringComparison.OrdinalIgnoreCase) &&
                             t.IsConnected &&
@@ -4080,8 +4092,17 @@ namespace MultiTerminal
         {
             try
             {
-                // Get list of existing terminal names
-                var existingTerminals = _mcpServer.Broker.GetTerminals();
+                // RAW view, deliberately. "Is this name free?" is NOT the same question as
+                // "should this row appear in the Terminals list", and since task d1151661 the two
+                // answers differ: GetTerminals() hides rows whose owner process is provably dead,
+                // but gate (4) holds a name whenever the row carries a LaunchNonce REGARDLESS of
+                // liveness ("held by its (immortal) nonce", MessageBroker.cs:2613). Every
+                // MT-launched row is nonce-bearing, so asking GetTerminals() here would hand out a
+                // name DecideRegistration then refuses — PreRegisterTerminal returns null, the tab
+                // launches with MULTITERMINAL_NAME cleared, and an unnamed terminal is exactly the
+                // shape whose SessionEnd hook early-returns, making it the NEXT ghost. The pool is
+                // scanned in fixed order, so that one ghost would capture every subsequent tab.
+                var existingTerminals = _mcpServer.Broker.GetAllConnectedTerminals();
                 var takenNames = existingTerminals.Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 // Pick first available name from pool
@@ -4108,6 +4129,13 @@ namespace MultiTerminal
                 {
                     return terminalName;
                 }
+
+                // Say WHY. This path returned null silently, and the caller responds by starting the
+                // terminal with a null name — which clears MULTITERMINAL_NAME in the child, and an
+                // unnamed terminal is exactly the shape whose SessionEnd hook early-returns, so it
+                // becomes the next ghost row. A refusal that propagates the fault it came from must
+                // not be invisible (task d1151661; mirrors PreRegisterTerminalWithName's handling).
+                _debugLogService?.Warning("MainForm", $"Pre-registration REFUSED for '{terminalName}' (docId {docId}): {result.Error ?? "no reason given"}. The terminal will start WITHOUT a name unless the caller handles this.");
             }
             catch (Exception ex)
             {

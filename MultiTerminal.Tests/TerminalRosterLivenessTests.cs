@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
 using System.Linq;
@@ -154,6 +155,13 @@ namespace MultiTerminal.Tests
             Assert.NotNull(row.OwnerStartTime);      // precondition: there WAS one to remove
             row.OwnerStartTime = null;
 
+            // The mutation above assumes GetAllConnectedTerminals hands back the LIVE row rather than
+            // a copy. That holds today, but nothing pins it — and if it ever projects copies the write
+            // is discarded, the row stays Alive, and this fact goes VACUOUSLY green while still
+            // claiming to be the load-bearing guard against a two-state filter. Assert the write
+            // actually landed on broker state.
+            Assert.Null(Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Robin").OwnerStartTime);
+
             // THE CLAIM: unverifiable keeps its place in the list.
             Assert.Contains(broker.GetTerminals(), t => t.Name == "Robin");
         }
@@ -225,6 +233,9 @@ namespace MultiTerminal.Tests
             Assert.NotNull(row.OwnerStartTime);
             row.OwnerStartTime = null;              // the documented Unknown shape
 
+            // Same anti-vacuity guard as the listing fact — prove the write reached broker state.
+            Assert.Null(Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Robin").OwnerStartTime);
+
             Assert.Contains("Robin", broker.GetOnlineAgentNames());
         }
 
@@ -261,6 +272,81 @@ namespace MultiTerminal.Tests
             var online = broker.GetOnlineAgentNames();
             Assert.Contains("robin", online);
             Assert.Contains("ROBIN", online);
+        }
+
+        [Fact]
+        public void Hidden_from_the_listing_does_NOT_mean_the_name_is_available()
+        {
+            // ⚠️ PIPELINE RUN 1 / DEBUGGER HIGH. This is the regression the roster filter introduced,
+            // and it is why MainForm.PreRegisterTerminal reads GetAllConnectedTerminals().
+            //
+            // GetTerminals() drops a row whose owner is Dead. Gate (4) does NOT release that name if
+            // the row carries a LaunchNonce — "held by its (immortal) nonce" (MessageBroker.cs:2613) —
+            // and EVERY MT-launched row is nonce-bearing. So the two answers diverge, and MainForm's
+            // name pool sat between them: it built takenNames from the listing, handed out a name the
+            // registration gate then refused, and started the terminal with a NULL name. An unnamed
+            // terminal is precisely the shape whose SessionEnd hook early-returns, so it became the
+            // next ghost — and since the pool is scanned in fixed order, that one ghost captured
+            // every subsequent tab until restart.
+            //
+            // The fix is a distinction, not a filter change: "is this name free" is a different
+            // question from "should this appear in the Terminals list". This fact pins them apart.
+            using var broker = new MessageBroker();
+
+            var child = StartBindableChild();
+            try
+            {
+                // An MT-LAUNCHED row: carries a docId AND a launch nonce, like every real terminal.
+                broker.RegisterTerminal("Robin", docId: "D1", channelPort: 8801, nonce: "N1",
+                                        ownerPid: child.Id);
+
+                var bound = Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Robin");
+                Assert.Equal(child.Id, bound.OwnerPid);
+                Assert.False(string.IsNullOrEmpty(bound.LaunchNonce),
+                    "precondition: the row must be nonce-bearing, or this fact tests the wrong population");
+
+                child.Kill();
+                Assert.True(child.WaitForExit(10000), "child did not exit; the owner is not actually dead");
+            }
+            finally
+            {
+                try { if (!child.HasExited) child.Kill(); } catch { }
+                child.Dispose();
+            }
+
+            // The listing hides it — that is the Owner's symptom, fixed.
+            Assert.DoesNotContain(broker.GetTerminals(), t => t.Name == "Robin");
+
+            // ...but THE NAME IS STILL HELD. A different process claiming it is refused, because the
+            // nonce holds the row regardless of liveness. This is what the name pool must see.
+            var claim = broker.RegisterTerminal("Robin", docId: "D2", channelPort: 8802, nonce: "N2");
+            Assert.False(claim.Success,
+                "gate (4) must still refuse a nonce-bearing row's name after its owner dies — if this "
+                + "ever passes, the filter and the gate agree again and MainForm may use either view.");
+
+            // The raw view is therefore the honest source for name availability, and it still shows it.
+            Assert.Contains(broker.GetAllConnectedTerminals(), t => t.Name == "Robin");
+        }
+
+        [Fact]
+        public void Online_names_derived_from_a_caller_snapshot_match_the_zero_arg_overload()
+        {
+            // The two-overload split exists so a caller holding the rows does not take a SECOND,
+            // independent snapshot — a terminal dying between two calls lands in one and not the
+            // other, putting a single rendered payload in disagreement with itself. Pin that the
+            // projection overload gives the same answer, so nobody "simplifies" the panels back to
+            // two calls on the grounds that it reads more nicely.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Robin", docId: "DR", channelPort: 8801, nonce: "NR");
+            broker.RegisterTerminal("Wren", docId: "DW", channelPort: 8802, nonce: "NW");
+
+            var terminals = broker.GetTerminals();
+            Assert.True(broker.GetOnlineAgentNames(terminals).SetEquals(broker.GetOnlineAgentNames()));
+
+            // Degenerate inputs must not throw on a UI refresh path.
+            Assert.Empty(broker.GetOnlineAgentNames(null));
+            Assert.Empty(broker.GetOnlineAgentNames(new List<MultiTerminal.MCPServer.Models.TerminalInfo>()));
         }
     }
 }
