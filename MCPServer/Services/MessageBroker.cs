@@ -3404,6 +3404,20 @@ namespace MultiTerminal.MCPServer.Services
                 // Must be connected
                 if (!t.IsConnected) return false;
 
+                // A row whose owner process is PROVABLY gone is a ghost that nothing else clears.
+                // An adopted session has no docId for UnregisterTerminal and no MULTITERMINAL_NAME
+                // for the SessionEnd hook's disconnect POST, and there is no reaper — so IsConnected
+                // stays true for MT's whole uptime and the Owner keeps seeing terminals that have
+                // quit (task d1151661; the same population documented on ResolveOwnerLiveness).
+                //
+                // ⚠️ Dead ONLY. Unknown and Unowned MUST stay listed. Collapsing "cannot verify"
+                // into "gone" is the Run 2 defect recorded in ResolveOwnerLiveness's own remarks: a
+                // Win32Exception — MT unelevated while claude is elevated, a protected process, a
+                // cross-session pid — makes a LIVE owner read as a corpse. Hiding those would erase
+                // live terminals from the roster and leave them unmessageable, which is strictly
+                // worse than the ghost this filter removes.
+                if (ResolveOwnerLiveness(t) == OwnerLiveness.Dead) return false;
+
                 // Exclude temporary subagents (e.g. "Agent Alice") from terminal listings
                 if (IsTemporaryAgent(t.Name)) return false;
 

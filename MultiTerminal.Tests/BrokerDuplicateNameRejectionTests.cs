@@ -474,7 +474,14 @@ namespace MultiTerminal.Tests
             // Session 2 claims the released name presenting a pid whose start time cannot be read.
             broker.RegisterTerminal("Lynn", docId: null, channelPort: null, nonce: null, ownerPid: UnbindablePid());
 
-            var lynn = Assert.Single(broker.GetTerminals(), t => t.Name == "Lynn");
+            // RAW accessor deliberately. This fact is ABOUT a row whose owner is a corpse, and since
+            // task d1151661 GetTerminals() — the UI-listing view — hides exactly those, so it can no
+            // longer see the subject of the test. GetAllConnectedTerminals() is the unfiltered door
+            // (its own summary already says GetTerminals's filtering is "wrong for broadcast
+            // audiences"), and it is the right one here for the same reason.
+            // Do NOT "simplify" this back to GetTerminals(): the fact would go VACUOUS rather than
+            // fail, because Assert.Single would stop finding the row it exists to inspect.
+            var lynn = Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Lynn");
 
             // PRECONDITION, asserted so this fact cannot go vacuous: the rebind must NOT have happened,
             // or we are on the already-covered rebound path and the finding is untested. The row still
