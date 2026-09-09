@@ -153,14 +153,26 @@ namespace MultiTerminal.MCPServer.Models
         /// stays null, and the terminal keeps looking healthy — <see cref="IsConnected"/> is true and
         /// <c>get_messages</c> polling works perfectly, because polling does not use the port. The
         /// failure is invisible precisely where an agent would look for it.</para>
-        /// <para>⚠️ Counts ONLY a refusal that carried a channelPort AND landed on a row that has no
-        /// <see cref="ChannelPort"/> of its own. BOTH conjuncts are load-bearing, and the second was
-        /// missing in the first cut (found by four pipeline gates). A refusal is by definition the case
-        /// where the broker could NOT attribute the report to this row, so counting it here records
-        /// someone else's failure against the incumbent — and since a name claim always carries a port
-        /// too (registerPortOnce sends name and port together), a second shell claiming a live name was
-        /// enough to have a HEALTHY terminal reported as dead. Requiring the row to hold no route is
-        /// what makes the count a statement about THIS terminal rather than about whoever was refused.</para>
+        /// <para>⚠️ THREE conditions, not one, and none of them subsumes the others. A refusal reaches
+        /// this field only when it (1) carried a channelPort, (2) landed on a row that has no
+        /// <see cref="ChannelPort"/> of its own, and (3) is not the first refusal of that (name, port)
+        /// pair inside the corroboration window. Each was added because the previous set was shown to
+        /// be insufficient by a real failure, so do not simplify this back:</para>
+        /// <para>(1) alone counted name claims as dead channels. (2) was added by Run 4 after four
+        /// gates independently found that a refusal is BY DEFINITION the case where the broker could
+        /// not attribute the report to this row — and since a name claim always carries a port too
+        /// (registerPortOnce sends name and port together), a second shell claiming a live name marked
+        /// a HEALTHY terminal dead. (3) was added after live testing on 2026-09-09 showed (2) still
+        /// fails during the seconds between a terminal's own registration and its first port report,
+        /// when it legitimately holds no route: 7.0s measured for an MT-launched terminal, 2.4s and
+        /// 2.1s for adopted ones. Any stranger's claim arriving in that window marked it dead, and
+        /// permanently, because the reset needs an accepted port report and a healthy server's
+        /// heartbeat is drift-gated so it never sends another.</para>
+        /// <para>Corroboration works because the two cases differ in kind, not degree: a refused
+        /// channel server never gets its port into the roster, so the drift gate never silences it and
+        /// it re-reports the SAME port every ~30s forever, whereas a stranger's claim is one-shot. The
+        /// cost is that a genuine dead channel is reported one heartbeat late. That is the right trade:
+        /// a health field that fires when nothing is wrong trains its reader to ignore it.</para>
         /// <para>NOT JsonIgnore'd, unlike the nonce and pid: those are check values that must never
         /// leave the process, whereas this exists to be read. It is a count of failures, discloses
         /// nothing an attacker could present as proof, and a health signal nobody can see is the exact

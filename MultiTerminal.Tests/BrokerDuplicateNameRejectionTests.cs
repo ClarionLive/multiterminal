@@ -508,11 +508,112 @@ namespace MultiTerminal.Tests
             Assert.True(zoe.IsConnected);
             Assert.Null(zoe.ChannelPort);
 
-            // THE FIX: it now says so. Without this the two lines above are the entire observable
-            // state, and they are indistinguishable from a terminal that simply has not reported a
-            // port yet.
-            Assert.Equal(1, zoe.ChannelPortRefusalCount);
-            Assert.NotNull(zoe.LastChannelPortRefusalAt);
+            // ITEM 10 CYCLE 1: the FIRST refusal deliberately says nothing. At this instant Zoe is
+            // indistinguishable from a healthy terminal whose own port report has not landed yet and
+            // whose name a stranger just tried to claim — the live false positive this cycle fixes.
+            Assert.Equal(0, zoe.ChannelPortRefusalCount);
+            Assert.Null(zoe.LastChannelPortRefusalAt);
+
+            // What distinguishes the real thing is that it COMES BACK. The drift gate only silences
+            // the heartbeat once the roster shows its port, which for a refused server never happens,
+            // so it re-reports the same port every ~30s forever. A stranger does not.
+            var secondReport = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
+            Assert.False(secondReport.Success);
+
+            var zoeAfter = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+
+            // THE FIX: corroborated, so now it says so. Without this the two lines above are the entire
+            // observable state, and they are indistinguishable from a terminal that simply has not
+            // reported a port yet.
+            Assert.Equal(2, zoeAfter.ChannelPortRefusalCount);
+            Assert.NotNull(zoeAfter.LastChannelPortRefusalAt);
+            Assert.Null(zoeAfter.ChannelPort);
+        }
+
+        [Fact]
+        public void A_single_claim_cannot_mark_a_terminal_that_has_not_reported_its_port_yet()
+        {
+            // ITEM 10, CYCLE 1 — THE FALSIFYING FACT. Run 4's guard ("count only when the incumbent
+            // holds no route") passes every test in this file while still carrying this defect, which
+            // is why it shipped: the guard is correct about the case it was written for and silent
+            // about this one.
+            //
+            // MEASURED LIVE on 2026-09-09 against the deployed build, which is how it was found:
+            //   10:03:42.150  Alice's row registered            (channelPort null)
+            //   10:03:49.045  Alice's channel server accepted   (port set)
+            // Seven seconds during which Alice was healthy, connected, and held no route. An adopted
+            // session has the same window — 2.405s and 2.145s were measured the same afternoon.
+            //
+            // Any name claim landing in that window marked her dead, and PERMANENTLY: clearing the mark
+            // requires an accepted port report, and her channel server's heartbeat is drift-gated, so
+            // having already succeeded once it never sends another. list_terminals would then tell
+            // every agent that a working terminal needed restarting, for MT's entire uptime.
+            using var broker = new MessageBroker();
+
+            // A terminal mid-startup: registered, healthy, port report not yet sent. This is the exact
+            // state of EVERY terminal for the first seconds of its life.
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+
+            var starting = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.True(starting.IsConnected);
+            Assert.Null(starting.ChannelPort);
+
+            // A stranger claims the name. registerPortOnce sends name AND port together, so a claim
+            // carrying a port needs no impostor — a second shell registering as "Zoe" produces exactly
+            // this call, which is how it happens in practice.
+            var claim = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8899, nonce: null, ownerPid: null);
+            Assert.False(claim.Success);   // refused, correctly — that half was never in doubt
+
+            // THE CLAIM: one refusal proves nothing about Zoe. It is somebody else's failure, and Zoe
+            // has not yet had the chance to succeed. She must be unmarked.
+            var afterClaim = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(0, afterClaim.ChannelPortRefusalCount);
+            Assert.Null(afterClaim.LastChannelPortRefusalAt);
+
+            // And the fix must not be "delete the feature". Zoe's own report now arrives and is
+            // accepted, so she ends healthy with a live route and a clean record — the ordinary
+            // startup this whole fact is protecting.
+            var own = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8820, nonce: "NONCE-Z", ownerPid: null);
+            Assert.True(own.Success);
+
+            var healthy = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(8820, healthy.ChannelPort);
+            Assert.Equal(0, healthy.ChannelPortRefusalCount);
+        }
+
+        [Fact]
+        public void Recovery_clears_the_corroboration_history_not_just_the_count()
+        {
+            // ITEM 10, CYCLE 1. A partial tally that survives a successful report is a half-armed trap:
+            // the row's count is reset, so nothing looks wrong, but one refusal is still banked. The
+            // next unrelated one-shot claim then pairs with it and produces a verdict that neither
+            // event on its own justified — the original false positive, reintroduced through the back
+            // door and harder to see because it needs two unrelated causes.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Zoe", docId: "DZ", channelPort: null, nonce: "NONCE-Z", ownerPid: null);
+
+            // One refusal banked (below the threshold, so nothing is written to the row).
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: 8899, nonce: null, ownerPid: null);
+            Assert.Equal(0, Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe").ChannelPortRefusalCount);
+
+            // Zoe's own report lands. Delivery demonstrably works.
+            Assert.True(broker.RegisterTerminal("Zoe", docId: null, channelPort: 8820, nonce: "NONCE-Z", ownerPid: null).Success);
+
+            // Her server restarts, so the row's port is cleared by the owner-change path and she is once
+            // again mid-startup with no route. A stranger claims the name once.
+            broker.RegisterTerminal("Zoe2", docId: "DZ2", channelPort: null, nonce: "NONCE-Z2", ownerPid: null);
+            var zoe = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            zoe.ChannelPort = null;   // what a channel-server exit leaves behind
+
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: 8899, nonce: null, ownerPid: null);
+
+            // THE CLAIM: that is the FIRST refusal of the new run, not the second of the old one.
+            // If the accepted report had cleared only the verdict and not the evidence, this would
+            // read 2 and Zoe would be declared dead on the strength of two strangers months apart.
+            var after = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(0, after.ChannelPortRefusalCount);
+            Assert.Null(after.LastChannelPortRefusalAt);
         }
 
         [Fact]
@@ -541,13 +642,29 @@ namespace MultiTerminal.Tests
             // three sibling facts went red.) So drive the OTHER side in the same fact: a port report,
             // refused for the identical reason by the identical branch, MUST count. What is being
             // pinned is the discrimination, not either value on its own.
+            // ITEM 10 CYCLE 1: it takes a corroborated pair to count now, so drive the same port twice.
+            // That is not a weakening of this fact — the discrimination it pins is unchanged, because
+            // the name claim above never counts NO MATTER HOW OFTEN it is repeated (it carries no port),
+            // while port reports do once corroborated. The two sides still differ, and still for the
+            // reason this fact exists to state.
+            Assert.False(broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null).Success);
             var report = broker.RegisterTerminal("Zoe", docId: null, channelPort: 8815, nonce: null, ownerPid: null);
 
             Assert.False(report.Success);   // same gate, same refusal...
 
             var afterReport = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
-            Assert.Equal(1, afterReport.ChannelPortRefusalCount);   // ...but this one is a dead channel
+            Assert.Equal(2, afterReport.ChannelPortRefusalCount);   // ...but this one is a dead channel
             Assert.NotNull(afterReport.LastChannelPortRefusalAt);
+
+            // The other half of the discrimination, made explicit: repeating the PORTLESS name claim
+            // cannot corroborate anything, because corroboration is keyed on (name, port) and a claim
+            // carrying no port never enters the ledger at all. Without this the fact above would be
+            // consistent with "any two refusals count", which is the defect one cycle removed.
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: null, nonce: null, ownerPid: null);
+            broker.RegisterTerminal("Zoe", docId: null, channelPort: null, nonce: null, ownerPid: null);
+
+            var afterMoreClaims = Assert.Single(broker.GetTerminals(), t => t.Name == "Zoe");
+            Assert.Equal(2, afterMoreClaims.ChannelPortRefusalCount);   // unchanged by the claims
         }
 
         [Fact]

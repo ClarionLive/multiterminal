@@ -1836,6 +1836,63 @@ namespace MultiTerminal.MCPServer.Services
         // now genuinely atomic, because the inner call no longer runs unsynchronized.
         private readonly object _registrationLock = new object();
 
+        // Corroboration ledger for refused channel-port reports (task c9285d2a item 10, cycle 1).
+        //
+        // WHY THIS EXISTS RATHER THAN A COUNTER ON THE INCUMBENT'S ROW. Run 4 established that a
+        // refusal cannot be attributed to the row it names — that is what a refusal IS — and narrowed
+        // the count with "and the incumbent holds no route". Live testing on 2026-09-09 showed the
+        // narrowing is not enough: a healthy terminal has NO route for the few seconds between its own
+        // register_terminal and its channel server's port report (measured 7.0s for an MT-launched
+        // terminal, 2.4s and 2.1s for adopted ones), and any stranger's name claim arriving in that
+        // window marked it dead. Permanently, because the reset needs an accepted port report and a
+        // healthy server's heartbeat is drift-gated so it never sends another one.
+        //
+        // The fix is to stop writing to the incumbent on a single refusal at all, and to discriminate
+        // on a property the two cases genuinely differ in rather than on a proxy:
+        //
+        //   the real condition REPEATS  — an old channel server whose reports are refused never gets
+        //                                 its port into the roster, so the drift gate never silences
+        //                                 it and it re-reports the SAME port every ~30s, indefinitely;
+        //   the false positive DOES NOT — a stranger's name claim is one-shot.
+        //
+        // So a refusal is recorded here, keyed on the (name, port) pair the caller presented, and only
+        // once the same pair has been refused CorroborationThreshold times inside the window does
+        // anything land on the row. (name, port) is a safe key without the pid: a port has one owning
+        // process, and an old channel server presents neither nonce nor pid, so the pid is exactly what
+        // is unavailable in the population this signal exists to detect.
+        //
+        // COST, stated honestly: the genuine signal is delayed by one heartbeat (~30s) rather than
+        // firing on the first refusal. That is the price of not crying dead on a terminal that is
+        // merely three seconds old, and it is the right trade — a health field that fires when nothing
+        // is wrong trains its reader to ignore it, which is worse than no field.
+        //
+        // Guarded by _registrationLock: every read and write below happens inside DecideRegistration,
+        // which the class contract requires to be called with that lock held. A plain Dictionary is
+        // therefore correct; a ConcurrentDictionary would not make the read-modify-write atomic anyway.
+        private readonly Dictionary<string, PortRefusalRecord> _portRefusalLedger =
+            new Dictionary<string, PortRefusalRecord>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Refusals must reach this count inside <see cref="ChannelPortRefusalWindow"/> before a row is marked.</summary>
+        private const int ChannelPortRefusalCorroborationThreshold = 2;
+
+        /// <summary>
+        /// How long a refusal stays eligible to corroborate a later one. Comfortably wider than the
+        /// channel server's ~30s re-report interval (so a genuinely skewed server corroborates on its
+        /// next heartbeat) and far narrower than MT's uptime (so two unrelated one-shot claims hours
+        /// apart never add up to a false verdict).
+        /// </summary>
+        private static readonly TimeSpan ChannelPortRefusalWindow = TimeSpan.FromMinutes(5);
+
+        /// <summary>One (name, port) pair's refusal history inside the current window.</summary>
+        private sealed class PortRefusalRecord
+        {
+            public int Count { get; set; }
+
+            public DateTime FirstAtUtc { get; set; }
+
+            public DateTime LastAtUtc { get; set; }
+        }
+
         /// <summary>
         /// Returns a name safe to use for a fresh terminal registration.
         ///
@@ -2047,6 +2104,70 @@ namespace MultiTerminal.MCPServer.Services
         /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
         /// session's claim.</para>
         /// </summary>
+        /// <summary>
+        /// Records one refused port report and returns how many times this exact (name, port) pair has
+        /// been refused inside the current window — the caller compares that against
+        /// <see cref="ChannelPortRefusalCorroborationThreshold"/>. Task c9285d2a item 10, cycle 1.
+        /// </summary>
+        /// <remarks>
+        /// The window is measured from the FIRST refusal in the run, not the most recent, so a caller
+        /// retrying forever cannot hold a run open indefinitely by sliding the deadline ahead of itself.
+        /// A run that ages out simply starts a new one; nothing is lost, because the condition being
+        /// detected re-reports every ~30s and will re-corroborate almost immediately.
+        /// MUST be called with <see cref="_registrationLock"/> held.
+        /// </remarks>
+        private int RecordPortRefusal(string name, int port)
+        {
+            DateTime now = DateTime.UtcNow;
+            string key = $"{name}|{port}";
+
+            if (!_portRefusalLedger.TryGetValue(key, out PortRefusalRecord record)
+                || now - record.FirstAtUtc > ChannelPortRefusalWindow)
+            {
+                record = new PortRefusalRecord { Count = 0, FirstAtUtc = now };
+                _portRefusalLedger[key] = record;
+            }
+
+            record.Count++;
+            record.LastAtUtc = now;
+
+            PrunePortRefusals(now);
+
+            return record.Count;
+        }
+
+        /// <summary>
+        /// Drops every refusal record for a name. Called when a port report is ACCEPTED, so recovery
+        /// clears the evidence and not merely the verdict. MUST be called with
+        /// <see cref="_registrationLock"/> held.
+        /// </summary>
+        private void ClearPortRefusals(string name)
+        {
+            string prefix = name + "|";
+            var stale = _portRefusalLedger.Keys
+                .Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (string key in stale)
+                _portRefusalLedger.Remove(key);
+        }
+
+        /// <summary>
+        /// Discards records whose window has closed, so the ledger cannot grow without bound on a
+        /// long-lived MT. Cheap: it runs only on the refusal path, which is rare by construction.
+        /// MUST be called with <see cref="_registrationLock"/> held.
+        /// </summary>
+        private void PrunePortRefusals(DateTime now)
+        {
+            var expired = _portRefusalLedger
+                .Where(kv => now - kv.Value.FirstAtUtc > ChannelPortRefusalWindow)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (string key in expired)
+                _portRefusalLedger.Remove(key);
+        }
+
         private OwnerLiveness ResolveOwnerLiveness(TerminalInfo terminal)
         {
             if (terminal?.OwnerPid == null) return OwnerLiveness.Unowned;
@@ -2420,11 +2541,34 @@ namespace MultiTerminal.MCPServer.Services
                 // working because polling never uses the port, so the terminal looks fine in exactly
                 // the place anyone would check. The recorded count is what turns a silent failure into
                 // one a person or an agent can see (surfaced by list_terminals).
+                // ⚠️ RUN 4's GUARD WAS NECESSARY BUT NOT SUFFICIENT — item 10, cycle 1. Keeping
+                // "the incumbent holds no route" is still right: the terminal this signal describes has
+                // no route BECAUSE its own reports are being refused, and a row holding a live port is
+                // demonstrably not dead whoever else was refused. But that conjunct alone still marks a
+                // healthy terminal during the seconds before its first port report lands. Corroboration
+                // is the second half: only a REPEATED refusal of the same (name, port) can be the
+                // terminal's own server retrying, because a stranger's claim does not come back.
+                //
+                // Both conjuncts are load-bearing and neither subsumes the other. Drop the route check
+                // and a persistent impostor marks a port-holding incumbent; drop corroboration and a
+                // one-shot claim marks a three-second-old terminal.
                 if (channelPort.HasValue && existingByName.ChannelPort == null)
                 {
-                    existingByName.ChannelPortRefusalCount++;
-                    existingByName.LastChannelPortRefusalAt = DateTime.UtcNow;
-                    DebugLogService?.Warning("MessageBroker", $"CHANNEL PORT REPORT REFUSED for '{name}' (port {channelPort.Value}, refusal #{existingByName.ChannelPortRefusalCount}): push delivery is DEAD for this terminal and polling will hide it. If this repeats every ~30s, the terminal's channel server predates the launch-nonce echo (plugin 7875686) — restart that terminal. task c9285d2a");
+                    int corroborated = RecordPortRefusal(name, channelPort.Value);
+
+                    if (corroborated >= ChannelPortRefusalCorroborationThreshold)
+                    {
+                        existingByName.ChannelPortRefusalCount = corroborated;
+                        existingByName.LastChannelPortRefusalAt = DateTime.UtcNow;
+                        DebugLogService?.Warning("MessageBroker", $"CHANNEL PORT REPORT REFUSED for '{name}' (port {channelPort.Value}, refusal #{corroborated} within {ChannelPortRefusalWindow.TotalMinutes:0}min): push delivery is DEAD for this terminal and polling will hide it. The same port has now been refused repeatedly, which a one-off name claim cannot produce — this is the terminal's own channel server, and it predates the launch-nonce echo (plugin 7875686). Restart that terminal. task c9285d2a");
+                    }
+                    else
+                    {
+                        // Deliberately NOT a verdict, and deliberately not written to the row. One
+                        // refusal is indistinguishable from a stranger arriving during a healthy
+                        // terminal's startup window, so the only honest thing to say is what happened.
+                        DebugLogService?.Info("MessageBroker", $"Channel port report for '{name}' (port {channelPort.Value}) refused, refusal {corroborated} of {ChannelPortRefusalCorroborationThreshold} needed before this counts as a dead channel. Not attributed to '{name}' yet — a single refusal cannot distinguish this terminal's own stale channel server from someone else claiming its name. task c9285d2a");
+                    }
                 }
                 LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
 
@@ -2473,6 +2617,13 @@ namespace MultiTerminal.MCPServer.Services
                         existingByName.ChannelPortRefusalCount = 0;
                         existingByName.LastChannelPortRefusalAt = null;
                     }
+
+                    // Clear the corroboration history too, unconditionally — not just when the row was
+                    // already marked (item 10, cycle 1). A partial tally that survives a successful
+                    // report is a half-armed trap: one refusal recorded before recovery would pair with
+                    // one unrelated claim afterwards and produce a verdict neither event justified.
+                    // Recovery must reset the evidence, not only the conclusion.
+                    ClearPortRefusals(existingByName.Name);
                 }
 
                 // Update DocId if provided AND existing DocId is empty (don't overwrite valid pre-registration)
