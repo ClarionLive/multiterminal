@@ -2476,13 +2476,9 @@ namespace MultiTerminal
                 // a mismatch with 409 `wrong_recipient`, deliberately non-2xx so MT does not mark it
                 // delivered; 18 assertions cover it (ticket 6b093a22).
                 //
-                // ⚠️ This comment previously read "Plugin-side enforcement is a follow-up in the
-                // marketplace repo". That was stale, and it was not harmless: on task d1151661 TWO
-                // independent review models read it and each filed a HIGH claiming a recycled port
-                // could route one agent's messages into another live session. Verified live the same
-                // day — same port, same live server, 18s apart, only the addressee differing: the
-                // correctly-addressed message was delivered and the mis-addressed one failed three
-                // times and went to the inbox. Keep this comment true; it is load-bearing for review.
+                // ⚠️ KEEP THIS TRUE. It previously claimed enforcement was still "a follow-up", and
+                // reviewers reasoned from it: two independent models each filed a HIGH about recycled
+                // ports on the strength of that one stale line. Full account on task d1151661.
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     from = sender,
@@ -4096,7 +4092,9 @@ namespace MultiTerminal
                 // "should this row appear in the Terminals list", and since task d1151661 the two
                 // answers differ: GetTerminals() hides rows whose owner process is provably dead,
                 // but gate (4) holds a name whenever the row carries a LaunchNonce REGARDLESS of
-                // liveness ("held by its (immortal) nonce", MessageBroker.cs:2613). Every
+                // liveness ("held by its (immortal) nonce" — see existingCarriesProof in
+                // MessageBroker.DecideRegistration gate (4); named, not line-numbered, because a line
+                // number is the kind of reference that goes stale silently). Every
                 // MT-launched row is nonce-bearing, so asking GetTerminals() here would hand out a
                 // name DecideRegistration then refuses — PreRegisterTerminal returns null, the tab
                 // launches with MULTITERMINAL_NAME cleared, and an unnamed terminal is exactly the

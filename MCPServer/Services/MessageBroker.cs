@@ -2288,13 +2288,23 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private OwnerLiveness ResolveOwnerLiveness(TerminalInfo terminal)
         {
-            if (terminal?.OwnerPid == null) return OwnerLiveness.Unowned;
+            // Snapshot both halves ONCE. The pair is written non-atomically by the rebind path
+            // (OwnerPid, then OwnerStartTime) on a row already published in _terminals, under
+            // _registrationLock — which this reader does not take. Before task d1151661 that tear was
+            // observed only by DecideRegistration, which DOES hold the lock, so it was unobservable;
+            // putting liveness on a read path made this the sole observer. Re-reading the fields
+            // separately could pair a new pid with the previous owner's start time and report a LIVE
+            // row as Dead for one frame. Read-side only: nothing here changes the write path.
+            int? ownerPid = terminal?.OwnerPid;
+            DateTime? ownerStart = terminal?.OwnerStartTime;
+
+            if (ownerPid == null) return OwnerLiveness.Unowned;
 
             // A pid is only ever bound together with a verified start time (see the stamp sites), so a
             // row carrying a pid without one predates that rule. Unverifiable, not provably gone.
-            if (terminal.OwnerStartTime == null) return OwnerLiveness.Unknown;
+            if (ownerStart == null) return OwnerLiveness.Unknown;
 
-            switch (ReadProcessStartTime(terminal.OwnerPid.Value, out DateTime startTime))
+            switch (ReadProcessStartTime(ownerPid.Value, out DateTime startTime))
             {
                 case ProcessProbe.NotRunning:
                     return OwnerLiveness.Dead;
@@ -2309,7 +2319,7 @@ namespace MultiTerminal.MCPServer.Services
                     return OwnerLiveness.Unknown;
 
                 default:
-                    return startTime == terminal.OwnerStartTime.Value
+                    return startTime == ownerStart.Value
                         ? OwnerLiveness.Alive
                         : OwnerLiveness.Dead;   // pid recycled onto a different process
             }
@@ -2331,9 +2341,22 @@ namespace MultiTerminal.MCPServer.Services
         {
             string key = $"{terminal?.Name}|{terminal?.OwnerPid}";
             DateTime now = DateTime.UtcNow;
-            DateTime last = _unreadableOwnerWarnedAt.GetOrAdd(key, DateTime.MinValue);
-            if (now - last < UnreadableOwnerWarnInterval) return;
-            _unreadableOwnerWarnedAt[key] = now;
+
+            // AddOrUpdate rather than GetOrAdd-then-indexer: the latter is a read-modify-write that
+            // lets two concurrent refreshes both claim the token. Harmless for a log throttle, but
+            // saying so deliberately costs nothing and the file's own _portRefusalLedger sets that
+            // discipline 300 lines up.
+            bool warn = false;
+            _unreadableOwnerWarnedAt.AddOrUpdate(
+                key,
+                _ => { warn = true; return now; },
+                (_, last) =>
+                {
+                    if (now - last < UnreadableOwnerWarnInterval) return last;
+                    warn = true;
+                    return now;
+                });
+            if (!warn) return;
 
             DebugLogService?.Warning("MessageBroker", $"Owner liveness for '{terminal?.Name}' (pid {terminal?.OwnerPid}) is UNKNOWN — the start time could not be read. Keeping the name held and falling back to bare pid equality; a name is not released on an unverifiable read. (Further identical warnings suppressed for {UnreadableOwnerWarnInterval.TotalSeconds:F0}s.)");
         }
@@ -3494,11 +3517,17 @@ namespace MultiTerminal.MCPServer.Services
         /// terminal dying between them lands in one and not the other. That renders a single payload
         /// carrying two different answers to "is this agent online" — which is the exact defect this
         /// helper exists to remove.</para>
+        /// <para>⚠️ PRECONDITION: <paramref name="reachableTerminals"/> MUST be a
+        /// <see cref="GetTerminals"/> result. This method PROJECTS, it does not filter — the liveness
+        /// guarantee lives in the argument, not here. Passing
+        /// <see cref="GetAllConnectedTerminals"/> compiles perfectly and reports dead owners and
+        /// temporary "Agent *" subagents as online, which is precisely the defect this helper was
+        /// added to remove.</para>
         /// </summary>
-        public HashSet<string> GetOnlineAgentNames(IEnumerable<TerminalInfo> terminals)
+        public HashSet<string> GetOnlineAgentNames(IEnumerable<TerminalInfo> reachableTerminals)
         {
             return new HashSet<string>(
-                (terminals ?? Enumerable.Empty<TerminalInfo>())
+                (reachableTerminals ?? Enumerable.Empty<TerminalInfo>())
                     .Select(t => t?.Name)
                     .Where(n => !string.IsNullOrEmpty(n)),
                 StringComparer.OrdinalIgnoreCase);
