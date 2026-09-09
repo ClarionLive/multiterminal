@@ -959,13 +959,20 @@ namespace MultiTerminal.Tests
                 string trimmed = line.TrimStart();
 
                 if (trimmed.StartsWith("//", StringComparison.Ordinal)) continue;
-                if (!trimmed.Contains("Broker.RegisterTerminal", StringComparison.Ordinal)) continue;
+
+                // ⚠️ NORMALISE THE NULL-CONDITIONAL RECEIVER BEFORE MATCHING (Run 6 verifier finding).
+                // The census used to filter on the literal "Broker.RegisterTerminal", so every
+                // `Broker?.RegisterTerminal` site was invisible to it — including MainForm.cs:6619,
+                // which registers the REAL name "Oracle" and discards the result. A census whose name
+                // asserts "no site does X" while being structurally unable to see a whole call SHAPE
+                // is worse than no census: it reports a safety it never checked, and it had already
+                // been "falsified" once against a non-`?.` fixture, which proved only that it could
+                // see the shape it was already looking at.
+                if (!IsRegisterTerminalCall(trimmed)) continue;
 
                 // A call whose result is read starts with an assignment ("var result =", "terminalName =").
                 // A discarded one begins directly with the receiver.
-                bool resultIsRead = trimmed.Contains("=", StringComparison.Ordinal)
-                                    && trimmed.IndexOf('=') < trimmed.IndexOf("Broker.RegisterTerminal", StringComparison.Ordinal);
-                if (resultIsRead) continue;
+                if (RegisterResultIsRead(trimmed)) continue;
 
                 // "Unassigned" is a deliberate shared sentinel and is exempted inside gate (4), so it
                 // can never be refused — discarding its result is safe.
@@ -1001,16 +1008,67 @@ namespace MultiTerminal.Tests
             string read = "terminalName = PreRegisterTerminalWithName(doc.DocId, terminalName, isTeamLead);";
             string sentinel = "_mcpServer.Broker.RegisterTerminal(\"Unassigned\", doc.DocId);";
 
+            // ⚠️ RUN 6. Every fixture above uses a bare `.` receiver, so this fact proved only that the
+            // rule could see the shape it was already looking at. The real MainForm offender wrote
+            // `Broker?.RegisterTerminal` and was invisible to both the rule AND to this falsifier —
+            // a blind spot cannot be found by fixtures that share it. These two carry the `?.` form.
+            string discardedNullConditional = "_mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);";
+            string readNullConditional = "var regResult = _mcpServer?.Broker?.RegisterTerminal(agentName, agentDocId);";
+
             Assert.False(ResultIsRead(discarded), "A bare call must be recognised as discarding its result.");
             Assert.True(ResultIsRead(read) || !read.Contains("Broker.RegisterTerminal", StringComparison.Ordinal),
                 "An assigned call must not be flagged.");
             Assert.True(sentinel.Contains("\"Unassigned\"", StringComparison.Ordinal),
                 "The sentinel exemption must key on the literal the gate exempts.");
 
-            static bool ResultIsRead(string trimmed) =>
-                trimmed.Contains("=", StringComparison.Ordinal)
-                && trimmed.IndexOf('=') < trimmed.IndexOf("Broker.RegisterTerminal", StringComparison.Ordinal);
+            Assert.True(Matches(discardedNullConditional),
+                "A null-conditional receiver must still be RECOGNISED as a RegisterTerminal call — this is "
+                + "the exact miss that let MainForm.cs:6619 hide from the census for a whole run.");
+            Assert.False(ResultIsRead(discardedNullConditional),
+                "A discarded `?.` call must be flagged, not silently skipped.");
+            Assert.True(ResultIsRead(readNullConditional),
+                "An assigned `?.` call must NOT be flagged — widening the matcher must not turn every "
+                + "null-conditional site into a false offender. Note this is the half that breaks if the "
+                + "IndexOf is left matching the un-normalised literal: it returns -1, which is less than "
+                + "the '=' index, so the call reads as discarded and the census cries wolf on a safe site.");
+
+            static bool Matches(string trimmed) => IsRegisterTerminalCall(trimmed);
+
+            static bool ResultIsRead(string trimmed) => RegisterResultIsRead(trimmed);
         }
+
+        // ⚠️ THE CENSUS AND ITS FALSIFIER MUST SHARE ONE IMPLEMENTATION, not two copies of the same
+        // idea. Found while falsifying the Run 6 fix: reverting ONLY the census's normalisation made
+        // the census go red (correctly, naming two safe `?.` sites it now mis-read as discarding) while
+        // the falsifier stayed GREEN, because the falsifier carried its own private copy of the rule.
+        // A falsifier that cannot fail when the thing it certifies breaks is decoration. These two
+        // helpers are the single definition both now go through, so the drift is not possible.
+
+        /// <summary>
+        /// Whether a source line calls <c>Broker.RegisterTerminal</c>, INCLUDING through a
+        /// null-conditional receiver (<c>Broker?.RegisterTerminal</c>). Normalising <c>?.</c> to
+        /// <c>.</c> is the whole point: matching the bare literal is what hid MainForm.cs:6619 for a
+        /// full run.
+        /// </summary>
+        private static bool IsRegisterTerminalCall(string trimmed) =>
+            Canonicalise(trimmed).Contains("Broker.RegisterTerminal", StringComparison.Ordinal);
+
+        /// <summary>
+        /// Whether the call's result is assigned rather than discarded. Both the '=' search and the
+        /// method-name search run on the CANONICAL form — an <c>IndexOf</c> against the un-normalised
+        /// literal returns -1 on a <c>?.</c> line, which is less than any '=' index, so every safe
+        /// null-conditional site would read as discarded and the census would cry wolf.
+        /// </summary>
+        private static bool RegisterResultIsRead(string trimmed)
+        {
+            string canonical = Canonicalise(trimmed);
+            return canonical.Contains("=", StringComparison.Ordinal)
+                   && canonical.IndexOf('=') < canonical.IndexOf("Broker.RegisterTerminal", StringComparison.Ordinal);
+        }
+
+        /// <summary>Collapses null-conditional receivers so one literal matches both call shapes.</summary>
+        private static string Canonicalise(string trimmed) =>
+            trimmed.Replace("?.", ".", StringComparison.Ordinal);
 
         /// <summary>Walks up from the test binary to the repo root to find a source file.</summary>
         private static string LocateRepoFile(string fileName)

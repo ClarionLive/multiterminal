@@ -6615,8 +6615,23 @@ namespace MultiTerminal
                 // re-bind a saved "Oracle" position to this live instance.
                 _oracleService.Start(_dockPanel);
 
-                // Register Oracle terminal with the same docId so broker and ConPTY are in sync
-                _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
+                // Register Oracle terminal with the same docId so broker and ConPTY are in sync.
+                //
+                // Run 6: this discarded the RegisterResult. "Oracle" is a REAL name, not the exempt
+                // "Unassigned" sentinel, so gate (4) applies to it — and a refusal here would leave
+                // Oracle running under a name the broker had rejected: visible in the dock, addressable
+                // by nobody, with nothing logged. Exactly the class 4c3f60d set out to eliminate, missed
+                // because the census that guarantees its absence could not see a `?.` receiver.
+                //
+                // Oracle is a singleton with a fixed name, so there is no placeholder to fall back to
+                // the way PreRegisterTerminalWithName does. The honest handling is therefore to say so:
+                // Oracle still starts (it is useful locally even when unaddressable), but the refusal
+                // reaches the log with the broker's own sentence instead of vanishing.
+                var oracleRegistration = _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
+                if (oracleRegistration != null && !oracleRegistration.Success)
+                {
+                    _debugLogService?.Warning("MainForm", $"Registration of '{OracleService.OracleName}' was refused by the broker. Oracle is running but is NOT addressable — messages to it will not route. Broker said: {oracleRegistration.Error ?? "(no reason given)"}");
+                }
 
                 // Apply user's font size and theme to Oracle's terminal
                 float oracleFontSize = _settings?.GetTerminalFontSize() ?? 10f;
