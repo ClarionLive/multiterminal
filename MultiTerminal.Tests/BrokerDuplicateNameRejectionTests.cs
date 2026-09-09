@@ -1077,25 +1077,28 @@ namespace MultiTerminal.Tests
                     + "row marked connected while holding the port of a channel server that had exited.\n"
                     + "Ports 8800-8899 are recycled, so that port may already belong to a different live\n"
                     + "terminal whose channel server does not check the envelope's `to` field.");
+
+                // ⚠️ THE PORT CLEAR IS PART OF THE SAME OBLIGATION, for BOTH methods. The corruption is a
+                // torn write across the PAIR — a row is connected WITH a route or disconnected WITHOUT
+                // one, and the mixture is the defect — so checking only IsConnected would let the
+                // `ChannelPort = null` line be deleted outright without anything noticing.
+                //
+                // Checking BOTH methods is itself a Run 6 finding: the two teardown paths disagreed.
+                // DisconnectTerminalByName nulled the port and UnregisterTerminal did not, and since
+                // rows are never removed from _terminals, a closed tab left a row holding a recycled
+                // port that a later name-match registration could inherit. An asymmetry between two
+                // methods that mean the same thing is exactly what a census is for.
+                Assert.True(body.Contains("ChannelPort = null", StringComparison.Ordinal),
+                    $"{signature} does not clear ChannelPort. Both teardown paths must, because a row is "
+                    + "never removed from _terminals — leaving the port set means a stale route survives "
+                    + "the session that owned it, and the 8800-8899 allocator may already have reissued "
+                    + "that number to a different live terminal.");
+
+                Assert.True(MutationIsInsideRegistrationLock(body, "ChannelPort = null"),
+                    $"{signature} clears ChannelPort OUTSIDE the _registrationLock block. It must be "
+                    + "written atomically with IsConnected — the whole defect is a torn write across "
+                    + "that pair.");
             }
-
-            // ⚠️ THE PORT CLEAR IS CHECKED SEPARATELY, and that is not redundancy. The race corrupts the
-            // PAIR — a row is connected WITH a route or disconnected WITHOUT one, and the mixture is the
-            // corruption. An earlier version of this census checked only IsConnected, so deleting the
-            // `ChannelPort = null` line entirely — the single line whose own comment says it exists to
-            // stop delivery to a dead channel server — would not have been noticed.
-            int disconnectStart = Array.FindIndex(lines, l => l.Contains("public bool DisconnectTerminalByName(", StringComparison.Ordinal));
-            string disconnectBody = string.Join("\n", lines[disconnectStart..Math.Min(disconnectStart + 80, lines.Length)]
-                .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
-
-            Assert.True(disconnectBody.Contains("ChannelPort = null", StringComparison.Ordinal),
-                "DisconnectTerminalByName no longer clears ChannelPort. That line is what stops messages "
-                + "being delivered to a port whose channel server has exited and which the 8800-8899 "
-                + "allocator may already have reissued to a different live terminal.");
-
-            Assert.True(MutationIsInsideRegistrationLock(disconnectBody, "ChannelPort = null"),
-                "DisconnectTerminalByName clears ChannelPort OUTSIDE the _registrationLock block. It must "
-                + "be written atomically with IsConnected — the whole defect is a torn write across that pair.");
         }
 
         /// <summary>

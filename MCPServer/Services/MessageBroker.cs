@@ -3243,6 +3243,21 @@ namespace MultiTerminal.MCPServer.Services
                 if (terminal != null)
                 {
                     terminal.IsConnected = false;
+
+                    // ⚠️ CLEAR THE ROUTE TOO — the two teardown paths used to disagree (Run 6 debugger,
+                    // MEDIUM). DisconnectTerminalByName nulls the port "to prevent delivery to a dead
+                    // channel server"; this path did not, and rows are never removed from _terminals,
+                    // so a closed tab left a row holding a port from the recycled 8800-8899 range. A
+                    // later name-match registration that presents no port revives that row and inherits
+                    // it, and the owner-change port clear only fires when previousOwnerDied — false for
+                    // a row that never bound an owner pid. Net effect: the exact misdelivery the other
+                    // path's comment says the null exists to prevent.
+                    //
+                    // There is no reason a UI-side teardown may keep a route that a session-end teardown
+                    // may not: in both cases the session owning that channel server is going away. A
+                    // terminal that comes back gets a port from its own channel server's next report,
+                    // which is the only source that can prove the port is live.
+                    terminal.ChannelPort = null;
                 }
             }
 
