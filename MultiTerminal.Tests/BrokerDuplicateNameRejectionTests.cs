@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using MultiTerminal.MCPServer.Services;
 using Xunit;
 
@@ -919,6 +923,211 @@ namespace MultiTerminal.Tests
             // same row. Nobody should be holding a success that refers to a row which no longer decides
             // delivery.
             Assert.Equal(racers, results.Count);
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 6, debugger HIGH — the lock enrolled half the writers.
+        ///
+        /// <para>4c3f60d added <c>_registrationLock</c> to fix a check-then-act on
+        /// <c>IsConnected</c>/<c>ChannelPort</c>, and enrolled only the REGISTRATION writers.
+        /// <c>DisconnectTerminalByName</c> mutates the same two fields, so the race stayed wide open
+        /// from the other side — through the same window the 16-racer fact above documents, which is
+        /// several hundred lines and two process-probe syscalls long.</para>
+        ///
+        /// <para>This pairing is not exotic. It happens at EVERY SESSION END: the SessionEnd hook POSTs
+        /// /api/messaging/disconnect while the channel server's 30s drift heartbeat POSTs
+        /// /api/messaging/register, on independent thread-pool threads.</para>
+        ///
+        /// <para>The end state that must not occur is a row reading CONNECTED while holding the port of
+        /// a channel server that has exited. Ports 8800-8899 are recycled, so that number may already
+        /// belong to a different live terminal whose channel server does not check the envelope's
+        /// <c>to</c> field — one agent's messages delivered into another's session, with nothing
+        /// reporting it. Clearing the port is the single line that prevents that, and the race was
+        /// overwriting exactly it.</para>
+        /// </summary>
+        [Fact]
+        public void A_disconnect_is_never_overwritten_by_a_concurrent_registration()
+        {
+            const int rounds = 40;
+
+            for (int round = 0; round < rounds; round++)
+            {
+                using var broker = new MessageBroker();
+
+                // A live MT-launched terminal holding a route.
+                broker.RegisterTerminal("Lynn", docId: "DL", channelPort: 8840, nonce: "NL");
+
+                // Its channel server's drift heartbeat and its SessionEnd disconnect, released together.
+                using var start = new Barrier(2);
+                Exception failure = null;
+
+                var register = new Thread(() =>
+                {
+                    try
+                    {
+                        start.SignalAndWait();
+                        broker.RegisterTerminal("Lynn", docId: null, channelPort: 8842, nonce: "NL");
+                    }
+                    catch (Exception ex) { failure = ex; }
+                });
+
+                var disconnect = new Thread(() =>
+                {
+                    try
+                    {
+                        start.SignalAndWait();
+                        broker.DisconnectTerminalByName("Lynn");
+                    }
+                    catch (Exception ex) { failure = ex; }
+                });
+
+                register.IsBackground = true;
+                disconnect.IsBackground = true;
+                register.Start();
+                disconnect.Start();
+                register.Join(TimeSpan.FromSeconds(30));
+                disconnect.Join(TimeSpan.FromSeconds(30));
+
+                Assert.Null(failure);
+
+                // THE INVARIANT. Either order is legitimate — the disconnect may land first and the
+                // registration then legitimately revive the row, or the registration may land first and
+                // the disconnect then tear it down. What must NEVER happen is the interleaving: the
+                // disconnect's field writes surviving as "disconnected" while the registration's port
+                // write survives on the same row. A row is connected WITH a port, or disconnected WITHOUT
+                // one; the mixture is the corruption.
+                // ⚠️ OBSERVABILITY LIMIT, stated rather than glossed. GetTerminals() filters on
+                // IsConnected, so a DISCONNECTED row cannot be inspected from outside the broker at
+                // all. Of the two torn orderings only ONE is visible here:
+                //
+                //   visible   — disconnect's ChannelPort=null lands last while register's
+                //               IsConnected=true survives  => CONNECTED row holding NO port, even
+                //               though the registration that connected it supplied 8842.
+                //   invisible — register's ChannelPort=8842 lands last while disconnect's
+                //               IsConnected=false survives  => disconnected row holding a live port.
+                //
+                // So this fact is a STRESS CHECK that can only ever catch real corruption (it has no
+                // false-positive mode), not a complete proof. The complete, deterministic guarantee is
+                // the source census below it — which is why that one exists and why this one is not
+                // load-bearing on its own.
+                var lynnRows = broker.GetTerminals().Where(t => t.Name == "Lynn").ToList();
+
+                if (lynnRows.Count == 1)
+                {
+                    Assert.True(lynnRows[0].ChannelPort != null,
+                        $"Round {round}: the row is CONNECTED but holds no port. Both writers that set "
+                        + "IsConnected=true also set a port, so this state is only reachable by the "
+                        + "disconnect's ChannelPort=null landing between the registration's two field "
+                        + "writes — a torn write across the pair the lock exists to keep together.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 6, debugger HIGH — the deterministic half of the disconnect-race guarantee.
+        ///
+        /// <para>The barrier fact above can only observe one of the two torn orderings, and only if the
+        /// interleaving happens to occur. That makes it a stress check, not a proof: a race test that
+        /// passes tells you nothing, because passing is also what an un-fixed build does most of the
+        /// time. This census is the part that actually holds the line.</para>
+        ///
+        /// <para>It asserts the STRUCTURAL property directly — that every broker method which mutates
+        /// <c>IsConnected</c> or <c>ChannelPort</c> outside the registration decision does so under
+        /// <c>_registrationLock</c>. That is exactly what 4c3f60d got wrong: it introduced the lock as
+        /// the fix for a check-then-act on these two fields, then enrolled only the registration
+        /// writers, leaving the disconnect side racing the very window the lock was added to close.</para>
+        /// </summary>
+        [Fact]
+        public void Every_disconnect_writer_mutates_connection_state_under_the_registration_lock()
+        {
+            string brokerPath = LocateRepoFile(Path.Combine("MCPServer", "Services", "MessageBroker.cs"));
+            string[] lines = File.ReadAllLines(brokerPath);
+
+            // The two methods that tear down a terminal's connection state from outside the
+            // registration path. Both mutate IsConnected; DisconnectTerminalByName also nulls the port.
+            string[] guarded = { "public void UnregisterTerminal(", "public bool DisconnectTerminalByName(" };
+
+            foreach (string signature in guarded)
+            {
+                int start = Array.FindIndex(lines, l => l.Contains(signature, StringComparison.Ordinal));
+                Assert.True(start >= 0, $"Could not find {signature} in MessageBroker.cs — this census has gone stale and is no longer checking anything.");
+
+                // Scan the method body: from its signature forward, bounded so a rename elsewhere
+                // cannot silently widen the search until it stumbles onto some other method's lock.
+                //
+                // ⚠️ COMMENT LINES ARE STRIPPED FIRST, and that is not tidiness. On the first run this
+                // census failed against the FIXED code, because the explanatory comment above
+                // DisconnectTerminalByName narrates the bug — it contains the literal
+                // "IsConnected = false" describing step 3 of the losing interleaving, which sorted
+                // before the real `lock` line and made the correct code look unguarded. A string census
+                // that reads prose as if it were code is the same defect this run already found twice
+                // (the `?.` blind spot, and a falsifier that shared it). Strip the prose.
+                int end = Math.Min(start + 80, lines.Length);
+                string body = string.Join("\n", lines[start..end]
+                    .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+                int mutation = body.IndexOf("IsConnected = false", StringComparison.Ordinal);
+                Assert.True(mutation >= 0, $"{signature} no longer contains 'IsConnected = false'. If the teardown moved, move this census with it.");
+
+                int lockAt = body.IndexOf("lock (_registrationLock)", StringComparison.Ordinal);
+
+                Assert.True(lockAt >= 0 && lockAt < mutation,
+                    $"{signature} mutates connection state WITHOUT holding _registrationLock first.\n"
+                    + "That is the Run 6 defect: 4c3f60d added the lock to fix a check-then-act on\n"
+                    + "IsConnected/ChannelPort and enrolled only the registration writers, so a SessionEnd\n"
+                    + "disconnect could be overwritten by a concurrent port-report registration — leaving a\n"
+                    + "row marked connected while holding the port of a channel server that had exited.\n"
+                    + "Ports 8800-8899 are recycled, so that port may already belong to a different live\n"
+                    + "terminal whose channel server does not check the envelope's `to` field.");
+            }
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 6, cross-model adversary HIGH — the guard fired essentially never.
+        ///
+        /// <para><c>GetTerminalNameByOwnerPid</c> resolves an unbound channel server's identity from its
+        /// parent pid. It documented itself as returning null "rather than guess if more than one
+        /// non-temporary row remains", but the code returned null ONLY when two rows tied on
+        /// <c>OwnerBoundAt</c> to the tick — a measure-zero event — and otherwise handed back the
+        /// newest. So the stated rule and the implemented rule had diverged, and the guess was the
+        /// ordinary path.</para>
+        ///
+        /// <para>Two real rows under one owner pid is not contrived: a rename leaves the old row still
+        /// connected, and subagents share the parent's MCP server process. Delivery is keyed on NAME,
+        /// so a wrong answer does not degrade — it binds a channel server to somebody else's identity
+        /// and silently delivers their messages to it.</para>
+        /// </summary>
+        [Fact]
+        public void Two_real_rows_under_one_owner_pid_resolve_to_nothing_rather_than_a_guess()
+        {
+            using var broker = new MessageBroker();
+
+            // Two REAL names (neither the "Unassigned" sentinel, neither a temporary "Agent *" row),
+            // both connected, both owned by the same live process — and deliberately bound at DIFFERENT
+            // times, which is the case the old tie-only guard let through.
+            broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
+            Thread.Sleep(15);
+            broker.RegisterTerminal("Morgan", docId: null, channelPort: 8811, nonce: null, ownerPid: LivePid);
+
+            var rows = System.Linq.Enumerable.ToList(System.Linq.Enumerable.Where(
+                broker.GetTerminals(), t => t.IsConnected && t.OwnerPid == LivePid));
+            Assert.Equal(2, rows.Count);   // the ambiguous topology genuinely exists
+
+            // THE CLAIM: ambiguous means ambiguous. Refusing costs an unbound caller one retry;
+            // guessing costs a misrouted conversation that nothing reports.
+            string resolved = broker.GetTerminalNameByOwnerPid(LivePid);
+
+            Assert.True(resolved == null,
+                $"Expected null for an ambiguous owner pid; got '{resolved}'. Returning a name here "
+                + "binds a channel server to whichever row happened to sort first, and message delivery "
+                + "is keyed on name — so the wrong answer is not a degraded answer, it is another "
+                + "terminal's messages delivered to this one.");
+
+            // And the fix must not be "always return null", which would break adoption entirely.
+            // One unambiguous row still resolves.
+            using var single = new MessageBroker();
+            single.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: LivePid);
+            Assert.Equal("Lynn", single.GetTerminalNameByOwnerPid(LivePid));
         }
 
         /// <summary>

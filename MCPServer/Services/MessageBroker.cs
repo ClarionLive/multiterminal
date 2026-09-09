@@ -1883,6 +1883,18 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private static readonly TimeSpan ChannelPortRefusalWindow = TimeSpan.FromMinutes(5);
 
+        /// <summary>
+        /// Maximum LIVE refusal records. Time-based expiry does not bound the working set — everything
+        /// created inside one window is live at once — so this is what actually bounds memory, and what
+        /// stops a caller-influenced key space from growing the dictionary that the refusal path walks
+        /// under the process-wide registration lock. Generous relative to any honest workload: it is
+        /// 100 ports x ~5 simultaneously-failing terminals, and real deployments run a handful.
+        /// </summary>
+        private const int ChannelPortRefusalLedgerCap = 512;
+
+        /// <summary>Longest name fragment used in a ledger key; the port is already range-checked, the name is not.</summary>
+        private const int LedgerKeyNameClamp = 128;
+
         /// <summary>One (name, port) pair's refusal history inside the current window.</summary>
         private sealed class PortRefusalRecord
         {
@@ -2039,12 +2051,28 @@ namespace MultiTerminal.MCPServer.Services
 
             if (candidates.Count == 0) return null;
 
-            // A tie between two real identities is genuinely ambiguous — say so by answering nothing
-            // rather than picking one at random.
-            if (candidates.Count > 1
-                && (candidates[0].OwnerBoundAt ?? DateTime.MinValue) == (candidates[1].OwnerBoundAt ?? DateTime.MinValue))
+            // ⚠️ MORE THAN ONE CANDIDATE IS AMBIGUOUS, FULL STOP — it is not "ambiguous only when the
+            // timestamps happen to be equal" (Run 6, cross-model adversary HIGH).
+            //
+            // The previous cut returned null ONLY on an exact OwnerBoundAt tie and otherwise handed
+            // back the newest. Two rows bound at the same tick is a measure-zero event; two real rows
+            // under one owner pid with DIFFERENT bind times is the ordinary case — a rename leaves the
+            // old row still connected, and subagents share the parent's MCP server process. So the
+            // guard fired essentially never and the guess fired essentially always, which is the exact
+            // opposite of what item 9 SAID it did: "return null rather than guess if more than one
+            // non-temporary row remains". The code and its own stated rule had diverged.
+            //
+            // Why guessing is not an acceptable default here: delivery is keyed on NAME
+            // (multiterminal-channel.mjs isAddressedToMe), so a wrong answer does not degrade — it
+            // binds a channel server to somebody else's identity and silently delivers their messages
+            // to it. Refusing costs an unbound caller that retries on its next poll; guessing costs a
+            // misrouted conversation that nothing reports.
+            //
+            // The ordering above is now only for a deterministic, readable log line.
+            if (candidates.Count > 1)
             {
-                DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected rows tie on OwnerBoundAt ('{candidates[0].Name}', '{candidates[1].Name}'). Refusing to guess — the caller stays unbound.");
+                string names = string.Join(", ", candidates.Select(c => $"'{c.Name}'"));
+                DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected non-temporary rows share this owner pid ({names}). Refusing to guess — the caller stays unbound and will retry. Binding one of these would hand it another terminal's messages, because delivery is keyed on name.");
                 return null;
             }
 
@@ -2093,18 +2121,6 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Classifies whether the row's <see cref="TerminalInfo.OwnerPid"/> still names the process
-        /// incarnation it was bound to (task c9285d2a).
-        /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
-        /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
-        /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
-        /// defining property of an adopted session; there is no staleness reaper either. So without a
-        /// liveness test the row sits connected forever and gate (4) refuses the name's real owner on
-        /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
-        /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
-        /// session's claim.</para>
-        /// </summary>
-        /// <summary>
         /// Records one refused port report and returns how many times this exact (name, port) pair has
         /// been refused inside the current window — the caller compares that against
         /// <see cref="ChannelPortRefusalCorroborationThreshold"/>. Task c9285d2a item 10, cycle 1.
@@ -2119,7 +2135,7 @@ namespace MultiTerminal.MCPServer.Services
         private int RecordPortRefusal(string name, int port)
         {
             DateTime now = DateTime.UtcNow;
-            string key = $"{name}|{port}";
+            string key = LedgerKey(name, port);
 
             if (!_portRefusalLedger.TryGetValue(key, out PortRefusalRecord record)
                 || now - record.FirstAtUtc > ChannelPortRefusalWindow)
@@ -2131,7 +2147,35 @@ namespace MultiTerminal.MCPServer.Services
             record.Count++;
             record.LastAtUtc = now;
 
-            PrunePortRefusals(now);
+            // ⚠️ BOUND THE LEDGER, AND DO NOT SCAN IT ON EVERY REFUSAL (Run 6, Codex security MEDIUM).
+            //
+            // The first cut called PrunePortRefusals on every single refusal, which walks the WHOLE
+            // dictionary — while holding _registrationLock, the process-wide lock that serializes every
+            // registration decision. Since the keys are built from caller-supplied name and port, a
+            // local caller could enumerate 8800-8899 across many names to grow the dictionary and make
+            // each subsequent refusal scan all of it, turning an unauthenticated local endpoint into
+            // lock-contention DoS against legitimate terminal registration and channel binding.
+            //
+            // Time-based expiry alone does not bound the WORKING SET: everything created inside a
+            // 5-minute window is live at once. So the cap is what bounds memory, and the scan now runs
+            // only when the cap is exceeded rather than on every call — expired records are inert in
+            // the meantime (a refusal landing on one resets it), so leaving them costs nothing but
+            // space we have already capped.
+            if (_portRefusalLedger.Count > ChannelPortRefusalLedgerCap)
+            {
+                PrunePortRefusals(now);
+
+                // Still over after dropping the expired ones: the pressure is live, not stale, which is
+                // the shape a deliberate flood takes. Evict oldest-first. That preferentially discards
+                // runs nearest to ageing out anyway, and a genuine dead channel re-reports every ~30s,
+                // so a wrongly-evicted real signal re-corroborates on its next heartbeat. Losing a
+                // health signal for one heartbeat is a far better failure than unbounded growth on the
+                // registration hot path.
+                if (_portRefusalLedger.Count > ChannelPortRefusalLedgerCap)
+                {
+                    EvictOldestPortRefusals(_portRefusalLedger.Count - ChannelPortRefusalLedgerCap);
+                }
+            }
 
             return record.Count;
         }
@@ -2143,13 +2187,57 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         private void ClearPortRefusals(string name)
         {
-            string prefix = name + "|";
+            string prefix = LedgerKeyPrefix(name);
             var stale = _portRefusalLedger.Keys
                 .Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             foreach (string key in stale)
                 _portRefusalLedger.Remove(key);
+        }
+
+        /// <summary>
+        /// The ledger key for one (name, port) pair. The name is clamped so a caller cannot make the
+        /// key arbitrarily large — the port is already range-checked, the name is not.
+        /// <para>Two names sharing the first <see cref="LedgerKeyNameClamp"/> characters share a key
+        /// slot. That is acceptable for a health counter and is the price of a bounded key; it is
+        /// mentioned here because <see cref="ClearPortRefusals"/> would then clear both.</para>
+        /// </summary>
+        private static string LedgerKey(string name, int port) => $"{ClampLedgerName(name)}|{port}";
+
+        /// <summary>
+        /// The prefix matching every key for a name. MUST clamp identically to <see cref="LedgerKey"/>
+        /// — a prefix built from the unclamped name would match nothing for long names, silently
+        /// leaving their history behind on recovery.
+        /// </summary>
+        private static string LedgerKeyPrefix(string name) => ClampLedgerName(name) + "|";
+
+        private static string ClampLedgerName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+            return name.Length <= LedgerKeyNameClamp ? name : name.Substring(0, LedgerKeyNameClamp);
+        }
+
+        /// <summary>
+        /// Drops the <paramref name="count"/> oldest records by <see cref="PortRefusalRecord.FirstAtUtc"/>.
+        /// Only ever called when the ledger is over <see cref="ChannelPortRefusalLedgerCap"/> AFTER
+        /// expiry pruning, i.e. when the pressure is live rather than stale. MUST be called with
+        /// <see cref="_registrationLock"/> held.
+        /// </summary>
+        private void EvictOldestPortRefusals(int count)
+        {
+            if (count <= 0) return;
+
+            var oldest = _portRefusalLedger
+                .OrderBy(kv => kv.Value.FirstAtUtc)
+                .Take(count)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (string key in oldest)
+                _portRefusalLedger.Remove(key);
+
+            DebugLogService?.Warning("MessageBroker", $"Port-refusal ledger hit its cap of {ChannelPortRefusalLedgerCap} live records; evicted {oldest.Count} oldest. Either many terminals are genuinely failing to bind at once, or something is generating refusals deliberately. task c9285d2a");
         }
 
         /// <summary>
@@ -2168,6 +2256,18 @@ namespace MultiTerminal.MCPServer.Services
                 _portRefusalLedger.Remove(key);
         }
 
+        /// <summary>
+        /// Classifies whether the row's <see cref="TerminalInfo.OwnerPid"/> still names the process
+        /// incarnation it was bound to (task c9285d2a).
+        /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
+        /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
+        /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
+        /// defining property of an adopted session; there is no staleness reaper either. So without a
+        /// liveness test the row sits connected forever and gate (4) refuses the name's real owner on
+        /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
+        /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
+        /// session's claim.</para>
+        /// </summary>
         private OwnerLiveness ResolveOwnerLiveness(TerminalInfo terminal)
         {
             if (terminal?.OwnerPid == null) return OwnerLiveness.Unowned;
@@ -3101,17 +3201,35 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void UnregisterTerminal(string terminalId)
         {
-            // Look up by dictionary key first, then fall back to DocId
-            if (!_terminals.TryGetValue(terminalId, out var terminal))
+            // ⚠️ THE LOOKUP AND THE MUTATION MUST BE ATOMIC AGAINST REGISTRATION (Run 6, debugger HIGH).
+            // 4c3f60d added _registrationLock to fix a check-then-act on IsConnected/ChannelPort — and
+            // enrolled only the REGISTRATION writers. This method mutates the same fields, so the race
+            // it was meant to close stayed open from the other side. See DisconnectTerminalByName for
+            // the full interleaving; it applies here too, minus the port clear.
+            //
+            // Side effects stay OUTSIDE the lock for the same reason as ApplyRegistrationSideEffects:
+            // RaiseSafe reaches WinForms handlers that marshal to the UI thread, and SetProfileOffline
+            // writes SQLite. Holding a process-wide lock across either is a deadlock.
+            TerminalInfo terminal;
+
+            lock (_registrationLock)
             {
-                terminal = _terminals.Values.FirstOrDefault(t =>
-                    !string.IsNullOrEmpty(t.DocId) &&
-                    t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase));
+                // Look up by dictionary key first, then fall back to DocId
+                if (!_terminals.TryGetValue(terminalId, out terminal))
+                {
+                    terminal = _terminals.Values.FirstOrDefault(t =>
+                        !string.IsNullOrEmpty(t.DocId) &&
+                        t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (terminal != null)
+                {
+                    terminal.IsConnected = false;
+                }
             }
 
             if (terminal != null)
             {
-                terminal.IsConnected = false;
                 RaiseSafe(TerminalDisconnected, terminal);
 
                 // Set profile offline through the write path: DB flag + coherent cache swap + broadcast,
@@ -3126,13 +3244,46 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public bool DisconnectTerminalByName(string name)
         {
-            var terminal = _terminals.Values.FirstOrDefault(t =>
-                t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.IsConnected);
+            // ⚠️ THE LOOKUP AND THE MUTATION MUST BE ATOMIC AGAINST REGISTRATION (Run 6, debugger HIGH).
+            //
+            // Both sides arrive over REST on independent thread-pool threads, and the pairing happens at
+            // EVERY SESSION END: the SessionEnd hook POSTs /api/messaging/disconnect while the channel
+            // server's 30s drift heartbeat POSTs /api/messaging/register. Unsynchronized, the losing
+            // interleaving was:
+            //
+            //   1. DecideRegistration reads existingByName — the row is connected.
+            //   2. It spends the window in ResolveOwnerLiveness / TryGetProcessStartTime, each of which
+            //      enumerates the system process table. This is the SAME wide window the 16-racer test
+            //      documents; under any real contention the racers land inside it.
+            //   3. THIS METHOD sets IsConnected = false and ChannelPort = null.
+            //   4. Registration resumes and writes IsConnected = true and ChannelPort = <its port>.
+            //
+            // The row then reads connected while holding the port of a channel server that has exited.
+            // Ports 8800-8899 are recycled, so that number may already belong to a DIFFERENT live
+            // terminal whose channel server does not check the envelope's `to` field — one agent's
+            // messages land in another's session with nothing reporting it. That is precisely the
+            // outcome the `ChannelPort = null` below exists to prevent, so the race defeated the one
+            // line written to stop it. And because the row is nonce-bearing, existingCarriesProof stays
+            // true, so gate (4) then refuses the name's real owner for MT's whole uptime.
+            //
+            // Side effects stay OUTSIDE the lock (RaiseSafe marshals to the UI thread; SetProfileOffline
+            // writes SQLite) — the same decide/apply split as DecideRegistration.
+            TerminalInfo terminal;
+
+            lock (_registrationLock)
+            {
+                terminal = _terminals.Values.FirstOrDefault(t =>
+                    t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.IsConnected);
+
+                if (terminal != null)
+                {
+                    terminal.IsConnected = false;
+                    terminal.ChannelPort = null; // Clear stale port to prevent delivery to dead channel server
+                }
+            }
 
             if (terminal != null)
             {
-                terminal.IsConnected = false;
-                terminal.ChannelPort = null; // Clear stale port to prevent delivery to dead channel server
                 RaiseSafe(TerminalDisconnected, terminal);
             }
 

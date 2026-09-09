@@ -144,9 +144,13 @@ namespace MultiTerminal.MCPServer.Models
         public int? ChannelPort { get; set; }
 
         /// <summary>
-        /// CONSECUTIVE refused PORT REPORTS for this terminal since delivery last worked — reset to zero
-        /// the moment one is accepted (task c9285d2a, item 10). Non-zero therefore means push delivery is
-        /// dead for this terminal RIGHT NOW, and nothing else will say so.
+        /// CORROBORATED refusals of ONE (name, port) pair inside the current window — not a lifetime
+        /// total, and not a running increment (task c9285d2a, item 10 cycle 1). Non-zero means push
+        /// delivery is dead for this terminal RIGHT NOW, and nothing else will say so; the MAGNITUDE
+        /// means much less than the fact of it being non-zero. It is ASSIGNED the ledger's count for
+        /// the current run rather than incremented, so it CAN GO DOWN: when a window rolls over, a
+        /// long-refused server's run restarts at 1 and this field drops with it. Reset to zero the
+        /// moment a port report is accepted.
         /// <para>The motivating case is version skew: a channel server started before plugin commit
         /// 7875686 echoes no launch nonce, so its port report cannot prove origin against a row that MT
         /// created WITH a nonce. Every 30s heartbeat is refused identically, <see cref="ChannelPort"/>
