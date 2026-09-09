@@ -174,5 +174,93 @@ namespace MultiTerminal.Tests
 
             Assert.Contains(broker.GetTerminals(), t => t.Name == "Robin");
         }
+
+        [Fact]
+        public void An_agent_whose_owner_is_dead_is_not_reported_online()
+        {
+            // The bug this closes: "online" had two meanings. GetTerminals answered it from live
+            // terminals; four other sites answered it from profile.IsOnline, a STORED flag that is
+            // set on registration and cleared only by an explicit disconnect. Nothing clears it for a
+            // session that simply died.
+            //
+            // That is not cosmetic. GET /api/team/roster backs the get_team_roster MCP tool — the tool
+            // AGENTS use to decide who to talk to — so a corpse reported as online invites an agent to
+            // message a terminal that no longer exists.
+            using var broker = new MessageBroker();
+
+            var child = StartBindableChild();
+            try
+            {
+                broker.RegisterTerminal("Robin", docId: null, channelPort: 8801, nonce: null, ownerPid: child.Id);
+                Assert.Contains("Robin", broker.GetOnlineAgentNames());   // precondition: online while alive
+
+                child.Kill();
+                Assert.True(child.WaitForExit(10000),
+                    "The child did not exit within 10s, so the owner is not actually dead and this "
+                    + "fact would pass for the wrong reason.");
+            }
+            finally
+            {
+                try { if (!child.HasExited) child.Kill(); } catch { }
+                child.Dispose();
+            }
+
+            Assert.DoesNotContain("Robin", broker.GetOnlineAgentNames());
+        }
+
+        [Fact]
+        public void An_agent_whose_owner_cannot_be_probed_is_STILL_reported_online()
+        {
+            // ⚠️ The same load-bearing shape as the listing facts above. GetOnlineAgentNames is
+            // DERIVED from GetTerminals precisely so it inherits the three-state rule; the danger is
+            // someone "optimising" it into its own liveness check that collapses Unknown into Dead.
+            // That would drop healthy agents out of the roster the moment their pid cannot be probed
+            // (MT unelevated while claude is elevated), and every other fact here would still pass.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Robin", docId: null, channelPort: 8801, nonce: null,
+                                    ownerPid: Environment.ProcessId);
+
+            var row = Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Robin");
+            Assert.NotNull(row.OwnerStartTime);
+            row.OwnerStartTime = null;              // the documented Unknown shape
+
+            Assert.Contains("Robin", broker.GetOnlineAgentNames());
+        }
+
+        [Fact]
+        public void Online_agents_are_exactly_the_listed_terminals()
+        {
+            // "Is X online?" must have ONE answer. It previously had two that disagreed, in the same
+            // file: /api/team/profiles derived it from live terminals while /api/team/roster forty
+            // lines below read the stored flag. This pins GetOnlineAgentNames as a VIEW of
+            // GetTerminals rather than a second source of truth that is free to drift from it.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Robin", docId: null, channelPort: 8801, nonce: null, ownerPid: null);
+            broker.RegisterTerminal("Wren", docId: "DW", channelPort: 8802, nonce: "NW");
+
+            var listed = broker.GetTerminals().Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var online = broker.GetOnlineAgentNames();
+
+            Assert.True(listed.SetEquals(online),
+                $"listed=[{string.Join(", ", listed.OrderBy(x => x))}] " +
+                $"online=[{string.Join(", ", online.OrderBy(x => x))}]");
+        }
+
+        [Fact]
+        public void Online_agent_lookup_ignores_case()
+        {
+            // The call sites compare names that come from profiles (DisplayName ?? Id) against names
+            // that come from terminal rows. Those are not guaranteed to agree in case, and an ordinal
+            // set would silently report a live agent as offline.
+            using var broker = new MessageBroker();
+
+            broker.RegisterTerminal("Robin", docId: "DR", channelPort: 8801, nonce: "NR");
+
+            var online = broker.GetOnlineAgentNames();
+            Assert.Contains("robin", online);
+            Assert.Contains("ROBIN", online);
+        }
     }
 }

@@ -3433,6 +3433,31 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// The names of agents that are actually REACHABLE right now, case-insensitive.
+        ///
+        /// <para>"Online" had two meanings and they disagreed. <see cref="GetTerminals"/> answers it
+        /// from live terminals; four other sites answered it from <c>profile.IsOnline</c>, a stored
+        /// flag that is set on registration and cleared only by an explicit disconnect. Nothing clears
+        /// it for a session that simply died, so those sites reported corpses as online — including
+        /// <c>GET /api/team/roster</c>, which backs the <c>get_team_roster</c> MCP tool. That is the
+        /// tool AGENTS use to decide who to talk to, so the stale flag was not merely cosmetic: it
+        /// invited an agent to message a terminal that no longer exists (task d1151661).</para>
+        ///
+        /// <para>Two endpoints in <c>TeamController</c> alone disagreed — <c>/api/team/profiles</c>
+        /// derived it from live terminals while <c>/api/team/roster</c> read the flag. This exists so
+        /// there is ONE answer to "is X online" rather than four copies free to drift again.</para>
+        ///
+        /// <para>Derived, never stored: it inherits every filter <see cref="GetTerminals"/> applies,
+        /// owner-liveness included, so it cannot fall out of date the way the flag did.</para>
+        /// </summary>
+        public HashSet<string> GetOnlineAgentNames()
+        {
+            return new HashSet<string>(
+                GetTerminals().Select(t => t.Name),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// Get or set remote mode. When on, hooks relay questions to ClaudeRemote and
         /// push notifications fire to the owner's phone. When off (user at desk), all
         /// phone-directed traffic short-circuits so the phone stays silent.

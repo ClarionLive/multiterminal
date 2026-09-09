@@ -29,12 +29,9 @@ namespace MultiTerminal.API.Controllers
         public IActionResult GetAllProfiles()
         {
             var summaries = _projectDb.GetAllProfileSummaries();
-            var activeTerminals = _broker.GetTerminals();
-            var onlineNames = new System.Collections.Generic.HashSet<string>(
-                activeTerminals
-                    .Where(t => t.IsConnected)
-                    .Select(t => t.Name),
-                System.StringComparer.OrdinalIgnoreCase);
+            // This endpoint already derived online-ness correctly; it just did it by hand. Same
+            // answer, one implementation, so the two endpoints in this file cannot drift apart again.
+            var onlineNames = _broker.GetOnlineAgentNames();
 
             var profiles = summaries.Select(s =>
             {
@@ -70,6 +67,10 @@ namespace MultiTerminal.API.Controllers
             if (project.TeamAgents == null || project.TeamAgents.Count == 0)
                 return Ok(new { projectName = project.Name, agents = new List<object>() });
 
+            // Reachability, not the stored flag: profile.IsOnline is never cleared for a session
+            // that simply died, and this endpoint backs the get_team_roster MCP tool (d1151661).
+            var onlineNames = _broker.GetOnlineAgentNames();
+
             var roster = new List<object>();
             foreach (var agentName in project.TeamAgents)
             {
@@ -85,7 +86,7 @@ namespace MultiTerminal.API.Controllers
                         agentInstructions = profile.AgentInstructions,
                         role = profile.Role,
                         skills = profile.GetSkills(),
-                        isOnline = profile.IsOnline,
+                        isOnline = onlineNames.Contains(agentName),
                         isTeamLead = profile.IsTeamLead
                     });
                 }

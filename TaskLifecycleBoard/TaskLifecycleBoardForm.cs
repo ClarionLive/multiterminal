@@ -223,6 +223,7 @@ namespace MultiTerminal.TaskLifecycleBoard
 
             var terminals = _broker.GetTerminals();
             var terminalNames = terminals?.Select(t => t.Name).ToList() ?? new List<string>();
+            var onlineNames = _broker.GetOnlineAgentNames();
 
             // Get all team member profiles (online + offline) for assignee dropdowns
             var profilesResult = _broker.ListProfiles();
@@ -234,7 +235,8 @@ namespace MultiTerminal.TaskLifecycleBoard
                 {
                     var displayName = p.DisplayName ?? p.Id;
                     memberNames.Add(displayName);
-                    allMembers.Add(new { name = displayName, isOnline = p.IsOnline });
+                    // Reachability, not the stored flag — see MessageBroker.GetOnlineAgentNames.
+                    allMembers.Add(new { name = displayName, isOnline = onlineNames.Contains(displayName) });
                 }
             }
             // Also include any online terminals not yet in profiles
