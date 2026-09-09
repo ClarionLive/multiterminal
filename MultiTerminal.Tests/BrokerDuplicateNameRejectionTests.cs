@@ -1066,13 +1066,11 @@ namespace MultiTerminal.Tests
                 string body = string.Join("\n", lines[start..end]
                     .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
 
-                int mutation = body.IndexOf("IsConnected = false", StringComparison.Ordinal);
-                Assert.True(mutation >= 0, $"{signature} no longer contains 'IsConnected = false'. If the teardown moved, move this census with it.");
+                Assert.True(body.Contains("IsConnected = false", StringComparison.Ordinal),
+                    $"{signature} no longer contains 'IsConnected = false'. If the teardown moved, move this census with it.");
 
-                int lockAt = body.IndexOf("lock (_registrationLock)", StringComparison.Ordinal);
-
-                Assert.True(lockAt >= 0 && lockAt < mutation,
-                    $"{signature} mutates connection state WITHOUT holding _registrationLock first.\n"
+                Assert.True(MutationIsInsideRegistrationLock(body, "IsConnected = false"),
+                    $"{signature} mutates connection state OUTSIDE the _registrationLock block.\n"
                     + "That is the Run 6 defect: 4c3f60d added the lock to fix a check-then-act on\n"
                     + "IsConnected/ChannelPort and enrolled only the registration writers, so a SessionEnd\n"
                     + "disconnect could be overwritten by a concurrent port-report registration — leaving a\n"
@@ -1080,6 +1078,154 @@ namespace MultiTerminal.Tests
                     + "Ports 8800-8899 are recycled, so that port may already belong to a different live\n"
                     + "terminal whose channel server does not check the envelope's `to` field.");
             }
+
+            // ⚠️ THE PORT CLEAR IS CHECKED SEPARATELY, and that is not redundancy. The race corrupts the
+            // PAIR — a row is connected WITH a route or disconnected WITHOUT one, and the mixture is the
+            // corruption. An earlier version of this census checked only IsConnected, so deleting the
+            // `ChannelPort = null` line entirely — the single line whose own comment says it exists to
+            // stop delivery to a dead channel server — would not have been noticed.
+            int disconnectStart = Array.FindIndex(lines, l => l.Contains("public bool DisconnectTerminalByName(", StringComparison.Ordinal));
+            string disconnectBody = string.Join("\n", lines[disconnectStart..Math.Min(disconnectStart + 80, lines.Length)]
+                .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+            Assert.True(disconnectBody.Contains("ChannelPort = null", StringComparison.Ordinal),
+                "DisconnectTerminalByName no longer clears ChannelPort. That line is what stops messages "
+                + "being delivered to a port whose channel server has exited and which the 8800-8899 "
+                + "allocator may already have reissued to a different live terminal.");
+
+            Assert.True(MutationIsInsideRegistrationLock(disconnectBody, "ChannelPort = null"),
+                "DisconnectTerminalByName clears ChannelPort OUTSIDE the _registrationLock block. It must "
+                + "be written atomically with IsConnected — the whole defect is a torn write across that pair.");
+        }
+
+        /// <summary>
+        /// Whether <paramref name="mutation"/> occurs inside the lexical body of the FIRST
+        /// <c>lock (_registrationLock)</c> block in <paramref name="body"/>.
+        ///
+        /// <para>⚠️ THIS EXISTS BECAUSE THE OBVIOUS VERSION WAS WRONG, and wrong in the way that matters.
+        /// The first cut asserted <c>indexOf(lock) &lt; indexOf(mutation)</c> — textual ORDER, not
+        /// CONTAINMENT. The Run 6 debugger falsified it empirically by replaying the logic against a copy
+        /// with the mutation moved after the lock's closing brace and getting
+        /// <c>lockAt=116 &lt; mutAt=567 =&gt; PASS</c>. So the census certified precisely the regression it
+        /// was written to catch: lock the lookup, mutate after release. It was described in its own commit
+        /// as "the deterministic guarantee" while being unable to see that.</para>
+        ///
+        /// <para>Assumption, stated because it is load-bearing: braces inside interpolated strings
+        /// (<c>{name}</c>) are balanced, so depth tracking is unaffected by them. An unbalanced brace
+        /// inside a string literal would break this, and none exists in the scanned methods.</para>
+        /// </summary>
+        private static bool MutationIsInsideRegistrationLock(string body, string mutation)
+        {
+            int lockAt = body.IndexOf("lock (_registrationLock)", StringComparison.Ordinal);
+            if (lockAt < 0) return false;
+
+            int open = body.IndexOf('{', lockAt);
+            if (open < 0) return false;
+
+            int depth = 0;
+            int close = -1;
+            for (int i = open; i < body.Length; i++)
+            {
+                if (body[i] == '{') depth++;
+                else if (body[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0) { close = i; break; }
+                }
+            }
+
+            if (close < 0) return false;   // unbalanced — refuse rather than guess
+
+            int mutationAt = body.IndexOf(mutation, StringComparison.Ordinal);
+            return mutationAt > open && mutationAt < close;
+        }
+
+        /// <summary>
+        /// Proves <see cref="MutationIsInsideRegistrationLock"/> can actually fail — the guard the
+        /// previous version of this census did not have, and whose absence let it certify the regression
+        /// it existed to catch.
+        /// </summary>
+        [Fact]
+        public void The_lock_containment_rule_rejects_a_mutation_after_the_closing_brace()
+        {
+            // The regression shape: the lock wraps only the LOOKUP, and the field write happens after
+            // release. Textually the lock still precedes the mutation, which is exactly why the
+            // first-occurrence comparison passed it.
+            string lockedLookupOnly =
+                "TerminalInfo terminal;\n"
+                + "lock (_registrationLock)\n"
+                + "{\n"
+                + "    terminal = _terminals.Values.FirstOrDefault(t => t.IsConnected);\n"
+                + "}\n"
+                + "if (terminal != null)\n"
+                + "{\n"
+                + "    terminal.IsConnected = false;\n"
+                + "}\n";
+
+            Assert.False(MutationIsInsideRegistrationLock(lockedLookupOnly, "IsConnected = false"),
+                "A mutation AFTER the lock's closing brace must be rejected. The first-occurrence "
+                + "comparison this replaced returned PASS here, which is how a census described as the "
+                + "deterministic guarantee came to be unable to see its own regression.");
+
+            // The correct shape must still be accepted, or the rule is just always-false — which would
+            // pass this fact while breaking the census for every legitimate implementation.
+            string properlyGuarded =
+                "TerminalInfo terminal;\n"
+                + "lock (_registrationLock)\n"
+                + "{\n"
+                + "    terminal = _terminals.Values.FirstOrDefault(t => t.IsConnected);\n"
+                + "    if (terminal != null)\n"
+                + "    {\n"
+                + "        terminal.IsConnected = false;\n"
+                + "    }\n"
+                + "}\n";
+
+            Assert.True(MutationIsInsideRegistrationLock(properlyGuarded, "IsConnected = false"),
+                "A mutation nested inside the lock block — including inside a nested if — must be accepted.");
+
+            // And a body with no lock at all is rejected rather than throwing.
+            Assert.False(MutationIsInsideRegistrationLock("terminal.IsConnected = false;\n", "IsConnected = false"));
+        }
+
+        /// <summary>
+        /// PIPELINE RUN 6 delta, cross-model adversary MEDIUM — two long names must not corroborate
+        /// each other.
+        ///
+        /// <para>The ledger key clamped the name to a bounded prefix. Two distinct connected names
+        /// sharing that prefix and reporting the same refused port therefore shared ONE record, so
+        /// terminal A's first refusal could serve as terminal B's corroborating second — marking B dead
+        /// off a single one-shot refusal. That is the exact false positive the corroboration rule was
+        /// added to prevent, manufactured by the bounding that was supposed to be a safety measure.</para>
+        ///
+        /// <para>Names come from an unauthenticated local endpoint, so this is a shape a caller can
+        /// choose rather than an unlucky accident.</para>
+        /// </summary>
+        [Fact]
+        public void Two_long_names_sharing_a_prefix_do_not_corroborate_each_others_refusals()
+        {
+            using var broker = new MessageBroker();
+
+            // Identical for far longer than any key clamp, differing only at the very end.
+            string shared = new string('x', 200);
+            string nameA = shared + "-alpha";
+            string nameB = shared + "-beta";
+
+            broker.RegisterTerminal(nameA, docId: "DA", channelPort: null, nonce: "NA");
+            broker.RegisterTerminal(nameB, docId: "DB", channelPort: null, nonce: "NB");
+
+            // ONE refused port report against each — a single one-shot refusal per terminal, which must
+            // never be enough to mark either of them.
+            Assert.False(broker.RegisterTerminal(nameA, docId: null, channelPort: 8815, nonce: null).Success);
+            Assert.False(broker.RegisterTerminal(nameB, docId: null, channelPort: 8815, nonce: null).Success);
+
+            var rowA = Assert.Single(broker.GetTerminals(), t => t.Name == nameA);
+            var rowB = Assert.Single(broker.GetTerminals(), t => t.Name == nameB);
+
+            Assert.True(rowA.ChannelPortRefusalCount == 0 && rowB.ChannelPortRefusalCount == 0,
+                $"Neither terminal had a second refusal of its own, so neither may be marked. "
+                + $"Got A={rowA.ChannelPortRefusalCount}, B={rowB.ChannelPortRefusalCount}. A non-zero "
+                + "value here means the two names collapsed onto one ledger record and one terminal's "
+                + "refusal corroborated the other's — a dead-channel verdict neither event justified.");
         }
 
         /// <summary>

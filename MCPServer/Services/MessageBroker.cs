@@ -2197,25 +2197,43 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// The ledger key for one (name, port) pair. The name is clamped so a caller cannot make the
-        /// key arbitrarily large — the port is already range-checked, the name is not.
-        /// <para>Two names sharing the first <see cref="LedgerKeyNameClamp"/> characters share a key
-        /// slot. That is acceptable for a health counter and is the price of a bounded key; it is
-        /// mentioned here because <see cref="ClearPortRefusals"/> would then clear both.</para>
+        /// The ledger key for one (name, port) pair: a bounded prefix of the name PLUS a hash of the
+        /// whole name, so the key is size-limited without becoming ambiguous.
         /// </summary>
-        private static string LedgerKey(string name, int port) => $"{ClampLedgerName(name)}|{port}";
+        /// <remarks>
+        /// ⚠️ THE HASH IS NOT DECORATION — truncation alone was a false-corroboration path (Run 6,
+        /// cross-model adversary). Clamping to a prefix made two distinct names sharing that prefix
+        /// share one record, so terminal A's FIRST refusal could serve as terminal B's CORROBORATING
+        /// SECOND and mark B dead off a single one-shot refusal. The comment here previously called that
+        /// collision "acceptable for a health counter"; it is not, because it manufactures exactly the
+        /// false positive the corroboration rule exists to prevent — the defect item 10 was sent back to
+        /// coding for in the first place. Registration names arrive from an unauthenticated local
+        /// endpoint, so colliding names are a thing a caller can choose, not merely an unlucky accident.
+        /// The prefix is retained only so the key stays readable in a debugger.
+        /// </remarks>
+        private static string LedgerKey(string name, int port) => $"{LedgerNameIdentity(name)}|{port}";
 
         /// <summary>
-        /// The prefix matching every key for a name. MUST clamp identically to <see cref="LedgerKey"/>
-        /// — a prefix built from the unclamped name would match nothing for long names, silently
-        /// leaving their history behind on recovery.
+        /// The prefix matching every key for a name. MUST derive the identity identically to
+        /// <see cref="LedgerKey"/> — a prefix built differently would match nothing, silently leaving a
+        /// recovered terminal's history behind and letting it corroborate against a later refusal.
         /// </summary>
-        private static string LedgerKeyPrefix(string name) => ClampLedgerName(name) + "|";
+        private static string LedgerKeyPrefix(string name) => LedgerNameIdentity(name) + "|";
 
-        private static string ClampLedgerName(string name)
+        /// <summary>Bounded, collision-resistant identity for a terminal name.</summary>
+        private static string LedgerNameIdentity(string name)
         {
             if (string.IsNullOrEmpty(name)) return string.Empty;
-            return name.Length <= LedgerKeyNameClamp ? name : name.Substring(0, LedgerKeyNameClamp);
+
+            string prefix = name.Length <= LedgerKeyNameClamp ? name : name.Substring(0, LedgerKeyNameClamp);
+
+            // Short names are already unambiguous; skip the hash so the common key stays exactly the
+            // readable "Alice|8801" it was.
+            if (name.Length <= LedgerKeyNameClamp) return prefix;
+
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            byte[] digest = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(name));
+            return prefix + "#" + Convert.ToHexString(digest, 0, 8);
         }
 
         /// <summary>
