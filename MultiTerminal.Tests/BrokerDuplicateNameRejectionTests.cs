@@ -252,7 +252,8 @@ namespace MultiTerminal.Tests
 
             // An adopted row whose owning process is NOT running. This is the ordinary end state of
             // every adopted session: it has no docId for UnregisterTerminal and no MULTITERMINAL_NAME
-            // for the SessionEnd hook, and no reaper exists — so the row stays IsConnected forever.
+            // for the SessionEnd hook, so the row stays IsConnected until the liveness reaper's next
+            // sweep (d1151661), or forever where none runs — and this broker runs no reaper.
             // Treating that corpse as a live holder is what made gate (4) refuse the name's real owner
             // on their very next shell, which is how the feature would have failed on first use.
             broker.RegisterTerminal("Lynn", docId: null, channelPort: 8810, nonce: null, ownerPid: 424242);
@@ -405,7 +406,7 @@ namespace MultiTerminal.Tests
         /// readable would silently exercise the REBOUND branch, and the fact using it would pass while
         /// pinning the opposite path. Three facts on this ticket already failed exactly that way.
         /// </summary>
-        private static int UnbindablePid()
+        internal static int UnbindablePid()
         {
             var probe = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
@@ -484,9 +485,14 @@ namespace MultiTerminal.Tests
             var lynn = Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Lynn");
 
             // PRECONDITION, asserted so this fact cannot go vacuous: the rebind must NOT have happened,
-            // or we are on the already-covered rebound path and the finding is untested. The row still
-            // carries the DEAD owner's pid because an unverifiable pid is deliberately never bound.
-            Assert.Equal(deadOwnerPid, lynn.OwnerPid);
+            // or we are on the already-covered rebound path and the finding is untested. An
+            // unverifiable pid is deliberately never bound. Since d1151661 pipeline Run 3 (adversary M2)
+            // the DEAD owner's identity is cleared too, so the row is genuinely Unowned rather than
+            // still reading Dead, which the roster would hide and the reaper would tear down for a
+            // session that is alive. Null here is still distinct from the rebound path, which would
+            // carry the new pid.
+            Assert.Null(lynn.OwnerPid);
+            Assert.NotEqual(deadOwnerPid, lynn.OwnerPid);
 
             // THE CLAIM: the stale routing goes anyway. Under the old conjunct both of these held the
             // dead session's values.
@@ -1062,16 +1068,39 @@ namespace MultiTerminal.Tests
 
             // ⚠️ COMPLETENESS. A census that enumerates its targets by name cannot see a writer nobody
             // listed. The reaper was nearly exactly that: a third teardown path that would have passed
-            // this test by never being scanned. So also require that every non-comment
-            // `IsConnected = false` in the file is accounted for by one of the guarded methods. A
-            // fourth teardown added without enrolling here fails on the count, not silently.
-            int disconnectWrites = lines.Count(l =>
-                !l.TrimStart().StartsWith("//", StringComparison.Ordinal)
-                && l.Contains("IsConnected = false", StringComparison.Ordinal));
-            Assert.True(disconnectWrites == guarded.Length,
-                $"MessageBroker.cs has {disconnectWrites} non-comment 'IsConnected = false' writes but this census "
-                + $"guards {guarded.Length} methods. A teardown path was added or removed without updating "
-                + "`guarded` — enroll it, so its lock scope is actually checked.");
+            // this test by never being scanned. So every non-comment teardown write in the file
+            // (`IsConnected = false` or `ChannelPort = null`) must lie inside the scan window of a
+            // guarded method.
+            //
+            // Per LINE, not by count (Run 3 code review). The first cut compared totals, which
+            // failed a guarded method that legitimately wrote twice and passed a new method that
+            // only nulled the port. Scope, stated: gate (4)'s own port clear inside the
+            // registration decision is not a teardown and is allowlisted by the method it lives in.
+            int[] guardedStarts = guarded
+                .Select(sig => Array.FindIndex(lines, l => l.Contains(sig, StringComparison.Ordinal)))
+                .ToArray();
+            // The registration decision's region: from RegisterTerminal to the first guarded teardown
+            // method after it. Only its port clear is allowlisted, never an `IsConnected = false`.
+            int registrationStart = Array.FindIndex(lines, l => l.Contains("public RegisterResult RegisterTerminal(", StringComparison.Ordinal));
+            Assert.True(registrationStart >= 0, "Could not find RegisterTerminal — the completeness allowlist has gone stale.");
+            int registrationEnd = guardedStarts.Where(s => s > registrationStart).DefaultIfEmpty(lines.Length).Min();
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string trimmed = lines[i].TrimStart();
+                if (trimmed.StartsWith("//", StringComparison.Ordinal)) continue;
+
+                bool clearsConnection = lines[i].Contains("IsConnected = false", StringComparison.Ordinal);
+                bool clearsPort = lines[i].Contains("ChannelPort = null", StringComparison.Ordinal);
+                if (!clearsConnection && !clearsPort) continue;
+
+                bool inGuarded = guardedStarts.Any(s => s >= 0 && i > s && i < s + 80);
+                bool isRegistrationPortClear = clearsPort && !clearsConnection
+                                               && i > registrationStart && i < registrationEnd;
+                Assert.True(inGuarded || isRegistrationPortClear,
+                    $"MessageBroker.cs:{i + 1} writes teardown state (`{trimmed}`) outside every method this census guards. "
+                    + "A teardown path was added without enrolling it in `guarded`, so its lock scope is not being checked.");
+            }
 
             foreach (string signature in guarded)
             {
@@ -1455,7 +1484,7 @@ namespace MultiTerminal.Tests
             trimmed.Replace("?.", ".", StringComparison.Ordinal);
 
         /// <summary>Walks up from the test binary to the repo root to find a source file.</summary>
-        private static string LocateRepoFile(string fileName)
+        internal static string LocateRepoFile(string fileName)
         {
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
             while (dir != null)

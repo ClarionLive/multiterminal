@@ -155,6 +155,19 @@ namespace MultiTerminal.MCPServer.Services
             return clamped;
         }
 
-        private void Log(string message) => _log?.Invoke(message);
+        private void Log(string message)
+        {
+            // The logger can be a disposed DebugLogService (or a panel handler on a torn-down
+            // window) during shutdown, and this runs on a timer thread. An exception thrown from
+            // inside Sweep's catch would escape and end the process, breaking Sweep's "never throws".
+            try
+            {
+                _log?.Invoke(message);
+            }
+            catch
+            {
+                // Nothing useful can be done with a failure to log.
+            }
+        }
     }
 }

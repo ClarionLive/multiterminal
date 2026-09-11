@@ -18,8 +18,10 @@ namespace MultiTerminal.Tests
     /// <para>Nothing releases those rows. An adopted session has no docId for
     /// <c>UnregisterTerminal</c> and no <c>MULTITERMINAL_NAME</c> for the SessionEnd hook's disconnect
     /// POST (<c>session-status-hook.js</c> early-returns on it), the channel server has no exit handler
-    /// at all, and there is no reaper. So <see cref="MessageBroker.GetTerminals"/> — the UI-listing
-    /// view — now asks the OS instead of trusting the dying process to report in.</para>
+    /// at all, and the liveness reaper (item 3) releases them only on its next ~30s sweep. So
+    /// <see cref="MessageBroker.GetTerminals"/> — the UI-listing view — asks the OS on every read
+    /// instead of trusting the dying process to report in. These facts use a bare broker, which runs
+    /// no reaper.</para>
     ///
     /// <para><b>The second fact is the load-bearing one.</b> <c>ResolveOwnerLiveness</c> has FOUR
     /// states, and its own remarks record why (Run 2 correction): collapsing "cannot verify" into
@@ -170,8 +172,9 @@ namespace MultiTerminal.Tests
         public void A_terminal_that_names_no_owner_at_all_is_STILL_listed()
         {
             // The Unowned state, and it is ordinary rather than exotic: every terminal already running
-            // when this deploys reports no ownerPid, and spawned-agent and Oracle rows carry none at
-            // all. A pid probe is meaningless for them and always will be — a gateway terminal on
+            // when this deploys reports no ownerPid, and spawned-agent and Unassigned-placeholder rows
+            // carry none at all. (Oracle is NOT in this set: its channel server reports a pid.) A pid
+            // probe is meaningless for these and always will be — a gateway terminal on
             // another machine can never be probed from here. They must never be filtered out.
             using var broker = new MessageBroker();
 
@@ -188,8 +191,8 @@ namespace MultiTerminal.Tests
         {
             // The bug this closes: "online" had two meanings. GetTerminals answered it from live
             // terminals; four other sites answered it from profile.IsOnline, a STORED flag that is
-            // set on registration and cleared only by an explicit disconnect. Nothing clears it for a
-            // session that simply died.
+            // set on registration and cleared by an explicit disconnect. For a session that simply
+            // died, only the liveness reaper clears it, on its next sweep — and this bare broker runs none.
             //
             // That is not cosmetic. GET /api/team/roster backs the get_team_roster MCP tool — the tool
             // AGENTS use to decide who to talk to — so a corpse reported as online invites an agent to

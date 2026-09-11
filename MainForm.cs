@@ -7024,7 +7024,14 @@ namespace MultiTerminal
             try
             {
                 if (e == null || IsTemporaryAgent(e.Name) || IsUnassignedSentinel(e.Name)) return;
-                _mcpServer?.Broker?.AgentAttention?.NoteTerminalGone(e.Name);
+
+                // The event is per ROW but the eviction is per NAME. If another live terminal still
+                // carries this name, its cards are not this row's to delete (task d1151661 pipeline
+                // Run 3, adversary M1: a reaped or closed Diana evicted a relaunched live Diana's card).
+                var broker = _mcpServer?.Broker;
+                if (broker == null || broker.IsAgentNameHeldByLiveTerminal(e.Name)) return;
+
+                broker.AgentAttention?.NoteTerminalGone(e.Name);
             }
             catch (Exception ex)
             {

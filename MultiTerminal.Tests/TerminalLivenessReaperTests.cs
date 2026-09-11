@@ -164,9 +164,11 @@ namespace MultiTerminal.Tests
         [Fact]
         public void Unowned_and_alive_owners_are_never_reaped()
         {
-            // Unowned is ordinary: spawned agents, Oracle and gateway terminals carry no pid, and a
-            // pid probe is meaningless for them. Alive is the everyday case: a sweep over healthy
-            // terminals must be a pure no-op.
+            // Unowned is ordinary: spawned agents, Unassigned placeholders and gateway terminals carry
+            // no pid, and a pid probe is meaningless for them. Oracle is NOT in that set: its channel
+            // server reports a pid, so a sweep during its auto-restart gap disconnects it, the same
+            // as its SessionEnd hook would. That cost is accepted. Alive is the everyday case: a
+            // sweep over healthy terminals must be a pure no-op.
             using var broker = new MessageBroker();
             var disconnected = new List<string>();
             broker.TerminalDisconnected += (_, t) => disconnected.Add(t.Name);
@@ -241,6 +243,197 @@ namespace MultiTerminal.Tests
         }
 
         [Fact]
+        public void Closing_a_reaped_terminals_tab_does_not_sign_out_the_live_agent_that_took_its_name()
+        {
+            // ⚠️ PIPELINE RUN 3 BLOCKING (debugger). Freeing a dead terminal's name while its tab is
+            // still open made this sequence routine:
+            //   1. Diana's claude dies; her tab (docId D1) stays open; the reaper frees "Diana".
+            //   2. The Owner launches Diana in another tab (D2), which creates a second, live row.
+            //   3. The Owner closes the old tab, which calls UnregisterTerminal("D1").
+            // UnregisterTerminal found the corpse by docId, disconnected-or-not, and repeated its
+            // name-keyed teardown. The event made MainForm evict EVERY "Diana" Attention card, and
+            // SetProfileOffline("Diana") hid the live row from GetTerminals.
+            using var broker = new MessageBroker();
+
+            RegisterWithDeadOwner(broker, "Diana", docId: "D1", nonce: "N1");
+            Assert.Equal(new[] { "Diana" }, broker.ReapDeadOwnerTerminals());
+
+            var relaunch = broker.RegisterTerminal("Diana", docId: "D2", channelPort: 8802, nonce: "N2",
+                                                   ownerPid: Environment.ProcessId);
+            Assert.True(relaunch.Success, "precondition: the reaped name must be claimable by the relaunch");
+            Assert.Contains(broker.GetTerminals(), t => t.Name == "Diana" && t.DocId == "D2");
+
+            var disconnected = new List<string>();
+            broker.TerminalDisconnected += (_, t) => disconnected.Add($"{t.Name}/{t.DocId}");
+
+            broker.UnregisterTerminal("D1");   // the old tab closes
+
+            Assert.Empty(disconnected);
+            Assert.Contains(broker.GetTerminals(), t => t.Name == "Diana" && t.DocId == "D2");
+            Assert.True(broker.GetProfile("Diana").Profile.IsOnline,
+                "Closing the dead tab marked the live Diana's profile offline, which hides her from "
+                + "GetTerminals, the roster and every panel.");
+        }
+
+        [Fact]
+        public void Closing_a_tab_disconnects_its_live_session_not_an_earlier_corpse_under_the_same_docId()
+        {
+            // Same tab, relaunched after a reap: one docId now owns a disconnected row AND a live one,
+            // because rows are never removed. UnregisterTerminal must tear down the live one.
+            //
+            // Stated honestly: before the fix this picked a row in dictionary order, so the old code
+            // could pass here by luck. The deterministic guard is the ordering; this fact pins the
+            // outcome.
+            using var broker = new MessageBroker();
+
+            var corpse = RegisterWithDeadOwner(broker, "Diana", docId: "D1", nonce: "N1");
+            Assert.Equal(new[] { "Diana" }, broker.ReapDeadOwnerTerminals());
+
+            broker.RegisterTerminal("Diana", docId: "D1", channelPort: 8803, nonce: "N1", ownerPid: Environment.ProcessId);
+            var live = Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Diana");
+            Assert.NotSame(corpse, live);   // precondition: two rows share D1
+
+            var disconnected = new List<TerminalInfo>();
+            broker.TerminalDisconnected += (_, t) => disconnected.Add(t);
+
+            broker.UnregisterTerminal("D1");
+
+            Assert.False(live.IsConnected, "the tab closed but its live session was left connected");
+            Assert.Same(live, Assert.Single(disconnected));
+        }
+
+        [Fact]
+        public void Reaping_one_of_two_same_name_rows_leaves_the_name_live_for_name_keyed_effects()
+        {
+            // ⚠️ PIPELINE RUN 3, adversary M1. The event is per ROW; the Attention eviction and the
+            // profile write are per NAME. Two connected rows can carry one name: an Unassigned tab
+            // renames to a name whose dead row has not been swept yet. Reaping the dead one must not
+            // sign out the live one. MainForm's Attention handler asks
+            // IsAgentNameHeldByLiveTerminal DURING the raise, so that is what this checks.
+            using var broker = new MessageBroker();
+
+            var dead = RegisterWithDeadOwner(broker, "Diana", docId: "D1", nonce: "N1");
+            broker.RegisterTerminal("Unassigned", docId: "D2", channelPort: 8804, nonce: "N2");
+            broker.RegisterTerminal("Diana", docId: "D2", channelPort: 8804, nonce: "N2", ownerPid: Environment.ProcessId);
+
+            var rows = broker.GetAllConnectedTerminals().Where(t => t.Name == "Diana").ToList();
+            Assert.True(rows.Count == 2,
+                $"precondition: the rename path must produce two connected 'Diana' rows (got {rows.Count}); "
+                + "without them this fact exercises nothing");
+            var live = Assert.Single(rows, t => !ReferenceEquals(t, dead));
+
+            bool? nameLiveDuringRaise = null;
+            broker.TerminalDisconnected += (_, t) => nameLiveDuringRaise = broker.IsAgentNameHeldByLiveTerminal(t.Name);
+
+            Assert.Equal(new[] { "Diana" }, broker.ReapDeadOwnerTerminals());
+
+            Assert.True(nameLiveDuringRaise == true,
+                "During the reaper's TerminalDisconnected the name read as NOT live, so MainForm would "
+                + "evict the live Diana's Attention cards.");
+            Assert.True(live.IsConnected);
+            Assert.True(broker.GetProfile("Diana").Profile.IsOnline, "the live same-name row's profile was marked offline");
+            Assert.Contains(broker.GetTerminals(), t => ReferenceEquals(t, live));
+        }
+
+        [Fact]
+        public void Closing_one_of_two_same_name_tabs_keeps_the_other_signed_in()
+        {
+            // The same name-keyed rule on the tab-close path, for a row that is still CONNECTED, so the
+            // already-disconnected short-circuit does not apply. Only IsAgentNameHeldByLiveTerminal
+            // stands between this close and the other Diana's profile.
+            using var broker = new MessageBroker();
+
+            RegisterWithDeadOwner(broker, "Diana", docId: "D1", nonce: "N1");   // not yet swept
+            broker.RegisterTerminal("Unassigned", docId: "D2", channelPort: 8805, nonce: "N2");
+            broker.RegisterTerminal("Diana", docId: "D2", channelPort: 8805, nonce: "N2", ownerPid: Environment.ProcessId);
+            Assert.Equal(2, broker.GetAllConnectedTerminals().Count(t => t.Name == "Diana"));   // precondition
+
+            var disconnected = new List<string>();
+            broker.TerminalDisconnected += (_, t) => disconnected.Add(t.DocId);
+
+            broker.UnregisterTerminal("D1");
+
+            Assert.Equal(new[] { "D1" }, disconnected);   // the row-keyed event still fires (Office)
+            Assert.True(broker.GetProfile("Diana").Profile.IsOnline,
+                "Closing the dead Diana's tab marked the name offline while the other Diana is live.");
+            Assert.Contains(broker.GetTerminals(), t => t.Name == "Diana" && t.DocId == "D2");
+        }
+
+        [Fact]
+        public void A_name_held_only_by_a_corpse_is_not_live_but_one_held_by_an_unprobeable_owner_is()
+        {
+            // The other half of IsAgentNameHeldByLiveTerminal. Every fact above needs it to say "live"
+            // when a live row exists; none needed it to say "not live" when only a corpse is left. So
+            // a helper counting Dead rows as live passed all of them (falsified, Run 3 fix round).
+            // That would keep a dead name online on the roster, since the offline write never runs.
+            using var broker = new MessageBroker();
+
+            RegisterWithDeadOwner(broker, "Diana", docId: "D1", nonce: "N1");   // connected, not yet swept
+            Assert.Contains(broker.GetAllConnectedTerminals(), t => t.Name == "Diana");   // precondition
+
+            Assert.False(broker.IsAgentNameHeldByLiveTerminal("Diana"),
+                "A name whose only connected row has a dead owner was reported live.");
+
+            // ...and the three-state rule holds here too: Unknown and Unowned are live.
+            broker.RegisterTerminal("Robin", docId: null, channelPort: 8806, nonce: null, ownerPid: null);
+            Assert.True(broker.IsAgentNameHeldByLiveTerminal("robin"));   // Unowned, case-insensitive
+
+            broker.RegisterTerminal("Wren", docId: null, channelPort: 8807, nonce: null, ownerPid: Environment.ProcessId);
+            Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Wren").OwnerStartTime = null;   // Unknown
+            Assert.True(broker.IsAgentNameHeldByLiveTerminal("Wren"));
+
+            Assert.False(broker.IsAgentNameHeldByLiveTerminal(null));
+            Assert.False(broker.IsAgentNameHeldByLiveTerminal("Nobody"));
+        }
+
+        [Fact]
+        public void A_live_session_whose_pid_cannot_be_bound_is_unowned_not_dead()
+        {
+            // ⚠️ PIPELINE RUN 3, adversary M2. A session admitted by its nonce onto a dead-owner row,
+            // presenting a pid whose start time cannot be read (e.g. claude elevated, MT not). The
+            // rebind is correctly refused, but the DEAD owner's identity stayed on the row. So a live
+            // session read as Dead: hidden by the roster, and disconnected by every sweep.
+            using var broker = new MessageBroker();
+
+            var row = RegisterWithDeadOwner(broker, "Lynn", docId: "D1", nonce: "N1");
+
+            var readmit = broker.RegisterTerminal("Lynn", docId: "D1", channelPort: 8811, nonce: "N1",
+                                                  ownerPid: BrokerDuplicateNameRejectionTests.UnbindablePid());
+            Assert.True(readmit.Success, "precondition: the nonce must admit the session");
+            Assert.Same(row, Assert.Single(broker.GetAllConnectedTerminals(), t => t.Name == "Lynn"));
+
+            Assert.Null(row.OwnerPid);
+            Assert.Null(row.OwnerStartTime);
+            Assert.Empty(broker.ReapDeadOwnerTerminals());
+            Assert.True(row.IsConnected);
+            Assert.Contains(broker.GetTerminals(), t => ReferenceEquals(t, row));
+        }
+
+        [Fact]
+        public void The_attention_eviction_asks_whether_the_name_is_still_live_before_evicting()
+        {
+            // The M1 fact above proves the broker answers correctly during the raise. It cannot prove
+            // MainForm ASKS: that handler is a WinForms member no unit test can construct. Item 2's
+            // known gap was exactly that shape (a correct helper nobody is proven to call), so pin the
+            // call site structurally.
+            string mainForm = File.ReadAllText(BrokerDuplicateNameRejectionTests.LocateRepoFile("MainForm.cs"));
+
+            int handler = mainForm.IndexOf("private void OnMcpTerminalDisconnectedForAttention(", StringComparison.Ordinal);
+            Assert.True(handler >= 0, "OnMcpTerminalDisconnectedForAttention not found; this census has gone stale.");
+
+            int next = mainForm.IndexOf("\n        private ", handler + 1, StringComparison.Ordinal);
+            string body = mainForm.Substring(handler, (next < 0 ? mainForm.Length : next) - handler);
+            string code = string.Join("\n", body.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+            int ask = code.IndexOf("IsAgentNameHeldByLiveTerminal(", StringComparison.Ordinal);
+            int evict = code.IndexOf("NoteTerminalGone(", StringComparison.Ordinal);
+            Assert.True(evict >= 0, "the handler no longer evicts; move this census with the eviction");
+            Assert.True(ask >= 0 && ask < evict,
+                "The Attention handler evicts by name without first asking IsAgentNameHeldByLiveTerminal, so a "
+                + "dead or closed row deletes the cards of a live terminal that carries the same name.");
+        }
+
+        [Fact]
         public void The_timer_shell_survives_a_failing_sweep_and_reports_what_it_released()
         {
             var log = new List<string>();
@@ -263,6 +456,19 @@ namespace MultiTerminal.Tests
             reaper.Dispose();
             reaper.Sweep();   // a tick already in flight at dispose must not reach the broker
             Assert.Equal(2, calls);
+        }
+
+        [Fact]
+        public void A_throwing_logger_cannot_escape_the_sweep()
+        {
+            // Run 3 code review: during shutdown the logger can be a disposed DebugLogService. Sweep's
+            // catch logs, so an unguarded Log threw from inside the catch and escaped onto the timer
+            // thread, which ends the process.
+            using var reaper = new TerminalLivenessReaper(
+                () => throw new InvalidOperationException("sweep failed"),
+                _ => throw new ObjectDisposedException("DebugLogService"));
+
+            reaper.Sweep();   // THE CLAIM: returns normally
         }
     }
 }

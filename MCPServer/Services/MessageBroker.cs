@@ -2085,8 +2085,10 @@ namespace MultiTerminal.MCPServer.Services
         /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
         /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
         /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
-        /// defining property of an adopted session; there is no staleness reaper either. So without a
-        /// liveness test the row sits connected forever and gate (4) refuses the name's real owner on
+        /// defining property of an adopted session. The liveness reaper (task d1151661) now disconnects
+        /// such a row, but only every ~30s and only when MainForm hosts it, so this check is still what
+        /// decides the name at registration time. Without it the row blocks the name until the next
+        /// sweep, or forever where no reaper runs, and gate (4) refuses the name's real owner on
         /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
         /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
         /// session's claim.</para>
@@ -2277,14 +2279,18 @@ namespace MultiTerminal.MCPServer.Services
         /// <summary>
         /// Classifies whether the row's <see cref="TerminalInfo.OwnerPid"/> still names the process
         /// incarnation it was bound to (task c9285d2a).
-        /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
+        /// <para>Two defects converge on this check. (1) Nothing explicitly disconnects an adopted row —
         /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
         /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
-        /// defining property of an adopted session; there is no staleness reaper either. So without a
-        /// liveness test the row sits connected forever and gate (4) refuses the name's real owner on
+        /// defining property of an adopted session. The liveness reaper (task d1151661) disconnects
+        /// it only on its next ~30s sweep, and only when MainForm hosts it. Every read in between
+        /// still depends on this check, and without it gate (4) refuses the name's real owner on
         /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
         /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
         /// session's claim.</para>
+        /// <para>Since task d1151661 this verdict also drives WRITES: <see cref="GetTerminals"/> hides a
+        /// Dead row and <see cref="ReapDeadOwnerTerminals"/> disconnects it. So a live owner misread as
+        /// Dead is no longer only hidden; it is torn down.</para>
         /// </summary>
         private OwnerLiveness ResolveOwnerLiveness(TerminalInfo terminal)
         {
@@ -2663,11 +2669,12 @@ namespace MultiTerminal.MCPServer.Services
 
             //     A row is only HELD if someone is still there to hold it. A nonce-bearing row is held
             //     by its (immortal) nonce; a pid-only row is held only while its owning process lives.
-            //     That second clause is what stops gate (4) locking out its own owner: an adopted
-            //     session is never marked disconnected (no docId for UnregisterTerminal, and the
-            //     SessionEnd hook early-returns without MULTITERMINAL_NAME), and no reaper exists, so
-            //     the row would otherwise sit connected for MT's whole uptime and refuse the same
-            //     person's next shell. A dead owner means the name is free.
+            //     That second clause is what stops gate (4) locking out its own owner: nothing
+            //     explicitly disconnects an adopted session (no docId for UnregisterTerminal, and the
+            //     SessionEnd hook early-returns without MULTITERMINAL_NAME). The liveness reaper
+            //     (d1151661) disconnects it only on its next ~30s sweep, so without this clause the
+            //     row would refuse the same person's next shell until then, or for MT's whole uptime
+            //     where no reaper runs. A dead owner means the name is free.
             // Only DEAD releases a name. Unknown keeps the row held — releasing on a read we could not
             // perform is how a live session silently loses its name to whoever asks next.
             bool existingCarriesProof = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
@@ -2886,6 +2893,16 @@ namespace MultiTerminal.MCPServer.Services
                     }
                     else
                     {
+                        // ⚠️ MAKE "STAYS UNOWNED" TRUE (d1151661 pipeline Run 3, adversary M2). The log
+                        // line below always said so, but the DEAD owner's pid and start time were left
+                        // on the row. The session just admitted here is live, yet the row kept reading
+                        // Dead: item 0 hid it from the Terminals list, and the reaper disconnected it on
+                        // every sweep while its heartbeat re-registered it. Clearing the identity makes
+                        // the row Unowned: listed, never reaped, and no weaker at gate (4), which was
+                        // already fail-open for a Dead pid-only row and holds a nonce row by its nonce.
+                        existingByName.OwnerPid = null;
+                        existingByName.OwnerStartTime = null;
+                        existingByName.OwnerBoundAt = null;
                         DebugLogService?.Warning("MessageBroker", $"Not binding owner pid {ownerPid.Value} to '{name}': its start time could not be read, and a pid without one cannot be verified later. The row stays unowned rather than held by an unverifiable claim.");
                     }
 
@@ -3280,19 +3297,29 @@ namespace MultiTerminal.MCPServer.Services
             // RaiseSafe reaches WinForms handlers that marshal to the UI thread, and SetProfileOffline
             // writes SQLite. Holding a process-wide lock across either is a deadlock.
             TerminalInfo terminal;
+            bool wasConnected = false;
 
             lock (_registrationLock)
             {
-                // Look up by dictionary key first, then fall back to DocId
+                // Look up by dictionary key first, then fall back to DocId.
+                //
+                // ⚠️ PREFER THE CONNECTED ROW (d1151661 pipeline Run 3, debugger). Rows are never
+                // removed, so one docId can own a disconnected row AND a live one. That happens when
+                // a tab's session was reaped or /quit and a new session registered from the same tab.
+                // An unordered FirstOrDefault could pick the corpse and leave the live row connected
+                // after its tab closed.
                 if (!_terminals.TryGetValue(terminalId, out terminal))
                 {
-                    terminal = _terminals.Values.FirstOrDefault(t =>
-                        !string.IsNullOrEmpty(t.DocId) &&
-                        t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase));
+                    terminal = _terminals.Values
+                        .Where(t => !string.IsNullOrEmpty(t.DocId)
+                                    && t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(t => t.IsConnected)
+                        .FirstOrDefault();
                 }
 
                 if (terminal != null)
                 {
+                    wasConnected = terminal.IsConnected;
                     terminal.IsConnected = false;
 
                     // ⚠️ CLEAR THE ROUTE TOO — the two teardown paths used to disagree (Run 6 debugger,
@@ -3312,13 +3339,23 @@ namespace MultiTerminal.MCPServer.Services
                 }
             }
 
-            if (terminal != null)
+            // ⚠️ AN ALREADY-DISCONNECTED ROW GETS NO SECOND TEARDOWN (d1151661 pipeline Run 3,
+            // debugger). Its teardown already ran, whether reaper, /quit, or the other of the two
+            // tab-close paths that both land here. Repeating it is not idempotent, because both
+            // effects below are keyed by NAME. After the reaper freed a dead Diana's name and Diana
+            // relaunched elsewhere, closing the old tab evicted the live Diana's Attention card and
+            // marked her profile offline, which hides her from GetTerminals.
+            if (terminal != null && wasConnected)
             {
                 RaiseSafe(TerminalDisconnected, terminal);
 
                 // Set profile offline through the write path: DB flag + coherent cache swap + broadcast,
                 // with its own error handling (ProfileService logs + returns a result, never throws here).
-                _profileService.SetProfileOffline(terminal.Name);
+                // Name-keyed, so only when no other live row holds the name.
+                if (!IsAgentNameHeldByLiveTerminal(terminal.Name))
+                {
+                    _profileService.SetProfileOffline(terminal.Name);
+                }
             }
         }
 
@@ -3371,8 +3408,14 @@ namespace MultiTerminal.MCPServer.Services
                 RaiseSafe(TerminalDisconnected, terminal);
             }
 
-            // Always update profile status (even if terminal not found in memory)
-            SetProfileOffline(name);
+            // Update profile status even if no terminal row was found in memory — unless another live
+            // row still carries the name (d1151661 pipeline Run 3). This method can only take the FIRST
+            // connected match, so with two same-name rows the other one is still there, and a
+            // name-keyed offline write would hide it.
+            if (!IsAgentNameHeldByLiveTerminal(name))
+            {
+                SetProfileOffline(name);
+            }
 
             DebugLogService?.Info("MessageBroker", $"DisconnectTerminalByName: {name} (terminal found: {terminal != null})");
             return true;
@@ -3462,11 +3505,12 @@ namespace MultiTerminal.MCPServer.Services
                 // Exclude temporary subagents (e.g. "Agent Alice") from terminal listings
                 if (IsTemporaryAgent(t.Name)) return false;
 
-                // A row whose owner process is PROVABLY gone is a ghost that nothing else clears.
-                // An adopted session has no docId for UnregisterTerminal and no MULTITERMINAL_NAME
-                // for the SessionEnd hook's disconnect POST, and there is no reaper — so IsConnected
-                // stays true for MT's whole uptime and the Owner keeps seeing terminals that have
-                // quit (task d1151661; the same population documented on ResolveOwnerLiveness).
+                // A row whose owner process is PROVABLY gone is a ghost until the liveness reaper's
+                // next sweep (~30s; none at all where MainForm does not host it). An adopted session
+                // has no docId for UnregisterTerminal and no MULTITERMINAL_NAME for the SessionEnd
+                // hook's disconnect POST, so this read-time filter is what keeps the Owner from
+                // seeing terminals that have quit during that window (task d1151661; the same
+                // population documented on ResolveOwnerLiveness).
                 //
                 // ⚠️ Dead ONLY. Unknown and Unowned MUST stay listed. Collapsing "cannot verify"
                 // into "gone" is the Run 2 defect recorded in ResolveOwnerLiveness's own remarks: a
@@ -3494,8 +3538,9 @@ namespace MultiTerminal.MCPServer.Services
         ///
         /// <para>"Online" had two meanings and they disagreed. <see cref="GetTerminals"/> answers it
         /// from live terminals; four other sites answered it from <c>profile.IsOnline</c>, a stored
-        /// flag that is set on registration and cleared only by an explicit disconnect. Nothing clears
-        /// it for a session that simply died, so those sites reported corpses as online — including
+        /// flag that is set on registration and cleared by an explicit disconnect. For a session that
+        /// simply died, only the liveness reaper clears it, ~30s later at best. Until then those sites
+        /// reported corpses as online — including
         /// <c>GET /api/team/roster</c>, which backs the <c>get_team_roster</c> MCP tool. That is the
         /// tool AGENTS use to decide who to talk to, so the stale flag was not merely cosmetic: it
         /// invited an agent to message a terminal that no longer exists (task d1151661).</para>
@@ -3531,6 +3576,31 @@ namespace MultiTerminal.MCPServer.Services
                     .Select(t => t?.Name)
                     .Where(n => !string.IsNullOrEmpty(n)),
                 StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// True when some connected row whose owner is not provably Dead carries
+        /// <paramref name="name"/>. This is the ONE rule every name-keyed teardown effect checks
+        /// first (task d1151661, pipeline Run 3).
+        /// <para>Rows are keyed by terminal id, but two teardown effects are keyed by NAME: marking the
+        /// profile offline, and the Attention rail's card eviction (<c>NoteTerminalGone(name)</c>). So a
+        /// teardown of ONE row applied to the whole name signs out every same-name terminal. Freed names
+        /// made that routine: the reaper releases a dead Diana's name, the Owner relaunches Diana
+        /// elsewhere, then closes the old tab. Without this check, that close would hide the live
+        /// Diana and delete her card.</para>
+        /// <para>Row-keyed effects are NOT gated by this: <see cref="TerminalDisconnected"/> still fires
+        /// for the row, because the Office panel removes characters by terminal id.</para>
+        /// <para>Call it after the row being torn down has been marked disconnected, so that row does
+        /// not count. A row revived in the meantime DOES count, which is correct: it is live.</para>
+        /// </summary>
+        public bool IsAgentNameHeldByLiveTerminal(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+
+            return _terminals.Values.Any(t =>
+                t.IsConnected
+                && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)
+                && ResolveOwnerLiveness(t) != OwnerLiveness.Dead);
         }
 
         /// <summary>
@@ -3637,12 +3707,10 @@ namespace MultiTerminal.MCPServer.Services
 
             RaiseSafe(TerminalDisconnected, terminal);
 
-            // Don't mark the profile offline while ANOTHER live row carries the name.
-            bool nameStillLive = _terminals.Values.Any(t =>
-                !ReferenceEquals(t, terminal)
-                && t.IsConnected
-                && string.Equals(t.Name, terminal.Name, StringComparison.OrdinalIgnoreCase)
-                && ResolveOwnerLiveness(t) != OwnerLiveness.Dead);
+            // Name-keyed, so only if no live row still carries the name. No by-reference exclusion
+            // of this row: if it was revived after the check above, it is live and must count
+            // (security Run 3 LOW 1).
+            bool nameStillLive = IsAgentNameHeldByLiveTerminal(terminal.Name);
             if (!nameStillLive) _profileService.SetProfileOffline(terminal.Name);
 
             DebugLogService?.Info("MessageBroker", $"Reaped '{terminal.Name}': owner pid {candidate.OwnerPid} is dead, so it is disconnected and TerminalDisconnected was raised (profile offline: {!nameStillLive}). task d1151661");
