@@ -1050,9 +1050,28 @@ namespace MultiTerminal.Tests
             string brokerPath = LocateRepoFile(Path.Combine("MCPServer", "Services", "MessageBroker.cs"));
             string[] lines = File.ReadAllLines(brokerPath);
 
-            // The two methods that tear down a terminal's connection state from outside the
-            // registration path. Both mutate IsConnected; DisconnectTerminalByName also nulls the port.
-            string[] guarded = { "public void UnregisterTerminal(", "public bool DisconnectTerminalByName(" };
+            // The methods that tear down a terminal's connection state from outside the registration
+            // path. All mutate IsConnected and null the port. TryReapDeadOwner is the liveness reaper's
+            // teardown (task d1151661 item 3). It is the third, so this list is no longer a pair.
+            string[] guarded =
+            {
+                "public void UnregisterTerminal(",
+                "public bool DisconnectTerminalByName(",
+                "internal bool TryReapDeadOwner(",
+            };
+
+            // ⚠️ COMPLETENESS. A census that enumerates its targets by name cannot see a writer nobody
+            // listed. The reaper was nearly exactly that: a third teardown path that would have passed
+            // this test by never being scanned. So also require that every non-comment
+            // `IsConnected = false` in the file is accounted for by one of the guarded methods. A
+            // fourth teardown added without enrolling here fails on the count, not silently.
+            int disconnectWrites = lines.Count(l =>
+                !l.TrimStart().StartsWith("//", StringComparison.Ordinal)
+                && l.Contains("IsConnected = false", StringComparison.Ordinal));
+            Assert.True(disconnectWrites == guarded.Length,
+                $"MessageBroker.cs has {disconnectWrites} non-comment 'IsConnected = false' writes but this census "
+                + $"guards {guarded.Length} methods. A teardown path was added or removed without updating "
+                + "`guarded` — enroll it, so its lock scope is actually checked.");
 
             foreach (string signature in guarded)
             {

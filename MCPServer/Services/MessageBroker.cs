@@ -3534,6 +3534,122 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// A connected row whose owner read as <c>Dead</c>, together with the owner identity it was
+        /// judged against. <see cref="TryReapDeadOwner"/> refuses to act unless the row still carries
+        /// that exact identity.
+        /// </summary>
+        internal readonly record struct DeadOwnerCandidate(TerminalInfo Terminal, int? OwnerPid, DateTime? OwnerStartTime);
+
+        /// <summary>
+        /// Turns every provably-Dead owner into a real disconnect, and returns the names released.
+        /// Called on a timer by <see cref="TerminalLivenessReaper"/> (task d1151661 item 3).
+        /// <para><see cref="GetTerminals"/> already HIDES these rows, but hiding is a read-time answer and
+        /// five consumers never ask it — Attention, Office, the Tasks panel, the Dashboard header and
+        /// Chat all react to <see cref="TerminalDisconnected"/>, which only an explicit teardown raises.
+        /// A session that simply died raised nothing, so its Attention card stayed until MT restarted.
+        /// Found in Owner testing: a force-killed Diana left the Terminals list and kept her card.</para>
+        /// <para>⚠️ Dead ONLY, the same rule as <see cref="GetTerminals"/>: an Unknown owner is a live
+        /// terminal we could not probe, and Unowned rows (gateway, spawned agents) can never be probed.</para>
+        /// </summary>
+        public IReadOnlyList<string> ReapDeadOwnerTerminals()
+        {
+            var released = new List<string>();
+            foreach (DeadOwnerCandidate candidate in FindDeadOwnerCandidates())
+            {
+                if (TryReapDeadOwner(candidate)) released.Add(candidate.Terminal.Name);
+            }
+
+            return released;
+        }
+
+        /// <summary>
+        /// Phase one of <see cref="ReapDeadOwnerTerminals"/>: probe WITHOUT the registration lock, since
+        /// every probe enumerates the process table and the lock serializes every registration.
+        /// </summary>
+        internal List<DeadOwnerCandidate> FindDeadOwnerCandidates()
+        {
+            var candidates = new List<DeadOwnerCandidate>();
+            foreach (TerminalInfo terminal in _terminals.Values)
+            {
+                if (!terminal.IsConnected) continue;
+
+                // Snapshot the pair BEFORE probing, for the same torn-write reason ResolveOwnerLiveness
+                // gives. Snapshotting after would let a rebind landing mid-probe hand phase two a
+                // live owner's identity stamped with a dead owner's verdict.
+                int? ownerPid = terminal.OwnerPid;
+                DateTime? ownerStart = terminal.OwnerStartTime;
+
+                // ⚠️ The ONLY eligibility rule, deliberately. No separate "skip rows without a pid or
+                // start time" guard: that would decide Unowned and Unknown BEFORE this line, so the
+                // tests for those states would stay green even with this predicate weakened to
+                // `== Alive`. They must go through the same three-state classification that decides
+                // Dead.
+                if (ResolveOwnerLiveness(terminal) != OwnerLiveness.Dead) continue;
+
+                // The probe read the row's fields again. If they moved, the verdict belongs to a
+                // different owner than the one snapshotted — skip; the next sweep judges it afresh.
+                if (terminal.OwnerPid != ownerPid || terminal.OwnerStartTime != ownerStart) continue;
+
+                candidates.Add(new DeadOwnerCandidate(terminal, ownerPid, ownerStart));
+            }
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Phase two: tear down ONE row, only if it is still exactly the row that was judged dead.
+        /// <para>⚠️ ROW-TARGETED, NOT <see cref="DisconnectTerminalByName"/>. That method takes the
+        /// FIRST connected row with the name, so if a new session registered the same name in between,
+        /// it would disconnect the LIVE session instead of the dead one. The relaunch that makes this
+        /// real is ordinary: the Owner restarts an agent in the same tab under the same name.</para>
+        /// <para>A name-match registration REUSES the row object and rebinds its owner, so the row
+        /// reference alone does not prove identity. Inside the lock the row must still be connected
+        /// AND carry the snapshotted (pid, start time). No reprobe is needed: a process that has
+        /// exited cannot come back with the same pid AND the same start time.</para>
+        /// <para>Side effects run AFTER the lock, as in the other two teardown paths
+        /// (<c>_registrationLock</c> is a leaf lock: RaiseSafe marshals to the UI thread, and
+        /// SetProfileOffline writes SQLite).</para>
+        /// </summary>
+        /// <returns>True if this call released the row.</returns>
+        internal bool TryReapDeadOwner(DeadOwnerCandidate candidate)
+        {
+            TerminalInfo terminal = candidate.Terminal;
+            if (terminal == null) return false;
+
+            lock (_registrationLock)
+            {
+                if (!terminal.IsConnected
+                    || terminal.OwnerPid != candidate.OwnerPid
+                    || terminal.OwnerStartTime != candidate.OwnerStartTime)
+                {
+                    return false;
+                }
+
+                terminal.IsConnected = false;
+                terminal.ChannelPort = null;
+            }
+
+            // A registration can revive the row in the gap since release. Firing a disconnect for a
+            // terminal that is connected again would drop a live agent's Attention card and hide it
+            // from GetTerminals through its offline profile — so re-check. This narrows the gap
+            // to the few instructions before the raise; DisconnectTerminalByName has the same gap.
+            if (terminal.IsConnected) return false;
+
+            RaiseSafe(TerminalDisconnected, terminal);
+
+            // Don't mark the profile offline while ANOTHER live row carries the name.
+            bool nameStillLive = _terminals.Values.Any(t =>
+                !ReferenceEquals(t, terminal)
+                && t.IsConnected
+                && string.Equals(t.Name, terminal.Name, StringComparison.OrdinalIgnoreCase)
+                && ResolveOwnerLiveness(t) != OwnerLiveness.Dead);
+            if (!nameStillLive) _profileService.SetProfileOffline(terminal.Name);
+
+            DebugLogService?.Info("MessageBroker", $"Reaped '{terminal.Name}': owner pid {candidate.OwnerPid} is dead, so it is disconnected and TerminalDisconnected was raised (profile offline: {!nameStillLive}). task d1151661");
+            return true;
+        }
+
+        /// <summary>
         /// Get or set remote mode. When on, hooks relay questions to ClaudeRemote and
         /// push notifications fire to the owner's phone. When off (user at desk), all
         /// phone-directed traffic short-circuits so the phone stays silent.

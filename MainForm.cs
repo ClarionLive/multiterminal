@@ -113,6 +113,7 @@ namespace MultiTerminal
         /// ever left unconstructed again, the rail silently reverts to showing frozen state.
         /// </remarks>
         private MCPServer.Services.AgentActivityWatcher _agentActivityWatcher;
+        private MCPServer.Services.TerminalLivenessReaper _terminalLivenessReaper;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
 #pragma warning restore CA2213
@@ -995,6 +996,10 @@ namespace MultiTerminal
                         // The REST host has assigned Broker.ActivityFeedService by now, so the
                         // attention rail's poller can actually be built (task edcdcdd5).
                         StartAgentActivityWatcher();
+
+                        // Disconnects terminals whose Claude process died without a teardown, so the
+                        // event-driven panels drop them too (task d1151661 item 3).
+                        StartTerminalLivenessReaper();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -6969,6 +6974,37 @@ namespace MultiTerminal
         }
 
         /// <summary>
+        /// Starts the sweep that turns a provably-dead terminal owner into a real disconnect
+        /// (task d1151661 item 3). Without it, a terminal that crashed or was killed leaves the
+        /// Terminals list but keeps its card on the Attention rail and its place in every other panel
+        /// that only listens for <c>TerminalDisconnected</c>.
+        /// </summary>
+        private void StartTerminalLivenessReaper()
+        {
+            try
+            {
+                if (_terminalLivenessReaper != null) return;
+
+                var broker = _mcpServer?.Broker;
+                if (broker == null)
+                {
+                    _debugLogService?.Warning("TerminalLivenessReaper", "Not started: broker unavailable.");
+                    return;
+                }
+
+                var reaper = new MCPServer.Services.TerminalLivenessReaper(
+                    broker.ReapDeadOwnerTerminals,
+                    msg => _debugLogService?.Info("TerminalLivenessReaper", msg));
+                reaper.Start();
+                _terminalLivenessReaper = reaper;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("TerminalLivenessReaper", $"Failed to start: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// The shared placeholder name every restored/anonymous terminal carries until its agent
         /// registers a real one. Not an identity: the broker itself skips profile creation for it.
         /// </summary>
@@ -7909,6 +7945,8 @@ namespace MultiTerminal
                 _codeGraphWatcher?.Dispose();
                 // Before the DB it reads (task edcdcdd5).
                 _agentActivityWatcher?.Dispose();
+                // Before the broker state and profile DB its sweep writes (task d1151661).
+                _terminalLivenessReaper?.Dispose();
                 // Dispose the coordinator after the watcher that uses it, before the DB it indexes.
                 _mcpServer?.Broker?.CodeGraphIndexCoordinator?.Dispose();
                 _sessionIndexingService?.Dispose();
