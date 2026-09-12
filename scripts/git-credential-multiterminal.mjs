@@ -52,6 +52,10 @@
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
+// One shared mint path with the gh shim (item 5). The nonce rule, the timeout and the
+// "a token or nothing" contract live there so the two callers cannot drift apart.
+import { mintInstallationToken } from './lib/mint-github-token.mjs';
+
 /** The only host we will ever hand a token to. See load-bearing fact (1). */
 const GITHUB_HOST = 'github.com';
 
@@ -113,46 +117,6 @@ export function isGitHubRequest(request) {
   return host === GITHUB_HOST;
 }
 
-/**
- * Ask MT to mint an installation token for this terminal. Returns the token, or null for every
- * failure mode — the caller cannot act differently on any of them, and the distinction is only
- * useful to someone probing.
- */
-async function mintToken(nonce) {
-  const installationId = process.env.MULTITERMINAL_GITHUB_INSTALLATION_ID || null;
-
-  let response;
-  try {
-    response = await fetch(`${MT_API_URL}/api/github/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-MultiTerminal-Launch-Nonce': nonce,
-      },
-      body: JSON.stringify(installationId ? { installationId } : {}),
-      signal: AbortSignal.timeout(MINT_TIMEOUT_MS),
-    });
-  } catch {
-    // MT is not running, not reachable, or too slow. Nothing to report but the shape.
-    warn('MultiTerminal did not answer the mint request; falling through to git.');
-    return null;
-  }
-
-  if (!response.ok) {
-    warn(`MultiTerminal refused to mint a token (HTTP ${response.status}); falling through to git.`);
-    return null;
-  }
-
-  try {
-    const body = await response.json();
-    const token = body?.token;
-    return typeof token === 'string' && token.length > 0 ? token : null;
-  } catch {
-    warn('The mint response could not be read as JSON; falling through to git.');
-    return null;
-  }
-}
-
 async function main() {
   // git passes the operation as the first argument. `store` and `erase` are deliberate no-ops: we
   // persist nothing, so there is nothing to save and nothing to forget. An unknown operation (a
@@ -167,13 +131,16 @@ async function main() {
     return;
   }
 
-  const nonce = process.env.MULTITERMINAL_LAUNCH_NONCE;
-  if (!nonce) {
-    warn('No launch nonce in this environment, so no token can be minted for this terminal.');
-    return;
-  }
+  const token = await mintInstallationToken({
+    nonce: process.env.MULTITERMINAL_LAUNCH_NONCE,
+    installationId: process.env.MULTITERMINAL_GITHUB_INSTALLATION_ID || null,
+    apiUrl: MT_API_URL,
+    timeoutMs: MINT_TIMEOUT_MS,
+    warn,
+  });
 
-  const token = await mintToken(nonce);
+  // Every failure lands here identically, and every one of them means the same thing to git:
+  // say nothing, exit 0, let it try its other helpers.
   if (!token) return;
 
   // x-access-token is GitHub's username convention for an installation token. The blank line
