@@ -1809,11 +1809,101 @@ namespace MultiTerminal.MCPServer.Services
             }
         }
 
-        // Lock used to make "probe for unique name + register" an atomic pair
-        // (see RegisterTerminalUnique). Only covers the narrow critical section
-        // where a racing launch could choose the same candidate suffix; the
-        // regular RegisterTerminal path is unaffected.
-        private readonly object _uniqueRegistrationLock = new object();
+        // Serializes the whole registration DECISION — every name/docId lookup, the gate (4) proof
+        // check, and the row mutation or mint that follows from it. One lock for all callers, because
+        // the decision is a check-then-act over shared state and the act is only correct if nothing
+        // moved in between.
+        //
+        // ⚠️ It used to say: "Only covers the narrow critical section where a racing launch could
+        // choose the same candidate suffix; the regular RegisterTerminal path is unaffected." That
+        // sentence WAS the defect, written down as a design note. RegisterTerminal is the path gate (4)
+        // guards, and it held no lock at all: two callers registering the same free name both read
+        // existingByName == null, both skipped the gate, and both TryAdd'd a row — because the mint is
+        // keyed on a fresh Guid, so TryAdd cannot collide and provides no mutual exclusion on the NAME.
+        // Delivery then resolves by FirstOrDefault-over-name and picks arbitrarily, while reporting
+        // success. Found independently by three pipeline gates (Run 5); the "fail-closed" duplicate-name
+        // rejection this ticket exists to add was not closed against a second process.
+        //
+        // ⚠️ THE LOCK MUST NOT COVER SIDE EFFECTS. RaiseSafe(TerminalRegistered, ...) fans out to
+        // WinForms handlers that marshal to the UI thread, and the profile calls write SQLite. Holding a
+        // process-wide lock across either is a deadlock: a handler waiting on the UI thread while the UI
+        // thread waits for this lock. All three gates recommended locking "from the lookup through the
+        // TryAdd", which taken literally spans exactly that. So the decision runs here and the side
+        // effects run in ApplyRegistrationSideEffects AFTER release — see RegisterTerminal.
+        //
+        // Monitor is reentrant, so RegisterTerminalUnique can keep holding this across
+        // FindUniqueCandidate + RegisterTerminal and get the atomic pair it always wanted; that pair is
+        // now genuinely atomic, because the inner call no longer runs unsynchronized.
+        private readonly object _registrationLock = new object();
+
+        // Corroboration ledger for refused channel-port reports (task c9285d2a item 10, cycle 1).
+        //
+        // WHY THIS EXISTS RATHER THAN A COUNTER ON THE INCUMBENT'S ROW. Run 4 established that a
+        // refusal cannot be attributed to the row it names — that is what a refusal IS — and narrowed
+        // the count with "and the incumbent holds no route". Live testing on 2026-09-09 showed the
+        // narrowing is not enough: a healthy terminal has NO route for the few seconds between its own
+        // register_terminal and its channel server's port report (measured 7.0s for an MT-launched
+        // terminal, 2.4s and 2.1s for adopted ones), and any stranger's name claim arriving in that
+        // window marked it dead. Permanently, because the reset needs an accepted port report and a
+        // healthy server's heartbeat is drift-gated so it never sends another one.
+        //
+        // The fix is to stop writing to the incumbent on a single refusal at all, and to discriminate
+        // on a property the two cases genuinely differ in rather than on a proxy:
+        //
+        //   the real condition REPEATS  — an old channel server whose reports are refused never gets
+        //                                 its port into the roster, so the drift gate never silences
+        //                                 it and it re-reports the SAME port every ~30s, indefinitely;
+        //   the false positive DOES NOT — a stranger's name claim is one-shot.
+        //
+        // So a refusal is recorded here, keyed on the (name, port) pair the caller presented, and only
+        // once the same pair has been refused CorroborationThreshold times inside the window does
+        // anything land on the row. (name, port) is a safe key without the pid: a port has one owning
+        // process, and an old channel server presents neither nonce nor pid, so the pid is exactly what
+        // is unavailable in the population this signal exists to detect.
+        //
+        // COST, stated honestly: the genuine signal is delayed by one heartbeat (~30s) rather than
+        // firing on the first refusal. That is the price of not crying dead on a terminal that is
+        // merely three seconds old, and it is the right trade — a health field that fires when nothing
+        // is wrong trains its reader to ignore it, which is worse than no field.
+        //
+        // Guarded by _registrationLock: every read and write below happens inside DecideRegistration,
+        // which the class contract requires to be called with that lock held. A plain Dictionary is
+        // therefore correct; a ConcurrentDictionary would not make the read-modify-write atomic anyway.
+        private readonly Dictionary<string, PortRefusalRecord> _portRefusalLedger =
+            new Dictionary<string, PortRefusalRecord>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Refusals must reach this count inside <see cref="ChannelPortRefusalWindow"/> before a row is marked.</summary>
+        private const int ChannelPortRefusalCorroborationThreshold = 2;
+
+        /// <summary>
+        /// How long a refusal stays eligible to corroborate a later one. Comfortably wider than the
+        /// channel server's ~30s re-report interval (so a genuinely skewed server corroborates on its
+        /// next heartbeat) and far narrower than MT's uptime (so two unrelated one-shot claims hours
+        /// apart never add up to a false verdict).
+        /// </summary>
+        private static readonly TimeSpan ChannelPortRefusalWindow = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// Maximum LIVE refusal records. Time-based expiry does not bound the working set — everything
+        /// created inside one window is live at once — so this is what actually bounds memory, and what
+        /// stops a caller-influenced key space from growing the dictionary that the refusal path walks
+        /// under the process-wide registration lock. Generous relative to any honest workload: it is
+        /// 100 ports x ~5 simultaneously-failing terminals, and real deployments run a handful.
+        /// </summary>
+        private const int ChannelPortRefusalLedgerCap = 512;
+
+        /// <summary>Longest name fragment used in a ledger key; the port is already range-checked, the name is not.</summary>
+        private const int LedgerKeyNameClamp = 128;
+
+        /// <summary>One (name, port) pair's refusal history inside the current window.</summary>
+        private sealed class PortRefusalRecord
+        {
+            public int Count { get; set; }
+
+            public DateTime FirstAtUtc { get; set; }
+
+            public DateTime LastAtUtc { get; set; }
+        }
 
         /// <summary>
         /// Returns a name safe to use for a fresh terminal registration.
@@ -1868,11 +1958,20 @@ namespace MultiTerminal.MCPServer.Services
                 return RegisterTerminal(requested, docId, isTeamLead, channelPort, nonce);
             }
 
-            lock (_uniqueRegistrationLock)
+            // Decide under the lock, apply side effects after it. Calling RegisterTerminal here instead
+            // would LOOK fine — Monitor is reentrant so the inner lock succeeds — but reentrancy means
+            // the inner release does NOT release: RegisterTerminal's event dispatch and profile writes
+            // would run while this outer lock is still held, which is the exact deadlock the split was
+            // made to avoid. Reaching for DecideRegistration directly is what keeps the atomic
+            // find-candidate-then-register pair honest AND the side effects outside.
+            RegistrationOutcome outcome;
+            lock (_registrationLock)
             {
                 resolvedName = FindUniqueCandidate(requested);
-                return RegisterTerminal(resolvedName, docId, isTeamLead, channelPort, nonce);
+                outcome = DecideRegistration(resolvedName, docId, isTeamLead, channelPort, nonce, null);
             }
+
+            return ApplyRegistrationSideEffects(outcome);
         }
 
         /// <summary>
@@ -1903,6 +2002,426 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
+        /// Returns the name of the CONNECTED terminal registered from the given Claude Code process
+        /// id, or null when none is (task c9285d2a).
+        /// <para>This is how a channel server that started with no identity discovers the name its own
+        /// session has since claimed. It resolves on OwnerPid rather than anything the caller asserts
+        /// about itself, so a process can only ever find the row belonging to its own parent.</para>
+        /// <para>Returns the NAME only. The launch nonce is never exposed here — see
+        /// <see cref="TerminalInfo.LaunchNonce"/> for why disclosing it would collapse proof-of-origin
+        /// into a bearer token.</para>
+        /// </summary>
+        /// <remarks>
+        /// <para>DETERMINISM (pipeline Run 1). One Claude process can own SEVERAL connected rows — a
+        /// subagent shares its parent's MCP server process, and a rename creates a second row while the
+        /// first is still connected — and every row that session creates is stamped with the same pid.
+        /// <c>FirstOrDefault</c> over <c>ConcurrentDictionary.Values</c> has unspecified ordering, so an
+        /// unbound channel server could adopt the WRONG name and answer another agent's messages. This
+        /// method already documents that exact hazard for the "Unassigned" sentinel a few hundred lines
+        /// below; the lesson was learned here and originally not applied to this lookup.</para>
+        /// <para>So: temporary agent rows are excluded (they are never the session's real identity), the
+        /// newest row wins among what remains, and a genuine tie between two non-temporary rows returns
+        /// NULL rather than guessing. Refusing to answer keeps the channel server unbound, which is the
+        /// safe state — it registers no port and answers nothing.</para>
+        /// <para>LIVENESS: the pid must still name the process it was bound to. See
+        /// <see cref="TerminalInfo.OwnerStartTime"/>.</para>
+        /// </remarks>
+        public string GetTerminalNameByOwnerPid(int ownerPid)
+        {
+            if (ownerPid <= 0) return null;
+
+            var candidates = _terminals.Values
+                .Where(t => t.IsConnected
+                            && t.OwnerPid.HasValue
+                            && t.OwnerPid.Value == ownerPid
+                            && ResolveOwnerLiveness(t) != OwnerLiveness.Dead
+                            && !IsTemporaryAgent(t.Name)
+
+                            // "Unassigned" is the deliberate shared sentinel, never anyone's identity
+                            // (see RegisterTerminalUnique). Handing it back would let a channel server
+                            // bind the placeholder name and start answering for it.
+                            && !t.Name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase))
+
+                            // Ordered by when the OWNER was bound, not by LastActiveAt: the latter is
+                            // an activity clock that SendMessage/Broadcast/MarkAgentReady bump on the
+                            // sender's row, so "newest wins" could run backwards after ordinary
+                            // traffic and resolve to a stale identity.
+                .OrderByDescending(t => t.OwnerBoundAt ?? DateTime.MinValue)
+                .ToList();
+
+            if (candidates.Count == 0) return null;
+
+            // ⚠️ MORE THAN ONE CANDIDATE IS AMBIGUOUS, FULL STOP — it is not "ambiguous only when the
+            // timestamps happen to be equal" (Run 6, cross-model adversary HIGH).
+            //
+            // The previous cut returned null ONLY on an exact OwnerBoundAt tie and otherwise handed
+            // back the newest. Two rows bound at the same tick is a measure-zero event; two real rows
+            // under one owner pid with DIFFERENT bind times is the ordinary case — a rename leaves the
+            // old row still connected, and subagents share the parent's MCP server process. So the
+            // guard fired essentially never and the guess fired essentially always, which is the exact
+            // opposite of what item 9 SAID it did: "return null rather than guess if more than one
+            // non-temporary row remains". The code and its own stated rule had diverged.
+            //
+            // Why guessing is not an acceptable default here: delivery is keyed on NAME
+            // (multiterminal-channel.mjs isAddressedToMe), so a wrong answer does not degrade — it
+            // binds a channel server to somebody else's identity and silently delivers their messages
+            // to it. Refusing costs an unbound caller that retries on its next poll; guessing costs a
+            // misrouted conversation that nothing reports.
+            //
+            // The ordering above is now only for a deterministic, readable log line.
+            if (candidates.Count > 1)
+            {
+                string names = string.Join(", ", candidates.Select(c => $"'{c.Name}'"));
+                DebugLogService?.Warning("MessageBroker", $"GetTerminalNameByOwnerPid({ownerPid}): {candidates.Count} connected non-temporary rows share this owner pid ({names}). Refusing to guess — the caller stays unbound and will retry. Binding one of these would hand it another terminal's messages, because delivery is keyed on name.");
+                return null;
+            }
+
+            return candidates[0].Name;
+        }
+
+        /// <summary>
+        /// True when the row's <see cref="TerminalInfo.OwnerPid"/> still names the very process
+        /// incarnation it was bound to (task c9285d2a, pipeline Run 1).
+        /// <para>Two defects converge on this check. (1) An adopted row is NEVER marked disconnected —
+        /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
+        /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
+        /// defining property of an adopted session. The liveness reaper (task d1151661) now disconnects
+        /// such a row, but only every ~30s and only when MainForm hosts it, so this check is still what
+        /// decides the name at registration time. Without it the row blocks the name until the next
+        /// sweep, or forever where no reaper runs, and gate (4) refuses the name's real owner on
+        /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
+        /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
+        /// session's claim.</para>
+        /// <para>Comparing the start time as well pins the pid to one incarnation. A row whose owner is
+        /// gone reports FALSE and is treated as unheld, which releases the name.</para>
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ Run 2 correction: "cannot verify" is NOT "dead". The first cut collapsed every failure —
+        /// no such process, exited, AND access-denied — into a single false, so a `Win32Exception`
+        /// (MT unelevated while claude is elevated, a protected process, a cross-session pid) made a
+        /// LIVE owner read as a corpse and SILENTLY released its name to the next claimant. Three
+        /// states, not two: only <see cref="OwnerLiveness.Dead"/> releases a name.
+        /// </remarks>
+        private enum OwnerLiveness
+        {
+            /// <summary>The row names no owner at all — nothing holds it.</summary>
+            Unowned,
+
+            /// <summary>The pid names the very process incarnation it was bound to.</summary>
+            Alive,
+
+            /// <summary>The process is gone, or the pid was recycled onto a different one.</summary>
+            Dead,
+
+            /// <summary>
+            /// A process with that pid exists but its identity could not be confirmed (access denied).
+            /// The row stays HELD — releasing on an unverifiable read is how a live session loses its
+            /// name — but the degraded check falls back to bare pid equality so the legitimate owner,
+            /// who knows the pid, is not locked out either.
+            /// </summary>
+            Unknown,
+        }
+
+        /// <summary>
+        /// Records one refused port report and returns how many times this exact (name, port) pair has
+        /// been refused inside the current window — the caller compares that against
+        /// <see cref="ChannelPortRefusalCorroborationThreshold"/>. Task c9285d2a item 10, cycle 1.
+        /// </summary>
+        /// <remarks>
+        /// The window is measured from the FIRST refusal in the run, not the most recent, so a caller
+        /// retrying forever cannot hold a run open indefinitely by sliding the deadline ahead of itself.
+        /// A run that ages out simply starts a new one; nothing is lost, because the condition being
+        /// detected re-reports every ~30s and will re-corroborate almost immediately.
+        /// MUST be called with <see cref="_registrationLock"/> held.
+        /// </remarks>
+        private int RecordPortRefusal(string name, int port)
+        {
+            DateTime now = DateTime.UtcNow;
+            string key = LedgerKey(name, port);
+
+            if (!_portRefusalLedger.TryGetValue(key, out PortRefusalRecord record)
+                || now - record.FirstAtUtc > ChannelPortRefusalWindow)
+            {
+                record = new PortRefusalRecord { Count = 0, FirstAtUtc = now };
+                _portRefusalLedger[key] = record;
+            }
+
+            record.Count++;
+            record.LastAtUtc = now;
+
+            // ⚠️ BOUND THE LEDGER, AND DO NOT SCAN IT ON EVERY REFUSAL (Run 6, Codex security MEDIUM).
+            //
+            // The first cut called PrunePortRefusals on every single refusal, which walks the WHOLE
+            // dictionary — while holding _registrationLock, the process-wide lock that serializes every
+            // registration decision. Since the keys are built from caller-supplied name and port, a
+            // local caller could enumerate 8800-8899 across many names to grow the dictionary and make
+            // each subsequent refusal scan all of it, turning an unauthenticated local endpoint into
+            // lock-contention DoS against legitimate terminal registration and channel binding.
+            //
+            // Time-based expiry alone does not bound the WORKING SET: everything created inside a
+            // 5-minute window is live at once. So the cap is what bounds memory, and the scan now runs
+            // only when the cap is exceeded rather than on every call — expired records are inert in
+            // the meantime (a refusal landing on one resets it), so leaving them costs nothing but
+            // space we have already capped.
+            if (_portRefusalLedger.Count > ChannelPortRefusalLedgerCap)
+            {
+                PrunePortRefusals(now);
+
+                // Still over after dropping the expired ones: the pressure is live, not stale, which is
+                // the shape a deliberate flood takes. Evict oldest-first. That preferentially discards
+                // runs nearest to ageing out anyway, and a genuine dead channel re-reports every ~30s,
+                // so a wrongly-evicted real signal re-corroborates on its next heartbeat. Losing a
+                // health signal for one heartbeat is a far better failure than unbounded growth on the
+                // registration hot path.
+                if (_portRefusalLedger.Count > ChannelPortRefusalLedgerCap)
+                {
+                    EvictOldestPortRefusals(_portRefusalLedger.Count - ChannelPortRefusalLedgerCap);
+                }
+            }
+
+            return record.Count;
+        }
+
+        /// <summary>
+        /// Drops every refusal record for a name. Called when a port report is ACCEPTED, so recovery
+        /// clears the evidence and not merely the verdict. MUST be called with
+        /// <see cref="_registrationLock"/> held.
+        /// </summary>
+        private void ClearPortRefusals(string name)
+        {
+            string prefix = LedgerKeyPrefix(name);
+            var stale = _portRefusalLedger.Keys
+                .Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (string key in stale)
+                _portRefusalLedger.Remove(key);
+        }
+
+        /// <summary>
+        /// The ledger key for one (name, port) pair: a bounded prefix of the name PLUS a hash of the
+        /// whole name, so the key is size-limited without becoming ambiguous.
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ THE HASH IS NOT DECORATION — truncation alone was a false-corroboration path (Run 6,
+        /// cross-model adversary). Clamping to a prefix made two distinct names sharing that prefix
+        /// share one record, so terminal A's FIRST refusal could serve as terminal B's CORROBORATING
+        /// SECOND and mark B dead off a single one-shot refusal. The comment here previously called that
+        /// collision "acceptable for a health counter"; it is not, because it manufactures exactly the
+        /// false positive the corroboration rule exists to prevent — the defect item 10 was sent back to
+        /// coding for in the first place. Registration names arrive from an unauthenticated local
+        /// endpoint, so colliding names are a thing a caller can choose, not merely an unlucky accident.
+        /// The prefix is retained only so the key stays readable in a debugger.
+        /// </remarks>
+        private static string LedgerKey(string name, int port) => $"{LedgerNameIdentity(name)}|{port}";
+
+        /// <summary>
+        /// The prefix matching every key for a name. MUST derive the identity identically to
+        /// <see cref="LedgerKey"/> — a prefix built differently would match nothing, silently leaving a
+        /// recovered terminal's history behind and letting it corroborate against a later refusal.
+        /// </summary>
+        private static string LedgerKeyPrefix(string name) => LedgerNameIdentity(name) + "|";
+
+        /// <summary>Bounded, collision-resistant identity for a terminal name.</summary>
+        private static string LedgerNameIdentity(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+
+            string prefix = name.Length <= LedgerKeyNameClamp ? name : name.Substring(0, LedgerKeyNameClamp);
+
+            // Short names are already unambiguous; skip the hash so the common key stays exactly the
+            // readable "Alice|8801" it was.
+            if (name.Length <= LedgerKeyNameClamp) return prefix;
+
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            byte[] digest = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(name));
+            return prefix + "#" + Convert.ToHexString(digest, 0, 8);
+        }
+
+        /// <summary>
+        /// Drops the <paramref name="count"/> oldest records by <see cref="PortRefusalRecord.FirstAtUtc"/>.
+        /// Only ever called when the ledger is over <see cref="ChannelPortRefusalLedgerCap"/> AFTER
+        /// expiry pruning, i.e. when the pressure is live rather than stale. MUST be called with
+        /// <see cref="_registrationLock"/> held.
+        /// </summary>
+        private void EvictOldestPortRefusals(int count)
+        {
+            if (count <= 0) return;
+
+            var oldest = _portRefusalLedger
+                .OrderBy(kv => kv.Value.FirstAtUtc)
+                .Take(count)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (string key in oldest)
+                _portRefusalLedger.Remove(key);
+
+            DebugLogService?.Warning("MessageBroker", $"Port-refusal ledger hit its cap of {ChannelPortRefusalLedgerCap} live records; evicted {oldest.Count} oldest. Either many terminals are genuinely failing to bind at once, or something is generating refusals deliberately. task c9285d2a");
+        }
+
+        /// <summary>
+        /// Discards records whose window has closed, so the ledger cannot grow without bound on a
+        /// long-lived MT. Cheap: it runs only on the refusal path, which is rare by construction.
+        /// MUST be called with <see cref="_registrationLock"/> held.
+        /// </summary>
+        private void PrunePortRefusals(DateTime now)
+        {
+            var expired = _portRefusalLedger
+                .Where(kv => now - kv.Value.FirstAtUtc > ChannelPortRefusalWindow)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            foreach (string key in expired)
+                _portRefusalLedger.Remove(key);
+        }
+
+        /// <summary>
+        /// Classifies whether the row's <see cref="TerminalInfo.OwnerPid"/> still names the process
+        /// incarnation it was bound to (task c9285d2a).
+        /// <para>Two defects converge on this check. (1) Nothing explicitly disconnects an adopted row —
+        /// its session has no docId for <c>UnregisterTerminal</c>, and the SessionEnd hook that would
+        /// POST /api/messaging/disconnect early-returns when MULTITERMINAL_NAME is unset, which is the
+        /// defining property of an adopted session. The liveness reaper (task d1151661) disconnects
+        /// it only on its next ~30s sweep, and only when MainForm hosts it. Every read in between
+        /// still depends on this check, and without it gate (4) refuses the name's real owner on
+        /// their next session — the gate locking out exactly who it exists to protect. (2) Windows
+        /// recycles pids, so a bare integer match would let an unrelated process inherit a dead
+        /// session's claim.</para>
+        /// <para>Since task d1151661 this verdict also drives WRITES: <see cref="GetTerminals"/> hides a
+        /// Dead row and <see cref="ReapDeadOwnerTerminals"/> disconnects it. So a live owner misread as
+        /// Dead is no longer only hidden; it is torn down.</para>
+        /// </summary>
+        private OwnerLiveness ResolveOwnerLiveness(TerminalInfo terminal)
+        {
+            // Snapshot both halves ONCE. The pair is written non-atomically by the rebind path
+            // (OwnerPid, then OwnerStartTime) on a row already published in _terminals, under
+            // _registrationLock — which this reader does not take. Before task d1151661 that tear was
+            // observed only by DecideRegistration, which DOES hold the lock, so it was unobservable;
+            // putting liveness on a read path made this the sole observer. Re-reading the fields
+            // separately could pair a new pid with the previous owner's start time and report a LIVE
+            // row as Dead for one frame. Read-side only: nothing here changes the write path.
+            int? ownerPid = terminal?.OwnerPid;
+            DateTime? ownerStart = terminal?.OwnerStartTime;
+
+            if (ownerPid == null) return OwnerLiveness.Unowned;
+
+            // A pid is only ever bound together with a verified start time (see the stamp sites), so a
+            // row carrying a pid without one predates that rule. Unverifiable, not provably gone.
+            if (ownerStart == null) return OwnerLiveness.Unknown;
+
+            switch (ReadProcessStartTime(ownerPid.Value, out DateTime startTime))
+            {
+                case ProcessProbe.NotRunning:
+                    return OwnerLiveness.Dead;
+
+                case ProcessProbe.Unreadable:
+                    // Rate-limited per (name, pid). Since task d1151661 this runs on a UI read path
+                    // (the roster, the panels) rather than only at registration, and Unknown's own
+                    // documented trigger — MT unelevated while claude is elevated — is a PERSISTENT
+                    // condition, not a blip. Unthrottled it is a continuous write-to-disk stream that
+                    // would bury everything else in the log.
+                    WarnUnreadableOwnerOnce(terminal);
+                    return OwnerLiveness.Unknown;
+
+                default:
+                    return startTime == ownerStart.Value
+                        ? OwnerLiveness.Alive
+                        : OwnerLiveness.Dead;   // pid recycled onto a different process
+            }
+        }
+
+        /// <summary>Last time an Unreadable-owner warning was emitted, keyed by name + pid.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _unreadableOwnerWarnedAt
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly TimeSpan UnreadableOwnerWarnInterval = TimeSpan.FromMinutes(1);
+
+        /// <summary>
+        /// Emit the "owner liveness is UNKNOWN" warning at most once a minute per (name, pid).
+        /// <para>The condition it reports is persistent, and since d1151661 the probe sits on a read
+        /// path that fires per panel refresh and per activity event, so the honest choice is to keep
+        /// the signal and drop the repetition.</para>
+        /// </summary>
+        private void WarnUnreadableOwnerOnce(TerminalInfo terminal)
+        {
+            string key = $"{terminal?.Name}|{terminal?.OwnerPid}";
+            DateTime now = DateTime.UtcNow;
+
+            // AddOrUpdate rather than GetOrAdd-then-indexer: the latter is a read-modify-write that
+            // lets two concurrent refreshes both claim the token. Harmless for a log throttle, but
+            // saying so deliberately costs nothing and the file's own _portRefusalLedger sets that
+            // discipline 300 lines up.
+            bool warn = false;
+            _unreadableOwnerWarnedAt.AddOrUpdate(
+                key,
+                _ => { warn = true; return now; },
+                (_, last) =>
+                {
+                    if (now - last < UnreadableOwnerWarnInterval) return last;
+                    warn = true;
+                    return now;
+                });
+            if (!warn) return;
+
+            DebugLogService?.Warning("MessageBroker", $"Owner liveness for '{terminal?.Name}' (pid {terminal?.OwnerPid}) is UNKNOWN — the start time could not be read. Keeping the name held and falling back to bare pid equality; a name is not released on an unverifiable read. (Further identical warnings suppressed for {UnreadableOwnerWarnInterval.TotalSeconds:F0}s.)");
+        }
+
+        /// <summary>Outcome of probing a pid for its start time.</summary>
+        private enum ProcessProbe
+        {
+            /// <summary>Start time read successfully.</summary>
+            Read,
+
+            /// <summary>No process with that id is running.</summary>
+            NotRunning,
+
+            /// <summary>A process may exist but its start time could not be read (access denied).</summary>
+            Unreadable,
+        }
+
+        /// <summary>
+        /// Probes a pid's start time, distinguishing "no such process" from "cannot read it".
+        /// Conflating those two is what let an access-denied read silently release a live name.
+        /// </summary>
+        private static ProcessProbe ReadProcessStartTime(int pid, out DateTime startTime)
+        {
+            startTime = default;
+            if (pid <= 0) return ProcessProbe.NotRunning;
+
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                startTime = process.StartTime;
+                return ProcessProbe.Read;
+            }
+            catch (ArgumentException)
+            {
+                // No process with that id is running.
+                return ProcessProbe.NotRunning;
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited between lookup and read.
+                return ProcessProbe.NotRunning;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // Access denied — a process with this pid may well be alive; we simply cannot confirm
+                // which one. Never treat this as death: that is how a live session loses its name.
+                return ProcessProbe.Unreadable;
+            }
+        }
+
+        /// <summary>
+        /// Reads a process's start time for BINDING (as opposed to verification). Returns false when
+        /// the value could not be established, in which case the caller must NOT bind the pid at all —
+        /// a pid stored without a verified start time is an identity nobody can check later.
+        /// </summary>
+        internal static bool TryGetProcessStartTime(int pid, out DateTime startTime)
+            => ReadProcessStartTime(pid, out startTime) == ProcessProbe.Read;
+
+        /// <summary>
         /// Register a terminal with the broker.
         /// <para>Documented write-path bypass (P5 / 1df2a534): this registration orchestration writes
         /// profiles in-place (SaveProfile across several branches — docId match, name match, rename,
@@ -1912,7 +2431,31 @@ namespace MultiTerminal.MCPServer.Services
         /// (and UnregisterTerminal) to the write path and REMOVES it from the allowlist as its close
         /// condition, so the exception set shrinks rather than accretes.</para>
         /// </summary>
-        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null, string nonce = null)
+        public RegisterResult RegisterTerminal(string name, string docId = null, bool isTeamLead = false, int? channelPort = null, string nonce = null, int? ownerPid = null)
+        {
+            RegistrationOutcome outcome;
+            lock (_registrationLock)
+            {
+                outcome = DecideRegistration(name, docId, isTeamLead, channelPort, nonce, ownerPid);
+            }
+
+            // Deliberately OUTSIDE the lock — see _registrationLock's remarks. Event dispatch reaches
+            // WinForms handlers and the profile calls write SQLite; either under a process-wide lock is
+            // a deadlock waiting for the UI thread.
+            return ApplyRegistrationSideEffects(outcome);
+        }
+
+        /// <summary>
+        /// The registration DECISION and row mutation, with every side effect deferred to the returned
+        /// outcome. MUST be called with <see cref="_registrationLock"/> held — that is what makes the
+        /// lookup-then-mutate pair atomic, which is the entire point of gate (4).
+        /// </summary>
+        /// <remarks>
+        /// Split out of <see cref="RegisterTerminal"/> in Run 5 so the lock can cover the check-then-act
+        /// without also covering event dispatch and DB writes. Nothing in here may raise an event, touch
+        /// <c>_profileService</c>, or call <c>ActivityService</c>; put it on the outcome instead.
+        /// </remarks>
+        private RegistrationOutcome DecideRegistration(string name, string docId, bool isTeamLead, int? channelPort, string nonce, int? ownerPid)
         {
             LogInfo($"RegisterTerminal ENTRY: name='{name}', docId='{docId ?? "null"}', channelPort={channelPort?.ToString() ?? "null"}, noncePresented={!string.IsNullOrEmpty(nonce)}, stack={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name ?? "?"}");
 
@@ -1990,64 +2533,20 @@ namespace MultiTerminal.MCPServer.Services
                 }
                 existingByDocId.IsConnected = true;
 
-                // Handle profile transitions
-                try
+                // Profile transitions and the TerminalRegistered re-raise are DEFERRED to
+                // ApplyRegistrationSideEffects — they must not run under _registrationLock.
+                return new RegistrationOutcome
                 {
-                    // Mark OLD profile offline (write path: clone→persist→swap; no-op if not cached)
-                    if (_profileService.MutateProfile(oldName, p =>
+                    Kind = RegistrationOutcomeKind.DocIdRename,
+                    Row = existingByDocId,
+                    OldName = oldName,
+                    Name = newName,
+                    IsTeamLead = isTeamLead,
+                    Result = new RegisterResult
                     {
-                        p.IsOnline = false;
-                        p.UpdatedAt = DateTime.UtcNow;
-                    }) != null)
-                    {
-                        DebugLogService?.Info("MessageBroker", $"Marked old profile offline: {oldName}");
+                        Success = true,
+                        TerminalId = existingByDocId.Id
                     }
-
-                    // Mark NEW profile online (or create if doesn't exist)
-                    // Skip profile creation for temporary agents (e.g. "Agent Alice")
-                    if (!IsTemporaryAgent(newName))
-                    {
-                        if (_profileService.ContainsProfile(newName))
-                        {
-                            _profileService.MutateProfile(newName, p =>
-                            {
-                                p.IsOnline = true;
-                                p.UpdatedAt = DateTime.UtcNow;
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Marked new profile online: {newName}");
-                        }
-                        else
-                        {
-                            // Create new profile online (persist-first via the write path)
-                            _profileService.InsertProfile(new TeamMemberProfile
-                            {
-                                Id = newName,
-                                DisplayName = newName,
-                                IsOnline = true, // Online because registration is happening
-                                IsTeamLead = isTeamLead,
-                                CreatedAt = DateTime.UtcNow,
-                                UpdatedAt = DateTime.UtcNow
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
-                        }
-                    }
-                    else
-                    {
-                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for temporary agent: {newName}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLogService?.Error("MessageBroker", $"Failed to handle profile transitions: {ex.Message}");
-                }
-
-                // Re-raise event so MainForm updates tab title
-                RaiseSafe(TerminalRegistered, existingByDocId);
-
-                return new RegisterResult
-                {
-                    Success = true,
-                    TerminalId = existingByDocId.Id
                 };
                 } // end else (Unassigned rename)
             }
@@ -2115,6 +2614,160 @@ namespace MultiTerminal.MCPServer.Services
                 existingByName = null;
             }
 
+            // (4) PROOF-OF-ORIGIN FOR A REAL NAME (c9285d2a — Owner-requested duplicate rejection).
+            //     Gates (1)-(3) all concern the "Unassigned" sentinel; (3) says so itself — "Real-named
+            //     rows never reach here". So a REAL name arriving here is reused with NO origin check,
+            //     and that is the hole: a foreign register_terminal("Alice") carrying no docId and no
+            //     nonce falls straight into the reuse branch below and OVERWRITES Alice's ChannelPort,
+            //     silently taking delivery of her pushed messages. Name is the only thing channel
+            //     delivery is keyed on (multiterminal-channel.mjs isAddressedToMe), so this is
+            //     impersonation, not merely a bookkeeping collision.
+            //
+            //     Require the registrant to present the row's seeded nonce. Both legitimate callers
+            //     already can: mcp/index.js echoes MULTITERMINAL_LAUNCH_NONCE (:3197), and the channel
+            //     server's own port report now echoes it too. THAT SECOND ONE IS LOAD-BEARING — the
+            //     port report and its 30s drift heartbeat arrive here as a same-name registration with
+            //     no docId, so shipping this gate without the plugin-side echo would refuse every port
+            //     registration and kill push delivery for every terminal, while polling kept working
+            //     and hid it.
+            //
+            //     FAIL-OPEN when the row carries no seeded nonce, matching the (3) precedent: such a row
+            //     predates the gate and refusing it would lock out a terminal that never had a nonce to
+            //     present. Rows for DISCONNECTED terminals never reach here at all (the existingByName
+            //     lookup filters on IsConnected), so a name is released on disconnect rather than burned.
+            //     "Unassigned" is exempt — it is a deliberate shared sentinel (see RegisterTerminalUnique).
+            //     ADOPTED ROWS (c9285d2a item 2): a terminal MT did not launch has no nonce to
+            //     present, so the nonce clause alone would leave it on the unseeded fail-open path
+            //     forever. Its two processes — the MCP server that serves register_terminal and the
+            //     channel server that reports the port — share no secret, but they ARE siblings under
+            //     one claude.exe, so OwnerPid is the one thing both can state and a stranger cannot
+            //     state truthfully. Either proof admits the caller. See TerminalInfo.OwnerPid for why
+            //     this is deliberately weaker than the nonce and why that is acceptable here.
+            //     ⚠️ PIPELINE RUN 1 CORRECTION — the pid is DISCOVERY, NOT AUTHORIZATION (Owner ruling).
+            //     The first cut OR'd the pid proof with the nonce proof and stamped an OwnerPid on
+            //     EVERY registration, MT-launched included. That did not "give adopted rows a check
+            //     where they had none" — it gave every row a SECOND, weaker key, so presenting a
+            //     terminal's pid claimed its name without the nonce, and the reuse branch below then
+            //     repointed its ChannelPort. GET /api/messaging/channel-identity?ppid= made the pid
+            //     sweepable rather than guessable, so the nonce arm was bypassable in seconds.
+            //     Now: the pid proves origin ONLY for a row that has NO nonce — an adopted session,
+            //     which genuinely has nothing else. A row holding a nonce is held by that nonce alone.
+            OwnerLiveness ownerLiveness = ResolveOwnerLiveness(existingByName);
+
+            bool nonceProves = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
+                               && string.Equals(nonce, existingByName.LaunchNonce, StringComparison.Ordinal);
+
+            // Alive proves identity outright. Unknown (start time unreadable) degrades to bare pid
+            // equality rather than refusing: the row stays held against a stranger who does not know
+            // the pid, and its real owner — who does — still gets in. Dead proves nothing, because the
+            // process being compared against no longer exists.
+            bool pidProves = ownerPid.HasValue
+                             && string.IsNullOrEmpty(existingByName?.LaunchNonce)
+                             && existingByName?.OwnerPid != null
+                             && existingByName.OwnerPid.Value == ownerPid.Value
+                             && (ownerLiveness == OwnerLiveness.Alive || ownerLiveness == OwnerLiveness.Unknown);
+
+            //     A row is only HELD if someone is still there to hold it. A nonce-bearing row is held
+            //     by its (immortal) nonce; a pid-only row is held only while its owning process lives.
+            //     That second clause is what stops gate (4) locking out its own owner: nothing
+            //     explicitly disconnects an adopted session (no docId for UnregisterTerminal, and the
+            //     SessionEnd hook early-returns without MULTITERMINAL_NAME). The liveness reaper
+            //     (d1151661) disconnects it only on its next ~30s sweep, so without this clause the
+            //     row would refuse the same person's next shell until then, or for MT's whole uptime
+            //     where no reaper runs. A dead owner means the name is free.
+            // Only DEAD releases a name. Unknown keeps the row held — releasing on a read we could not
+            // perform is how a live session silently loses its name to whoever asks next.
+            bool existingCarriesProof = !string.IsNullOrEmpty(existingByName?.LaunchNonce)
+                                        || ownerLiveness == OwnerLiveness.Alive
+                                        || ownerLiveness == OwnerLiveness.Unknown;
+
+            if (existingByName != null
+                && !name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase)
+                && existingCarriesProof
+                && !nonceProves
+                && !pidProves)
+            {
+                bool heldByNonce = !string.IsNullOrEmpty(existingByName.LaunchNonce);
+                string expected = heldByNonce ? "its launch nonce" : "the owning process id it was registered from";
+                DebugLogService?.Warning("MessageBroker", $"Duplicate name rejected: '{name}' is held by a connected terminal and the registrant did not present {expected}. Refusing the claim.");
+
+                // Item 10 — make a dead channel say so.
+                //
+                // ⚠️ RUN 4 CORRECTION, found by four gates independently. The first cut counted every
+                // refusal that CARRIED a port, on the reasoning that a port means "port report" and no
+                // port means "name claim". That reasoning is wrong, and the comment defending it was
+                // the confident kind: it distinguishes WHAT KIND of refusal this was, not WHOSE report
+                // was refused — and a refusal is BY DEFINITION the case where the broker could not
+                // attribute the report to this row. So the count landed on `existingByName`, the
+                // INCUMBENT, who may be a perfectly healthy terminal that merely shares the name the
+                // refused caller wanted. `registerPortOnce` sends name AND port together, so this needs
+                // no impostor: a second shell claiming a live name is enough. list_terminals then told
+                // every agent that a WORKING terminal's push was dead and it needed restarting, while
+                // the genuinely broken row read clean.
+                //
+                // The extra conjunct is the whole claim, stated honestly: only a row that HAS NO ROUTE
+                // can be provably dead. A row holding a live port is not, whoever else was refused.
+                // It also closes the "never clears" half — the reset needs an accepted port report, but
+                // the channel server's heartbeat is drift-gated (multiterminal-channel.mjs: it returns
+                // early when the roster already shows its port), so a healthy terminal never re-reports
+                // and a false count would have been permanent for MT's whole uptime. With this guard a
+                // row that holds a port cannot accrue one in the first place.
+                //
+                // Nothing else reports this. The row stays IsConnected, and get_messages polling keeps
+                // working because polling never uses the port, so the terminal looks fine in exactly
+                // the place anyone would check. The recorded count is what turns a silent failure into
+                // one a person or an agent can see (surfaced by list_terminals).
+                // ⚠️ RUN 4's GUARD WAS NECESSARY BUT NOT SUFFICIENT — item 10, cycle 1. Keeping
+                // "the incumbent holds no route" is still right: the terminal this signal describes has
+                // no route BECAUSE its own reports are being refused, and a row holding a live port is
+                // demonstrably not dead whoever else was refused. But that conjunct alone still marks a
+                // healthy terminal during the seconds before its first port report lands. Corroboration
+                // is the second half: only a REPEATED refusal of the same (name, port) can be the
+                // terminal's own server retrying, because a stranger's claim does not come back.
+                //
+                // Both conjuncts are load-bearing and neither subsumes the other. Drop the route check
+                // and a persistent impostor marks a port-holding incumbent; drop corroboration and a
+                // one-shot claim marks a three-second-old terminal.
+                if (channelPort.HasValue && existingByName.ChannelPort == null)
+                {
+                    int corroborated = RecordPortRefusal(name, channelPort.Value);
+
+                    if (corroborated >= ChannelPortRefusalCorroborationThreshold)
+                    {
+                        existingByName.ChannelPortRefusalCount = corroborated;
+                        existingByName.LastChannelPortRefusalAt = DateTime.UtcNow;
+                        DebugLogService?.Warning("MessageBroker", $"CHANNEL PORT REPORT REFUSED for '{name}' (port {channelPort.Value}, refusal #{corroborated} within {ChannelPortRefusalWindow.TotalMinutes:0}min): push delivery is DEAD for this terminal and polling will hide it. The same port has now been refused repeatedly, which a one-off name claim cannot produce — this is the terminal's own channel server, and it predates the launch-nonce echo (plugin 7875686). Restart that terminal. task c9285d2a");
+                    }
+                    else
+                    {
+                        // Deliberately NOT a verdict, and deliberately not written to the row. One
+                        // refusal is indistinguishable from a stranger arriving during a healthy
+                        // terminal's startup window, so the only honest thing to say is what happened.
+                        DebugLogService?.Info("MessageBroker", $"Channel port report for '{name}' (port {channelPort.Value}) refused, refusal {corroborated} of {ChannelPortRefusalCorroborationThreshold} needed before this counts as a dead channel. Not attributed to '{name}' yet — a single refusal cannot distinguish this terminal's own stale channel server from someone else claiming its name. task c9285d2a");
+                    }
+                }
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=duplicate-name-reject incoming name='{name}' docId='{docId ?? "null"}' noncePresented={!string.IsNullOrEmpty(nonce)} ownerPidPresented={ownerPid.HasValue} rowHeldBy={(heldByNonce ? "nonce" : "livePid")} => refused"); // task c9285d2a
+
+                // No side effects on the refusal path — nothing was registered, so nothing to raise or
+                // profile. The counter increment above is a plain field write on a row we hold the lock
+                // for, which is also what makes it atomic now (it was a lost-update race before Run 5).
+                return new RegistrationOutcome
+                {
+                    Kind = RegistrationOutcomeKind.Refused,
+                    Result = new RegisterResult
+                    {
+                        Success = false,
+
+                        // The likeliest real-world trigger is NOT an impostor — it is this terminal's own
+                        // channel server running a build that predates the nonce echo (plugin 7875686).
+                        // Telling that caller to "pick a different name" sends it chasing a collision that
+                        // does not exist: it IS the terminal holding the name.
+                        Error = $"The name '{name}' is already in use by a connected terminal. Pick a different name, or disconnect the terminal currently holding it. "
+                                + "(If this IS your own terminal's channel server, it is running a build older than the one that echoes the launch nonce — restart the terminal.)"
+                    }
+                };
+            }
+
             if (existingByName != null)
             {
                 // Update existing terminal
@@ -2127,6 +2780,26 @@ namespace MultiTerminal.MCPServer.Services
                     if (existingByName.ChannelPort != channelPort.Value)
                         LogInfo($"CHANNEL_PORT CHANGE (name path): '{existingByName.Name}' {existingByName.ChannelPort} → {channelPort.Value}");
                     existingByName.ChannelPort = channelPort.Value;
+
+                    // A port report got through, so whatever was refusing has stopped (item 10). The row
+                    // survives a channel-server restart via the name-match path, so without this reset a
+                    // terminal that RECOVERED would carry its old refusal count forever and keep reading
+                    // as broken — a health signal that cannot go back to healthy is just a second way to
+                    // be wrong. The count therefore means "consecutive refusals since delivery last
+                    // worked", and non-zero means the channel is dead RIGHT NOW.
+                    if (existingByName.ChannelPortRefusalCount > 0)
+                    {
+                        DebugLogService?.Info("MessageBroker", $"Channel port report for '{existingByName.Name}' accepted after {existingByName.ChannelPortRefusalCount} refusal(s); push delivery is live again. task c9285d2a");
+                        existingByName.ChannelPortRefusalCount = 0;
+                        existingByName.LastChannelPortRefusalAt = null;
+                    }
+
+                    // Clear the corroboration history too, unconditionally — not just when the row was
+                    // already marked (item 10, cycle 1). A partial tally that survives a successful
+                    // report is a half-armed trap: one refusal recorded before recovery would pair with
+                    // one unrelated claim afterwards and produce a verdict neither event justified.
+                    // Recovery must reset the evidence, not only the conclusion.
+                    ClearPortRefusals(existingByName.Name);
                 }
 
                 // Update DocId if provided AND existing DocId is empty (don't overwrite valid pre-registration)
@@ -2137,64 +2810,181 @@ namespace MultiTerminal.MCPServer.Services
                 // Seed the launch nonce if not already bound (fd3437e6) — mirrors the DocId
                 // set-if-empty rule so a pre-registration that reuses a shared "Unassigned" row
                 // still records its proof-of-origin, but never overwrites an established nonce.
+                //
+                // ⚠️ Run 2: NOT onto a row that has been owned by a pid. Seeding here is a capture
+                // primitive, because a nonce — unlike a pid — is never checked for liveness and never
+                // expires. So after an adopted session exits and its name is released, any local
+                // process could POST that name with a nonce of its own choosing, and the row became
+                // PERMANENTLY nonce-held: pidProves is disabled for nonce-bearing rows, so the real
+                // owner could never reclaim it for the rest of MT's uptime. That is the same
+                // permanent-lockout class the liveness change was written to remove, re-entered
+                // through the door next to it.
+                //
+                // The rule: seed only when the caller PROVED it owns this row, or when the row is the
+                // shared "Unassigned" sentinel — which is the fd3437e6 case this seeding was written
+                // for (a pre-registration promoting the placeholder it was handed).
+                //
+                // Keying it on "has the row ever had a pid" is NOT enough, and the test caught that:
+                // a dead pid is never bound at all (a pid is stored only with a verified start time),
+                // so a row whose owner has died looks exactly like a placeholder that never had one.
+                // Proof-or-sentinel is the property that actually distinguishes the two.
+                //
+                // The cost is that a legacy real-name row carrying no nonce stays unprotected instead
+                // of being upgraded by the next registrant. That is the status quo before this ticket,
+                // not a regression — and it is strictly better than the alternative, where an unproven
+                // caller can make its claim permanent.
+                bool callerMayBindNonce = nonceProves
+                                          || pidProves
+                                          || name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase);
+
                 if (!string.IsNullOrEmpty(nonce) && string.IsNullOrEmpty(existingByName.LaunchNonce))
                 {
-                    existingByName.LaunchNonce = nonce;
-                }
-                LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
-                // Always re-raise event so MainForm updates its mapping
-                RaiseSafe(TerminalRegistered, existingByName);
-
-                // Auto-create profile if it doesn't exist, then set online
-                // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
-                try
-                {
-                    if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
+                    if (callerMayBindNonce)
                     {
-                        if (!_profileService.ContainsProfile(name))
-                        {
-                            // Persist-first auto-create (offline; set online below)
-                            _profileService.InsertProfile(new TeamMemberProfile
-                            {
-                                Id = name,
-                                DisplayName = name,
-                                IsOnline = false,  // Start offline, will be set online below
-                                IsTeamLead = isTeamLead,
-                                CreatedAt = DateTime.UtcNow,
-                                UpdatedAt = DateTime.UtcNow
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
-                        }
-                        else if (isTeamLead)
-                        {
-                            // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
-                            _profileService.MutateProfile(name, p => p.IsTeamLead = true);
-                        }
-
-                        // Set profile online now that terminal is registering
-                        SetProfileOnline(name);
-
-                        // Trigger status bar refresh after profile update
-                        ActivityService?.UpdateActivity(name, "idle", "Connected");
+                        existingByName.LaunchNonce = nonce;
                     }
                     else
                     {
-                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
+                        LogInfo($"SWAPDIAG REGISTER-OUTCOME=nonce-seed-refused name='{name}' — the caller proved nothing about this row, so its nonce is not seeded. A seeded nonce is never liveness-checked and never expires, so seeding here would hold the name permanently against its real owner. task c9285d2a");
                     }
                 }
-                catch (Exception ex)
+
+                // Set-if-unowned for the owning pid (c9285d2a). A LIVE owner's pid is never repointed —
+                // that is what stops a later caller taking an established row for itself. But "unowned"
+                // has to include a row whose recorded owner is DEAD, not just one that never had a pid.
+                //
+                // Run 2 caught the half-fix here. Making a corpse row release its NAME (see
+                // OwnerProcessStillAlive) let the next session register — and then this guard, testing
+                // only `OwnerPid == null`, refused to rebind, because the corpse's pid is non-null. So
+                // the second adopted session under a name got a successful registration whose row still
+                // pointed at a dead process: GetTerminalNameByOwnerPid returned null for the new pid,
+                // channel-identity?ppid= 404'd, and — since an adopted session has no
+                // MULTITERMINAL_NAME, which is the whole premise — its channel server had no other way
+                // to learn its name and never bound. Push delivery dead, registration reporting success.
+                // The row also carried no live proof from then on, so the protection lasted exactly one
+                // session.
+                //
+                // Rebinding a dead-owner row is safe precisely BECAUSE it is dead: such a row already
+                // grants no protection (existingCarriesProof is false for it, so the gate fail-opens
+                // for everyone), and stamping the new live owner RESTORES protection rather than
+                // weakening it. A row with a live owner still cannot be repointed.
+                bool rowIsUnowned = ownerLiveness == OwnerLiveness.Unowned || ownerLiveness == OwnerLiveness.Dead;
+                if (ownerPid.HasValue && rowIsUnowned)
                 {
-                    DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
+                    // "A previous owner existed and is gone" — NOT merely "this row had no owner".
+                    // Getting that distinction wrong cost a live regression: `OwnerPid != ownerPid`
+                    // is true for a null OwnerPid, so an UNOWNED row was treated as an ownership
+                    // change and had its port cleared. Rows in exactly that state are ordinary —
+                    // a channel server reports its port with no ownerPid (any session started
+                    // before the plugin sent one), and spawned-agent/Oracle rows carry no pid — so a
+                    // healthy terminal lost its push routing on its own next registration.
+                    bool previousOwnerDied = ownerLiveness == OwnerLiveness.Dead;
+
+                    // Bind the pid ONLY with a verified start time. A pid stored without one is an
+                    // identity nobody can check later: it reads as Unknown forever, which keeps the
+                    // name held on a claim we can never confirm. Better to record no owner at all.
+                    bool rebindSucceeded = false;
+                    if (TryGetProcessStartTime(ownerPid.Value, out DateTime reusedOwnerStart))
+                    {
+                        existingByName.OwnerPid = ownerPid.Value;
+                        existingByName.OwnerStartTime = reusedOwnerStart;
+                        existingByName.OwnerBoundAt = DateTime.UtcNow;
+                        rebindSucceeded = true;
+                    }
+                    else
+                    {
+                        // ⚠️ MAKE "STAYS UNOWNED" TRUE (d1151661 pipeline Run 3, adversary M2). The log
+                        // line below always said so, but the DEAD owner's pid and start time were left
+                        // on the row. The session just admitted here is live, yet the row kept reading
+                        // Dead: item 0 hid it from the Terminals list, and the reaper disconnected it on
+                        // every sweep while its heartbeat re-registered it. Clearing the identity makes
+                        // the row Unowned: listed, never reaped, and no weaker at gate (4), which was
+                        // already fail-open for a Dead pid-only row and holds a nonce row by its nonce.
+                        existingByName.OwnerPid = null;
+                        existingByName.OwnerStartTime = null;
+                        existingByName.OwnerBoundAt = null;
+                        DebugLogService?.Warning("MessageBroker", $"Not binding owner pid {ownerPid.Value} to '{name}': its start time could not be read, and a pid without one cannot be verified later. The row stays unowned rather than held by an unverifiable claim.");
+                    }
+
+                    // ⚠️ Run 2: a new owner must not inherit the old one's ROUTING. The reuse branch
+                    // only touches ChannelPort when the caller supplies one, and the real rebind
+                    // caller never does — mcp/index.js deliberately omits channelPort because the
+                    // channel server reports its own. So without this, the row ended up with the new
+                    // session's OwnerPid and the DEAD session's port. Ports are a small recycled range
+                    // (8800-8899) handed out to whatever is free, so that stale port may already
+                    // belong to a different live terminal's channel server — which does not enforce
+                    // the envelope's `to` field. The POST returns 200, delivery is marked done, and
+                    // one agent's messages land in another's session with nothing reporting it.
+                    // DisconnectTerminalByName nulls the port for exactly this reason; an ownership
+                    // change is the adopted-row analogue of that disconnect.
+                    //
+                    // Two conditions, and each one is load-bearing:
+                    //   previousOwnerDied  — a row that never had an owner has not changed hands, and
+                    //                        clearing its port kills a healthy terminal's push.
+                    //   !channelPort       — this same call supplying a port already replaces it.
+                    // Note this is NOT "the pid differs": the same-pid heartbeat never reaches here
+                    // (a live owner makes rowIsUnowned false), so an equality test was never what
+                    // distinguished the cases.
+                    //
+                    // ⚠️ Run 3b finding (a): `rebindSucceeded` used to be a third conjunct, on the
+                    // reasoning that clearing the port when the new pid could not be bound "leaves the
+                    // row with neither owner nor delivery". It is gone, because a dead session's port
+                    // is NOT delivery. The old owner being Dead is what makes its port stale, and that
+                    // fact does not depend on whether the NEW owner could be identified — the two are
+                    // independent, and conflating them meant an unreadable start time silently
+                    // preserved routing that was already known-invalid. Worse, IsReady stayed true
+                    // alongside it, so the row advertised a handshake that died with the old session.
+                    // The real choice was never "delivery vs no delivery"; it was "an honest absence
+                    // of routing vs a false appearance of it", and the appearance is precisely what
+                    // stops anyone noticing. Recovery does not depend on this conjunct either: the
+                    // channel server's 30s heartbeat re-registers on drift, and that — not a retained
+                    // stale number — is what restores a real port.
+                    if (previousOwnerDied && !channelPort.HasValue && existingByName.ChannelPort != null)
+                    {
+                        // ownerRebound distinguishes the two ways to reach this line. false means the
+                        // new pid's start time was unreadable, so the row is now BOTH unowned and
+                        // unrouted — the state the old conjunct was hiding, and the one worth seeing
+                        // in a log when someone asks why push went quiet.
+                        LogInfo($"CHANNEL_PORT CLEARED (owner change): '{existingByName.Name}' {existingByName.ChannelPort} → null; the previous owner is gone and its port may since have been re-issued. ownerRebound={rebindSucceeded}. task c9285d2a");
+                        existingByName.ChannelPort = null;
+                        existingByName.IsReady = false;   // the handshake belonged to the old session
+                    }
                 }
-
-                // Ensure message queue exists (may be missing after disconnect/reconnect)
-                _messageQueues.TryAdd(existingByName.Id, new BlockingCollection<Message>());
-
-                return new RegisterResult
+                LogInfo($"SWAPDIAG REGISTER-OUTCOME=name-match '{name}' incomingDocId='{docId ?? "null"}' deliveredDocId='{existingByName.DocId ?? "null"}' (existing row reused; delivered docId is what MainForm binds on). task ab32897c"); // remove after root cause
+                // The TerminalRegistered re-raise, the profile auto-create/online work and the message
+                // queue are DEFERRED to ApplyRegistrationSideEffects — none of them may run under
+                // _registrationLock. The row mutation above is finished, so releasing here is safe.
+                return new RegistrationOutcome
                 {
-                    Success = true,
-                    TerminalId = existingByName.Id
+                    Kind = RegistrationOutcomeKind.Reused,
+                    Row = existingByName,
+                    Name = name,
+                    IsTeamLead = isTeamLead,
+                    Result = new RegisterResult
+                    {
+                        Success = true,
+                        TerminalId = existingByName.Id
+                    }
                 };
+            }
+
+            // Resolve the owner ONCE. A pid is bound only together with a verified start time: stored
+            // without one it can never be checked again, so it would hold the name on a claim nobody
+            // can confirm (it reads as Unknown forever). If the start time is unreadable, the row
+            // records no owner at all — which leaves the name claimable rather than stuck.
+            int? boundOwnerPid = null;
+            DateTime? boundOwnerStart = null;
+            if (ownerPid.HasValue)
+            {
+                if (TryGetProcessStartTime(ownerPid.Value, out DateTime freshOwnerStart))
+                {
+                    boundOwnerPid = ownerPid.Value;
+                    boundOwnerStart = freshOwnerStart;
+                }
+                else
+                {
+                    DebugLogService?.Warning("MessageBroker", $"Not binding owner pid {ownerPid.Value} to new terminal '{name}': its start time could not be read, so the pid could never be verified later. The row records no owner.");
+                }
             }
 
             var terminal = new TerminalInfo
@@ -2207,69 +2997,239 @@ namespace MultiTerminal.MCPServer.Services
                 // Bind the launch nonce (fd3437e6): for an MT-seeded "Unassigned" placeholder this is
                 // the authoritative proof-of-origin value; for any other fresh registration it records
                 // what the registrant presented. Either way it's what a later adoption must match.
-                LaunchNonce = nonce
+                LaunchNonce = nonce,
+
+                // Records which Claude Code process this registration came from, so the terminal's
+                // OTHER child process (the channel server) can prove it belongs to the same session.
+                // Paired with the process's start time so the pid names one incarnation and not merely
+                // a number Windows may later reissue (see TerminalInfo.OwnerStartTime).
+                OwnerPid = boundOwnerPid,
+                OwnerStartTime = boundOwnerStart,
+                OwnerBoundAt = boundOwnerPid.HasValue ? DateTime.UtcNow : (DateTime?)null
             };
             LogInfo($"NEW TERMINAL: '{name}' id={id} channelPort={channelPort?.ToString() ?? "null"} docId={docId ?? "null"}");
 
             if (_terminals.TryAdd(id, terminal))
             {
-                _messageQueues.TryAdd(id, new BlockingCollection<Message>());
-                RaiseSafe(TerminalRegistered, terminal);
-
-                // Auto-create profile if it doesn't exist, then set online
-                // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
-                try
+                // Queue creation, the TerminalRegistered raise and the profile work are DEFERRED to
+                // ApplyRegistrationSideEffects. The name is claimed the moment TryAdd returns while we
+                // still hold _registrationLock, which is what makes gate (4) above binding against a
+                // concurrent registrant rather than advisory.
+                return new RegistrationOutcome
                 {
-                    if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
+                    Kind = RegistrationOutcomeKind.Minted,
+                    Row = terminal,
+                    Name = name,
+                    IsTeamLead = isTeamLead,
+                    Result = new RegisterResult
                     {
-                        if (!_profileService.ContainsProfile(name))
-                        {
-                            // Persist-first auto-create (offline; set online below)
-                            _profileService.InsertProfile(new TeamMemberProfile
-                            {
-                                Id = name,
-                                DisplayName = name,
-                                IsOnline = false,  // Start offline, will be set online below
-                                IsTeamLead = isTeamLead,
-                                CreatedAt = DateTime.UtcNow,
-                                UpdatedAt = DateTime.UtcNow
-                            });
-                            DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
-                        }
-                        else if (isTeamLead)
-                        {
-                            // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
-                            _profileService.MutateProfile(name, p => p.IsTeamLead = true);
-                        }
-
-                        // Set profile online now that terminal is registering
-                        SetProfileOnline(name);
-
-                        // Trigger status bar refresh after profile update
-                        ActivityService?.UpdateActivity(name, "idle", "Connected");
+                        Success = true,
+                        TerminalId = id
                     }
-                    else
-                    {
-                        DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
-                }
-
-                return new RegisterResult
-                {
-                    Success = true,
-                    TerminalId = id
                 };
             }
 
-            return new RegisterResult
+            return new RegistrationOutcome
             {
-                Success = false,
-                Error = "Failed to register terminal"
+                Kind = RegistrationOutcomeKind.MintFailed,
+                Result = new RegisterResult
+                {
+                    Success = false,
+                    Error = "Failed to register terminal"
+                }
             };
+        }
+
+        /// <summary>What <see cref="DecideRegistration"/> concluded, and what still has to happen for it.</summary>
+        private enum RegistrationOutcomeKind
+        {
+            /// <summary>An "Unassigned" placeholder was adopted under a real name.</summary>
+            DocIdRename,
+
+            /// <summary>Gate (4) refused the claim. Nothing was registered; there is nothing to do.</summary>
+            Refused,
+
+            /// <summary>An existing connected row was reused and updated.</summary>
+            Reused,
+
+            /// <summary>A fresh row was created and added to <c>_terminals</c>.</summary>
+            Minted,
+
+            /// <summary><c>_terminals.TryAdd</c> failed — should be unreachable, the id is a fresh Guid.</summary>
+            MintFailed
+        }
+
+        /// <summary>
+        /// The decision, plus everything <see cref="ApplyRegistrationSideEffects"/> needs to finish the
+        /// job once <see cref="_registrationLock"/> has been released.
+        /// </summary>
+        private sealed class RegistrationOutcome
+        {
+            public RegistrationOutcomeKind Kind { get; set; }
+
+            /// <summary>The registration result to hand back to the caller. Never null.</summary>
+            public RegisterResult Result { get; set; }
+
+            /// <summary>The row to raise <c>TerminalRegistered</c> for; null on the refusal paths.</summary>
+            public TerminalInfo Row { get; set; }
+
+            /// <summary>Profile name to bring online / create. Null when there is no profile work.</summary>
+            public string Name { get; set; }
+
+            /// <summary>Rename only: the profile to mark offline.</summary>
+            public string OldName { get; set; }
+
+            public bool IsTeamLead { get; set; }
+        }
+
+        /// <summary>
+        /// Runs the effects of a registration decision — event dispatch, profile writes, message queue —
+        /// AFTER <see cref="_registrationLock"/> has been released.
+        /// </summary>
+        /// <remarks>
+        /// Separated in Run 5. These must never run under the registration lock: <c>RaiseSafe</c> reaches
+        /// WinForms handlers that marshal to the UI thread, and the profile calls write SQLite. A
+        /// process-wide lock held across either deadlocks against any thread that takes the lock from the
+        /// UI thread. Per-branch ORDER is preserved exactly as it was before the split — the rename path
+        /// did its profile transitions before raising, the reuse/mint paths raise first.
+        /// </remarks>
+        private RegisterResult ApplyRegistrationSideEffects(RegistrationOutcome outcome)
+        {
+            switch (outcome.Kind)
+            {
+                case RegistrationOutcomeKind.DocIdRename:
+                    ApplyRenameProfileTransition(outcome.OldName, outcome.Name, outcome.IsTeamLead);
+
+                    // Re-raise event so MainForm updates tab title
+                    RaiseSafe(TerminalRegistered, outcome.Row);
+                    break;
+
+                case RegistrationOutcomeKind.Reused:
+                    // Always re-raise event so MainForm updates its mapping
+                    RaiseSafe(TerminalRegistered, outcome.Row);
+                    ApplyRegistrationProfile(outcome.Name, outcome.IsTeamLead);
+
+                    // Ensure message queue exists (may be missing after disconnect/reconnect)
+                    _messageQueues.TryAdd(outcome.Row.Id, new BlockingCollection<Message>());
+                    break;
+
+                case RegistrationOutcomeKind.Minted:
+                    _messageQueues.TryAdd(outcome.Row.Id, new BlockingCollection<Message>());
+                    RaiseSafe(TerminalRegistered, outcome.Row);
+                    ApplyRegistrationProfile(outcome.Name, outcome.IsTeamLead);
+                    break;
+
+                case RegistrationOutcomeKind.Refused:
+                case RegistrationOutcomeKind.MintFailed:
+                    // Nothing was registered, so there is nothing to raise or persist.
+                    break;
+            }
+
+            return outcome.Result;
+        }
+
+        /// <summary>
+        /// Auto-create the profile if absent, then bring it online. Shared by the reuse and mint paths,
+        /// which carried two near-identical copies of this block before Run 5.
+        /// </summary>
+        private void ApplyRegistrationProfile(string name, bool isTeamLead)
+        {
+            // Skip creating profiles for "Unassigned" and temporary agents (e.g. "Agent Alice")
+            try
+            {
+                if (!name.Equals("Unassigned", StringComparison.OrdinalIgnoreCase) && !IsTemporaryAgent(name))
+                {
+                    if (!_profileService.ContainsProfile(name))
+                    {
+                        // Persist-first auto-create (offline; set online below)
+                        _profileService.InsertProfile(new TeamMemberProfile
+                        {
+                            Id = name,
+                            DisplayName = name,
+                            IsOnline = false,  // Start offline, will be set online below
+                            IsTeamLead = isTeamLead,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                        DebugLogService?.Info("MessageBroker", $"Auto-created profile for terminal: {name}");
+                    }
+                    else if (isTeamLead)
+                    {
+                        // Update existing profile's IsTeamLead flag (write path: clone→persist→swap)
+                        _profileService.MutateProfile(name, p => p.IsTeamLead = true);
+                    }
+
+                    // Set profile online now that terminal is registering
+                    SetProfileOnline(name);
+
+                    // Trigger status bar refresh after profile update
+                    ActivityService?.UpdateActivity(name, "idle", "Connected");
+                }
+                else
+                {
+                    DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for placeholder/agent: {name}");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("MessageBroker", $"Failed to create/update profile: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Move the profile online-ness from the placeholder's old name to the adopted real name.
+        /// </summary>
+        private void ApplyRenameProfileTransition(string oldName, string newName, bool isTeamLead)
+        {
+            try
+            {
+                // Mark OLD profile offline (write path: clone→persist→swap; no-op if not cached)
+                if (_profileService.MutateProfile(oldName, p =>
+                {
+                    p.IsOnline = false;
+                    p.UpdatedAt = DateTime.UtcNow;
+                }) != null)
+                {
+                    DebugLogService?.Info("MessageBroker", $"Marked old profile offline: {oldName}");
+                }
+
+                // Mark NEW profile online (or create if doesn't exist)
+                // Skip profile creation for temporary agents (e.g. "Agent Alice")
+                if (!IsTemporaryAgent(newName))
+                {
+                    if (_profileService.ContainsProfile(newName))
+                    {
+                        _profileService.MutateProfile(newName, p =>
+                        {
+                            p.IsOnline = true;
+                            p.UpdatedAt = DateTime.UtcNow;
+                        });
+                        DebugLogService?.Info("MessageBroker", $"Marked new profile online: {newName}");
+                    }
+                    else
+                    {
+                        // Create new profile online (persist-first via the write path)
+                        _profileService.InsertProfile(new TeamMemberProfile
+                        {
+                            Id = newName,
+                            DisplayName = newName,
+                            IsOnline = true, // Online because registration is happening
+                            IsTeamLead = isTeamLead,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+                        DebugLogService?.Info("MessageBroker", $"Created new profile online: {newName}");
+                    }
+                }
+                else
+                {
+                    DebugLogService?.Warning("MessageBroker", $"Skipping profile creation for temporary agent: {newName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogService?.Error("MessageBroker", $"Failed to handle profile transitions: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -2327,22 +3287,75 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public void UnregisterTerminal(string terminalId)
         {
-            // Look up by dictionary key first, then fall back to DocId
-            if (!_terminals.TryGetValue(terminalId, out var terminal))
+            // ⚠️ THE LOOKUP AND THE MUTATION MUST BE ATOMIC AGAINST REGISTRATION (Run 6, debugger HIGH).
+            // 4c3f60d added _registrationLock to fix a check-then-act on IsConnected/ChannelPort — and
+            // enrolled only the REGISTRATION writers. This method mutates the same fields, so the race
+            // it was meant to close stayed open from the other side. See DisconnectTerminalByName for
+            // the full interleaving; it applies here too, minus the port clear.
+            //
+            // Side effects stay OUTSIDE the lock for the same reason as ApplyRegistrationSideEffects:
+            // RaiseSafe reaches WinForms handlers that marshal to the UI thread, and SetProfileOffline
+            // writes SQLite. Holding a process-wide lock across either is a deadlock.
+            TerminalInfo terminal;
+            bool wasConnected = false;
+
+            lock (_registrationLock)
             {
-                terminal = _terminals.Values.FirstOrDefault(t =>
-                    !string.IsNullOrEmpty(t.DocId) &&
-                    t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase));
+                // Look up by dictionary key first, then fall back to DocId.
+                //
+                // ⚠️ PREFER THE CONNECTED ROW (d1151661 pipeline Run 3, debugger). Rows are never
+                // removed, so one docId can own a disconnected row AND a live one. That happens when
+                // a tab's session was reaped or /quit and a new session registered from the same tab.
+                // An unordered FirstOrDefault could pick the corpse and leave the live row connected
+                // after its tab closed.
+                if (!_terminals.TryGetValue(terminalId, out terminal))
+                {
+                    terminal = _terminals.Values
+                        .Where(t => !string.IsNullOrEmpty(t.DocId)
+                                    && t.DocId.Equals(terminalId, StringComparison.OrdinalIgnoreCase))
+                        .OrderByDescending(t => t.IsConnected)
+                        .FirstOrDefault();
+                }
+
+                if (terminal != null)
+                {
+                    wasConnected = terminal.IsConnected;
+                    terminal.IsConnected = false;
+
+                    // ⚠️ CLEAR THE ROUTE TOO — the two teardown paths used to disagree (Run 6 debugger,
+                    // MEDIUM). DisconnectTerminalByName nulls the port "to prevent delivery to a dead
+                    // channel server"; this path did not, and rows are never removed from _terminals,
+                    // so a closed tab left a row holding a port from the recycled 8800-8899 range. A
+                    // later name-match registration that presents no port revives that row and inherits
+                    // it, and the owner-change port clear only fires when previousOwnerDied — false for
+                    // a row that never bound an owner pid. Net effect: the exact misdelivery the other
+                    // path's comment says the null exists to prevent.
+                    //
+                    // There is no reason a UI-side teardown may keep a route that a session-end teardown
+                    // may not: in both cases the session owning that channel server is going away. A
+                    // terminal that comes back gets a port from its own channel server's next report,
+                    // which is the only source that can prove the port is live.
+                    terminal.ChannelPort = null;
+                }
             }
 
-            if (terminal != null)
+            // ⚠️ AN ALREADY-DISCONNECTED ROW GETS NO SECOND TEARDOWN (d1151661 pipeline Run 3,
+            // debugger). Its teardown already ran, whether reaper, /quit, or the other of the two
+            // tab-close paths that both land here. Repeating it is not idempotent, because both
+            // effects below are keyed by NAME. After the reaper freed a dead Diana's name and Diana
+            // relaunched elsewhere, closing the old tab evicted the live Diana's Attention card and
+            // marked her profile offline, which hides her from GetTerminals.
+            if (terminal != null && wasConnected)
             {
-                terminal.IsConnected = false;
                 RaiseSafe(TerminalDisconnected, terminal);
 
                 // Set profile offline through the write path: DB flag + coherent cache swap + broadcast,
                 // with its own error handling (ProfileService logs + returns a result, never throws here).
-                _profileService.SetProfileOffline(terminal.Name);
+                // Name-keyed, so only when no other live row holds the name.
+                if (!IsAgentNameHeldByLiveTerminal(terminal.Name))
+                {
+                    _profileService.SetProfileOffline(terminal.Name);
+                }
             }
         }
 
@@ -2352,18 +3365,57 @@ namespace MultiTerminal.MCPServer.Services
         /// </summary>
         public bool DisconnectTerminalByName(string name)
         {
-            var terminal = _terminals.Values.FirstOrDefault(t =>
-                t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.IsConnected);
+            // ⚠️ THE LOOKUP AND THE MUTATION MUST BE ATOMIC AGAINST REGISTRATION (Run 6, debugger HIGH).
+            //
+            // Both sides arrive over REST on independent thread-pool threads, and the pairing happens at
+            // EVERY SESSION END: the SessionEnd hook POSTs /api/messaging/disconnect while the channel
+            // server's 30s drift heartbeat POSTs /api/messaging/register. Unsynchronized, the losing
+            // interleaving was:
+            //
+            //   1. DecideRegistration reads existingByName — the row is connected.
+            //   2. It spends the window in ResolveOwnerLiveness / TryGetProcessStartTime, each of which
+            //      enumerates the system process table. This is the SAME wide window the 16-racer test
+            //      documents; under any real contention the racers land inside it.
+            //   3. THIS METHOD sets IsConnected = false and ChannelPort = null.
+            //   4. Registration resumes and writes IsConnected = true and ChannelPort = <its port>.
+            //
+            // The row then reads connected while holding the port of a channel server that has exited.
+            // Ports 8800-8899 are recycled, so that number may already belong to a DIFFERENT live
+            // terminal whose channel server does not check the envelope's `to` field — one agent's
+            // messages land in another's session with nothing reporting it. That is precisely the
+            // outcome the `ChannelPort = null` below exists to prevent, so the race defeated the one
+            // line written to stop it. And because the row is nonce-bearing, existingCarriesProof stays
+            // true, so gate (4) then refuses the name's real owner for MT's whole uptime.
+            //
+            // Side effects stay OUTSIDE the lock (RaiseSafe marshals to the UI thread; SetProfileOffline
+            // writes SQLite) — the same decide/apply split as DecideRegistration.
+            TerminalInfo terminal;
+
+            lock (_registrationLock)
+            {
+                terminal = _terminals.Values.FirstOrDefault(t =>
+                    t.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && t.IsConnected);
+
+                if (terminal != null)
+                {
+                    terminal.IsConnected = false;
+                    terminal.ChannelPort = null; // Clear stale port to prevent delivery to dead channel server
+                }
+            }
 
             if (terminal != null)
             {
-                terminal.IsConnected = false;
-                terminal.ChannelPort = null; // Clear stale port to prevent delivery to dead channel server
                 RaiseSafe(TerminalDisconnected, terminal);
             }
 
-            // Always update profile status (even if terminal not found in memory)
-            SetProfileOffline(name);
+            // Update profile status even if no terminal row was found in memory — unless another live
+            // row still carries the name (d1151661 pipeline Run 3). This method can only take the FIRST
+            // connected match, so with two same-name rows the other one is still there, and a
+            // name-keyed offline write would hide it.
+            if (!IsAgentNameHeldByLiveTerminal(name))
+            {
+                SetProfileOffline(name);
+            }
 
             DebugLogService?.Info("MessageBroker", $"DisconnectTerminalByName: {name} (terminal found: {terminal != null})");
             return true;
@@ -2469,7 +3521,11 @@ namespace MultiTerminal.MCPServer.Services
         }
 
         /// <summary>
-        /// Get all registered terminals that are online (both connected and have online profiles).
+        /// Get all registered terminals that are reachable: connected, not a temporary subagent,
+        /// with an online profile, and whose owner process is not PROVABLY dead. The Dead-only rule
+        /// (and why Unknown must stay listed) is explained inline below.
+        /// <para>This is the UI-LISTING view. It is the wrong accessor for "is this name taken" —
+        /// see <see cref="GetAllConnectedTerminals"/> and the note at MainForm.PreRegisterTerminal.</para>
         /// </summary>
         public List<TerminalInfo> GetTerminals()
         {
@@ -2481,6 +3537,23 @@ namespace MultiTerminal.MCPServer.Services
                 // Exclude temporary subagents (e.g. "Agent Alice") from terminal listings
                 if (IsTemporaryAgent(t.Name)) return false;
 
+                // A row whose owner process is PROVABLY gone is a ghost until the liveness reaper's
+                // next sweep (~30s; none at all where MainForm does not host it). An adopted session
+                // has no docId for UnregisterTerminal and no MULTITERMINAL_NAME for the SessionEnd
+                // hook's disconnect POST, so this read-time filter is what keeps the Owner from
+                // seeing terminals that have quit during that window (task d1151661; the same
+                // population documented on ResolveOwnerLiveness).
+                //
+                // ⚠️ Dead ONLY. Unknown and Unowned MUST stay listed. Collapsing "cannot verify"
+                // into "gone" is the Run 2 defect recorded in ResolveOwnerLiveness's own remarks: a
+                // Win32Exception — MT unelevated while claude is elevated, a protected process, a
+                // cross-session pid — makes a LIVE owner read as a corpse. Hiding those would erase
+                // live terminals from the roster and leave them unmessageable, which is strictly
+                // worse than the ghost this filter removes.
+                // Ordered LAST among the cheap predicates: this one enumerates the process table,
+                // so a row the free string check would reject anyway must not pay for a probe.
+                if (ResolveOwnerLiveness(t) == OwnerLiveness.Dead) return false;
+
                 // Check if profile exists and is online
                 if (_profileService.TryGetProfile(t.Name, out var profile))
                 {
@@ -2490,6 +3563,190 @@ namespace MultiTerminal.MCPServer.Services
                 // If no profile exists, allow (backwards compatibility)
                 return true;
             }).ToList();
+        }
+
+        /// <summary>
+        /// The names of agents that are actually REACHABLE right now, case-insensitive.
+        ///
+        /// <para>"Online" had two meanings and they disagreed. <see cref="GetTerminals"/> answers it
+        /// from live terminals; four other sites answered it from <c>profile.IsOnline</c>, a stored
+        /// flag that is set on registration and cleared by an explicit disconnect. For a session that
+        /// simply died, only the liveness reaper clears it, ~30s later at best. Until then those sites
+        /// reported corpses as online — including
+        /// <c>GET /api/team/roster</c>, which backs the <c>get_team_roster</c> MCP tool. That is the
+        /// tool AGENTS use to decide who to talk to, so the stale flag was not merely cosmetic: it
+        /// invited an agent to message a terminal that no longer exists (task d1151661).</para>
+        ///
+        /// <para>Two endpoints in <c>TeamController</c> alone disagreed — <c>/api/team/profiles</c>
+        /// derived it from live terminals while <c>/api/team/roster</c> read the flag. This exists so
+        /// there is ONE answer to "is X online" rather than four copies free to drift again.</para>
+        ///
+        /// <para>Derived, never stored: it inherits every filter <see cref="GetTerminals"/> applies,
+        /// owner-liveness included, so it cannot fall out of date the way the flag did.</para>
+        /// </summary>
+        public HashSet<string> GetOnlineAgentNames() => GetOnlineAgentNames(GetTerminals());
+
+        /// <summary>
+        /// The projection half of <see cref="GetOnlineAgentNames()"/>, over a list the caller already
+        /// holds.
+        /// <para>Callers that also need the terminal rows themselves must use this overload rather
+        /// than calling both, and not for cost alone: two calls are two INDEPENDENT SNAPSHOTS, so a
+        /// terminal dying between them lands in one and not the other. That renders a single payload
+        /// carrying two different answers to "is this agent online" — which is the exact defect this
+        /// helper exists to remove.</para>
+        /// <para>⚠️ PRECONDITION: <paramref name="reachableTerminals"/> MUST be a
+        /// <see cref="GetTerminals"/> result. This method PROJECTS, it does not filter — the liveness
+        /// guarantee lives in the argument, not here. Passing
+        /// <see cref="GetAllConnectedTerminals"/> compiles perfectly and reports dead owners and
+        /// temporary "Agent *" subagents as online, which is precisely the defect this helper was
+        /// added to remove.</para>
+        /// </summary>
+        public HashSet<string> GetOnlineAgentNames(IEnumerable<TerminalInfo> reachableTerminals)
+        {
+            return new HashSet<string>(
+                (reachableTerminals ?? Enumerable.Empty<TerminalInfo>())
+                    .Select(t => t?.Name)
+                    .Where(n => !string.IsNullOrEmpty(n)),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// True when some connected row whose owner is not provably Dead carries
+        /// <paramref name="name"/>. This is the ONE rule every name-keyed teardown effect checks
+        /// first (task d1151661, pipeline Run 3).
+        /// <para>Rows are keyed by terminal id, but two teardown effects are keyed by NAME: marking the
+        /// profile offline, and the Attention rail's card eviction (<c>NoteTerminalGone(name)</c>). So a
+        /// teardown of ONE row applied to the whole name signs out every same-name terminal. Freed names
+        /// made that routine: the reaper releases a dead Diana's name, the Owner relaunches Diana
+        /// elsewhere, then closes the old tab. Without this check, that close would hide the live
+        /// Diana and delete her card.</para>
+        /// <para>Row-keyed effects are NOT gated by this: <see cref="TerminalDisconnected"/> still fires
+        /// for the row, because the Office panel removes characters by terminal id.</para>
+        /// <para>Call it after the row being torn down has been marked disconnected, so that row does
+        /// not count. A row revived in the meantime DOES count, which is correct: it is live.</para>
+        /// </summary>
+        public bool IsAgentNameHeldByLiveTerminal(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+
+            return _terminals.Values.Any(t =>
+                t.IsConnected
+                && string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)
+                && ResolveOwnerLiveness(t) != OwnerLiveness.Dead);
+        }
+
+        /// <summary>
+        /// A connected row whose owner read as <c>Dead</c>, together with the owner identity it was
+        /// judged against. <see cref="TryReapDeadOwner"/> refuses to act unless the row still carries
+        /// that exact identity.
+        /// </summary>
+        internal readonly record struct DeadOwnerCandidate(TerminalInfo Terminal, int? OwnerPid, DateTime? OwnerStartTime);
+
+        /// <summary>
+        /// Turns every provably-Dead owner into a real disconnect, and returns the names released.
+        /// Called on a timer by <see cref="TerminalLivenessReaper"/> (task d1151661 item 3).
+        /// <para><see cref="GetTerminals"/> already HIDES these rows, but hiding is a read-time answer and
+        /// five consumers never ask it — Attention, Office, the Tasks panel, the Dashboard header and
+        /// Chat all react to <see cref="TerminalDisconnected"/>, which only an explicit teardown raises.
+        /// A session that simply died raised nothing, so its Attention card stayed until MT restarted.
+        /// Found in Owner testing: a force-killed Diana left the Terminals list and kept her card.</para>
+        /// <para>⚠️ Dead ONLY, the same rule as <see cref="GetTerminals"/>: an Unknown owner is a live
+        /// terminal we could not probe, and Unowned rows (gateway, spawned agents) can never be probed.</para>
+        /// </summary>
+        public IReadOnlyList<string> ReapDeadOwnerTerminals()
+        {
+            var released = new List<string>();
+            foreach (DeadOwnerCandidate candidate in FindDeadOwnerCandidates())
+            {
+                if (TryReapDeadOwner(candidate)) released.Add(candidate.Terminal.Name);
+            }
+
+            return released;
+        }
+
+        /// <summary>
+        /// Phase one of <see cref="ReapDeadOwnerTerminals"/>: probe WITHOUT the registration lock, since
+        /// every probe enumerates the process table and the lock serializes every registration.
+        /// </summary>
+        internal List<DeadOwnerCandidate> FindDeadOwnerCandidates()
+        {
+            var candidates = new List<DeadOwnerCandidate>();
+            foreach (TerminalInfo terminal in _terminals.Values)
+            {
+                if (!terminal.IsConnected) continue;
+
+                // Snapshot the pair BEFORE probing, for the same torn-write reason ResolveOwnerLiveness
+                // gives. Snapshotting after would let a rebind landing mid-probe hand phase two a
+                // live owner's identity stamped with a dead owner's verdict.
+                int? ownerPid = terminal.OwnerPid;
+                DateTime? ownerStart = terminal.OwnerStartTime;
+
+                // ⚠️ The ONLY eligibility rule, deliberately. No separate "skip rows without a pid or
+                // start time" guard: that would decide Unowned and Unknown BEFORE this line, so the
+                // tests for those states would stay green even with this predicate weakened to
+                // `== Alive`. They must go through the same three-state classification that decides
+                // Dead.
+                if (ResolveOwnerLiveness(terminal) != OwnerLiveness.Dead) continue;
+
+                // The probe read the row's fields again. If they moved, the verdict belongs to a
+                // different owner than the one snapshotted — skip; the next sweep judges it afresh.
+                if (terminal.OwnerPid != ownerPid || terminal.OwnerStartTime != ownerStart) continue;
+
+                candidates.Add(new DeadOwnerCandidate(terminal, ownerPid, ownerStart));
+            }
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Phase two: tear down ONE row, only if it is still exactly the row that was judged dead.
+        /// <para>⚠️ ROW-TARGETED, NOT <see cref="DisconnectTerminalByName"/>. That method takes the
+        /// FIRST connected row with the name, so if a new session registered the same name in between,
+        /// it would disconnect the LIVE session instead of the dead one. The relaunch that makes this
+        /// real is ordinary: the Owner restarts an agent in the same tab under the same name.</para>
+        /// <para>A name-match registration REUSES the row object and rebinds its owner, so the row
+        /// reference alone does not prove identity. Inside the lock the row must still be connected
+        /// AND carry the snapshotted (pid, start time). No reprobe is needed: a process that has
+        /// exited cannot come back with the same pid AND the same start time.</para>
+        /// <para>Side effects run AFTER the lock, as in the other two teardown paths
+        /// (<c>_registrationLock</c> is a leaf lock: RaiseSafe marshals to the UI thread, and
+        /// SetProfileOffline writes SQLite).</para>
+        /// </summary>
+        /// <returns>True if this call released the row.</returns>
+        internal bool TryReapDeadOwner(DeadOwnerCandidate candidate)
+        {
+            TerminalInfo terminal = candidate.Terminal;
+            if (terminal == null) return false;
+
+            lock (_registrationLock)
+            {
+                if (!terminal.IsConnected
+                    || terminal.OwnerPid != candidate.OwnerPid
+                    || terminal.OwnerStartTime != candidate.OwnerStartTime)
+                {
+                    return false;
+                }
+
+                terminal.IsConnected = false;
+                terminal.ChannelPort = null;
+            }
+
+            // A registration can revive the row in the gap since release. Firing a disconnect for a
+            // terminal that is connected again would drop a live agent's Attention card and hide it
+            // from GetTerminals through its offline profile — so re-check. This narrows the gap
+            // to the few instructions before the raise; DisconnectTerminalByName has the same gap.
+            if (terminal.IsConnected) return false;
+
+            RaiseSafe(TerminalDisconnected, terminal);
+
+            // Name-keyed, so only if no live row still carries the name. No by-reference exclusion
+            // of this row: if it was revived after the check above, it is live and must count
+            // (security Run 3 LOW 1).
+            bool nameStillLive = IsAgentNameHeldByLiveTerminal(terminal.Name);
+            if (!nameStillLive) _profileService.SetProfileOffline(terminal.Name);
+
+            DebugLogService?.Info("MessageBroker", $"Reaped '{terminal.Name}': owner pid {candidate.OwnerPid} is dead, so it is disconnected and TerminalDisconnected was raised (profile offline: {!nameStillLive}). task d1151661");
+            return true;
         }
 
         /// <summary>

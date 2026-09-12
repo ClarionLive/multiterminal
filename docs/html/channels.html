@@ -132,6 +132,17 @@ claude \
           <p><strong>For MultiTerminal terminals this is automatic</strong> &mdash; the launch builder adds both flags, so channels just work in any docked terminal. You only need to pass the flags yourself if you run Claude Code by hand (outside MultiTerminal) and want the same channel messaging.</p>
         </div>
 
+        <h3 id="not-installed-warning">The &ldquo;plugin not installed&rdquo; warning is a false positive</h3>
+        <p>Every MultiTerminal terminal opens with two lines, and the second one looks like an error:</p>
+        <pre><code>Channels (experimental) messages from plugin:multiterminal@inline inject directly in this session
+plugin:multiterminal@inline · plugin not installed</code></pre>
+        <p>The first line is honest. The second is <strong>true about the registry and misleading about MultiTerminal</strong>: Claude Code validates the channel entry against the list of <em>installed</em> plugins, and a plugin loaded with <code>--plugin-dir</code> is session-loaded rather than installed, so it is legitimately absent from that list. Channels are working; nothing is broken.</p>
+        <div class="card">
+          <p><strong>⚠️ Do not &ldquo;fix&rdquo; it by changing <code>@inline</code> to <code>@multiterminal-marketplace</code>.</strong> That silently kills channel messaging. Registration runs a <em>different</em> check from the warning, and a marketplace mismatch is skipped <em>before</em> the development-channel flag is considered &mdash; so <code>--dangerously-load-development-channels</code> does not rescue it. Nothing throws and nothing logs an error. Polling (<code>get_messages</code>) keeps working perfectly, so the only symptom is that pushed messages stop arriving, which reads as &ldquo;nobody messaged me&rdquo; rather than as a fault.</p>
+          <p>Switching to the installed plugin instead (enabling it at user scope and dropping <code>--plugin-dir</code>) does not help either: the installed copy lives in a separate cache directory that is a snapshot taken at install time, and it does not contain the channel server at all.</p>
+          <p><code>MultiTerminal.Tests/ChannelFlagContractTests.cs</code> pins <code>@inline</code> across every launch path so this cannot be changed by accident.</p>
+        </div>
+
         <h2 id="env">Environment variables</h2>
         <p>When MultiTerminal spawns a terminal it injects <strong>two</strong> of these — <code>MULTITERMINAL_NAME</code> and <code>CHANNEL_PORT</code> — so the channel server knows who it is and which port to listen on. The other two are <em>not</em> set by MultiTerminal; the channel server falls back to its own defaults:</p>
         <table>

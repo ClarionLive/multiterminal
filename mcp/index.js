@@ -78,6 +78,64 @@ function seg(value) {
   return encodeURIComponent(s);
 }
 
+/** Longest server explanation worth relaying. The real ones are ~250 chars; this guards against a
+ *  stack trace or an HTML error page being pasted into an agent's context. */
+const MAX_ERROR_DETAIL_CHARS = 500;
+
+/**
+ * Pull the server's own explanation out of a failed response, or return null.
+ *
+ * NEVER THROWS. That is the whole contract: this runs on a path that is already failing, and an
+ * exception here would replace a real "the name is held by a live terminal" with a parse error —
+ * strictly worse than the bare status line it exists to improve on.
+ *
+ * MT's controllers return ASP.NET ProblemDetails (`Problem(detail:)`, 252 sites), so `detail` is
+ * the field that matters; `title` is the generic "Bad Request" and is only a fallback. One
+ * endpoint returns `{ error }` instead, and non-JSON bodies happen when something upstream of the
+ * controller fails, so all three are handled rather than assuming the dominant shape.
+ */
+async function readErrorDetail(response) {
+  try {
+    const text = await response.text();
+    if (!text) return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    // A body that was MEANT as JSON is read structurally or not at all. Falling back to the raw
+    // text when parsing fails would relay a half-written `{"detail": "trunca` as the reason —
+    // worse than saying nothing, because it reads like an explanation and carries none.
+    if (/^[[{"]/.test(trimmed) || trimmed === "null") {
+      let parsed;
+      try { parsed = JSON.parse(trimmed); } catch { return null; }
+
+      // A bare JSON string body is already the message.
+      if (typeof parsed === "string") return parsed.trim() ? clampDetail(parsed) : null;
+      if (!parsed || typeof parsed !== "object") return null;
+
+      // `detail` first: ProblemDetails puts the useful sentence there and a generic label in
+      // `title`, so preferring title would relay "Bad Request" and drop the actual reason.
+      const picked = parsed.detail ?? parsed.error ?? parsed.title;
+      return typeof picked === "string" && picked.trim() ? clampDetail(picked) : null;
+    }
+
+    // Plain text. An HTML error page is noise, not an explanation, and truncating one just pastes
+    // half a <head> into the conversation — so relay short plain text only.
+    if (trimmed.startsWith("<") || trimmed.length > MAX_ERROR_DETAIL_CHARS) return null;
+    return clampDetail(trimmed);
+  } catch {
+    // Body unreadable (already consumed, connection dropped mid-read, decode failure). The status
+    // line alone is still worth throwing, so say nothing rather than lose it.
+    return null;
+  }
+}
+
+function clampDetail(s) {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > MAX_ERROR_DETAIL_CHARS
+    ? `${flat.slice(0, MAX_ERROR_DETAIL_CHARS)}…`
+    : flat;
+}
+
 async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TIMEOUT_MS) {
   const url = `${API_BASE}${endpoint}`;
   const options = {
@@ -101,8 +159,25 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
       if (!response.ok) {
-        const apiErr = new Error(`API error: ${response.status} ${response.statusText}`);
+        // Carry the server's OWN explanation, not just the status line (task c9285d2a).
+        //
+        // This used to throw `API error: 400 Bad Request` and never read the body, so every
+        // reason the API took the trouble to write was discarded here — for all ~91 tools, since
+        // this is their single funnel. It surfaced on gate (4): the broker refuses a duplicate
+        // name with a precise, actionable message ("The name 'Lynn' is already in use by a
+        // connected terminal... if this IS your own terminal's channel server, it is running a
+        // build older than the one that echoes the launch nonce — restart the terminal"), and the
+        // caller saw none of it. Told only "400 Bad Request", an agent reasoned — correctly, from
+        // what it was given — that its REQUEST was malformed, invented a docId, retried, was
+        // refused again, and reported success to the Owner. A status code cannot distinguish
+        // "you sent nonsense" from "you may not have that name"; the body always could.
+        const detail = await readErrorDetail(response);
+        const apiErr = new Error(
+          `API error: ${response.status} ${response.statusText}` + (detail ? ` — ${detail}` : ""),
+        );
         apiErr.status = response.status;
+        // Kept separately so a caller can branch on the reason without re-parsing the message.
+        if (detail) apiErr.detail = detail;
         throw apiErr;
       }
       const text = await response.text();
@@ -115,6 +190,19 @@ async function apiCall(endpoint, method = "GET", body = null, timeoutMs = API_TI
           `The app may be busy or wedged on ${API_BASE}.`
         );
       }
+      // An error carrying an HTTP status came FROM the server, so by construction the connection was
+      // never refused — bail out before the substring heuristic below can be fooled.
+      //
+      // This guard exists because relaying the server's message (above) made err.message partly
+      // server-controlled, and isConnectionRefused() decides by `msg.includes("econnrefused")`. A
+      // response body containing that token would classify a 4xx/5xx as a connection failure, and the
+      // retry that follows is only safe because "the server never saw the request" — which is exactly
+      // false here. A POST or DELETE would silently execute twice, then report "MultiTerminal isn't
+      // running". No MT endpoint emits that token today, so this was latent rather than live; it is
+      // also the kind of coupling that would be re-introduced by any future error-text change, so the
+      // guard is structural rather than a filter on the token.
+      if (err.status) throw err;
+
       if (isConnectionRefused(err)) {
         if (attempt === 0) {
           // Brief backoff, then one retry — covers a mid-restart window.
@@ -232,7 +320,33 @@ function formatTerminals(terminals) {
     const minutesAgo = Math.floor((now - lastActive) / 60000);
     const timeStr = minutesAgo === 0 ? "just now" : `${minutesAgo} min ago`;
 
+    // Push delivery health (task c9285d2a item 10). A terminal whose port reports are being refused
+    // is CONNECTED and answers get_messages perfectly — polling never touches the channel port — so
+    // the one place anyone looks says it is fine while every push to it is undeliverable. Say it here,
+    // because a health signal nobody reads is the same as not having one.
+    const refusals = t.channelPortRefusalCount || 0;
+    // The `channelPort == null` conjunct is repeated here deliberately, not redundantly. The broker
+    // already refuses to count against a row that holds a route, but a stale count could still arrive
+    // from a path neither of us has enumerated (an older build, a reconnect that reused the row), and
+    // the cost of the two states is wildly asymmetric: failing to warn loses a diagnostic, while
+    // warning wrongly tells an agent to restart a terminal that is working. Only claim "dead" when
+    // this row has no route of its own.
+    //
+    // The wording no longer asserts a cause. It previously named version skew and prescribed a
+    // restart, which an agent relays to the Owner as diagnosis — and skew is only one of the ways to
+    // get here. Say what is observed, point at the log, let the reader conclude.
+    const refusalsAreDead = refusals > 0 && (t.channelPort === null || t.channelPort === undefined);
+    let health = "";
+    if (refusalsAreDead) {
+      health = `  ⚠️ PUSH DELIVERY DEAD — this terminal has no channel port and ${refusals} port report(s) were refused. It can be reached only by polling. Causes include a channel server predating the launch-nonce echo (restart that terminal) or another process claiming its name; the broker log line "CHANNEL PORT REPORT REFUSED" distinguishes them.`;
+    } else if (refusals > 0) {
+      // Refusals recorded, but this row HAS a route — so they were about someone else claiming the
+      // name, not about this terminal's delivery. Worth surfacing, worth not calling dead.
+      health = `  ℹ️ ${refusals} port report(s) claiming this name were refused, but this terminal has a live channel port — its own delivery is fine.`;
+    }
+
     output += `• ${t.name} (${t.id.substring(0, 8)}) - Last active ${timeStr}\n`;
+    if (health) output += `${health}\n`;
   });
 
   return output.trim();
@@ -3204,6 +3318,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           docId: effectiveDocId,
         };
         if (launchNonce) regPayload.nonce = launchNonce;
+        // Owning process id (task c9285d2a). This MCP server and the channel server are siblings
+        // under one claude.exe, so process.ppid is the same integer for both and is the only thing
+        // they share when MT did not launch the session (no MULTITERMINAL_LAUNCH_NONCE to echo).
+        // Sending it is what lets an ADOPTED terminal — a plain shell that ran register_terminal —
+        // have its channel server discover the claimed name and prove it belongs to the same
+        // session. Read from the process, never from a caller arg, so an agent cannot assert
+        // someone else's pid.
+        if (process.ppid) regPayload.ownerPid = process.ppid;
         const result = await apiCall("/api/messaging/register", "POST", regPayload);
         const channelInfo = `\nChannel Port: (managed by channel server)`;
         return {

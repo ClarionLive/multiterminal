@@ -113,6 +113,7 @@ namespace MultiTerminal
         /// ever left unconstructed again, the rail silently reverts to showing frozen state.
         /// </remarks>
         private MCPServer.Services.AgentActivityWatcher _agentActivityWatcher;
+        private MCPServer.Services.TerminalLivenessReaper _terminalLivenessReaper;
         private FilePreviewPanel.FilePreviewPanelDocument _filePreviewPanel;
         private ToolStripButton _filePreviewPanelButton;
 #pragma warning restore CA2213
@@ -995,6 +996,10 @@ namespace MultiTerminal
                         // The REST host has assigned Broker.ActivityFeedService by now, so the
                         // attention rail's poller can actually be built (task edcdcdd5).
                         StartAgentActivityWatcher();
+
+                        // Disconnects terminals whose Claude process died without a teardown, so the
+                        // event-driven panels drop them too (task d1151661 item 3).
+                        StartTerminalLivenessReaper();
 
                         // Wire terminal stream resolver: resolves any terminal identifier
                         // (terminal ID, DocId, or agent name) to its ConPtyTerminal instance
@@ -2088,10 +2093,34 @@ namespace MultiTerminal
                     mcpConfigPath: mcpConfigPath,
                     environmentVars: spawnEnv);
 
-                // Register with MessageBroker so other terminals can message this agent
+                // Register with MessageBroker so other terminals can message this agent.
+                //
+                // The refusal must NOT be swallowed (task c9285d2a, pipeline Run 1). Gate (4) made a
+                // previously-impossible outcome reachable here: when the requested agent name is held
+                // by a connected terminal, RegisterTerminal now returns Success=false with a null
+                // TerminalId. The old `regResult?.TerminalId ?? agentDocId` turned that refusal into a
+                // plausible-looking id the broker had never heard of — the panel appeared, the agent
+                // was mapped in _agentProcessMap, and every message addressed to it went nowhere, with
+                // nothing logged. That is the same silent-wrong-recipient class this ticket exists to
+                // remove, reintroduced one call site over.
                 string agentDocId = $"agent-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
                 var regResult = _mcpServer?.Broker?.RegisterTerminal(agentName, agentDocId);
-                string agentTerminalId = regResult?.TerminalId ?? agentDocId;
+                if (regResult == null || !regResult.Success)
+                {
+                    string reason = regResult?.Error ?? "the message broker is unavailable";
+                    _debugLogService?.Error("MainForm", $"Refusing to spawn agent '{agentName}': registration failed — {reason}. Stopping the spawned process rather than mapping it to an id the broker does not know.");
+
+                    // Best-effort teardown: the process is already running, and leaving it orphaned
+                    // would be a worse outcome than the registration failure we are reporting.
+                    try { await agent.StopAsync(); } catch { /* teardown is best-effort */ }
+                    try { agent.Dispose(); } catch { /* teardown is best-effort */ }
+
+                    // The enclosing catch turns this into (false, null, error) for the caller, so the
+                    // refusal reaches the requester instead of becoming an unroutable agent panel.
+                    throw new InvalidOperationException($"Could not register agent '{agentName}' with the message broker: {reason}");
+                }
+
+                string agentTerminalId = regResult.TerminalId;
 
                 // Map the terminal ID to this AgentProcess for message delivery
                 lock (_agentProcessMap)
@@ -2445,11 +2474,16 @@ namespace MultiTerminal
         {
             try
             {
-                // id + to are forward-compatible extras (old channel servers ignore unknown
-                // fields): id lets a future channel server dedup Tier-3 re-deliveries after an
-                // inbox-file belt write; to lets it refuse a POST aimed at a different agent
-                // (stale/reused port — the GH#7 per-recipient loss signature). Plugin-side
-                // enforcement is a follow-up in the marketplace repo.
+                // id + to are enforced by the channel server, NOT merely forward-compatible extras:
+                // id dedups Tier-3 re-deliveries after an inbox-file belt write, and `to` lets the
+                // recipient refuse a POST aimed at a different agent (stale/reused port — the GH#7
+                // per-recipient loss signature). multiterminal-channel.mjs isAddressedToMe() answers
+                // a mismatch with 409 `wrong_recipient`, deliberately non-2xx so MT does not mark it
+                // delivered; 18 assertions cover it (ticket 6b093a22).
+                //
+                // ⚠️ KEEP THIS TRUE. It previously claimed enforcement was still "a follow-up", and
+                // reviewers reasoned from it: two independent models each filed a HIGH about recycled
+                // ports on the strength of that one stale line. Full account on task d1151661.
                 var payload = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     from = sender,
@@ -3593,7 +3627,10 @@ namespace MultiTerminal
                     // Check if this identity is already active in another terminal
                     if (isTeamLead)
                     {
-                        var activeTerminals = _mcpServer.Broker.GetTerminals();
+                        // RAW view for the same reason as PreRegisterTerminal: a held-but-hidden
+                        // name must still count as in use, or we skip the IdentityPicker and let the
+                        // launch be refused instead (task d1151661).
+                        var activeTerminals = _mcpServer.Broker.GetAllConnectedTerminals();
                         bool nameInUse = activeTerminals.Any(t =>
                             t.Name.Equals(terminalName, StringComparison.OrdinalIgnoreCase) &&
                             t.IsConnected &&
@@ -3622,15 +3659,19 @@ namespace MultiTerminal
                     // concurrent launch took the name since our resolve, we get a
                     // fresh suffix atomically. Team-lead path keeps the existing
                     // IdentityPickerDialog flow (dialog is authoritative).
-                    if (!isTeamLead && kind == TerminalKind.Codex)
-                    {
-                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
-                        terminalName = resolved;
-                    }
-                    else
-                    {
-                        _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
-                    }
+                    // Run 5: both arms used to DISCARD the RegisterResult. Since gate (4) made
+                    // registration fallible for real names, a refusal left no broker row bound to this
+                    // doc while execution carried straight on into StartTerminal with MULTITERMINAL_NAME
+                    // set to the refused name — a correctly-titled tab that no message can reach, with
+                    // nothing logged. PreRegisterTerminalWithName is the one site that already handled
+                    // this properly (check Success, else fall back to an unnamed pre-registration), so
+                    // route through it rather than re-implementing the check three times.
+                    terminalName = PreRegisterTerminalWithName(
+                        doc.DocId,
+                        terminalName,
+                        isTeamLead,
+                        atomicUniqueness: kind == TerminalKind.Codex,
+                        launchNonce: doc.LaunchNonce);
                 }
 
                 // Sync MCP configs: gateway-aware path if available, else standard path.
@@ -3781,7 +3822,13 @@ namespace MultiTerminal
 
                 if (_mcpServer?.Broker != null)
                 {
-                    _mcpServer.Broker.RegisterTerminal(terminalName, doc.DocId, isTeamLead, nonce: doc.LaunchNonce);
+                    // Run 5: was discarding the RegisterResult — see the note at the project-launch site.
+                    // A gate-(4) refusal here launched the session under a name the broker had rejected.
+                    terminalName = PreRegisterTerminalWithName(
+                        doc.DocId,
+                        terminalName,
+                        isTeamLead,
+                        launchNonce: doc.LaunchNonce);
                 }
 
                 // AC7 launch-root strategy (task c6ed236c): spawn at repo root, in-shell
@@ -3887,12 +3934,22 @@ namespace MultiTerminal
                 {
                     if (!isTeamLead && terminalKind == Models.TerminalKind.Codex)
                     {
-                        _mcpServer.Broker.RegisterTerminalUnique(terminalName, out string resolved, sourceDoc.DocId, isTeamLead, nonce: sourceDoc.LaunchNonce);
-                        terminalName = resolved;
+                        // Run 5: was discarding the RegisterResult on both arms — see the note at the
+                        // project-launch site. Routed through the one site that checks Success.
+                        terminalName = PreRegisterTerminalWithName(
+                            sourceDoc.DocId,
+                            terminalName,
+                            isTeamLead,
+                            atomicUniqueness: true,
+                            launchNonce: sourceDoc.LaunchNonce);
                     }
                     else
                     {
-                        _mcpServer.Broker.RegisterTerminal(terminalName, sourceDoc.DocId, isTeamLead, nonce: sourceDoc.LaunchNonce);
+                        terminalName = PreRegisterTerminalWithName(
+                            sourceDoc.DocId,
+                            terminalName,
+                            isTeamLead,
+                            launchNonce: sourceDoc.LaunchNonce);
                     }
                 }
 
@@ -4036,8 +4093,19 @@ namespace MultiTerminal
         {
             try
             {
-                // Get list of existing terminal names
-                var existingTerminals = _mcpServer.Broker.GetTerminals();
+                // RAW view, deliberately. "Is this name free?" is NOT the same question as
+                // "should this row appear in the Terminals list", and since task d1151661 the two
+                // answers differ: GetTerminals() hides rows whose owner process is provably dead,
+                // but gate (4) holds a name whenever the row carries a LaunchNonce REGARDLESS of
+                // liveness ("held by its (immortal) nonce" — see existingCarriesProof in
+                // MessageBroker.DecideRegistration gate (4); named, not line-numbered, because a line
+                // number is the kind of reference that goes stale silently). Every
+                // MT-launched row is nonce-bearing, so asking GetTerminals() here would hand out a
+                // name DecideRegistration then refuses — PreRegisterTerminal returns null, the tab
+                // launches with MULTITERMINAL_NAME cleared, and an unnamed terminal is exactly the
+                // shape whose SessionEnd hook early-returns, making it the NEXT ghost. The pool is
+                // scanned in fixed order, so that one ghost would capture every subsequent tab.
+                var existingTerminals = _mcpServer.Broker.GetAllConnectedTerminals();
                 var takenNames = existingTerminals.Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 // Pick first available name from pool
@@ -4064,6 +4132,13 @@ namespace MultiTerminal
                 {
                     return terminalName;
                 }
+
+                // Say WHY. This path returned null silently, and the caller responds by starting the
+                // terminal with a null name — which clears MULTITERMINAL_NAME in the child, and an
+                // unnamed terminal is exactly the shape whose SessionEnd hook early-returns, so it
+                // becomes the next ghost row. A refusal that propagates the fault it came from must
+                // not be invisible (task d1151661; mirrors PreRegisterTerminalWithName's handling).
+                _debugLogService?.Warning("MainForm", $"Pre-registration REFUSED for '{terminalName}' (docId {docId}): {result.Error ?? "no reason given"}. The terminal will start WITHOUT a name unless the caller handles this.");
             }
             catch (Exception ex)
             {
@@ -4142,12 +4217,19 @@ namespace MultiTerminal
                     var uniqueResult = _mcpServer.Broker.RegisterTerminalUnique(identityName, out string resolved, docId, isTeamLead, nonce: launchNonce);
                     if (uniqueResult.Success)
                         return resolved;
+
+                    // Run 5: the refusal REASON used to be dropped here, so a gate-(4) rejection was
+                    // indistinguishable from "no identity was requested" — the terminal simply came up
+                    // as a placeholder and nobody could say why. Log the broker's own sentence.
+                    _debugLogService?.Warning("MainForm", $"Unique pre-registration of '{identityName}' was refused by the broker; falling back to an unnamed placeholder. Broker said: {uniqueResult.Error ?? "(no reason given)"}");
                 }
                 else
                 {
                     var result = _mcpServer.Broker.RegisterTerminal(identityName, docId, isTeamLead, nonce: launchNonce);
                     if (result.Success)
                         return identityName;
+
+                    _debugLogService?.Warning("MainForm", $"Pre-registration of '{identityName}' was refused by the broker; falling back to an unnamed placeholder. Broker said: {result.Error ?? "(no reason given)"}");
                 }
             }
             catch (Exception ex)
@@ -6564,8 +6646,23 @@ namespace MultiTerminal
                 // re-bind a saved "Oracle" position to this live instance.
                 _oracleService.Start(_dockPanel);
 
-                // Register Oracle terminal with the same docId so broker and ConPTY are in sync
-                _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
+                // Register Oracle terminal with the same docId so broker and ConPTY are in sync.
+                //
+                // Run 6: this discarded the RegisterResult. "Oracle" is a REAL name, not the exempt
+                // "Unassigned" sentinel, so gate (4) applies to it — and a refusal here would leave
+                // Oracle running under a name the broker had rejected: visible in the dock, addressable
+                // by nobody, with nothing logged. Exactly the class 4c3f60d set out to eliminate, missed
+                // because the census that guarantees its absence could not see a `?.` receiver.
+                //
+                // Oracle is a singleton with a fixed name, so there is no placeholder to fall back to
+                // the way PreRegisterTerminalWithName does. The honest handling is therefore to say so:
+                // Oracle still starts (it is useful locally even when unaddressable), but the refusal
+                // reaches the log with the broker's own sentence instead of vanishing.
+                var oracleRegistration = _mcpServer?.Broker?.RegisterTerminal(OracleService.OracleName, _oracleService.DocId);
+                if (oracleRegistration != null && !oracleRegistration.Success)
+                {
+                    _debugLogService?.Warning("MainForm", $"Registration of '{OracleService.OracleName}' was refused by the broker. Oracle is running but is NOT addressable — messages to it will not route. Broker said: {oracleRegistration.Error ?? "(no reason given)"}");
+                }
 
                 // Apply user's font size and theme to Oracle's terminal
                 float oracleFontSize = _settings?.GetTerminalFontSize() ?? 10f;
@@ -6877,6 +6974,37 @@ namespace MultiTerminal
         }
 
         /// <summary>
+        /// Starts the sweep that turns a provably-dead terminal owner into a real disconnect
+        /// (task d1151661 item 3). Without it, a terminal that crashed or was killed leaves the
+        /// Terminals list but keeps its card on the Attention rail and its place in every other panel
+        /// that only listens for <c>TerminalDisconnected</c>.
+        /// </summary>
+        private void StartTerminalLivenessReaper()
+        {
+            try
+            {
+                if (_terminalLivenessReaper != null) return;
+
+                var broker = _mcpServer?.Broker;
+                if (broker == null)
+                {
+                    _debugLogService?.Warning("TerminalLivenessReaper", "Not started: broker unavailable.");
+                    return;
+                }
+
+                var reaper = new MCPServer.Services.TerminalLivenessReaper(
+                    broker.ReapDeadOwnerTerminals,
+                    msg => _debugLogService?.Info("TerminalLivenessReaper", msg));
+                reaper.Start();
+                _terminalLivenessReaper = reaper;
+            }
+            catch (Exception ex)
+            {
+                _debugLogService?.Error("TerminalLivenessReaper", $"Failed to start: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// The shared placeholder name every restored/anonymous terminal carries until its agent
         /// registers a real one. Not an identity: the broker itself skips profile creation for it.
         /// </summary>
@@ -6896,7 +7024,14 @@ namespace MultiTerminal
             try
             {
                 if (e == null || IsTemporaryAgent(e.Name) || IsUnassignedSentinel(e.Name)) return;
-                _mcpServer?.Broker?.AgentAttention?.NoteTerminalGone(e.Name);
+
+                // The event is per ROW but the eviction is per NAME. If another live terminal still
+                // carries this name, its cards are not this row's to delete (task d1151661 pipeline
+                // Run 3, adversary M1: a reaped or closed Diana evicted a relaunched live Diana's card).
+                var broker = _mcpServer?.Broker;
+                if (broker == null || broker.IsAgentNameHeldByLiveTerminal(e.Name)) return;
+
+                broker.AgentAttention?.NoteTerminalGone(e.Name);
             }
             catch (Exception ex)
             {
@@ -7817,6 +7952,8 @@ namespace MultiTerminal
                 _codeGraphWatcher?.Dispose();
                 // Before the DB it reads (task edcdcdd5).
                 _agentActivityWatcher?.Dispose();
+                // Before the broker state and profile DB its sweep writes (task d1151661).
+                _terminalLivenessReaper?.Dispose();
                 // Dispose the coordinator after the watcher that uses it, before the DB it indexes.
                 _mcpServer?.Broker?.CodeGraphIndexCoordinator?.Dispose();
                 _sessionIndexingService?.Dispose();
