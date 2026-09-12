@@ -149,6 +149,14 @@ jobs:
       - name: mcp node tests
         run: node --test "mcp/test/*.test.mjs"
 
+      # ---- Script node tests (scripts/test/). Separate from the mcp/ glob above because these
+      #      cover repo tooling rather than the MCP server: today the git credential helper
+      #      (task b42b1883 item 4), whose host check is the difference between "hands git a bot
+      #      token" and "hands ANY remote a bot token". A new file here is picked up automatically;
+      #      a new DIRECTORY of node tests needs its own line, as this one did. ----
+      - name: script node tests
+        run: node --test "scripts/test/*.test.mjs"
+
       # ---- Invariant censuses (scripts/verify-*.mjs). These guard architectural rules the C#
       #      compiler cannot see: one-owner-per-SQLite-connection (bb2b0104), no bare event raises,
       #      the logging sweep, write-path locking, and the SqliteWriteGate write-fairness invariant
