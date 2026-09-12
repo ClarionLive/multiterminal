@@ -21,8 +21,15 @@
 //       `gh` invocation in the terminal the moment MultiTerminal hiccupped.
 //
 //   (2) AN EXISTING GH_TOKEN IS NEVER OVERWRITTEN. If the environment already carries one, someone
-//       chose it deliberately — that is the Owner escape hatch the plan insists must be explicit
-//       rather than silently overridden. We say so on stderr and change nothing.
+//       chose it deliberately, and silently replacing another tool's credential would be its own
+//       kind of hijack. We say so on stderr and change nothing.
+//
+//       ⚠️ THIS IS NOT THE OWNER ESCAPE HATCH, though this comment used to claim it was (item 8).
+//       Reaching it requires already holding a token — for the Owner's identity, that means holding
+//       their personal access token, which is the exact practice this ticket exists to end. The real
+//       hatch is MULTITERMINAL_GH_AS_OWNER (see lib/owner-escape-hatch.mjs), which needs no
+//       credential because gh is already signed in as the Owner in its own keyring. Rule (2) is now
+//       only what its first sentence says: do not clobber someone else's deliberate choice.
 //
 //   (3) THE CHILD'S EXIT CODE IS OURS. `gh` is scripted against; swallowing a non-zero exit would
 //       turn a failed comment into an apparent success for every caller that checks.
@@ -49,6 +56,11 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 
 import { mintInstallationToken } from './lib/mint-github-token.mjs';
 import { transformArgs, isSigningEnabled } from './lib/sign-comment.mjs';
+import {
+  isOwnerHatchRequested,
+  readGhActiveAccount,
+  ownerHatchNotice,
+} from './lib/owner-escape-hatch.mjs';
 
 const MINT_TIMEOUT_MS = 5000;
 const MT_API_URL = process.env.MT_API_URL || 'http://localhost:5050';
@@ -148,9 +160,21 @@ async function main() {
   }
 
   let token = null;
-  if (hasExplicitToken(process.env)) {
-    // Rule (2). Loud, not silent — the plan requires the Owner escape hatch to be visible.
+  if (isOwnerHatchRequested(process.env, warn)) {
+    // ITEM 8: the deliberate Owner escape hatch. We mint NOTHING and inject NOTHING, so gh falls
+    // through to the account in its own keyring — which is the Owner. No credential changes hands
+    // here: the hatch is a decision, not a secret.
+    //
+    // Announced BEFORE the command runs, not after. A warning that arrives alongside gh's own output
+    // competes with it for attention, and by then the comment is already published.
+    const account = readGhActiveAccount({ env: process.env, readFileText: (p) => fs.readFileSync(p, 'utf8') });
+    for (const line of ownerHatchNotice(account)) warn(line);
+  } else if (hasExplicitToken(process.env)) {
+    // Rule (2). NOT the escape hatch (see the header) — just "do not clobber a deliberate choice".
+    // The consequence is spelled out for the same reason item 11 spelled it out below: naming the
+    // cause alone leaves the reader to work out for themselves whose name goes on the result.
     warn('GH_TOKEN/GITHUB_TOKEN is already set, so gh will use it instead of MultiTerminal\'s bot identity.');
+    warn('Anything this command publishes will be attributed to whoever owns THAT token, not to the bot.');
   } else {
     token = await mintInstallationToken({
       nonce: process.env.MULTITERMINAL_LAUNCH_NONCE,

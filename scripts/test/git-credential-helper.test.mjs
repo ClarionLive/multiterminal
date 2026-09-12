@@ -257,15 +257,23 @@ test('store and erase are silent no-ops', async () => {
   }
 });
 
-// ─── Silent to git, audible to the human (item 11) ────────────────────────────────────────
+// ─── Silent to git, audible to the human (item 11, corrected by item 8) ───────────────────
 //
-// Every test above asserts stdout is empty, and that is the contract WITH GIT: say nothing, exit 0,
-// let it try its other helpers. What those helpers hold is the Owner's own credentials — so falling
-// through does not fail the push, it succeeds under their name. git ignores a credential helper's
-// stderr, so saying so cannot affect the operation, and this is the last moment at which the
-// attribution is still a surprise rather than a fact in the repository.
-
-test('a failed mint warns on stderr about who the push will be attributed to', async () => {
+// Every test above asserts stdout is empty, and that is the contract WITH GIT: say nothing, exit 0.
+//
+// ⚠️ THIS COMMENT USED TO SAY the helpers git falls back to "hold the Owner's own credentials — so
+// falling through does not fail the push, it succeeds under their name". That is FALSE, and the same
+// false sentence had been copied into the source file it describes. MEASURED in an MT-launched
+// terminal (item 8): the effective helper list for github.com is
+//     manager / "" / !gh auth git-credential / "" / !node git-credential-multiterminal.mjs
+// and git treats an empty value as "reset the list". Item 6's clear-then-set is the second reset, so
+// OURS IS THE ONLY HELPER LEFT — deliberately, because leaving the Owner's helper in the list would
+// have agents pushing as the Owner while appearing to work.
+//
+// So declining does not misattribute the push; it leaves git with nothing and the push PROMPTS or
+// fails. Both deserve a warning, but they call for opposite next actions, which is why the wording
+// is asserted here rather than left to drift.
+test('a failed mint warns that git has no other helper to fall back to', async () => {
   const broker = await startFakeBroker({ status: 503, body: { error: 'no installation' } });
   try {
     const { stdout, stderr, code } = await runHelper({
@@ -277,8 +285,55 @@ test('a failed mint warns on stderr about who the push will be attributed to', a
     assert.equal(stdout, '', 'stderr diagnostics must not turn into a partial answer on stdout');
     assert.equal(code, 0, 'a non-zero exit makes git treat the helper as broken');
 
-    assert.match(stderr, /attributed/i);
-    assert.match(stderr, /not to the bot/i);
+    assert.match(stderr, /ONLY credential helper/i, 'say that nothing else will answer');
+    assert.match(stderr, /NOT a push that silently went out/i,
+      'and rule out the failure mode a reader would otherwise assume');
+  } finally {
+    await broker.close();
+  }
+});
+
+// ─── The deliberate Owner escape hatch reaches git too (item 8) ───────────────────────────
+//
+// One variable governs identity for BOTH tools. A hatch that covered `gh issue comment` but silently
+// left `git push` acting as the bot would be more confusing than no hatch at all.
+test('the hatch declines to mint, loudly, and names the way through', async () => {
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr, code } = await runHelper({
+      stdin: githubRequest,
+      env: {
+        MT_API_URL: broker.url,
+        MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc',
+        MULTITERMINAL_GH_AS_OWNER: '1',
+      },
+    });
+
+    assert.equal(stdout, '', 'the hatch must hand git no bot credential');
+    assert.equal(code, 0);
+    assert.equal(broker.received.length, 0, 'and must not mint one either');
+    assert.match(stderr, /acting as the OWNER/i);
+    assert.match(stderr, /git -c credential/i, 'a hatch that only says "no" is not a way through');
+  } finally {
+    await broker.close();
+  }
+});
+
+test('THE accident test: a misspelled hatch value still mints the bot token for git', async () => {
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr } = await runHelper({
+      stdin: githubRequest,
+      env: {
+        MT_API_URL: broker.url,
+        MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc',
+        MULTITERMINAL_GH_AS_OWNER: 'flase',
+      },
+    });
+
+    assert.match(stdout, /^username=x-access-token\n/, 'a typo must leave you as the bot');
+    assert.equal(broker.received.length, 1);
+    assert.match(stderr, /not recognized/i);
   } finally {
     await broker.close();
   }

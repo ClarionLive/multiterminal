@@ -174,8 +174,14 @@
     </Content>
     <!-- item 7. This list is EXPLICIT, not a wildcard: a lib/ module the shim imports but nobody
          adds here is missing from a deployed MultiTerminal, and the failure is not a missing
-         signature — it is an unresolved import that breaks EVERY gh invocation in every terminal. -->
+         signature — it is an unresolved import that breaks EVERY gh invocation in every terminal.
+         That is not a hypothetical cost: item 8 added owner-escape-hatch.mjs below and forgot this
+         entry, and deployed-scripts.test.mjs caught it on the first run. Keep the guard. -->
     <Content Include="scripts\lib\sign-comment.mjs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- item 8. Imported by BOTH the gh shim and the git credential helper. -->
+    <Content Include="scripts\lib\owner-escape-hatch.mjs">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

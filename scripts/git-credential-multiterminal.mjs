@@ -50,7 +50,14 @@
 // This file alone would leave the ticket's headline scenario unfixed.
 
 import process from 'node:process';
+import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
+
+import {
+  isOwnerHatchRequested,
+  readGhActiveAccount,
+  ownerHatchNotice,
+} from './lib/owner-escape-hatch.mjs';
 
 // One shared mint path with the gh shim (item 5). The nonce rule, the timeout and the
 // "a token or nothing" contract live there so the two callers cannot drift apart.
@@ -131,6 +138,32 @@ async function main() {
     return;
   }
 
+  // ITEM 8: the Owner escape hatch, honoured here as well as in the gh shim so that ONE variable
+  // governs identity across both tools. A hatch that covered `gh issue comment` but silently left
+  // `git push` acting as the bot would be a worse kind of confusing than no hatch at all.
+  //
+  // We decline rather than minting. Note honestly what that does and does not achieve: per the
+  // correction below, declining leaves git with no helper for github.com, so this makes the push
+  // PROMPT rather than making it succeed as the Owner. That is the truthful ceiling of what this
+  // file can do alone, and it is why the message names the concrete way through.
+  //
+  // ⚠️ NOT IMPLEMENTED ON PURPOSE — needs an Owner decision, not an agent's: this helper COULD
+  // delegate to `gh auth git-credential` and hand git the Owner's own credential. That would make
+  // the hatch work end to end for pushes, at the cost of routing a long-lived personal credential
+  // through MultiTerminal's helper process — the precise thing the rest of this ticket removes.
+  // Choosing that trade is the Owner's call, so it is written down rather than taken.
+  if (isOwnerHatchRequested(process.env, warn)) {
+    const account = readGhActiveAccount({
+      env: process.env,
+      readFileText: (p) => fs.readFileSync(p, 'utf8'),
+    });
+    for (const line of ownerHatchNotice(account, 'Commits pushed by this command')) warn(line);
+    warn('This helper is declining, and MT configures no other helper for github.com, so git will'
+      + ' prompt. To push as the Owner, re-run with:'
+      + ' git -c credential.https://github.com.helper=\'!gh auth git-credential\' push');
+    return;
+  }
+
   const token = await mintInstallationToken({
     nonce: process.env.MULTITERMINAL_LAUNCH_NONCE,
     installationId: process.env.MULTITERMINAL_GITHUB_INSTALLATION_ID || null,
@@ -140,17 +173,35 @@ async function main() {
   });
 
   // Every failure lands here identically, and every one of them means the same thing to git:
-  // say nothing, exit 0, let it try its other helpers.
+  // say nothing, exit 0.
   //
-  // Silence is the right answer TO GIT and the wrong answer to the human (Owner ruling 2026-09-12:
-  // warn and continue). Those other helpers hold the Owner's own credentials, so falling through
-  // does not fail the push — it succeeds, under their name. Saying so on stderr costs nothing: git
-  // ignores stderr from a credential helper, so this cannot affect the operation, and it is the only
-  // moment at which the attribution is still a surprise rather than a fact in the repository.
+  // ⚠️ CORRECTED (item 8). This block used to say "git will fall back to its other credential
+  // helpers ... it succeeds, under their name", and that is FALSE in the only situation where this
+  // file ever runs. Measured, not reasoned: in an MT-launched terminal the effective helper list for
+  // github.com is
+  //     manager            (generic, from .gitconfig)
+  //     ""                 (reset, from .gitconfig)
+  //     !gh auth git-credential   (the Owner's helper, from .gitconfig)
+  //     ""                 (reset, from item 6's GIT_CONFIG_* clear-then-set)
+  //     !node this file    (ours)
+  // and git treats an empty value as "reset the list to empty". So ours is the ONLY helper left —
+  // which is exactly what item 6 intended, since leaving the Owner's helper in the list would have
+  // agents pushing as the Owner while appearing to work. The consequence is that declining here
+  // leaves git with NO helper for github.com: it prompts, and a non-interactive agent terminal fails.
+  // It does not silently succeed as the Owner.
+  //
+  // That correction matters beyond tidiness: the old text told a reader their push had merely been
+  // misattributed, when in fact it had not happened. Both are worth warning about, but they call for
+  // opposite next actions.
+  //
+  // Silence remains the right answer TO GIT (a helper that errors makes git report failure for an
+  // operation that might still succeed) and the wrong answer to the human. git ignores a helper's
+  // stderr, so saying so cannot affect the operation.
   if (!token) {
-    warn('No MultiTerminal bot token, so git will fall back to its other credential helpers.');
-    warn('Commits pushed by this command will be attributed to whatever account those supply,'
-      + ' not to the bot.');
+    warn('No MultiTerminal bot token, and MT configures this as the ONLY credential helper for'
+      + ' github.com — so git has nothing else to try.');
+    warn('Expect an authentication prompt, or a failed push in a non-interactive terminal. This is'
+      + ' a failure to authenticate, NOT a push that silently went out under someone else\'s name.');
     return;
   }
 

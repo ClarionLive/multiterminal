@@ -231,9 +231,80 @@ test('runs gh anyway in a terminal with no launch nonce', async () => {
   }
 });
 
+// ─── The DELIBERATE Owner escape hatch (item 8) ────────────────────────────────────────────
+//
+// Item 8's requirement is "explicit and loud, never a silent fallback reachable by accident". These
+// assert the END of that, at the only place it can be observed honestly: what the CHILD received.
+// Asking the shim what it intended would prove nothing about the identity gh actually used.
+//
+// Note what distinguishes these from the test below. The GH_TOKEN rule is "do not clobber someone
+// else's deliberate choice" and REQUIRES the caller to already hold a token. The hatch requires no
+// credential at all — it just declines to mint — which is why it, not that rule, is the escape
+// hatch the plan asked for. The header of gh-multiterminal.mjs claimed the opposite until item 8.
+
+test('the hatch mints nothing and hands the child no token', async () => {
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr } = await runShim({
+      env: {
+        MT_API_URL: broker.url,
+        MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc',
+        MULTITERMINAL_GH_AS_OWNER: '1',
+      },
+    });
+
+    assert.ok(stdout.includes('GH_TOKEN=(none)'), 'gh must fall through to its own keyring account');
+    assert.ok(!stdout.includes(FAKE_TOKEN), 'no bot token may reach the child');
+    assert.equal(broker.received.length, 0, 'and nothing should be minted at all');
+    assert.match(stderr, /acting as the OWNER/i, 'the hatch must announce itself');
+    assert.match(stderr, /attributed to/i, 'and name the consequence, not just the cause');
+  } finally {
+    await broker.close();
+  }
+});
+
+test('THE accident test: a misspelled hatch value still mints the bot token', async () => {
+  // The whole point of item 8's strict parsing, observed end to end. If this goes red, a typo is
+  // publishing an agent's words under a real person's name.
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr } = await runShim({
+      env: {
+        MT_API_URL: broker.url,
+        MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc',
+        MULTITERMINAL_GH_AS_OWNER: 'flase',
+      },
+    });
+
+    assert.ok(stdout.includes(`GH_TOKEN=${FAKE_TOKEN}`), 'a typo must leave you as the bot');
+    assert.equal(broker.received.length, 1, 'the token is still minted');
+    assert.match(stderr, /not recognized/i, 'and the typo is reported rather than obeyed');
+  } finally {
+    await broker.close();
+  }
+});
+
+test('an explicitly disabled hatch is silent and still the bot', async () => {
+  const broker = await startFakeBroker();
+  try {
+    const { stdout, stderr } = await runShim({
+      env: {
+        MT_API_URL: broker.url,
+        MULTITERMINAL_LAUNCH_NONCE: 'nonce-abc',
+        MULTITERMINAL_GH_AS_OWNER: '0',
+      },
+    });
+
+    assert.ok(stdout.includes(`GH_TOKEN=${FAKE_TOKEN}`));
+    assert.ok(!/acting as the OWNER/i.test(stderr), 'an off switch must not nag');
+  } finally {
+    await broker.close();
+  }
+});
+
 test('never overwrites a token the environment already had', async () => {
-  // The Owner escape hatch: a token set deliberately must survive, and the shim must say so rather
-  // than silently swapping identities.
+  // NOT the escape hatch (item 8 corrected that claim) — this is only "do not clobber a token
+  // someone else chose deliberately". Reaching it requires already holding one.
   const broker = await startFakeBroker();
   try {
     const { stdout, stderr } = await runShim({
