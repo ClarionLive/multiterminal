@@ -222,7 +222,31 @@ const GUARDED_MODELS = ['Models/SourceControlAccount.cs', 'Models/OwnerProfile.c
 // credential", which should be approximately never — prefer moving the operation into the service.
 // Keys are `relPath::identifier`; every entry must state why.
 const ALLOWED_CRED_GETTERS = new Map();
-const ALLOWED_SECRET_MEMBERS = new Map();
+const ALLOWED_SECRET_MEMBERS = new Map([
+  // Task b42b1883 item 2. POST /api/github/token is the ONE endpoint whose entire purpose is to hand
+  // a credential to its caller — the git credential helper and the `gh` shim, which hold it for the
+  // duration of a single command. Owner decision 2026-09-08 chose exactly this shape ("credential
+  // helper + localhost mint endpoint") over an environment variable, because an installation token
+  // expires in ~1h and an env var in a long-lived terminal does not.
+  //
+  // Why this is not the ea7d9cf9 shape it resembles. That leak was a LONG-LIVED PAT, dispensed
+  // through an UNAUTHENTICATED endpoint, with NO consumer — the credential was the whole response and
+  // nothing needed it. Here the token lives ~1h, the endpoint is gated on the caller presenting its
+  // terminal's MULTITERMINAL_LAUNCH_NONCE (so every mint is attributable to a terminal), and two real
+  // consumers exist.
+  //
+  // RESIDUAL RISK, recorded rather than waived: ea7d9cf9's actual damage was the secret landing in
+  // agent session transcripts on disk. That mechanism is NOT closed here — an agent that curls this
+  // endpoint and prints the response writes a live token into its own JSONL. What limits the blast
+  // radius is the ~1h expiry and the installation's narrow permissions, not the transport. Do not
+  // read this exemption as "tokens in response bodies are fine"; it covers this one endpoint.
+  // Verified absent from transcripts at audit time by scripts/verify-key-at-rest.mjs (item 9), which
+  // sweeps ~/.claude/projects for the PEM and client secret — note it sweeps the LONG-LIVED
+  // credentials, not minted tokens, which rotate faster than an audit can chase.
+  ['API/Controllers/GitHubAppController.cs::token',
+    'POST /api/github/token — the mint endpoint (b42b1883 item 2). Nonce-gated, ~1h installation '
+    + 'token, two real consumers. See the note above for the residual transcript risk.'],
+]);
 
 // Build artifacts and nested worktrees. NOTE: MultiTerminal.Tests is already out of scope because
 // scanFiles only walks API/ — the entry below is belt-and-braces for a future widening of the scan
