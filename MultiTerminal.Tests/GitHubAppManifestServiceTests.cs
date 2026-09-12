@@ -70,38 +70,74 @@ namespace MultiTerminal.Tests
             JsonElement m = Manifest();
 
             Assert.Empty(m.GetProperty("default_events").EnumerateArray());
-            Assert.False(m.GetProperty("hook_attributes").GetProperty("active").GetBoolean());
+            Assert.False(m.TryGetProperty("hook_attributes", out _));
         }
 
         [Fact]
-        public void Hook_attributes_carries_a_url_because_GitHub_rejects_the_manifest_without_one()
+        public void The_manifest_never_declares_a_webhook_GitHub_cannot_reach()
         {
-            // REGRESSION, and the reason this test exists rather than being folded into the one above.
+            // REGRESSION x2. This assertion is deliberately conditional rather than a flat "there is no
+            // hook_attributes" — that is already covered above. This one encodes GITHUB'S RULE, so it
+            // keeps its teeth if someone ever legitimately adds a webhook.
             //
-            // The first live registration attempt (2026-09-12) failed on GitHub's own validation page
-            // with `"url" wasn't supplied.` — because hook_attributes was sent as `{ active: false }`
-            // with no url. Every test in this file passed at the time. They pinned what we MEANT to ask
-            // for and nothing checked that GitHub would accept the payload, so the defect survived all
-            // the way to an Owner click.
+            // Two Owner clicks were spent learning that rule, one per horn of it:
+            //   { active: false }                      -> `"url" wasn't supplied.`
+            //   { url: "http://localhost:5050/…", active: false }
+            //                                          -> `Hook url is not supported because it isn't
+            //                                              reachable over the public Internet (localhost)`
+            // Supply the object and you owe it a url; owe it a url and that url must be publicly
+            // routable. active=false exempts neither.
             //
-            // The error message is actively misleading: the top-level url WAS supplied, so it reads as
-            // if the homepage url were missing. Measured against the live endpoint, the rule is that
-            // omitting hook_attributes entirely validates fine, but supplying it obliges you to supply
-            // its url. Hence this assertion sits next to the active=false one — the two are only
-            // correct together, and asserting active=false alone is what let the bug through.
-            JsonElement hook = Manifest().GetProperty("hook_attributes");
+            // ⚠️ WHY THE PREVIOUS TEST HERE DID NOT HELP — the part worth internalising. It asserted
+            // `Assert.StartsWith("http://localhost:", value)`. It did not merely fail to catch the
+            // second bug; it REQUIRED it. The fix for bug 1 reasoned that loopback was safe BECAUSE
+            // GitHub could not reach it, and the test then froze that inversion in place, so the only
+            // way to ship the real fix was to delete a green test. A test that pins our intention can
+            // do that. A test that pins the external system's rule cannot.
+            //
+            // This still cannot prove GitHub accepts the manifest — no unit test can. See
+            // scratchpad probe.mjs: an anonymous POST to /settings/apps/new reproduces a REJECTION
+            // faithfully, but its 302 is not acceptance (the loopback manifest 302s there and is
+            // rejected on the authenticated click). Probe rejections are evidence; probe passes are not.
+            if (!Manifest().TryGetProperty("hook_attributes", out JsonElement hook))
+            {
+                return; // No webhook declared — neither rule can fire. This is the shipping shape.
+            }
 
             Assert.True(
-                hook.TryGetProperty("url", out JsonElement url),
-                "hook_attributes must carry a url; GitHub rejects the whole manifest without it.");
+                hook.TryGetProperty("url", out JsonElement urlElement),
+                "hook_attributes without a url is rejected: `\"url\" wasn't supplied.`");
 
-            string value = url.GetString();
+            string value = urlElement.GetString();
             Assert.False(string.IsNullOrWhiteSpace(value));
+            Assert.True(
+                Uri.TryCreate(value, UriKind.Absolute, out Uri uri),
+                $"hook_attributes.url must be an absolute URL; got '{value}'.");
 
-            // Loopback on purpose. The webhook is inactive, and even if something flipped it active,
-            // GitHub's servers cannot route to this host — so the field satisfies GitHub's schema
-            // without opening an inbound listener, which is the whole point of asking for no webhook.
-            Assert.StartsWith("http://localhost:", value, StringComparison.Ordinal);
+            Assert.False(
+                uri.IsLoopback,
+                $"hook_attributes.url '{value}' is loopback. GitHub rejects it: \"Hook url is not " +
+                "supported because it isn't reachable over the public Internet\". active=false does " +
+                "not exempt it.");
+
+            Assert.False(
+                uri.HostNameType == UriHostNameType.IPv4 && IsPrivateIPv4(uri.Host),
+                $"hook_attributes.url '{value}' is a private address GitHub cannot route to.");
+        }
+
+        /// <summary>RFC 1918 ranges — unreachable from GitHub for the same reason loopback is.</summary>
+        private static bool IsPrivateIPv4(string host)
+        {
+            string[] parts = host.Split('.');
+            if (parts.Length != 4 || !int.TryParse(parts[0], out int a) || !int.TryParse(parts[1], out int b))
+            {
+                return false;
+            }
+
+            return a == 10
+                || (a == 192 && b == 168)
+                || (a == 172 && b >= 16 && b <= 31)
+                || (a == 169 && b == 254);
         }
 
         [Fact]

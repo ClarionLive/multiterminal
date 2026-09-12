@@ -125,24 +125,30 @@ namespace MultiTerminal.Services
                 // No webhook and no events: MT polls and acts, nothing calls back into it. An inbound
                 // webhook would be a public listener this design does not need and would have to defend.
                 //
-                // ⚠️ The url is MANDATORY and its absence is why the first live registration attempt
-                // failed (2026-09-12). GitHub's manifest parser rejects hook_attributes without a url
-                // and reports it as `"url" wasn't supplied.` — which reads like the TOP-LEVEL url is
-                // missing and sends you looking in the wrong place. GitHub's own docs call
-                // hook_attributes required; measured against the live endpoint it is not (omitting the
-                // object entirely validates fine). The real rule is narrower: supply the object and you
-                // must supply its url.
+                // ⚠️ hook_attributes IS DELIBERATELY ABSENT, and it took two failed Owner clicks to get
+                // here. GitHub applies two separate rules, and satisfying one breaks the other:
                 //
-                // So the object stays, because it states "no webhook" rather than leaving it to a
-                // default nobody asserted, and the url is deliberately loopback: unreachable twice over,
-                // once because active is false and again because GitHub's servers cannot route to
-                // 127.0.0.1. MT serves nothing at this path and is not meant to.
+                //   attempt 1: hook_attributes = { active: false }
+                //              -> `"url" wasn't supplied.`  (reads like the TOP-LEVEL url is missing,
+                //                 which it never was — it sends you looking in the wrong place)
+                //   attempt 2: hook_attributes = { url: "http://localhost:5050/...", active: false }
+                //              -> `Hook url is not supported because it isn't reachable over the
+                //                  public Internet (localhost)` + `Hook is invalid`
+                //
+                // So: supply the object and you MUST supply a url, and that url must be publicly
+                // routable. active=false does NOT exempt it — GitHub validates the url's reachability
+                // regardless. The fix for attempt 1 chose loopback precisely BECAUSE GitHub could not
+                // reach it, reasoning that unreachability was a safety property. GitHub treats it as
+                // invalid configuration. That inversion is the whole lesson.
+                //
+                // We have no public endpoint and want no webhook, so the only honest option left is to
+                // omit the object: with no hook url, neither rule can fire. Omitting it is legal despite
+                // GitHub's docs listing hook_attributes as required — measured, not assumed.
+                //
+                // ⚠️ DO NOT "restore" this field to be explicit about wanting no webhook. Stating it
+                // costs a publicly-reachable listener we would then have to defend, which is the exact
+                // thing not having a webhook is for.
                 default_events = Array.Empty<string>(),
-                hook_attributes = new
-                {
-                    url = "http://localhost:5050/api/github/app/webhook",
-                    active = false,
-                },
             };
 
             return JsonSerializer.Serialize(manifest);
