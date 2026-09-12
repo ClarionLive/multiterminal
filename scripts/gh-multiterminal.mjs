@@ -32,6 +32,12 @@
 //       candidate inside the shim's own directory is skipped, and if resolution still lands on this
 //       file we refuse loudly instead of looping.
 //
+//   (5) SIGNING NEVER BREAKS THE COMMAND. Item 7 rewrites the body of comment-authoring subcommands
+//       to carry the agent's name, because one App is one identity and the bot marker alone cannot
+//       say WHICH agent spoke. Every failure mode of that rewrite — no name, unknown subcommand,
+//       unreadable file, body on stdin — falls through to running gh with the ORIGINAL arguments.
+//       An unsigned comment is a small loss; a mangled one is a real one.
+//
 // The token is never logged: stderr diagnostics name only the shape of a failure, and stdout belongs
 // entirely to `gh`.
 
@@ -42,6 +48,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 import { mintInstallationToken } from './lib/mint-github-token.mjs';
+import { transformArgs, isSigningEnabled } from './lib/sign-comment.mjs';
 
 const MINT_TIMEOUT_MS = 5000;
 const MT_API_URL = process.env.MT_API_URL || 'http://localhost:5050';
@@ -157,12 +164,39 @@ async function main() {
     if (!token) warn('Running gh without a MultiTerminal token.');
   }
 
-  const child = spawn(realGh, process.argv.slice(2), {
+  // Rule (5). Signing is deliberately the LAST thing before the spawn: the token path above must be
+  // unaffected by it, and any throw here would cost the agent a working gh for the sake of a
+  // signature, so the whole rewrite is wrapped rather than trusted.
+  let childArgs = process.argv.slice(2);
+  let signedTempDir = null;
+  if (isSigningEnabled(process.env, warn)) {
+    try {
+      const rewritten = transformArgs(childArgs, process.env.MULTITERMINAL_NAME, { warn });
+      childArgs = rewritten.args;
+      signedTempDir = rewritten.tempDir;
+    } catch (err) {
+      warn(`Could not sign the comment body (${err?.message ?? 'unknown'}); sending it unsigned.`);
+    }
+  }
+
+  const cleanup = () => {
+    if (!signedTempDir) return;
+    try {
+      fs.rmSync(signedTempDir, { recursive: true, force: true });
+    } catch {
+      // A leftover file in the OS temp directory is not worth failing or warning over; it holds a
+      // comment body, not a credential.
+    }
+    signedTempDir = null;
+  };
+
+  const child = spawn(realGh, childArgs, {
     env: buildChildEnv(process.env, token),
     stdio: 'inherit',
   });
 
   child.on('error', (err) => {
+    cleanup();
     warn(`Could not start gh: ${err?.message ?? 'unknown error'}`);
     process.exit(127);
   });
@@ -172,6 +206,7 @@ async function main() {
   // available here without a lookup table that would be wrong on Windows anyway — a killed child
   // becomes a plain failure, with the signal named on stderr so the cause is not lost.
   child.on('exit', (code, signal) => {
+    cleanup();
     if (signal) {
       warn(`gh was terminated by ${signal}.`);
       process.exit(1);

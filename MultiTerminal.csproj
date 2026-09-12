@@ -172,6 +172,12 @@
     <Content Include="scripts\lib\mint-github-token.mjs">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- item 7. This list is EXPLICIT, not a wildcard: a lib/ module the shim imports but nobody
+         adds here is missing from a deployed MultiTerminal, and the failure is not a missing
+         signature — it is an unresolved import that breaks EVERY gh invocation in every terminal. -->
+    <Content Include="scripts\lib\sign-comment.mjs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
